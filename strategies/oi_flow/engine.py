@@ -71,6 +71,7 @@ _DEFAULT_PROXIMITY_PCT = 0.005
 _DEFAULT_HARD_RISK_RS_PER_LOT = 2000.0
 _EOD_TIME_DEFAULT = time(15, 15)
 _EXIT_CONFIRM_TIMEOUT_SEC = 15.0
+_TICK_STALENESS_SEC = 60.0   # feed-staleness watchdog for an open position -- see _eod_loop
 
 # Step-locked trailing profit-lock (2026-08-13, "target" concept -- there was
 # no take-profit/trailing mechanism at all before this; only SL + hard risk
@@ -151,8 +152,21 @@ class OIFlowStrategy(AbstractStrategyBook):
         self._latest_snap = None
         self._live_option_ltp: Dict[str, float] = {}   # "CE"/"PE" -> latest live LTP of that side's wall strike
         self._watched_strikes: Dict[tuple, str] = {}   # (strike, side) -> "opposing"|"supporting", for option bar routing
+        # Which strike _option_acc[side]/_live_option_ltp[side] currently
+        # reflect -- the CURRENT wall while flat, the position's own strike
+        # while open. See _option_tick_loop's reset-on-change comment.
+        self._tracked_option_strike: Dict[str, Optional[float]] = {"CE": None, "PE": None}
 
         self._position: Optional[dict] = None
+        # Feed-staleness watchdog (2026-08-13): _check_exit() only ever
+        # runs when a fresh OPTION_TICK arrives for the position's own
+        # strike -- a WebSocket outage (or the feed silently dropping just
+        # this one strike) would leave a position completely unprotected
+        # by SL/TSL/S1 with zero warning, since nothing else re-evaluates
+        # the exit condition. _eod_loop's existing 5s cycle also checks
+        # for this now. Alerted once per staleness episode (not every 5s).
+        self._last_position_tick_ts: Optional[datetime] = None
+        self._staleness_alerted = False
         self._day_done = False
         self._event_counter = 0
         self._fill_waiters: Dict[str, asyncio.Event] = {}
@@ -170,6 +184,9 @@ class OIFlowStrategy(AbstractStrategyBook):
         self._spot_acc = BarAccumulator(timeframe_min=1)
         self._option_acc = {"CE": BarAccumulator(1), "PE": BarAccumulator(1)}
         self._live_option_ltp = {}
+        self._tracked_option_strike = {"CE": None, "PE": None}
+        self._last_position_tick_ts = None
+        self._staleness_alerted = False
         self._day_done = False
         self._recent_remarks.clear()
 
@@ -407,27 +424,33 @@ class OIFlowStrategy(AbstractStrategyBook):
 
             side = str(ev.option_type).upper()
             has_position = self._position is not None and self._position["side"] == side
-            # 2026-08-13 fix: which strike _option_acc[side]/_live_option_ltp
-            # track must switch the moment a position opens. Before this,
-            # both ALWAYS followed the CURRENT OI wall (snap.max_call_oi_
-            # strike/max_put_oi_strike) -- correct while scanning/flat, but
-            # _rewatch_oi_strikes() re-derives the wall on every new
-            # MATRIX_SNAPSHOT regardless of position state, so a wall that
-            # drifts to a DIFFERENT strike while a position is open would
-            # silently redirect these onto the NEW wall's premium -- a
-            # different instrument's price series entirely -- corrupting
-            # the EOD exit-price fallback, the dashboard's live P&L, and
-            # (2026-08-13) the S1 trailing-stop swing-low calculation,
-            # while the actual held position sits at the OLD strike.
             # Post-entry: lock onto the position's own strike, immune to
-            # wall drift. Pre-entry/flat: keep following the current wall
-            # (that IS the correct behavior while scanning for an entry).
+            # wall drift. Pre-entry/flat: follow the current wall (correct
+            # while scanning for an entry).
             if has_position:
                 target_strike = float(self._position["strike"])
             else:
                 snap = self._latest_snap
                 wall = (snap.max_call_oi_strike if side == "CE" else snap.max_put_oi_strike) if snap else None
                 target_strike = float(wall) if wall else None
+            # 2026-08-13 fix, twin of the position-side fix above: whenever
+            # the TRACKED strike itself changes for ANY reason -- the wall
+            # drifting while flat/scanning (the common case, since it can
+            # happen many times a day), a position opening, or a position
+            # closing and reverting to (possibly a NEW) current wall --
+            # _option_acc[side]/_live_option_ltp[side] must reset. Without
+            # this, BarAccumulator has zero concept of "which instrument"
+            # it's bucketing: switching from strike A's ticks to strike B's
+            # mid-accumulation would silently mix TWO DIFFERENT option
+            # contracts' OHLC into one continuous bar series, corrupting
+            # confirm_option_price_action()'s VWAP/swing-low for every
+            # entry evaluated afterward -- not just during an open
+            # position, which is the FAR more common case since the wall
+            # can drift many times a day while flat/scanning.
+            if target_strike != self._tracked_option_strike.get(side):
+                self._option_acc[side] = BarAccumulator(1)
+                self._live_option_ltp.pop(side, None)
+                self._tracked_option_strike[side] = target_strike
             is_target_strike = target_strike is not None and float(ev.strike) == target_strike
             if is_target_strike:
                 self._live_option_ltp[side] = ev.ltp
@@ -436,6 +459,8 @@ class OIFlowStrategy(AbstractStrategyBook):
                     self._maybe_promote_s1(side)
 
             if has_position and is_target_strike:
+                self._last_position_tick_ts = datetime.now(IST)
+                self._staleness_alerted = False   # fresh data -- clear any prior alert
                 self._check_exit(ev.ltp)
 
     def _check_exit(self, ltp: float) -> None:
@@ -527,11 +552,37 @@ class OIFlowStrategy(AbstractStrategyBook):
                 break
             if self._position is None or self._position.get("_closing"):
                 continue
+            self._check_tick_staleness()
             now_t = datetime.now(IST).time()
             if now_t >= self._squareoff_time:
                 exit_price = self._live_option_ltp.get(self._position["side"], self._position["entry_price"])
                 self._exit(reason="eod", exit_price=exit_price)
                 self._day_done = True
+
+    def _check_tick_staleness(self) -> None:
+        """Feed-staleness watchdog: SL/TSL/S1 only ever re-evaluate when a
+        fresh OPTION_TICK arrives for the position's own strike -- if the
+        feed genuinely stalls (WS outage, or the feed silently drops just
+        this one strike) while a position is open, NOTHING else would ever
+        notice or re-check the exit condition, leaving real capital
+        completely unprotected with zero warning. Piggybacks on
+        _eod_loop's existing 5s cycle rather than a new task. Alerts once
+        per staleness episode (cleared the moment a fresh tick arrives in
+        _option_tick_loop), not every 5s indefinitely."""
+        if self._last_position_tick_ts is None or self._staleness_alerted:
+            return
+        age = (datetime.now(IST) - self._last_position_tick_ts).total_seconds()
+        if age < _TICK_STALENESS_SEC:
+            return
+        pos = self._position
+        self._staleness_alerted = True
+        logger.critical(
+            "OIFlow[%s]: NO OPTION TICK for %s%d in %.0fs (position OPEN, entry=%.2f) -- SL/TSL/S1 "
+            "protection is NOT re-evaluating; feed may be stalled. Investigate immediately.",
+            self._underlying, pos["side"], pos["strike"], age, pos["entry_price"],
+        )
+        self._clog.info("ALERT: no option tick for %s%d in %.0fs -- SL/TSL/S1 protection may be stalled",
+                         pos["side"], pos["strike"], age)
 
     # ── entry / exit ─────────────────────────────────────────────────────────
 
@@ -547,6 +598,8 @@ class OIFlowStrategy(AbstractStrategyBook):
             high_lock_pct=0.0,   # step-locked TSL ratchet, see _check_exit
             s1_floor=_initial_sl,   # S1 trailing stop, see _maybe_promote_s1
         )
+        self._last_position_tick_ts = datetime.now(IST)   # staleness watchdog grace period starts now
+        self._staleness_alerted = False
         self._persist_position()
         logger.info(
             "OIFlow[%s]: ENTER BUY %s %d entry=%.2f sl=%.2f (awaiting broker confirmation, event_id=%s)",
@@ -617,6 +670,29 @@ class OIFlowStrategy(AbstractStrategyBook):
                                  pos["side"], pos["strike"], eid, reason)
                 return
 
+            filled_qty = getattr(fill, "filled_qty", pos["qty"]) if fill is not None else pos["qty"]
+            if 0 < filled_qty < pos["qty"]:
+                # Partial exit fill: the broker only closed SOME of the
+                # held lots. Never clear the position on a partial close --
+                # that would make the engine believe it's flat while still
+                # actually holding the remainder naked, unprotected by any
+                # further SL/TSL/S1 check (which only run while
+                # self._position is not None). Reduce qty to what's
+                # genuinely still open and let the next SL/TSL/S1 tick (or
+                # EOD) retry closing the remainder, exactly like an
+                # unconfirmed/aborted exit already does.
+                logger.critical(
+                    "OIFlow[%s]: EXIT %s%d PARTIAL FILL (event_id=%s reason=%s): closed %d of %d lots -- "
+                    "%d lots STILL OPEN, will retry closing the remainder on a later tick/EOD pass.",
+                    self._underlying, pos["side"], pos["strike"], eid, reason,
+                    filled_qty, pos["qty"], pos["qty"] - filled_qty,
+                )
+                self._clog.info("EXIT %s%d PARTIAL FILL event_id=%s: closed %d of %d lots -- %d STILL OPEN",
+                                 pos["side"], pos["strike"], eid, filled_qty, pos["qty"], pos["qty"] - filled_qty)
+                pos["qty"] -= filled_qty
+                self._persist_position()
+                return
+
             if self._position is pos:
                 self._position = None
             self._persist_position()
@@ -652,8 +728,9 @@ class OIFlowStrategy(AbstractStrategyBook):
 
     def _on_fill(self, fill: OIFlowFillEvent) -> None:
         if fill.action == "BUY":
-            if fill.entry_aborted and self._position is not None \
-                    and self._position.get("_event_id") == fill.event_id:
+            if self._position is None or self._position.get("_event_id") != fill.event_id:
+                return
+            if fill.entry_aborted:
                 logger.critical(
                     "OIFlow[%s]: ENTRY ABORTED (broker unavailable/gate closed, event_id=%s) "
                     "-- discarding optimistic position.", self._underlying, fill.event_id,
@@ -661,6 +738,25 @@ class OIFlowStrategy(AbstractStrategyBook):
                 self._clog.info("ENTRY ABORTED (broker unavailable/gate closed) event_id=%s -- discarding position",
                                  fill.event_id)
                 self._position = None
+                self._persist_position()
+                return
+            # Partial entry fill: the broker only filled SOME of the
+            # requested lots. The position was booked optimistically at
+            # decision time (self._enter()) before this confirmation
+            # arrives -- reconcile qty down to what actually filled so
+            # P&L, the hard risk-cap floor, and the exit order's own
+            # quantity all stay consistent with what's genuinely held.
+            filled_qty = fill.filled_qty or self._position["qty"]
+            if 0 < filled_qty < self._position["qty"]:
+                logger.critical(
+                    "OIFlow[%s]: ENTRY %s%d PARTIAL FILL (event_id=%s): requested %d, filled %d -- "
+                    "position qty reconciled down.", self._underlying, self._position["side"],
+                    self._position["strike"], fill.event_id, self._position["qty"], filled_qty,
+                )
+                self._clog.info("ENTRY %s%d PARTIAL FILL event_id=%s: requested %d, filled %d -- qty reconciled",
+                                 self._position["side"], self._position["strike"], fill.event_id,
+                                 self._position["qty"], filled_qty)
+                self._position["qty"] = filled_qty
                 self._persist_position()
             return
         if fill.action == "SELL":
@@ -695,6 +791,11 @@ class OIFlowStrategy(AbstractStrategyBook):
                               self._underlying)
             return
         self._position = d
+        # Grace period, same as a fresh _enter() -- without this, a feed
+        # that's ALREADY down at restart would silently never trip the
+        # staleness watchdog (self._last_position_tick_ts stays None).
+        self._last_position_tick_ts = datetime.now(IST)
+        self._staleness_alerted = False
         logger.info("OIFlow[%s]: RESTORED open leg from disk on restart -- %s%s@%.2f",
                     self._underlying, d["side"], int(d["strike"]), d["entry_price"])
         self._clog.info("RESTORED open leg from disk on restart -- %s%s@%.2f",

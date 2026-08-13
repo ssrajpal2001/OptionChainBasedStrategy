@@ -288,22 +288,39 @@ class OIFlowExecutionBridge:
         )
 
         avg = 0.0
+        filled_qty = 0
         order_id = ""
         _tag = "PAPER_ROUTE" if paper_route else "LIVE"
         try:
             order_id = await broker.place_order(req)
             fill = await broker.get_order_status(str(order_id))
             avg = float(getattr(fill, "avg_price", 0.0) or 0.0)
+            filled_qty = int(getattr(fill, "qty", 0) or 0)
             if avg > 0:
+                if 0 < filled_qty < ev.quantity:
+                    # Real, not-uncommon on a moderately-liquid strike for a
+                    # MARKET order -- the broker only filled PART of the
+                    # requested lots. Never silently treat this as a full
+                    # fill (would corrupt qty-derived P&L/risk-cap sizing
+                    # and, on an EXIT, wrongly believe the position is flat
+                    # while lots are still actually held).
+                    logger.critical(
+                        "[%s] OIFLOW %s %s %s%d — PARTIAL FILL: requested %d, filled %d @ %.2f "
+                        "order_id=%s | client=%s/%s",
+                        _tag, ev.action, ev.underlying, ev.option_type, ev.strike,
+                        ev.quantity, filled_qty, avg, order_id, ev.client_id, ev.binding_id,
+                    )
+                else:
+                    filled_qty = ev.quantity   # fully filled (or a nonsensical overfill -- clamp to requested)
                 logger.info(
-                    "[%s] OIFLOW %s %s %s%d exp=%s qty=%d @ %.2f order_id=%s | client=%s/%s",
+                    "[%s] OIFLOW %s %s %s%d exp=%s qty=%d filled=%d @ %.2f order_id=%s | client=%s/%s",
                     _tag, ev.action, ev.underlying, ev.option_type, ev.strike, ev.expiry,
-                    ev.quantity, avg, order_id, ev.client_id, ev.binding_id,
+                    ev.quantity, filled_qty, avg, order_id, ev.client_id, ev.binding_id,
                 )
                 self._trade_log.log(
                     ev.client_id, ev.binding_id,
                     f"[{_tag}] {ev.action} {ev.underlying} {ev.option_type} strike={ev.strike} "
-                    f"exp={ev.expiry} qty={ev.quantity} @ {avg:.2f} symbol={symbol} "
+                    f"exp={ev.expiry} qty={ev.quantity} filled={filled_qty} @ {avg:.2f} symbol={symbol} "
                     f"order_id={order_id} reason={ev.reason}",
                 )
             else:
@@ -364,5 +381,5 @@ class OIFlowExecutionBridge:
             action=ev.action, underlying=ev.underlying, option_type=ev.option_type or "",
             strike=int(ev.strike or 0), fill_price=avg, qty=int(ev.quantity or 0),
             client_id=ev.client_id, binding_id=ev.binding_id, event_id=ev.event_id or "",
-            paper_mode=paper_route, symbol=symbol,
+            paper_mode=paper_route, symbol=symbol, filled_qty=filled_qty,
         ))

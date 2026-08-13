@@ -56,7 +56,7 @@ class OIFlowFillEvent:
     option_type:   str
     strike:        int
     fill_price:    float
-    qty:           int
+    qty:           int          # the REQUESTED quantity (ev.quantity) -- see filled_qty for what actually filled
     client_id:     str
     binding_id:    str
     event_id:      str
@@ -70,3 +70,14 @@ class OIFlowFillEvent:
     # True when a live SELL (exit) could not be routed -- the engine must
     # leave the position exactly as it was (still open, still persisted).
     exit_failed: bool = False
+    # 2026-08-13: the ACTUAL filled quantity, as reported by the broker
+    # (OrderFill.qty) -- may be LESS than `qty` on a partial fill (real,
+    # not-uncommon on a moderately-liquid strike for a MARKET order).
+    # Defaults to `qty` for paper/paper_route's simulated fills (always
+    # "full" by construction) and any caller that doesn't set it
+    # explicitly -- only a genuine live partial fill sets this lower.
+    filled_qty: int = 0
+
+    def __post_init__(self) -> None:
+        if self.filled_qty <= 0 and not self.entry_aborted and not self.exit_failed:
+            self.filled_qty = self.qty

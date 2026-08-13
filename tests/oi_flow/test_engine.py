@@ -103,8 +103,11 @@ def _make_book() -> OIFlowStrategy:
     book._option_acc = {"CE": BarAccumulator(1), "PE": BarAccumulator(1)}
     book._latest_snap = None
     book._live_option_ltp = {}
+    book._tracked_option_strike = {"CE": None, "PE": None}
     book._watched_strikes = {}
     book._position = None
+    book._last_position_tick_ts = None
+    book._staleness_alerted = False
     book._day_done = False
     book._event_counter = 0
     book._fill_waiters = {}
@@ -667,6 +670,106 @@ async def test_option_tick_loop_check_exit_only_fires_for_the_position_strike():
     assert exit_calls == [505.0]   # only the real strike's tick reached _check_exit
 
 
+@pytest.mark.asyncio
+async def test_option_tick_loop_resets_accumulator_when_wall_drifts_while_flat():
+    """2026-08-13 fix, twin of the position-side lock above: while FLAT/
+    scanning, _option_acc/_live_option_ltp always followed the CURRENT
+    wall -- correct in principle, but the accumulator itself was never
+    RESET when the wall moved to a different strike, so its .bars list
+    would silently keep growing with a MIX of two different option
+    contracts' OHLC once the wall drifted even once. This is the far more
+    common case (happens any time the wall moves while flat, not just
+    during an open trade). Feeds ticks for wall A, then a NEW snapshot
+    moves the wall to strike B, then feeds ticks for B -- proves the
+    accumulator reset and only reflects B afterward."""
+    book = _make_book()
+    base = _base()
+    book._position = None
+    book._latest_snap = _FakeSnap(max_call_oi_strike=57700.0, max_put_oi_strike=57200.0, pcr=1.3)
+
+    q = asyncio.Queue()
+    book._loop_queues[Topic.OPTION_TICK] = q
+    # Two ticks on wall A (57700) within the same bucket -- would normally
+    # start building a real bar.
+    await q.put(_real_option_tick(57700.0, "CE", 500.0, 10_000, base))
+    await q.put(_real_option_tick(57700.0, "CE", 502.0, 10_600, base + timedelta(seconds=30)))
+    try:
+        await asyncio.wait_for(book._option_tick_loop(), timeout=0.15)
+    except asyncio.TimeoutError:
+        pass
+    assert book._live_option_ltp["CE"] == 502.0
+    assert book._tracked_option_strike["CE"] == 57700.0
+
+    # Wall drifts to a NEW strike (57800) -- a fresh snapshot arrives.
+    book._latest_snap = _FakeSnap(max_call_oi_strike=57800.0, max_put_oi_strike=57200.0, pcr=1.3)
+    await q.put(_real_option_tick(57800.0, "CE", 300.0, 500, base + timedelta(seconds=45)))
+    try:
+        await asyncio.wait_for(book._option_tick_loop(), timeout=0.15)
+    except asyncio.TimeoutError:
+        pass
+
+    assert book._tracked_option_strike["CE"] == 57800.0
+    assert book._live_option_ltp["CE"] == 300.0   # reflects ONLY the new wall, not a mix
+    # The old wall's in-progress bucket must be gone, not carried forward
+    # into a bar mixing both instruments' prices.
+    assert book._option_acc["CE"]._bucket is None or book._option_acc["CE"]._bucket.open == 300.0
+
+
+# ── feed-staleness watchdog ───────────────────────────────────────────────────
+
+def test_check_tick_staleness_no_alert_when_recent():
+    book = _make_book()
+    book._position = dict(side="CE", strike=57700.0, entry_price=500.0, sl_price=480.0,
+                           entry_ts=datetime.now(IST), qty=30)
+    book._last_position_tick_ts = datetime.now(IST) - timedelta(seconds=10)
+    logged = []
+    book._clog = type("FakeLog", (), {"info": staticmethod(lambda *a, **kw: logged.append(a))})()
+
+    book._check_tick_staleness()
+
+    assert logged == []
+    assert book._staleness_alerted is False
+
+
+def test_check_tick_staleness_alerts_when_stale():
+    book = _make_book()
+    book._position = dict(side="CE", strike=57700.0, entry_price=500.0, sl_price=480.0,
+                           entry_ts=datetime.now(IST), qty=30)
+    book._last_position_tick_ts = datetime.now(IST) - timedelta(seconds=90)   # well past the 60s threshold
+    logged = []
+    book._clog = type("FakeLog", (), {"info": staticmethod(lambda *a, **kw: logged.append(a))})()
+
+    book._check_tick_staleness()
+
+    assert len(logged) == 1
+    assert "ALERT" in logged[0][0]
+    assert book._staleness_alerted is True
+
+
+def test_check_tick_staleness_alerts_only_once_per_episode():
+    book = _make_book()
+    book._position = dict(side="CE", strike=57700.0, entry_price=500.0, sl_price=480.0,
+                           entry_ts=datetime.now(IST), qty=30)
+    book._last_position_tick_ts = datetime.now(IST) - timedelta(seconds=90)
+    logged = []
+    book._clog = type("FakeLog", (), {"info": staticmethod(lambda *a, **kw: logged.append(a))})()
+
+    book._check_tick_staleness()
+    book._check_tick_staleness()   # still stale, called again 5s later (as _eod_loop would)
+
+    assert len(logged) == 1   # not re-alerted every cycle
+
+
+def test_check_tick_staleness_noop_when_never_ticked():
+    """No position tick recorded yet (e.g. no position open) -- must not
+    crash or false-alert."""
+    book = _make_book()
+    book._position = None
+    book._last_position_tick_ts = None
+    book._check_tick_staleness()   # must not raise
+    assert book._staleness_alerted is False
+
+
 def test_check_exit_hard_risk_cap_backstop():
     book = _make_book()
     # entry=500, qty=30, hard_risk_rs_per_lot=2000 -> risk_floor = 500 - 2000/30 = 433.33
@@ -694,6 +797,38 @@ def test_on_fill_entry_aborted_discards_optimistic_position():
     assert book._position is None
 
 
+def test_on_fill_buy_partial_fill_reconciles_position_qty_down():
+    """The position was booked optimistically at decision time before this
+    confirmation arrives -- a partial fill (broker only filled 15 of the
+    requested 30) must reconcile qty down, not silently keep the position
+    at the full requested amount (would corrupt P&L/risk-cap sizing and
+    the eventual exit order's own quantity)."""
+    book = _make_book()
+    book._position = dict(side="CE", strike=57700.0, entry_price=500.0, sl_price=480.0,
+                           entry_ts=datetime.now(IST), qty=30, _event_id="EV1")
+    fill = OIFlowFillEvent(action="BUY", underlying="BANKNIFTY", option_type="CE", strike=57700,
+                            fill_price=500.0, qty=30, client_id="ssrajpal2001", binding_id="SA5770",
+                            event_id="EV1", filled_qty=15)
+
+    book._on_fill(fill)
+
+    assert book._position is not None   # NOT discarded -- a partial fill is a real, held position
+    assert book._position["qty"] == 15
+
+
+def test_on_fill_buy_full_fill_leaves_qty_unchanged():
+    book = _make_book()
+    book._position = dict(side="CE", strike=57700.0, entry_price=500.0, sl_price=480.0,
+                           entry_ts=datetime.now(IST), qty=30, _event_id="EV1")
+    fill = OIFlowFillEvent(action="BUY", underlying="BANKNIFTY", option_type="CE", strike=57700,
+                            fill_price=500.0, qty=30, client_id="ssrajpal2001", binding_id="SA5770",
+                            event_id="EV1")   # filled_qty defaults to qty (full fill) via __post_init__
+
+    book._on_fill(fill)
+
+    assert book._position["qty"] == 30
+
+
 def test_on_fill_sell_sets_waiter_for_matching_event_id():
     book = _make_book()
     waiter = asyncio.Event()
@@ -704,6 +839,56 @@ def test_on_fill_sell_sets_waiter_for_matching_event_id():
     book._on_fill(fill)
     assert waiter.is_set()
     assert book._fill_results["EV2"] is fill
+
+
+@pytest.mark.asyncio
+async def test_square_off_partial_exit_fill_reduces_qty_and_keeps_position_open():
+    """A partial EXIT fill (broker only closed 15 of 30 held lots) must
+    NOT clear the position -- that would make the engine believe it's
+    flat while still actually holding the remainder naked, unprotected by
+    any further SL/TSL/S1 check (which only run while self._position is
+    not None). qty must reduce to what's genuinely still open, and the
+    leg stays open (same as an unconfirmed/aborted exit) for a retry."""
+    book = _make_book()
+    pos = dict(side="CE", strike=57700.0, entry_price=500.0, sl_price=480.0,
+               entry_ts=datetime.now(IST), qty=30, high_lock_pct=0.0, s1_floor=480.0)
+    book._position = pos
+
+    async def _feed_partial_fill():
+        await asyncio.sleep(0.01)
+        eid = next(iter(book._fill_waiters))
+        fill = OIFlowFillEvent(action="SELL", underlying="BANKNIFTY", option_type="CE", strike=57700,
+                                fill_price=490.0, qty=30, client_id="ssrajpal2001", binding_id="SA5770",
+                                event_id=eid, filled_qty=15)
+        book._on_fill(fill)
+
+    await asyncio.gather(book._square_off(pos, "sl_option_swing_low@480.00", 490.0), _feed_partial_fill())
+
+    assert book._position is pos    # NOT cleared
+    assert book._position["qty"] == 15
+
+
+@pytest.mark.asyncio
+async def test_square_off_full_exit_fill_clears_position():
+    """Sanity check for the test above: a FULL exit fill still clears the
+    position exactly as before (proves the partial-fill branch doesn't
+    accidentally also catch the normal case)."""
+    book = _make_book()
+    pos = dict(side="CE", strike=57700.0, entry_price=500.0, sl_price=480.0,
+               entry_ts=datetime.now(IST), qty=30, high_lock_pct=0.0, s1_floor=480.0)
+    book._position = pos
+
+    async def _feed_full_fill():
+        await asyncio.sleep(0.01)
+        eid = next(iter(book._fill_waiters))
+        fill = OIFlowFillEvent(action="SELL", underlying="BANKNIFTY", option_type="CE", strike=57700,
+                                fill_price=490.0, qty=30, client_id="ssrajpal2001", binding_id="SA5770",
+                                event_id=eid)   # filled_qty defaults to qty (full) via __post_init__
+        book._on_fill(fill)
+
+    await asyncio.gather(book._square_off(pos, "sl_option_swing_low@480.00", 490.0), _feed_full_fill())
+
+    assert book._position is None
 
 
 # ── monitoring_state() / remarks (dashboard) ─────────────────────────────────

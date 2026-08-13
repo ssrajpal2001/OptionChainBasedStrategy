@@ -664,6 +664,63 @@ the moment one opens, immune to wall drift, and reverts to following the current
 once flat again. 2 regression tests drive the real loop with a position open at one
 strike while the snapshot's wall has already moved to another.
 
+**⚠️ Twin bug found on the SCANNING side — accumulator never reset on wall drift while
+flat (2026-08-13):** `BarAccumulator` has zero concept of "which instrument" it's
+bucketing — it just buckets whatever `ltp` arrives by timestamp. The position-side fix
+above only handles wall drift *during an open trade*; while flat/scanning (the far more
+common case, since the wall can drift many times a day with no position open at all),
+`_option_acc[side]`/`_live_option_ltp[side]` kept following the current wall correctly
+in *principle*, but the accumulator itself was never reset when the tracked strike
+changed — silently mixing two different option contracts' OHLC into one continuous bar
+series, corrupting `confirm_option_price_action()`'s VWAP/swing-low for every entry
+evaluated afterward. Fixed with one unified mechanism: `self._tracked_option_strike`
+records whichever strike is currently feeding the accumulator (wall while flat,
+position's own strike while open); `_option_tick_loop()` resets
+`self._option_acc[side]`/pops `_live_option_ltp[side]` the instant that tracked value
+changes for ANY reason (wall drift, position opening, position closing and reverting to
+a possibly-new wall).
+
+**⚠️ Market-hours risk audit (2026-08-13), prompted by direct request to "think like a
+trader" about what can go wrong during a live position — found and fixed 3 more real
+gaps beyond the wall-drift ones above:**
+1. **Partial fills never reconciled.** `OrderFill.qty` (the broker's actual filled
+   quantity) was never read — only `avg_price`. A broker that fills PART of the
+   requested lots (real, not uncommon on a moderately-liquid strike for a MARKET order)
+   would have been silently treated as a full fill: on ENTRY, `self._position["qty"]`
+   would stay at the full requested amount while only some lots were genuinely held,
+   corrupting P&L/risk-cap sizing; on EXIT, the position would be cleared entirely
+   (believed flat) while some lots were still actually open and completely unprotected.
+   `OIFlowFillEvent` gained a `filled_qty` field (defaults to `qty` for paper/paper_route's
+   always-full simulated fills); the bridge now detects `0 < filled_qty < requested` and
+   logs CRITICAL; the engine reconciles `position["qty"]` down on a partial ENTRY fill
+   and, on a partial EXIT fill, does NOT clear the position — reduces `qty` to what's
+   genuinely still open and lets the next SL/TSL/S1 tick (or EOD) retry closing the
+   remainder, exactly like an unconfirmed/aborted exit already does.
+2. **No feed-staleness protection for an open position.** SL/TSL/S1 only ever
+   re-evaluate when a fresh `OPTION_TICK` arrives for the position's own strike — a
+   WebSocket outage (or the feed silently dropping just that one strike) would leave a
+   position with zero protection and zero warning, since nothing else ever re-checks the
+   exit condition. `_eod_loop`'s existing 5s cycle now also calls
+   `_check_tick_staleness()`: if no tick has landed for the position's own strike within
+   60s, logs CRITICAL once per staleness episode (cleared the moment a fresh tick
+   arrives) — an alert, not an auto-close, since a REST-poll fallback to keep the
+   position genuinely protected during an outage is a bigger lift than this pass covers.
+3. Considered and explicitly **deferred** (design decisions, not bugs, worth discussing
+   before building): a re-entry cooldown after an SL/TSL/S1 stop-out (arguable either
+   way — pre-breakout signals may legitimately re-trigger quickly in a genuine breakout
+   attempt); a REST-poll fallback for genuinely stale feeds (needs a real endpoint
+   wired in); a defensive guard against a single corrupt/wrong-date tick triggering a
+   spurious mid-day session reset (low-probability edge case); CE-priority tie-break
+   when both CE and PE signals would fire on the exact same bar (arbitrary but
+   defensible, not wrong).
+
+Also considered and explicitly rejected: pegging an exit **target** to a new/shifted OI
+wall level. The wall lives on spot; translating "spot distance to the wall" into an
+option premium target reintroduces the same spot-premium desync problem the PE bug and
+FVG's own history already proved out (theta/IV/delta mean spot distance doesn't map
+cleanly to premium distance). If revisited, it should be a soft/logged signal (same
+tier as PCR and the volume spike), not a hard exit gate.
+
 **Status (2026-08-13):** Phases 1-5 + the volume/absorption addition + the paper_route/
 dashboard integration + the critical PE fix + the target/TSL mechanic above are all
 built, unit-tested, and pushed. First real deployment (BOTH live and paper_route) is

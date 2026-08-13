@@ -362,6 +362,51 @@ async def test_live_fill_success_reaches_broker_and_publishes_real_fill(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_live_fill_partial_fill_reports_actual_filled_qty_not_requested(monkeypatch):
+    """A broker that only fills PART of the requested lots (real, not
+    uncommon on a moderately-liquid strike for a MARKET order) must never
+    be silently reported as a full fill -- the published event's
+    filled_qty must reflect what actually filled (15), not qty (30, the
+    requested amount)."""
+    db = _FakeDB(trading_mode="live")
+
+    class _FakePartialFill:
+        avg_price = 482.35
+        qty = 15   # requested 30 (see _entry_ev's default quantity)
+
+    class _FakeBroker:
+        provider = "zerodha"
+        async def place_order(self, req):
+            return "ORDER222"
+        async def get_order_status(self, order_id):
+            return _FakePartialFill()
+
+    async def _fake_resolve(bus, router, client_id, binding_id, strategy, context="", **kw):
+        return _FakeBroker()
+    monkeypatch.setattr("execution_bridge.oi_flow_bridge.resolve_broker_or_alert", _fake_resolve)
+
+    class _FakeTradeLog:
+        def log(self, *a, **kw):
+            pass
+
+    bus = _CapturingBus()
+    bridge = OIFlowExecutionBridge.__new__(OIFlowExecutionBridge)
+    bridge._bus = bus
+    bridge._router = _FakeRouter(db)
+    bridge._trade_log = _FakeTradeLog()
+    bridge._resolve_symbol = lambda ev, broker: "BANKNIFTY25AUG57700CE"
+
+    await bridge._handle(_entry_ev())   # quantity=30 in _entry_ev's defaults
+
+    fills = [e for t, e in bus.published if t == Topic.OI_FLOW_ORDER_FILL]
+    assert len(fills) == 1
+    fill = fills[0]
+    assert fill.qty == 30          # the ORIGINAL requested quantity, unchanged
+    assert fill.filled_qty == 15   # what ACTUALLY filled
+    assert fill.entry_aborted is False   # a partial fill is still a real, reportable fill -- not an abort
+
+
+@pytest.mark.asyncio
 async def test_live_fill_zero_avg_price_aborts_not_fabricates():
     """A broker call that 'succeeds' (no exception) but confirms avg_price
     <= 0 (rejected/zero-fill) must still abort, never publish a fake fill."""
