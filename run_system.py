@@ -570,6 +570,7 @@ async def _run_live(
                 hourly_breakout_manager=managers.get("hourly_breakout"),
                 d1_trap_manager=managers.get("d1_trap_option"),
                 fvg_manager=managers.get("fvg"),
+                oi_flow_manager=managers.get("oi_flow"),
             )
         except ImportError as exc:
             logger.warning("Could not start dashboard (missing deps): %s", exc)

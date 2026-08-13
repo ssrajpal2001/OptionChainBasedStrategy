@@ -169,6 +169,8 @@ class OIFlowExecutionBridge:
         mode = live_binding.get("trading_mode", "paper") or "paper"
 
         if mode == "paper":
+            # PURE LOCAL SIMULATION -- never sends a real order, never
+            # touches the broker resolver at all.
             logger.info(
                 "OIFlowExecutionBridge: %s %s %s%d exp=%s qty=%d → [%s/%s] mode=paper",
                 ev.action, ev.underlying, ev.option_type, ev.strike, ev.expiry,
@@ -177,6 +179,14 @@ class OIFlowExecutionBridge:
             await self._paper_fill(ev)
             return
 
+        # mode in {"paper_route", <live>}: both need a REAL broker instance.
+        # paper_route (2026-08-13) mirrors StraddleExecutionBridge's own
+        # paper_route semantics (execution_bridge/straddle_bridge.py) --
+        # the client explicitly wants the order to actually reach their
+        # broker from the whitelisted IP (verifies real routing end-to-end,
+        # a no-fund reject is the EXPECTED broker response), while the
+        # strategy's own state still advances on a locally-simulated fill
+        # regardless of that broker response.
         broker = await resolve_broker_or_alert(
             self._bus, self._router, ev.client_id, ev.binding_id, _BROKER_RESOLVE_LABEL,
             context=f"{ev.action} {ev.underlying} {ev.option_type}{ev.strike}",
@@ -192,11 +202,14 @@ class OIFlowExecutionBridge:
         if broker is None:
             # Never call _paper_fill here -- that would fabricate a fill the
             # caller would treat as real. resolve_broker_or_alert already
-            # logged CRITICAL and published SYSTEM_EVENT.
+            # logged CRITICAL and published SYSTEM_EVENT. Applies to
+            # paper_route too -- a genuinely UNRESOLVABLE broker (bad creds,
+            # terminal down) is a real routing failure worth surfacing, not
+            # something to paper over.
             await self._abort(ev, routing_failed=True)
             return
 
-        await self._live_fill(ev, broker)
+        await self._live_fill(ev, broker, paper_route=(mode == "paper_route"))
 
     async def _abort(self, ev: OIFlowOrderEvent, routing_failed: bool = False) -> None:
         await self._bus.publish(Topic.OI_FLOW_ORDER_FILL, OIFlowFillEvent(
@@ -240,7 +253,18 @@ class OIFlowExecutionBridge:
         provider = _b.provider if _b else getattr(broker, "provider", "mock")
         return REGISTRY.get_broker_symbol(ev.underlying, ev.expiry, int(ev.strike), ev.option_type, provider)
 
-    async def _live_fill(self, ev: OIFlowOrderEvent, broker) -> None:
+    async def _live_fill(self, ev: OIFlowOrderEvent, broker, paper_route: bool = False) -> None:
+        """paper_route=True: still places the REAL order via broker.place_
+        order() (so the client can verify the order genuinely reaches their
+        broker from the whitelisted IP -- a no-fund rejection is EXPECTED
+        and fine), but always finalizes a fill for the strategy -- using the
+        broker's own avg_price if it happened to confirm one (>0), else a
+        LOCAL SIMULATED fill at the strategy's own passed-in price. Mirrors
+        StraddleExecutionBridge._live_fill's own paper=True contract
+        (execution_bridge/straddle_bridge.py) -- same intent, written fresh
+        for this bridge's own simpler single-leg (not multi-leg/chase) path.
+        paper_route=False (real live): an unconfirmed fill (avg<=0) is
+        NEVER faked -- aborts instead, exactly as before."""
         symbol = self._resolve_symbol(ev, broker)
         if not symbol:
             logger.error(
@@ -265,34 +289,68 @@ class OIFlowExecutionBridge:
 
         avg = 0.0
         order_id = ""
+        _tag = "PAPER_ROUTE" if paper_route else "LIVE"
         try:
             order_id = await broker.place_order(req)
             fill = await broker.get_order_status(str(order_id))
             avg = float(getattr(fill, "avg_price", 0.0) or 0.0)
             if avg > 0:
                 logger.info(
-                    "[LIVE] OIFLOW %s %s %s%d exp=%s qty=%d @ %.2f order_id=%s | client=%s/%s",
-                    ev.action, ev.underlying, ev.option_type, ev.strike, ev.expiry,
+                    "[%s] OIFLOW %s %s %s%d exp=%s qty=%d @ %.2f order_id=%s | client=%s/%s",
+                    _tag, ev.action, ev.underlying, ev.option_type, ev.strike, ev.expiry,
                     ev.quantity, avg, order_id, ev.client_id, ev.binding_id,
                 )
                 self._trade_log.log(
                     ev.client_id, ev.binding_id,
-                    f"[LIVE] {ev.action} {ev.underlying} {ev.option_type} strike={ev.strike} "
+                    f"[{_tag}] {ev.action} {ev.underlying} {ev.option_type} strike={ev.strike} "
                     f"exp={ev.expiry} qty={ev.quantity} @ {avg:.2f} symbol={symbol} "
                     f"order_id={order_id} reason={ev.reason}",
                 )
+            else:
+                logger.info(
+                    "[%s] OIFLOW %s %s %s%d exp=%s qty=%d — order reached broker (order_id=%s) "
+                    "but no confirmed fill (avg_price<=0) | client=%s/%s",
+                    _tag, ev.action, ev.underlying, ev.option_type, ev.strike, ev.expiry,
+                    ev.quantity, order_id, ev.client_id, ev.binding_id,
+                )
         except Exception as exc:
             logger.error(
-                "[LIVE] OIFLOW %s %s %s%d order FAILED: %s.",
-                ev.action, ev.underlying, ev.option_type, ev.strike, exc,
+                "[%s] OIFLOW %s %s %s%d order FAILED: %s.",
+                _tag, ev.action, ev.underlying, ev.option_type, ev.strike, exc,
             )
             self._trade_log.log(
                 ev.client_id, ev.binding_id,
-                f"LIVE {ev.action} {ev.underlying} {ev.option_type} strike={ev.strike} FAILED: {exc}",
+                f"{_tag} {ev.action} {ev.underlying} {ev.option_type} strike={ev.strike} FAILED: {exc}",
             )
             avg = 0.0
 
         if avg <= 0:
+            if paper_route:
+                # Expected outcome for a no-fund account -- the order genuinely
+                # reached (or was attempted against) the real broker, verifying
+                # routing; the strategy's own state still advances on a LOCAL
+                # simulated fill at its own passed-in price, same as pure
+                # "paper" mode's fill, just with real broker contact logged.
+                sim_price = ev.exit_price if (ev.action == "SELL" and ev.exit_price > 0) else ev.entry_price
+                logger.info(
+                    "[PAPER_ROUTE] OIFLOW %s %s %s%d — no confirmed broker fill (expected for "
+                    "no-fund account); booking SIMULATED fill @ %.2f | client=%s/%s",
+                    ev.action, ev.underlying, ev.option_type, ev.strike, sim_price,
+                    ev.client_id, ev.binding_id,
+                )
+                self._trade_log.log(
+                    ev.client_id, ev.binding_id,
+                    f"[PAPER_ROUTE] {ev.action} {ev.underlying} {ev.option_type} strike={ev.strike} "
+                    f"exp={ev.expiry} qty={ev.quantity} @ {sim_price:.2f} (simulated, real order "
+                    f"attempted order_id={order_id or 'none'}) reason={ev.reason}",
+                )
+                await self._bus.publish(Topic.OI_FLOW_ORDER_FILL, OIFlowFillEvent(
+                    action=ev.action, underlying=ev.underlying, option_type=ev.option_type or "",
+                    strike=int(ev.strike or 0), fill_price=sim_price, qty=int(ev.quantity or 0),
+                    client_id=ev.client_id, binding_id=ev.binding_id, event_id=ev.event_id or "",
+                    paper_mode=True, symbol=symbol,
+                ))
+                return
             logger.error(
                 "[LIVE] OIFLOW %s %s %s%d — NO confirmed fill, %s NOT reported as a fill "
                 "(no phantom position/close). client=%s/%s",
@@ -306,5 +364,5 @@ class OIFlowExecutionBridge:
             action=ev.action, underlying=ev.underlying, option_type=ev.option_type or "",
             strike=int(ev.strike or 0), fill_price=avg, qty=int(ev.quantity or 0),
             client_id=ev.client_id, binding_id=ev.binding_id, event_id=ev.event_id or "",
-            paper_mode=False, symbol=symbol,
+            paper_mode=paper_route, symbol=symbol,
         ))

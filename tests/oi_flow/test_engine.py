@@ -9,6 +9,7 @@ feed (which doesn't exist for this strategy anyway -- no historical OI
 data to replay).
 """
 import asyncio
+from collections import deque
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
@@ -103,6 +104,7 @@ def _make_book() -> OIFlowStrategy:
     book._event_counter = 0
     book._fill_waiters = {}
     book._fill_results = {}
+    book._recent_remarks = deque(maxlen=30)
     book._persist_position = lambda: None   # avoid real disk I/O in tests
     return book
 
@@ -348,6 +350,80 @@ def test_on_fill_sell_sets_waiter_for_matching_event_id():
     book._on_fill(fill)
     assert waiter.is_set()
     assert book._fill_results["EV2"] is fill
+
+
+# ── monitoring_state() / remarks (dashboard) ─────────────────────────────────
+
+def test_try_enter_appends_a_remark_on_every_evaluation():
+    book = _make_book()
+    base = _base()
+    book._spot_acc.bars = _flat_spot_bars(base, price=50000.0)   # far from any wall -> rejects
+    _seed_oi_for_signal(book, base)
+    _seed_option_bars_ok(book, base)
+
+    book._try_enter("CE")
+
+    assert len(book._recent_remarks) == 1
+    remark = book._recent_remarks[0]
+    assert remark["side"] == "CE"
+    assert "no spot signal" in remark["text"]
+
+
+@pytest.mark.asyncio
+async def test_try_enter_remark_on_entry_mentions_strike_and_sl():
+    book = _make_book()
+    base = _base()
+    book._spot_acc.bars = _flat_spot_bars(base, price=57690.0)
+    _seed_oi_for_signal(book, base)
+    _seed_option_bars_ok(book, base)
+
+    book._try_enter("CE")
+    await asyncio.sleep(0.01)
+
+    remark = book._recent_remarks[0]
+    assert remark["level"] == "entry"
+    assert "ENTERED" in remark["text"]
+    assert "57700" in remark["text"]
+
+
+def test_monitoring_state_shape_with_no_snapshot_or_position():
+    book = _make_book()
+    state = book.monitoring_state()
+    assert state["underlying"] == "BANKNIFTY"
+    assert state["client_id"] == "ssrajpal2001"
+    assert state["binding_id"] == "SA5770"
+    assert state["walls"] == []
+    assert state["position"] is None
+    assert state["remarks"] == []
+
+
+def test_monitoring_state_shows_oi_walls_and_buildup():
+    book = _make_book()
+    base = _base()
+    _seed_oi_for_signal(book, base)   # sets book._latest_snap + real tracker data
+
+    state = book.monitoring_state()
+
+    walls = {w["side"]: w for w in state["walls"]}
+    assert walls["CE"]["wall_strike"] == 57700.0
+    assert walls["CE"]["wall_oi"] == 95_000        # latest CE-wall OI reading
+    assert walls["CE"]["wall_oi_roc"] == -5000      # opposing OI dropping -- writers fleeing
+    assert walls["CE"]["supporting_strike"] == 57600.0
+    assert walls["CE"]["supporting_oi_roc"] == 3000  # supporting side building
+
+
+def test_monitoring_state_shows_open_position_with_live_pnl():
+    book = _make_book()
+    book._position = dict(side="CE", strike=57700.0, entry_price=500.0, sl_price=480.0,
+                           entry_ts=datetime.now(IST), qty=30)
+    book._live_option_ltp["CE"] = 520.0
+
+    state = book.monitoring_state()
+
+    assert state["position"]["side"] == "CE"
+    assert state["position"]["entry_price"] == 500.0
+    assert state["position"]["ltp"] == 520.0
+    assert state["position"]["pnl"] == 600.0   # (520-500)*30
 
 
 # ── telemetry (Phase 5): every evaluation logs a row, fired or not ──────────

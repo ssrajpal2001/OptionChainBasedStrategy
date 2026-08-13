@@ -28,9 +28,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import deque
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
-from typing import Dict, Optional
+from typing import Deque, Dict, Optional
 
 from config.global_config import IST, Topic
 from data_layer.base_feeder import IndexTick, OptionTick
@@ -112,6 +113,11 @@ class OIFlowStrategy(AbstractStrategyBook):
         self._event_counter = 0
         self._fill_waiters: Dict[str, asyncio.Event] = {}
         self._fill_results: Dict[str, object] = {}
+        # Dashboard-facing, in-memory only (never persisted -- telemetry.py's
+        # JSONL is the durable record). A short human-readable trail of the
+        # last N signal evaluations so the UI can show "what just happened
+        # and why" without the user tailing log files.
+        self._recent_remarks: Deque[dict] = deque(maxlen=30)
 
     # ── lifecycle ─────────────────────────────────────────────────────────────
 
@@ -121,6 +127,7 @@ class OIFlowStrategy(AbstractStrategyBook):
         self._option_acc = {"CE": BarAccumulator(1), "PE": BarAccumulator(1)}
         self._live_option_ltp = {}
         self._day_done = False
+        self._recent_remarks.clear()
 
     def start(self) -> None:
         super().start()
@@ -228,6 +235,32 @@ class OIFlowStrategy(AbstractStrategyBook):
             # reviewable later as a fired signal, since there's no
             # backtest to compare against.
             log_signal_evaluation(row)
+            self._recent_remarks.appendleft(self._remark_for(row))
+
+    def _remark_for(self, row) -> dict:
+        """Turns one telemetry row into a short, human-readable line for the
+        dashboard's REMARKS panel -- the live-UI equivalent of the JSONL
+        telemetry file, so the user can see "what just happened and why"
+        without tailing logs/oi_flow/*.jsonl."""
+        if row.entered:
+            text = (f"{row.side} ENTERED @{row.option_premium:.2f} strike={row.wall_strike:.0f} "
+                    f"SL={row.option_sl_level:.2f}" if row.option_premium is not None and row.option_sl_level is not None
+                    else f"{row.side} ENTERED (strike={row.wall_strike})")
+            level = "entry"
+        elif row.skip_reason == "spot_gate_no_signal":
+            wall_txt = f"{row.wall_strike:.0f}" if row.wall_strike else "?"
+            text = f"{row.side}: no spot signal (spot={row.spot}, wall={wall_txt}) -- not consolidating at the wall yet"
+            level = "info"
+        elif row.skip_reason == "option_gate_blocked":
+            text = f"{row.side}: spot signal fired (wall={row.wall_strike:.0f}) but option chart blocked entry ({row.option_gate_reason})"
+            level = "watch"
+        elif row.skip_reason == "no_live_ltp":
+            text = f"{row.side}: both gates passed (wall={row.wall_strike:.0f}) but no live option price yet -- skipped"
+            level = "warn"
+        else:
+            text = f"{row.side}: evaluated, no entry"
+            level = "info"
+        return {"ts": row.ts, "side": row.side, "level": level, "text": text}
 
     def _try_enter_inner(self, side: str, row) -> None:
         # Raw diagnostics -- cheap, read-only queries against the same
@@ -501,3 +534,55 @@ class OIFlowStrategy(AbstractStrategyBook):
         self._position = d
         logger.info("OIFlow[%s]: RESTORED open leg from disk on restart -- %s%s@%.2f",
                     self._underlying, d["side"], int(d["strike"]), d["entry_price"])
+
+    # ── dashboard ────────────────────────────────────────────────────────────
+
+    def monitoring_state(self) -> dict:
+        """Live state for the dashboard's OI-Flow panel -- mirrors D1TrapOptionBook.
+        monitoring_zones() / FVGStrategy.monitoring_fvgs()'s own dashboard-surface
+        pattern. Shows the OI wall/buildup per strike (the "which strike, what's
+        building" the user explicitly wants to see), the recent remarks trail,
+        and the live position with running P&L."""
+        snap = self._latest_snap
+        walls = []
+        if snap is not None:
+            for side, wall, supporting_side_label in (
+                ("CE", snap.max_call_oi_strike, "opposing"), ("PE", snap.max_put_oi_strike, "opposing"),
+            ):
+                if not wall:
+                    continue
+                supporting_strike = (wall - self._strike_step) if side == "CE" else (wall + self._strike_step)
+                supporting_side = "PE" if side == "CE" else "CE"
+                walls.append({
+                    "side": side,
+                    "wall_strike": wall,
+                    "wall_oi": self._oi_tracker.oi_now(wall, side),
+                    "wall_oi_roc": self._oi_tracker.oi_roc(wall, side, self._window_sec),
+                    "supporting_strike": supporting_strike,
+                    "supporting_side": supporting_side,
+                    "supporting_oi": self._oi_tracker.oi_now(supporting_strike, supporting_side),
+                    "supporting_oi_roc": self._oi_tracker.oi_roc(supporting_strike, supporting_side, self._window_sec),
+                })
+
+        position = None
+        if self._position is not None:
+            pos = self._position
+            ltp = self._live_option_ltp.get(pos["side"])
+            pnl = ((ltp - pos["entry_price"]) * pos["qty"]) if ltp is not None else None
+            position = {
+                "side": pos["side"], "strike": pos["strike"], "entry_price": pos["entry_price"],
+                "sl_price": pos["sl_price"], "qty": pos["qty"],
+                "entry_ts": pos["entry_ts"].isoformat() if pos.get("entry_ts") else None,
+                "ltp": ltp, "pnl": pnl,
+            }
+
+        return {
+            "underlying": self._underlying,
+            "client_id": self._client_id,
+            "binding_id": self._binding_id,
+            "spot": self._spot_acc.bars[-1].close if self._spot_acc.bars else None,
+            "pcr": snap.pcr_smooth() if snap is not None else None,
+            "walls": walls,
+            "position": position,
+            "remarks": list(self._recent_remarks)[:15],
+        }

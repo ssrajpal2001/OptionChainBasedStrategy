@@ -67,6 +67,10 @@ def _entry_ev(**overrides) -> OIFlowOrderEvent:
 class _FakeDB:
     def __init__(self, trading_mode="live", terminal_connected=True, is_trade_enabled=True,
                  running=True):
+        # trading_mode also accepts "paper_route": order routes to a REAL
+        # broker (verifies routing/whitelist) but the strategy's own fill
+        # is always simulated -- see execution_bridge/oi_flow_bridge.py's
+        # _live_fill(paper_route=...) docstring.
         self._trading_mode = trading_mode
         self._terminal_connected = terminal_connected
         self._is_trade_enabled = is_trade_enabled
@@ -185,6 +189,117 @@ async def test_exit_still_routes_even_though_can_trade_gate_would_block_entry():
     fill = fills[0]
     assert fill.exit_failed is True   # routing failed (no broker), not gate-blocked
     assert fill.entry_aborted is False
+
+
+@pytest.mark.asyncio
+async def test_paper_route_sends_real_order_and_books_simulated_fill_on_no_fund_reject(monkeypatch):
+    """The client's whole reason for paper_route: verify the order genuinely
+    reaches their real broker (place_order IS called), while a no-fund
+    rejection (avg_price<=0) must NOT abort the strategy -- it books a
+    LOCAL SIMULATED fill at the strategy's own entry_price, same as pure
+    'paper' mode's fill, just with real broker contact attempted+logged."""
+    db = _FakeDB(trading_mode="paper_route")
+    calls = {"place_order": 0}
+
+    class _FakeRejectedFill:
+        avg_price = 0.0
+
+    class _FakeBroker:
+        provider = "zerodha"
+        async def place_order(self, req):
+            calls["place_order"] += 1
+            assert isinstance(req, OrderRequest)
+            return "ORDER999"
+        async def get_order_status(self, order_id):
+            assert order_id == "ORDER999"
+            return _FakeRejectedFill()
+
+    async def _fake_resolve(bus, router, client_id, binding_id, strategy, context="", **kw):
+        return _FakeBroker()
+    monkeypatch.setattr("execution_bridge.oi_flow_bridge.resolve_broker_or_alert", _fake_resolve)
+
+    class _FakeTradeLog:
+        def log(self, *a, **kw):
+            pass
+
+    bus = _CapturingBus()
+    bridge = OIFlowExecutionBridge.__new__(OIFlowExecutionBridge)
+    bridge._bus = bus
+    bridge._router = _FakeRouter(db)
+    bridge._trade_log = _FakeTradeLog()
+    bridge._resolve_symbol = lambda ev, broker: "BANKNIFTY25AUG57700CE"
+
+    await bridge._handle(_entry_ev())
+
+    assert calls["place_order"] == 1   # the real order DID reach the broker
+    fills = [e for t, e in bus.published if t == Topic.OI_FLOW_ORDER_FILL]
+    assert len(fills) == 1
+    fill = fills[0]
+    assert fill.entry_aborted is False   # never aborted -- simulated fill instead
+    assert fill.paper_mode is True
+    assert fill.fill_price == 480.0   # ev.entry_price (simulated), not the broker's 0.0
+
+
+@pytest.mark.asyncio
+async def test_paper_route_books_real_avg_price_when_broker_actually_fills(monkeypatch):
+    """If the paper_route account happens to have funds and the broker DOES
+    confirm a real fill, use that real avg_price (still tagged paper_mode
+    since the binding itself is paper_route, not live)."""
+    db = _FakeDB(trading_mode="paper_route")
+
+    class _FakeRealFill:
+        avg_price = 481.5
+
+    class _FakeBroker:
+        provider = "zerodha"
+        async def place_order(self, req):
+            return "ORDER111"
+        async def get_order_status(self, order_id):
+            return _FakeRealFill()
+
+    async def _fake_resolve(bus, router, client_id, binding_id, strategy, context="", **kw):
+        return _FakeBroker()
+    monkeypatch.setattr("execution_bridge.oi_flow_bridge.resolve_broker_or_alert", _fake_resolve)
+
+    class _FakeTradeLog:
+        def log(self, *a, **kw):
+            pass
+
+    bus = _CapturingBus()
+    bridge = OIFlowExecutionBridge.__new__(OIFlowExecutionBridge)
+    bridge._bus = bus
+    bridge._router = _FakeRouter(db)
+    bridge._trade_log = _FakeTradeLog()
+    bridge._resolve_symbol = lambda ev, broker: "BANKNIFTY25AUG57700CE"
+
+    await bridge._handle(_entry_ev())
+
+    fills = [e for t, e in bus.published if t == Topic.OI_FLOW_ORDER_FILL]
+    assert len(fills) == 1
+    fill = fills[0]
+    assert fill.paper_mode is True
+    assert fill.fill_price == 481.5   # the real confirmed avg_price, not entry_price
+
+
+@pytest.mark.asyncio
+async def test_paper_route_broker_unresolvable_still_aborts(monkeypatch):
+    """paper_route is not a blanket 'never fail' mode -- a genuinely
+    UNRESOLVABLE broker (bad creds, terminal down) must still abort loudly,
+    same as live. Only an order that reached the broker and came back
+    unconfirmed gets the simulated-fill treatment."""
+    db = _FakeDB(trading_mode="paper_route")
+    bus = _CapturingBus()
+    bridge = OIFlowExecutionBridge.__new__(OIFlowExecutionBridge)
+    bridge._bus = bus
+    bridge._router = _FakeRouter(db)
+    bridge._trade_log = None
+
+    await bridge._handle(_entry_ev())   # no resolve_broker_or_alert patch -- real one runs, fails
+
+    fills = [e for t, e in bus.published if t == Topic.OI_FLOW_ORDER_FILL]
+    assert len(fills) == 1
+    assert fills[0].entry_aborted is True
+    assert fills[0].routing_failed is True
 
 
 @pytest.mark.asyncio

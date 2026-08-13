@@ -658,6 +658,7 @@ class DashboardServer:
         hourly_breakout_manager=None, # HourlyBreakoutBookManager — 1H trap + 5M retest books
         d1_trap_manager=None,  # D1TrapOptionBookManager — trap scanner (index + FnO)
         fvg_manager=None,  # FVGBookManager — Fair Value Gap SMC books
+        oi_flow_manager=None,  # OIFlowBookManager — OI-Flow Pre-Breakout books
     ) -> None:
         self._bus = bus
         self._cfg = cfg
@@ -674,6 +675,7 @@ class DashboardServer:
         self._hourly_breakout_manager = hourly_breakout_manager
         self._d1_trap_manager = d1_trap_manager
         self._fvg_manager = fvg_manager
+        self._oi_flow_manager = oi_flow_manager
         self._fno_monitor = None          # set via set_fno_monitor()
         self._ws_bridge = WsBridge(bus, cfg=cfg)
         self._uvicorn_server = None
@@ -3885,7 +3887,7 @@ class DashboardServer:
                 "sell_straddle", "v4_cascade", "fno_positional", "hourly_breakout",
                 "d1_trap_option", "d1_trap_index", "d1_trap_fno", "d1_trap_bear_only",
                 "d1_trap_sr", "d1_trap_fno_sr",
-                "fvg",
+                "fvg", "oi_flow",
             }
             if body.strategy_name not in allowed_strategies:
                 return {"ok": False, "error": f"Unknown strategy '{body.strategy_name}'."}
@@ -5948,6 +5950,7 @@ pm2 save
 
         self._register_d1trap_routes(app)
         self._register_fvg_routes(app)
+        self._register_oi_flow_routes(app)
         return app
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -6210,6 +6213,36 @@ pm2 save
                 0 if (r.get("position") or any(z.get("high_liquidity") for z in r.get("zones", []))) else 1,
                 r.get("underlying", "")
             ))
+            return {"ok": True, "books": result}
+
+    # ── OI-Flow monitoring endpoint ──────────────────────────────────────────
+
+    def _register_oi_flow_routes(self, app) -> None:
+        _srv = self
+
+        @app.get("/api/oiflow/status")
+        async def oi_flow_status():
+            """Return live monitoring state for all active OI-Flow books --
+            same shape/intent as /api/d1trap/zones and /api/fvg/status above:
+            OI wall + buildup per strike, the recent remarks trail, and the
+            open position with running P&L, straight from OIFlowStrategy.
+            monitoring_state() (strategies/oi_flow/engine.py)."""
+            if _srv._oi_flow_manager is None:
+                return {"ok": True, "books": []}
+            books = getattr(_srv._oi_flow_manager, "books", [])
+            result = []
+            for b in books:
+                if not hasattr(b, "monitoring_state"):
+                    continue
+                try:
+                    result.append(b.monitoring_state())
+                except Exception:
+                    logger.exception(
+                        "oi_flow_status: monitoring_state() raised for %s -- dropped from panel.",
+                        getattr(b, "_underlying", "?"),
+                    )
+            # Books with an open position first, then by underlying.
+            result.sort(key=lambda r: (0 if r.get("position") else 1, r.get("underlying", "")))
             return {"ok": True, "books": result}
 
     def _open_history_rows(self, cid: str) -> list:
