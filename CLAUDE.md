@@ -781,6 +781,39 @@ confirm a real `MATRIX_SNAPSHOT` publish. **SellStraddle (including Gurmeet's li
 capital) has zero dependency on this component and was completely unaffected, before or
 after this fix** — confirmed via direct code inspection before touching anything.
 
+**Remark specificity (2026-08-13):** found live, same first trading day — NIFTY PE's
+dashboard remark said "not consolidating at the wall yet" while spot was genuinely only
+0.19% from the PE wall (well inside the 0.5% proximity threshold); the true blocker was
+PCR sitting neutral at 1.00 (needs <0.7 for PE), but the old generic
+`skip_reason="spot_gate_no_signal"` couldn't distinguish a proximity miss from a
+structure-break, OI-ROC, or PCR rejection. Added `detector.explain_no_signal()` — a
+diagnostic-only twin of `detect_pre_breakout_signal()` that re-runs the exact same checks
+in the exact same order purely to report which one is actually blocking, in plain
+English (deliberately duplicated rather than refactoring the real decision function to
+return a reason code, keeping it exactly as simple/pure as its own docstring already
+commits to). `SignalTelemetryRow` gained `spot_gate_detail`; remarks now say e.g. "PCR
+1.00 not bearish enough for PE (needs <0.7)" instead of the misleading generic line.
+
+**⚠️ CRITICAL — closed trades never appeared in the dashboard History tab (2026-08-13):**
+found when a real NIFTY CE trade (entered 12:03, S1-hit exit 12:16, both confirmed in the
+per-underlying log) showed nowhere in the dashboard. Root cause: `execution_bridge/
+option_buyer_bridge_base.py` (the shared base class D1Trap/FVG's bridges inherit) calls
+`data_layer.trade_history.record()` on every confirmed SELL fill — but `oi_flow_bridge.py`,
+written fresh per the standalone mandate, never got the equivalent call at all. Fixed:
+added `OIFlowExecutionBridge._record_history()` (own implementation, no import from the
+base class — `data_layer.trade_history` is platform infrastructure, not another
+strategy's logic, same category as `position_store`/`instrument_registry` already reused
+elsewhere in this bridge), called from all three SELL-fill paths (paper, paper_route
+simulated, live confirmed). Also threads `pos["entry_ts"]` into the exit's
+`OIFlowOrderEvent` (engine.py) — it was never being passed before, so history records
+would have had no entry timestamp even once recording started. 4 new tests confirm each
+fill path calls `trade_history.record()` with the correct P&L, and that a BUY (entry)
+fill never does. Separately noted, lower priority: the dashboard's "History" tab only
+shows *in-progress* (still-open) trades for `sell_straddle`/`v4_cascade`
+(`_open_history_rows()` in `dashboard_server.py`) — `oi_flow` (and FVG/D1Trap) never got
+that branch either; a currently-open position won't appear there until closed, though it
+already shows correctly in OI-Flow's own live monitoring panel. Not fixed this pass.
+
 ---
 
 ## Key Design Decisions

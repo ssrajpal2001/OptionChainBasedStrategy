@@ -696,7 +696,7 @@ class OIFlowStrategy(AbstractStrategyBook):
                 underlying=self._underlying, option_type=pos["side"], strike=int(pos["strike"]),
                 expiry=expiry, quantity=pos["qty"], entry_price=pos["entry_price"],
                 sl_price=pos["sl_price"], exit_price=exit_price, reason=reason, event_id=eid,
-                product_type=self._product_type,
+                product_type=self._product_type, entry_ts=pos.get("entry_ts"),
             )
             logger.info(
                 "OIFlow[%s]: SELL %s %d reason=%s exit=%.2f (awaiting broker confirmation, event_id=%s)",

@@ -151,6 +151,155 @@ async def test_paper_mode_local_sim_fill_no_broker_touch():
     assert fill.fill_price == 480.0   # ev.entry_price, since action="BUY"
 
 
+# ── dashboard trade history (2026-08-13 critical fix) ────────────────────────
+# A real production trade (NIFTY CE, entered 12:03, S1-hit exit 12:16, both
+# confirmed in the per-underlying log) never appeared anywhere in the
+# dashboard's History tab -- this bridge, written fresh per the standalone
+# mandate, never got the equivalent of option_buyer_bridge_base.py's own
+# _record_history() that D1Trap/FVG inherit for free from their shared base
+# class. These tests drive _handle() through a real SELL fill and confirm
+# data_layer.trade_history.record() is actually called with the right P&L.
+
+@pytest.mark.asyncio
+async def test_paper_sell_fill_records_trade_history(monkeypatch):
+    recorded = {}
+    def _fake_record(client_id, strategy, instrument, entry_price, exit_price,
+                      exit_reason, pnl, **kw):
+        recorded.update(client_id=client_id, strategy=strategy, instrument=instrument,
+                         entry_price=entry_price, exit_price=exit_price,
+                         exit_reason=exit_reason, pnl=pnl, **kw)
+    import data_layer.trade_history as _th
+    monkeypatch.setattr(_th, "record", _fake_record)
+
+    db = _FakeDB(trading_mode="paper")
+    bus = _CapturingBus()
+    bridge = OIFlowExecutionBridge.__new__(OIFlowExecutionBridge)
+    bridge._bus = bus
+    bridge._router = _FakeRouter(db)
+    class _FakeTradeLog:
+        def log(self, *a, **kw):
+            pass
+    bridge._trade_log = _FakeTradeLog()
+
+    exit_ev = _entry_ev(action="SELL", entry_price=480.0, exit_price=520.0,
+                         event_id="BANKNIFTY_CE57700_EXIT_1", reason="s1_hit@500.00")
+    await bridge._handle(exit_ev)
+
+    assert recorded["client_id"] == "ssrajpal2001"
+    assert recorded["strategy"] == "oi_flow"
+    assert recorded["instrument"] == "BANKNIFTY"
+    assert recorded["entry_price"] == 480.0
+    assert recorded["exit_price"] == 520.0
+    assert recorded["exit_reason"] == "s1_hit@500.00"
+    assert recorded["pnl"] == pytest.approx((520.0 - 480.0) * 30)   # (exit-entry)*qty
+    assert recorded["legs"][0]["side"] == "CE"
+    assert recorded["legs"][0]["strike"] == 57700
+
+
+@pytest.mark.asyncio
+async def test_buy_fill_never_records_trade_history(monkeypatch):
+    """Only a CLOSED trade (SELL) belongs in history -- an entry fill must
+    never call trade_history.record()."""
+    calls = []
+    import data_layer.trade_history as _th
+    monkeypatch.setattr(_th, "record", lambda *a, **kw: calls.append(True))
+
+    db = _FakeDB(trading_mode="paper")
+    bus = _CapturingBus()
+    bridge = OIFlowExecutionBridge.__new__(OIFlowExecutionBridge)
+    bridge._bus = bus
+    bridge._router = _FakeRouter(db)
+    class _FakeTradeLog:
+        def log(self, *a, **kw):
+            pass
+    bridge._trade_log = _FakeTradeLog()
+
+    await bridge._handle(_entry_ev())   # action="BUY" by default
+
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_paper_route_simulated_exit_records_trade_history(monkeypatch):
+    recorded = {}
+    import data_layer.trade_history as _th
+    monkeypatch.setattr(_th, "record", lambda *a, **kw: recorded.update(
+        entry_price=a[3], exit_price=a[4], pnl=a[6]))
+
+    db = _FakeDB(trading_mode="paper_route")
+
+    class _FakeRejectedFill:
+        avg_price = 0.0
+
+    class _FakeBroker:
+        provider = "zerodha"
+        async def place_order(self, req):
+            return "ORDER1"
+        async def get_order_status(self, order_id):
+            return _FakeRejectedFill()
+
+    async def _fake_resolve(bus, router, client_id, binding_id, strategy, context="", **kw):
+        return _FakeBroker()
+    monkeypatch.setattr("execution_bridge.oi_flow_bridge.resolve_broker_or_alert", _fake_resolve)
+
+    bus = _CapturingBus()
+    bridge = OIFlowExecutionBridge.__new__(OIFlowExecutionBridge)
+    bridge._bus = bus
+    bridge._router = _FakeRouter(db)
+    class _FakeTradeLog:
+        def log(self, *a, **kw):
+            pass
+    bridge._trade_log = _FakeTradeLog()
+    bridge._resolve_symbol = lambda ev, broker: "BANKNIFTY25AUG57700CE"
+
+    exit_ev = _entry_ev(action="SELL", entry_price=480.0, exit_price=520.0,
+                         event_id="BANKNIFTY_CE57700_EXIT_1", reason="eod")
+    await bridge._handle(exit_ev)
+
+    assert recorded["entry_price"] == 480.0
+    assert recorded["exit_price"] == 520.0   # the simulated exit price, not 0.0
+    assert recorded["pnl"] == pytest.approx((520.0 - 480.0) * 30)
+
+
+@pytest.mark.asyncio
+async def test_live_confirmed_exit_records_trade_history(monkeypatch):
+    recorded = {}
+    import data_layer.trade_history as _th
+    monkeypatch.setattr(_th, "record", lambda *a, **kw: recorded.update(exit_price=a[4]))
+
+    db = _FakeDB(trading_mode="live")
+
+    class _FakeFill:
+        avg_price = 505.5
+        qty = 30
+
+    class _FakeBroker:
+        provider = "zerodha"
+        async def place_order(self, req):
+            return "ORDER1"
+        async def get_order_status(self, order_id):
+            return _FakeFill()
+
+    async def _fake_resolve(bus, router, client_id, binding_id, strategy, context="", **kw):
+        return _FakeBroker()
+    monkeypatch.setattr("execution_bridge.oi_flow_bridge.resolve_broker_or_alert", _fake_resolve)
+
+    bus = _CapturingBus()
+    bridge = OIFlowExecutionBridge.__new__(OIFlowExecutionBridge)
+    bridge._bus = bus
+    bridge._router = _FakeRouter(db)
+    class _FakeTradeLog:
+        def log(self, *a, **kw):
+            pass
+    bridge._trade_log = _FakeTradeLog()
+    bridge._resolve_symbol = lambda ev, broker: "BANKNIFTY25AUG57700CE"
+
+    exit_ev = _entry_ev(action="SELL", entry_price=480.0, event_id="BANKNIFTY_CE57700_EXIT_1", reason="tsl_hit")
+    await bridge._handle(exit_ev)
+
+    assert recorded["exit_price"] == 505.5   # the REAL confirmed broker fill
+
+
 @pytest.mark.asyncio
 async def test_entry_aborted_when_can_trade_gate_closed(monkeypatch):
     db = _FakeDB(trading_mode="live", is_trade_enabled=False)   # gate closed

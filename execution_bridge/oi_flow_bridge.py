@@ -221,6 +221,46 @@ class OIFlowExecutionBridge:
             routing_failed=routing_failed,
         ))
 
+    # ── dashboard trade history ──────────────────────────────────────────────
+
+    def _record_history(self, ev: OIFlowOrderEvent, fill_price: float) -> None:
+        """Record a CLOSED trade to the dashboard's History tab. 2026-08-13
+        CRITICAL FIX: a real production trade (NIFTY CE, entered 12:03,
+        S1-hit exit 12:16, both confirmed in the per-underlying log) never
+        appeared anywhere in the dashboard -- because this bridge, written
+        fresh per the standalone mandate, never got the equivalent of
+        execution_bridge/option_buyer_bridge_base.py's own _record_history()
+        that D1Trap/FVG inherit for free from their shared base class.
+        Mirrors that exact call shape, independently (no import from that
+        base class -- this bridge still shares zero runtime strategy
+        infrastructure; data_layer.trade_history is the platform's own
+        generic dashboard-history store, not another strategy's logic, same
+        category as position_store/instrument_registry already reused
+        elsewhere in this bridge)."""
+        if ev.action != "SELL":
+            return
+        try:
+            from data_layer import trade_history as _th
+            pnl = round((fill_price - ev.entry_price) * ev.quantity, 2)
+            _entry_ts = ev.entry_ts
+            _th.record(
+                ev.client_id, ev.strategy or _GATE_STRATEGY, ev.underlying,
+                ev.entry_price, fill_price, ev.reason, pnl,
+                binding_id=ev.binding_id,
+                legs=[{
+                    "side": ev.option_type,
+                    "strike": ev.strike,
+                    "entry": ev.entry_price,
+                    "exit": fill_price,
+                    "pnl": pnl,
+                    "entry_reason": "oi_flow_pre_breakout",
+                    "entry_ts": _entry_ts.isoformat() if hasattr(_entry_ts, "isoformat") else _entry_ts,
+                    "exit_ts": datetime.now(IST).isoformat(),
+                }],
+            )
+        except Exception:
+            logger.exception("OIFlowExecutionBridge: trade_history.record failed (non-fatal).")
+
     # ── paper ─────────────────────────────────────────────────────────────────
 
     async def _paper_fill(self, ev: OIFlowOrderEvent) -> None:
@@ -237,6 +277,7 @@ class OIFlowExecutionBridge:
             f"[PAPER] {ev.action} {ev.underlying} {ev.option_type} strike={ev.strike} "
             f"exp={ev.expiry} qty={ev.quantity} @ {fill_price:.2f} reason={ev.reason}",
         )
+        self._record_history(ev, fill_price)
         await self._bus.publish(Topic.OI_FLOW_ORDER_FILL, OIFlowFillEvent(
             action=ev.action, underlying=ev.underlying, option_type=ev.option_type or "",
             strike=int(ev.strike or 0), fill_price=fill_price, qty=int(ev.quantity or 0),
@@ -361,6 +402,7 @@ class OIFlowExecutionBridge:
                     f"exp={ev.expiry} qty={ev.quantity} @ {sim_price:.2f} (simulated, real order "
                     f"attempted order_id={order_id or 'none'}) reason={ev.reason}",
                 )
+                self._record_history(ev, sim_price)
                 await self._bus.publish(Topic.OI_FLOW_ORDER_FILL, OIFlowFillEvent(
                     action=ev.action, underlying=ev.underlying, option_type=ev.option_type or "",
                     strike=int(ev.strike or 0), fill_price=sim_price, qty=int(ev.quantity or 0),
@@ -377,6 +419,7 @@ class OIFlowExecutionBridge:
             await self._abort(ev, routing_failed=False)
             return
 
+        self._record_history(ev, avg)
         await self._bus.publish(Topic.OI_FLOW_ORDER_FILL, OIFlowFillEvent(
             action=ev.action, underlying=ev.underlying, option_type=ev.option_type or "",
             strike=int(ev.strike or 0), fill_price=avg, qty=int(ev.quantity or 0),
