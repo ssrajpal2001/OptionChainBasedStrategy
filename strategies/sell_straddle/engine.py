@@ -280,6 +280,7 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                 "initial_net_credit": self._initial_net_credit,
                 "session_min_straddle_value": self._session_min_straddle_value,
                 "session_min_straddle_frozen": self._session_min_straddle_frozen,
+                "day_low_tracked_pair": list(self._day_low_tracked_pair) if self._day_low_tracked_pair else None,
             }, product_type="MIS")
         except Exception as exc:
             logger.debug("SellStraddle[%s]: session persist failed: %s", self._underlying, exc)
@@ -306,6 +307,9 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                 _saved_frozen = _sess.get("session_min_straddle_frozen", None)
                 if _saved_frozen is not None:
                     self._session_min_straddle_frozen = float(_saved_frozen)
+                _saved_pair = _sess.get("day_low_tracked_pair", None)
+                if _saved_pair is not None:
+                    self._day_low_tracked_pair = tuple(int(x) for x in _saved_pair)
                 # If session losses already breach day_loss_sl, lock immediately so a
                 # fresh book can't re-enter and trigger an immediate day_loss_sl exit.
                 if (not self._stop_for_day and self._day_loss_sl_pct > 0
@@ -707,6 +711,7 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         self._consecutive_entry_rejections = 0
         self._session_min_straddle_value = float("inf")
         self._session_min_straddle_frozen = None
+        self._day_low_tracked_pair = None
         self._prem_closes.clear()
         self._prem_volumes.clear()
         self._chart_series.clear()

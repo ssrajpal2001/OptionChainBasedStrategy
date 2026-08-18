@@ -1,26 +1,28 @@
 """
-Regression tests for the day-low reversal exit (2026-08-18, direct user spec):
-the straddle's combined premium (CE_ltp+PE_ltp) typically bottoms out somewhere
-in the 09:15-15:00 window then reverses upward into the close, eating back
-into profit already banked on paper. Track the day's running-min combined
-premium from position open; freeze it ONCE at `day_low_freeze_time` (default
-15:00 IST) using whatever the running min is at that instant. From the freeze
-tick onward -- INCLUDING the freeze tick itself, if that reading happens to BE
-the day's low -- the moment the current combined premium reaches (or
-undercuts) the frozen value, close the whole position and stop for the day.
+Regression tests for the day-low reversal exit (2026-08-18/19, direct user
+spec): the straddle's combined premium (CE_ltp+PE_ltp) typically bottoms out
+somewhere in the 09:15-15:00 window then reverses upward into the close,
+eating back into profit already banked on paper. Track the CURRENTLY RUNNING
+pair's own running-min combined premium since IT started running; freeze it
+ONCE at `day_low_freeze_time` (default 15:00 IST) using whatever this pair's
+own low is at that instant. From the freeze tick onward -- INCLUDING the
+freeze tick itself, if that reading happens to BE this pair's low so far --
+the moment the current combined premium reaches (or undercuts) the frozen
+value, close the whole position and stop for the day.
 
 Opt-in (`day_low_exit_enabled`, default OFF) -- brand new, unvalidated,
 must never silently activate on an existing live deployment.
 
-The tracking fields (`_session_min_straddle_value`/`_session_min_straddle_frozen`)
-live on the BOOK (`self`), not on the StraddlePosition object -- a mid-day
-rollover replaces `pos.ce_leg`/`pos.pe_leg` (a fresh StraddlePosition-level
-pair) but never touches these two fields (confirmed: no write site for either
-outside `_load_thresholds`'s first-time init, `reset_session()`, and this
-check itself -- `rolling.py`'s roll mechanics never reference them). So the
-day's lowest point survives a roll intact; the freeze value at 15:00 is truly
-the lowest combined premium across every pair the book ran that day, not just
-whatever pair happens to be open at 15:00 itself.
+**Scoped to the running pair, not the whole day** -- user's explicit
+correction after an earlier draft tracked a whole-day/whole-book low across
+rollovers: "exit will fire from the current running pair not the pair which
+was there prev when the roll happened... when roll happened prev data is of
+no use... will focus only on running legs and its own lowest point of the
+day." `_day_low_tracked_pair` (a `(ce_strike, pe_strike)` tuple) identifies
+which pair the tracker is currently following; the moment the running
+position's own strikes differ from it, tracking resets from scratch (the
+prior pair's low is discarded, not inherited) and starts fresh from THIS
+pair's own first observed tick.
 
 Tests use `_day_low_freeze_time = time(23, 59, 59)` to guarantee the freeze
 condition is false regardless of real wall-clock time the suite runs at, and
@@ -78,6 +80,7 @@ def test_disabled_by_default_no_tracking_no_exit():
     s._position = _position(30.0, 20.0)   # current_value = 50
     asyncio.run(s._check_exits())
     assert s._session_min_straddle_value == float("inf"), "must not track when the toggle is off"
+    assert s._day_low_tracked_pair is None
     assert s._position is not None and s._position.status == "open"
 
 
@@ -171,69 +174,89 @@ def test_retest_undercutting_the_frozen_low_also_exits():
     assert close_calls == ["day_low_reversal_exit"]
 
 
-def test_tracked_low_survives_a_mid_day_rollover_onto_a_new_pair():
-    """User's explicit concern: a rollover mid-day swaps the CE/PE pair --
-    confirm the day's lowest point tracked from the ORIGINAL pair is not lost
-    or reset when a brand new pair (different strikes) starts running, and the
-    frozen value used at 15:00 correctly reflects the true whole-day low even
-    though a different pair happens to be open at the freeze moment."""
+def test_tracking_resets_on_a_mid_day_rollover_onto_a_new_pair():
+    """User's explicit correction: a rollover DISCARDS the previous pair's
+    tracked low -- the day-low exit tracks ONLY the currently running pair's
+    own lowest point since IT started running, never the whole day/whole-book
+    history."""
     s = _strategy()
     s._day_low_exit_enabled = True
     s._day_low_freeze_time = dtime(23, 59, 59)   # not reached yet
     close_calls = _spy_close(s)
 
-    # Original pair (strikes 24000/24000) dips to a combined premium of 35 --
-    # this becomes the day's running low.
+    # Original pair (strikes 24000/24000) dips to a combined premium of 35.
     s._position = _position(30.0, 20.0)   # 50
     asyncio.run(s._check_exits())
-    s._position = _position(20.0, 15.0)   # 35 -- the day's low so far
+    s._position = _position(20.0, 15.0)   # 35
     asyncio.run(s._check_exits())
     assert s._session_min_straddle_value == 35.0
+    assert s._day_low_tracked_pair == (24000, 24000)
 
-    # Simulate a rollover: a brand new StraddlePosition object with DIFFERENT
-    # strikes takes over (exactly what rolling.py's _open_leg does under the
-    # hood) -- never revisits 35 again, only prints higher values.
+    # Rollover onto a DIFFERENT pair (24100/23900). Its own first reading (70)
+    # must become the new running min -- the old pair's 35 is discarded, not
+    # inherited.
     s._position = StraddlePosition(
         underlying="NIFTY", atm_at_entry=24000, entry_spot=24000,
-        ce_leg=StraddleLeg("CE", 24100, 45.0, 45.0),
-        pe_leg=StraddleLeg("PE", 23900, 43.0, 43.0),
-        net_credit=88.0, status="open",
-    )   # current_value = 88 -- must NOT reset the tracked low
+        ce_leg=StraddleLeg("CE", 24100, 40.0, 40.0),
+        pe_leg=StraddleLeg("PE", 23900, 30.0, 30.0),
+        net_credit=70.0, status="open",
+    )   # current_value = 70
     asyncio.run(s._check_exits())
-    assert s._session_min_straddle_value == 35.0, "the rollover must not reset or lose the day's low"
+    assert s._day_low_tracked_pair == (24100, 23900)
+    assert s._session_min_straddle_value == 70.0, "the old pair's 35 must be discarded, not inherited"
+    assert s._session_min_straddle_frozen is None
 
-    # New pair drifts around but never revisits 35 before freeze time.
+    # New pair dips to its OWN low of 60 -- never touches the old pair's 35.
     s._position = StraddlePosition(
         underlying="NIFTY", atm_at_entry=24000, entry_spot=24000,
-        ce_leg=StraddleLeg("CE", 24100, 50.0, 50.0),
-        pe_leg=StraddleLeg("PE", 23900, 40.0, 40.0),
-        net_credit=88.0, status="open",
-    )   # current_value = 90
+        ce_leg=StraddleLeg("CE", 24100, 35.0, 35.0),
+        pe_leg=StraddleLeg("PE", 23900, 25.0, 25.0),
+        net_credit=70.0, status="open",
+    )   # current_value = 60
     asyncio.run(s._check_exits())
-    assert s._session_min_straddle_value == 35.0
+    assert s._session_min_straddle_value == 60.0
     assert not close_calls
 
-    # Cross freeze time -- must freeze at 35 (the ORIGINAL pair's low), not at
-    # whatever the currently-running (post-roll) pair's own value happens to be.
+    # Freeze at this pair's own low (60), then a later tick above it -- no exit yet.
     s._day_low_freeze_time = dtime(0, 0)
     s._defer_exit = lambda reason, now: True
     s._position = StraddlePosition(
         underlying="NIFTY", atm_at_entry=24000, entry_spot=24000,
-        ce_leg=StraddleLeg("CE", 24100, 48.0, 48.0),
-        pe_leg=StraddleLeg("PE", 23900, 42.0, 42.0),
-        net_credit=88.0, status="open",
-    )   # current_value = 90 -- above the frozen 35, no exit yet
+        ce_leg=StraddleLeg("CE", 24100, 38.0, 38.0),
+        pe_leg=StraddleLeg("PE", 23900, 28.0, 28.0),
+        net_credit=70.0, status="open",
+    )   # current_value = 66 -- above the soon-to-be-frozen 60
     asyncio.run(s._check_exits())
-    assert s._session_min_straddle_frozen == 35.0
+    assert s._session_min_straddle_frozen == 60.0
     assert not close_calls
 
-    # The post-roll pair later retests 35 -- exits, using the day-wide low
-    # even though it was set on a pair that no longer exists.
+    # Retest of THIS pair's own frozen low (60) -- exits.
     s._position = StraddlePosition(
         underlying="NIFTY", atm_at_entry=24000, entry_spot=24000,
-        ce_leg=StraddleLeg("CE", 24100, 20.0, 20.0),
-        pe_leg=StraddleLeg("PE", 23900, 15.0, 15.0),
-        net_credit=88.0, status="open",
-    )   # current_value = 35 -- retest
+        ce_leg=StraddleLeg("CE", 24100, 35.0, 35.0),
+        pe_leg=StraddleLeg("PE", 23900, 25.0, 25.0),
+        net_credit=70.0, status="open",
+    )   # 60
     asyncio.run(s._check_exits())
     assert close_calls == ["day_low_reversal_exit"]
+
+
+def test_pair_starting_after_freeze_time_arms_and_fires_on_its_own_first_tick():
+    """Accepted edge case, explicitly flagged in the code comment: a pair that
+    only starts running AFTER the freeze time has already elapsed (e.g. a roll
+    at 15:10 with freeze=15:00) has zero real window to establish its own low
+    before this check applies -- its very first tick freezes AND immediately
+    satisfies the retest (that reading trivially IS its own low so far), so it
+    fires on the very same tick it starts running. A direct, accepted
+    consequence of scoping "own lowest point" to the running pair -- flagged
+    here, not silently smoothed over."""
+    s = _strategy()
+    s._day_low_exit_enabled = True
+    s._day_low_freeze_time = dtime(0, 0)   # already "past" freeze time
+    s._defer_exit = lambda reason, now: True
+    close_calls = _spy_close(s)
+
+    s._position = _position(40.0, 30.0)   # 70 -- this pair's first-ever tick, already past freeze
+    asyncio.run(s._check_exits())
+    assert close_calls == ["day_low_reversal_exit"]
+    assert s._stop_for_day is True

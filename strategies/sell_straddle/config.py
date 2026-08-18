@@ -358,6 +358,8 @@ class ConfigMixin:
             self._session_min_straddle_value = float("inf")
         if not hasattr(self, "_session_min_straddle_frozen"):
             self._session_min_straddle_frozen = None
+        if not hasattr(self, "_day_low_tracked_pair"):
+            self._day_low_tracked_pair = None
 
         self._same_day_expiry_enabled = cfg.same_day_expiry_enabled
 

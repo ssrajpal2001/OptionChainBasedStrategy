@@ -248,8 +248,9 @@ class ExitMixin:
             if reason == "day_low_reversal_exit":
                 _cv = pos.current_value
                 _frozen = getattr(self, "_session_min_straddle_frozen", 0.0) or 0.0
-                return (f"Day-low reversal exit | straddle rate={_cv:.2f} reached frozen "
-                        f"day-low={_frozen:.2f} (frozen @{self._day_low_freeze_time.strftime('%H:%M')}) "
+                return (f"Day-low reversal exit | CE{int(pos.ce_leg.strike)} PE{int(pos.pe_leg.strike)} "
+                        f"rate={_cv:.2f} reached its own frozen low={_frozen:.2f} "
+                        f"(frozen @{self._day_low_freeze_time.strftime('%H:%M')}) "
                         f"→ closed, stopped for day")
 
             if reason.startswith("manual_squareoff_"):
@@ -579,43 +580,62 @@ class ExitMixin:
             return
         pos = self._position  # refresh -- a roll above may have swapped legs/strikes
 
-        # 2c. DAY-LOW REVERSAL EXIT (2026-08-18, user spec). The straddle's combined
-        # premium (CE_ltp+PE_ltp) typically decays to its lowest point of the day
-        # somewhere in the 09:15-15:00 window as theta drains, then tends to
-        # reverse upward into the close, eating back into profit already banked
-        # on paper. Track the day's running-min combined premium continuously
-        # from position-open; freeze it ONCE, the first tick at/after
-        # self._day_low_freeze_time (default 15:00 IST), at whatever the running
-        # min is at that instant -- i.e. the true lowest point observed anywhere
-        # from 09:15 through the freeze tick. From the freeze tick onward
-        # (INCLUDING the freeze tick itself -- if the freeze-time reading turns
-        # out to BE the day's low, that already-frozen value trivially equals the
-        # current reading, so this fires immediately, same tick, no separate
-        # retest needed), the moment the CURRENT combined premium reaches (or
-        # undercuts) the frozen value, close the whole position and stop for the
-        # day. Opt-in (`day_low_exit_enabled`, default OFF).
+        # 2c. DAY-LOW REVERSAL EXIT (2026-08-18/19, user spec). Track the
+        # CURRENTLY RUNNING pair's OWN lowest combined premium since IT started
+        # running -- explicit user correction: "exit will fire from the current
+        # running pair not the pair which was there prev when the roll
+        # happened... when roll happened prev data is of no use... will focus
+        # only on running legs and its own lowest point of the day." A rollover
+        # (or a fresh re-entry) swaps in a different pair (different strikes) --
+        # the moment the running pair's own strike identity changes, tracking
+        # resets and starts fresh from that pair's own first observed tick; the
+        # PRIOR pair's tracked low is discarded, not inherited. Freeze the
+        # running-min ONCE, the first tick at/after self._day_low_freeze_time
+        # (default 15:00 IST), at whatever THIS pair's own low is at that
+        # instant. From the freeze tick onward (INCLUDING the freeze tick
+        # itself, same-tick, if that reading happens to BE this pair's low so
+        # far), the moment the current combined premium reaches (or undercuts)
+        # the frozen value, close the whole position and stop for the day.
+        # Opt-in (`day_low_exit_enabled`, default OFF).
+        # NOTE: a pair that only starts running AFTER the freeze time has
+        # already elapsed (e.g. a roll at 15:10 with freeze=15:00) has, by
+        # definition, zero real window to establish its own low before this
+        # check applies -- it freezes on its very first tick and can trigger on
+        # the very next tick that doesn't improve on it. Direct, accepted
+        # consequence of scoping "own lowest point" to the running pair rather
+        # than the whole day -- flagged, not silently smoothed over.
         if self._day_low_exit_enabled:
             _cv = pos.current_value
+            _pair_id = (int(pos.ce_leg.strike), int(pos.pe_leg.strike))
+            if tuple(getattr(self, "_day_low_tracked_pair", None) or ()) != _pair_id:
+                self._day_low_tracked_pair = _pair_id
+                self._session_min_straddle_value = _cv
+                self._session_min_straddle_frozen = None
+                self._clog.info(
+                    "SellStraddle[%s]: DAY-LOW TRACKING RESET — now tracking CE%d/PE%d's "
+                    "own low (prior pair's tracked low discarded on roll/re-entry).",
+                    self._underlying, _pair_id[0], _pair_id[1],
+                )
             if self._session_min_straddle_frozen is None:
                 if _cv < self._session_min_straddle_value:
                     self._session_min_straddle_value = _cv
-                if (now.time() >= self._day_low_freeze_time
-                        and self._session_min_straddle_value < float("inf")):
+                if now.time() >= self._day_low_freeze_time:
                     self._session_min_straddle_frozen = self._session_min_straddle_value
                     self._clog.info(
-                        "SellStraddle[%s]: DAY-LOW FROZEN @ %s — straddle rate=%.2f "
-                        "(lowest since position open today). From now until squareoff: "
-                        "exit in full the moment the rate reaches this value again.",
+                        "SellStraddle[%s]: DAY-LOW FROZEN @ %s — CE%d/PE%d rate=%.2f "
+                        "(lowest since this pair started running). From now until "
+                        "squareoff: exit in full the moment the rate reaches this "
+                        "value again.",
                         self._underlying, self._day_low_freeze_time.strftime("%H:%M"),
-                        self._session_min_straddle_frozen,
+                        _pair_id[0], _pair_id[1], self._session_min_straddle_frozen,
                     )
             if self._session_min_straddle_frozen is not None and _cv <= self._session_min_straddle_frozen:
                 self._clog.info(
-                    "SellStraddle[%s]: DAY-LOW REVERSAL EXIT — straddle rate=%.2f "
-                    "reached the frozen day-low=%.2f (frozen @ %s) — closing full "
+                    "SellStraddle[%s]: DAY-LOW REVERSAL EXIT — CE%d/PE%d rate=%.2f "
+                    "reached its frozen low=%.2f (frozen @ %s) — closing full "
                     "position, stopping for the day.",
-                    self._underlying, _cv, self._session_min_straddle_frozen,
-                    self._day_low_freeze_time.strftime("%H:%M"),
+                    self._underlying, _pair_id[0], _pair_id[1], _cv,
+                    self._session_min_straddle_frozen, self._day_low_freeze_time.strftime("%H:%M"),
                 )
                 if not self._defer_exit("day_low_reversal", now):
                     return
