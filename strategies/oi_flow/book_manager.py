@@ -47,6 +47,11 @@ _DEFAULT_PARAMS = {
     # no new entry evaluation after any stop-out exit (SL/TSL/S1/hard risk
     # cap -- EOD excluded). Book-wide, not per-side.
     "sl_cooldown_minutes": 15.0,
+    # Wall-selection debounce (2026-08-19 fix -- see engine.py's
+    # _debounced_wall docstring for the production incident this fixes):
+    # seconds a new OI-wall candidate must be sustained before the tracker
+    # actually switches to it. 0 disables debouncing entirely.
+    "wall_debounce_sec": 90.0,
 }
 _FLOAT_KEYS = tuple(_DEFAULT_PARAMS.keys())
 
@@ -99,6 +104,7 @@ class OIFlowBookManager(StrategyBookManager):
             trail_trigger_pct=value["trail_trigger_pct"], first_lock_pct=value["first_lock_pct"],
             step_pct=value["step_pct"], step_lock_pct=value["step_lock_pct"],
             sl_cooldown_minutes=value["sl_cooldown_minutes"],
+            wall_debounce_sec=value["wall_debounce_sec"],
             product_type=value["product_type"], squareoff_time=value["squareoff_time"],
         )
         logger.info(
@@ -126,6 +132,7 @@ class OIFlowBookManager(StrategyBookManager):
             or book._step_pct != value["step_pct"]
             or book._step_lock_pct != value["step_lock_pct"]
             or book._sl_cooldown_minutes != value["sl_cooldown_minutes"]
+            or book._wall_debounce_sec != value["wall_debounce_sec"]
         )
 
     def _log_spawned(self, key: tuple, value: dict) -> None:

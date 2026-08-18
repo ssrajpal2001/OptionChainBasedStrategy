@@ -74,6 +74,9 @@ _EOD_TIME_DEFAULT = time(15, 15)
 _EXIT_CONFIRM_TIMEOUT_SEC = 15.0
 _TICK_STALENESS_SEC = 60.0   # feed-staleness watchdog for an open position -- see _eod_loop
 _DEFAULT_SL_COOLDOWN_MINUTES = 15.0
+# Wall-selection debounce (2026-08-19, found via production telemetry -- see
+# _debounced_wall's own docstring for the full incident).
+_DEFAULT_WALL_DEBOUNCE_SEC = 90.0
 # Corrupt-tick date guard (2026-08-13, market-hours risk audit): a single
 # malformed/corrupt tick reporting an implausible date must never be
 # trusted to trigger a full session reset (wipes bars, tracked strike,
@@ -121,6 +124,7 @@ class OIFlowStrategy(AbstractStrategyBook):
         step_pct: float = _DEFAULT_STEP_PCT,
         step_lock_pct: float = _DEFAULT_STEP_LOCK_PCT,
         sl_cooldown_minutes: float = _DEFAULT_SL_COOLDOWN_MINUTES,
+        wall_debounce_sec: float = _DEFAULT_WALL_DEBOUNCE_SEC,
         product_type: str = "MIS",
         squareoff_time: str = "15:15",
     ) -> None:
@@ -139,6 +143,7 @@ class OIFlowStrategy(AbstractStrategyBook):
         self._step_pct = step_pct
         self._step_lock_pct = step_lock_pct
         self._sl_cooldown_minutes = sl_cooldown_minutes
+        self._wall_debounce_sec = float(wall_debounce_sec or 0.0)
         self._product_type = product_type
         try:
             _h, _m = str(squareoff_time or "15:15").split(":")
@@ -163,6 +168,9 @@ class OIFlowStrategy(AbstractStrategyBook):
         self._latest_snap = None
         self._live_option_ltp: Dict[str, float] = {}   # "CE"/"PE" -> latest live LTP of that side's wall strike
         self._watched_strikes: Dict[tuple, str] = {}   # (strike, side) -> "opposing"|"supporting", for option bar routing
+        # Wall-selection debounce state (see _debounced_wall docstring).
+        self._sticky_wall: Dict[str, float] = {}     # "CE"/"PE" -> the currently-adopted, debounced wall strike
+        self._pending_wall: Dict[str, tuple] = {}    # "CE"/"PE" -> (candidate_strike, first_seen_ts)
         # Which strike _option_acc[side]/_live_option_ltp[side] currently
         # reflect -- the CURRENT wall while flat, the position's own strike
         # while open. See _option_tick_loop's reset-on-change comment.
@@ -210,6 +218,8 @@ class OIFlowStrategy(AbstractStrategyBook):
         self._cooldown_until = None
         self._day_done = False
         self._recent_remarks.clear()
+        self._sticky_wall = {}
+        self._pending_wall = {}
 
     def start(self) -> None:
         super().start()
@@ -245,13 +255,76 @@ class OIFlowStrategy(AbstractStrategyBook):
             self._latest_snap = snap
             self._rewatch_oi_strikes(snap)
 
+    def _debounced_wall(self, side: str, candidate: float, now: datetime) -> float:
+        """Require a new OI-wall candidate to be sustained for
+        self._wall_debounce_sec before actually switching the tracked wall.
+
+        Root cause found via production telemetry (2026-08-19): NIFTY sat on
+        "insufficient OI history yet (tracker still warming up)" for
+        opposing_roc/supporting_roc across an entire 25+ minute tail, on
+        multiple real trading days, meaning zero entries were structurally
+        possible the whole time. ChainSnapshot.max_call_oi_strike/
+        max_put_oi_strike (matrix_engine/option_matrix.py) is a raw,
+        unsmoothed argmax recomputed on every OPTION_TICK -- when two or
+        three strikes carry near-tied OI (an entirely normal, common market
+        condition, not a data bug), that argmax can flip every few seconds
+        as individual OI updates land. The old _rewatch_oi_strikes blindly
+        followed that raw wall and called OIFlowTracker.watch_strikes() on
+        every MATRIX_SNAPSHOT -- and watch_strikes() drops history for any
+        (strike, side) no longer watched. So a jittery wall meant the
+        tracker's oi_roc() window (default 180s) could never accumulate 180
+        continuous seconds of history on any single strike: every switch
+        reset the clock back to zero before it ever finished, forever.
+
+        Fixed by debouncing the WALL SELECTION itself, standalone to
+        OI-Flow only (does not touch OptionMatrixEngine's own raw
+        computation -- other consumers, e.g. the dashboard's live wall
+        display, may legitimately want the instantaneous value). A new
+        candidate must be the consistently-reported argmax for
+        self._wall_debounce_sec seconds running before OIFlowTracker's
+        watch list actually changes; a candidate that flips away before
+        that never resets anything. self._wall_debounce_sec <= 0 disables
+        debouncing entirely (reverts to the old instantaneous-follow
+        behavior) for anyone who wants to opt back out."""
+        if not candidate:
+            return self._sticky_wall.get(side, 0.0)
+        if self._wall_debounce_sec <= 0:
+            self._sticky_wall[side] = candidate
+            return candidate
+        prev = self._sticky_wall.get(side)
+        if prev is None:
+            # First-ever pick this session -- nothing to debounce against.
+            self._sticky_wall[side] = candidate
+            self._pending_wall.pop(side, None)
+            return candidate
+        if candidate == prev:
+            self._pending_wall.pop(side, None)
+            return prev
+        pending = self._pending_wall.get(side)
+        if pending is None or pending[0] != candidate:
+            # A new (different) candidate just appeared -- start its clock.
+            self._pending_wall[side] = (candidate, now)
+            return prev
+        since = pending[1]
+        if (now - since).total_seconds() >= self._wall_debounce_sec:
+            self._clog.info(
+                "OIFlow[%s]: WALL SWITCH %s %s -> %s (sustained %.0fs, debounce=%.0fs).",
+                self._underlying, side, prev, candidate,
+                (now - since).total_seconds(), self._wall_debounce_sec,
+            )
+            self._sticky_wall[side] = candidate
+            self._pending_wall.pop(side, None)
+            return candidate
+        return prev
+
     def _rewatch_oi_strikes(self, snap) -> None:
-        """Re-derive the OIFlowTracker's watch list from the current OI
-        walls -- cheap and idempotent, safe to call on every new snapshot
-        so the tracker always follows the CURRENT wall even if it shifts
-        intraday."""
-        call_wall = snap.max_call_oi_strike
-        put_wall = snap.max_put_oi_strike
+        """Re-derive the OIFlowTracker's watch list from the current
+        (debounced) OI walls -- safe to call on every new snapshot; only
+        actually touches the tracker's watch list when the debounced walls
+        genuinely changed, so a steady-state day never resets OI history."""
+        now = datetime.now(IST)
+        call_wall = self._debounced_wall("CE", snap.max_call_oi_strike, now)
+        put_wall = self._debounced_wall("PE", snap.max_put_oi_strike, now)
         watched: Dict[tuple, str] = {}
         if call_wall:
             watched[(call_wall, "CE")] = "opposing"        # CE side's resistance wall
@@ -259,6 +332,8 @@ class OIFlowStrategy(AbstractStrategyBook):
         if put_wall:
             watched[(put_wall, "PE")] = "opposing"          # PE side's support wall
             watched[(put_wall + self._strike_step, "CE")] = "supporting"
+        if watched == self._watched_strikes:
+            return
         self._watched_strikes = watched
         self._oi_tracker.watch_strikes({k: True for k in watched})
 

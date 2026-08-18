@@ -822,6 +822,55 @@ shows *in-progress* (still-open) trades for `sell_straddle`/`v4_cascade`
 that branch either; a currently-open position won't appear there until closed, though it
 already shows correctly in OI-Flow's own live monitoring panel. Not fixed this pass.
 
+**⚠️ CRITICAL — zero trades possible for days straight: OI-wall jitter permanently starved
+the OI tracker's warm-up (2026-08-19):** user ran OI-Flow live on 2026-08-18 and it took
+zero trades all day. Root-caused via `logs/oi_flow/NIFTY_20260818.jsonl` — every single
+evaluation across the whole session showed `opposing_roc`/`supporting_roc` as `null` with
+`skip_reason="spot_gate_no_signal"`, most commonly `"insufficient OI history yet (tracker
+still warming up)"`, and the logged `wall_strike` was visibly flipping between 3-4 nearby
+strikes (24000/24100/24150/24200/24250/24400) almost every single one-minute evaluation
+cycle. Traced to `matrix_engine/option_matrix.py`'s `ChainSnapshot.max_call_oi_strike`/
+`max_put_oi_strike` (`recompute()`) — a raw, **unsmoothed** `max()` over per-strike OI,
+recomputed on every `OPTION_TICK`. When 2-3 strikes carry genuinely near-tied OI (common,
+normal market condition, not a data bug), that argmax can flip every few seconds as
+individual OI updates land for different strikes. `OIFlowStrategy._rewatch_oi_strikes()`
+(engine.py) blindly followed this raw wall on every `MATRIX_SNAPSHOT` and called
+`OIFlowTracker.watch_strikes()` with whatever the CURRENT wall was — and `watch_strikes()`
+**drops history for any (strike,side) no longer watched** (by design, so memory doesn't
+accumulate for strikes that stopped mattering). Net effect: the tracker's `oi_roc()` needs
+180 continuous seconds (`window_sec`) of history on one specific strike to return anything
+but `None` — and the wall kept reassigning to a different strike faster than that, so the
+180s clock reset before it ever completed, **forever**, on any real trading day where the
+wall wasn't a single clean dominant strike (i.e. most days). This alone fully explains zero
+entries: `detect_pre_breakout_signal()`'s OI-ROC check can never even evaluate a real
+number, only `None`, which always fails the gate.
+**Fix — wall-selection debounce, standalone to OI-Flow only** (does NOT touch
+`OptionMatrixEngine`'s own raw computation, which other consumers like the dashboard's live
+wall display may legitimately want instantaneous): new `_debounced_wall()` in engine.py —
+a new wall candidate must be the *consistently reported* argmax for `wall_debounce_sec`
+seconds (config, default **90s**) before `OIFlowTracker`'s watch list actually switches to
+it; a candidate that flips away before that never resets anything, and `_rewatch_oi_strikes`
+now also skips the `watch_strikes()` call entirely when the debounced result is unchanged
+from last time (steady-state days never touch the tracker at all). First-ever pick each
+session is adopted immediately (nothing to debounce against). `wall_debounce_sec<=0`
+disables debouncing entirely (reverts to the old instantaneous-follow behavior) for anyone
+who wants to opt back out. New `strategy_params` key `wall_debounce_sec` (default 90.0,
+wired through `book_manager.py` same as every other tunable). **Known, deliberately
+untouched parallel gap**: `_option_tick_loop`'s own wall-following (for the option premium
+bar accumulator feeding `confirm_option_price_action`'s VWAP/wick/swing-low checks) reads
+`snap.max_call_oi_strike`/`max_put_oi_strike` directly, un-debounced, by design (the
+2026-08-13 twin-bug fix specifically wants an accumulator reset on ANY wall change while
+flat, to prevent two different option contracts' OHLC mixing into one series) — so once the
+spot-side gate above starts passing more often thanks to this fix, the option-side gate
+could still be starved by the same underlying wall-jitter in a *different* way (never
+enough same-strike bars for a valid swing-low/VWAP). No evidence yet that this has actually
+blocked anything (the spot gate never got that far to see), so it's flagged for future
+telemetry review, not blind-fixed alongside this. 3 new regression tests
+(`tests/oi_flow/test_engine.py`, `test_debounced_wall_*`) drive `_rewatch_oi_strikes` the
+same way `_matrix_snapshot_loop` does: a brief flip is ignored (and the still-tracked wall's
+accumulated OI history survives untouched), a candidate sustained past the debounce window
+does switch, and `wall_debounce_sec=0` reproduces the old instant-follow behavior exactly.
+
 ---
 
 ## Key Design Decisions

@@ -91,6 +91,9 @@ def _make_book() -> OIFlowStrategy:
     book._step_pct = 0.10
     book._step_lock_pct = 0.05
     book._sl_cooldown_minutes = 15.0
+    book._wall_debounce_sec = 90.0
+    book._sticky_wall = {}
+    book._pending_wall = {}
     book._cooldown_until = None
     book._product_type = "MIS"
     from datetime import time as _time
@@ -197,6 +200,65 @@ def test_rewatch_oi_strikes_derives_correct_watch_list():
     assert (57600.0, "PE") in book._watched_strikes    # one step below -- CE's supporting side
     assert (57200.0, "PE") in book._watched_strikes    # put wall itself
     assert (57300.0, "CE") in book._watched_strikes    # one step above -- PE's supporting side
+
+
+# ── wall-selection debounce (2026-08-19 fix) ─────────────────────────────────
+# Root cause found via production telemetry: ChainSnapshot.max_call_oi_strike/
+# max_put_oi_strike is a raw, unsmoothed argmax recomputed on every tick --
+# when strikes carry near-tied OI, that argmax flips every few seconds. The
+# old _rewatch_oi_strikes blindly followed it and called
+# OIFlowTracker.watch_strikes() on every snapshot, which drops history for
+# any (strike, side) no longer watched -- so the tracker's 180s oi_roc()
+# window could never accumulate on any single strike, forever. These tests
+# drive _rewatch_oi_strikes exactly the way _matrix_snapshot_loop does.
+
+def test_debounced_wall_ignores_a_brief_flip():
+    book = _make_book()
+    book._wall_debounce_sec = 90.0
+    book._rewatch_oi_strikes(_FakeSnap(max_call_oi_strike=57700.0, max_put_oi_strike=57200.0))
+    watched_after_first_pick = dict(book._watched_strikes)
+    assert (57700.0, "CE") in watched_after_first_pick
+
+    # History starts accumulating on the adopted wall.
+    book._oi_tracker.on_option_tick(_FakeTick(57700.0, "CE", 100_000, _base()))
+
+    # A brief flip to a different candidate -- must NOT switch, must NOT
+    # touch the tracker's watch list (and therefore must not drop history).
+    book._rewatch_oi_strikes(_FakeSnap(max_call_oi_strike=57800.0, max_put_oi_strike=57200.0))
+    assert book._watched_strikes == watched_after_first_pick, "a single brief flip must not switch the tracked wall"
+    assert book._oi_tracker.oi_now(57700.0, "CE") == 100_000, "history for the still-tracked wall must survive"
+
+    # Flips back to the original before the debounce window elapses -- still no switch.
+    book._rewatch_oi_strikes(_FakeSnap(max_call_oi_strike=57700.0, max_put_oi_strike=57200.0))
+    assert book._watched_strikes == watched_after_first_pick
+    assert book._oi_tracker.oi_now(57700.0, "CE") == 100_000
+
+
+def test_debounced_wall_switches_once_sustained_past_the_debounce_window():
+    book = _make_book()
+    book._wall_debounce_sec = 90.0
+    book._rewatch_oi_strikes(_FakeSnap(max_call_oi_strike=57700.0, max_put_oi_strike=57200.0))
+    book._oi_tracker.on_option_tick(_FakeTick(57700.0, "CE", 100_000, _base()))
+
+    snap_b = _FakeSnap(max_call_oi_strike=57800.0, max_put_oi_strike=57200.0)
+    book._rewatch_oi_strikes(snap_b)   # starts the pending clock for 57800
+    assert (57700.0, "CE") in book._watched_strikes   # not switched yet
+
+    # Simulate the debounce window having elapsed.
+    book._pending_wall["CE"] = (57800.0, datetime.now(IST) - timedelta(seconds=book._wall_debounce_sec + 1))
+    book._rewatch_oi_strikes(snap_b)   # same candidate, now sustained long enough
+    assert (57800.0, "CE") in book._watched_strikes
+    assert (57700.0, "CE") not in book._watched_strikes
+
+
+def test_wall_debounce_zero_disables_debouncing():
+    book = _make_book()
+    book._wall_debounce_sec = 0.0
+    book._rewatch_oi_strikes(_FakeSnap(max_call_oi_strike=57700.0, max_put_oi_strike=57200.0))
+    assert (57700.0, "CE") in book._watched_strikes
+    book._rewatch_oi_strikes(_FakeSnap(max_call_oi_strike=57800.0, max_put_oi_strike=57200.0))
+    assert (57800.0, "CE") in book._watched_strikes    # instant switch -- old behavior
+    assert (57700.0, "CE") not in book._watched_strikes
 
 
 # ── _on_spot_bar_close: single-position-at-a-time (CE XOR PE) ────────────────
