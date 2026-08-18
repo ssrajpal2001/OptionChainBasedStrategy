@@ -20,9 +20,20 @@ was there prev when the roll happened... when roll happened prev data is of
 no use... will focus only on running legs and its own lowest point of the
 day." `_day_low_tracked_pair` (a `(ce_strike, pe_strike)` tuple) identifies
 which pair the tracker is currently following; the moment the running
-position's own strikes differ from it, tracking resets from scratch (the
-prior pair's low is discarded, not inherited) and starts fresh from THIS
-pair's own first observed tick.
+position's own strikes differ from it, tracking resets from scratch.
+
+**"From scratch" seeds from REAL history, not a blank slate** -- second
+correction: "from scratch" does not mean literally starting the count from
+whatever tick the book happens to notice the new pair on. The new pair was
+genuinely trading on the real market since 09:15 even though this book only
+just started holding it -- `_seed_day_low_for_pair()` REST-fetches today's
+actual 1-min intraday history for the new strikes and seeds the tracker with
+the true low already achieved before this book ever touched them (falls back
+to "start from this tick" if the fetch fails for any reason). Tests mock
+`s._seed_day_low_for_pair` directly (an AsyncMock returning `inf` by default
+via `_strategy()`, i.e. "no seed available") rather than hitting the network
+-- `tests/strategies/test_day_low_seed_rest_fetch.py` covers the REST
+fetch/minute-alignment logic itself in isolation.
 
 Tests use `_day_low_freeze_time = time(23, 59, 59)` to guarantee the freeze
 condition is false regardless of real wall-clock time the suite runs at, and
@@ -30,6 +41,7 @@ condition is false regardless of real wall-clock time the suite runs at, and
 """
 import asyncio
 from datetime import time as dtime
+from unittest.mock import AsyncMock
 
 from config.global_config import GlobalConfig
 from data_layer.base_feeder import EventBus
@@ -50,6 +62,9 @@ def _strategy():
     s._day_profit_target_pct = 0.0
     s._day_loss_sl_pct = 0.0
     s._ratio_threshold = 999.0
+    # No REST seed available by default -- degrades to "start from this
+    # tick", matching every test below unless a test overrides it explicitly.
+    s._seed_day_low_for_pair = AsyncMock(return_value=float("inf"))
     return s
 
 
@@ -241,15 +256,18 @@ def test_tracking_resets_on_a_mid_day_rollover_onto_a_new_pair():
     assert close_calls == ["day_low_reversal_exit"]
 
 
-def test_pair_starting_after_freeze_time_arms_and_fires_on_its_own_first_tick():
-    """Accepted edge case, explicitly flagged in the code comment: a pair that
-    only starts running AFTER the freeze time has already elapsed (e.g. a roll
-    at 15:10 with freeze=15:00) has zero real window to establish its own low
-    before this check applies -- its very first tick freezes AND immediately
-    satisfies the retest (that reading trivially IS its own low so far), so it
-    fires on the very same tick it starts running. A direct, accepted
-    consequence of scoping "own lowest point" to the running pair -- flagged
-    here, not silently smoothed over."""
+def test_pair_starting_after_freeze_time_arms_and_fires_on_its_own_first_tick_when_unseeded():
+    """Edge case when the REST seed is unavailable (mocked to inf here, e.g. a
+    genuine fetch failure): a pair that only starts running AFTER the freeze
+    time has already elapsed (e.g. a roll at 15:10 with freeze=15:00) has zero
+    real window to establish its own low before this check applies -- its very
+    first tick freezes AND immediately satisfies the retest (that reading
+    trivially IS its own low so far), so it fires on the very same tick it
+    starts running. A direct, accepted consequence of scoping "own lowest
+    point" to the running pair when no historical seed is available -- flagged
+    here, not silently smoothed over. See
+    test_pair_starting_after_freeze_time_uses_seeded_low_instead_of_self_firing
+    for the normal (seed succeeds) case, which does NOT self-fire this way."""
     s = _strategy()
     s._day_low_exit_enabled = True
     s._day_low_freeze_time = dtime(0, 0)   # already "past" freeze time
@@ -260,3 +278,65 @@ def test_pair_starting_after_freeze_time_arms_and_fires_on_its_own_first_tick():
     asyncio.run(s._check_exits())
     assert close_calls == ["day_low_reversal_exit"]
     assert s._stop_for_day is True
+
+
+def test_pair_change_seeds_from_rest_history_not_a_blank_slate():
+    """Second user correction: "from scratch" means seeded from the pair's
+    REAL intraday history (09:15 onward), not a blank slate starting at
+    whatever tick the book happens to notice it on. If the REST seed returns a
+    genuine historical low BELOW anything the live ticks alone establish, that
+    seeded value must be what gets tracked/frozen/retested -- not just the
+    live-tick-only running min."""
+    s = _strategy()
+    s._day_low_exit_enabled = True
+    s._day_low_freeze_time = dtime(23, 59, 59)   # not reached yet
+    close_calls = _spy_close(s)
+
+    # The pair's real market history (fetched via REST) shows it dipped to 28
+    # earlier today, well before this book ever opened it.
+    s._seed_day_low_for_pair = AsyncMock(return_value=28.0)
+
+    s._position = _position(40.0, 30.0)   # this book's own first tick = 70
+    asyncio.run(s._check_exits())
+    assert s._session_min_straddle_value == 28.0, "the REST-seeded historical low must win, not the live tick"
+
+    # Live ticks from here only ever print 60+ -- never independently reach 28.
+    s._position = _position(35.0, 25.0)   # 60
+    asyncio.run(s._check_exits())
+    assert s._session_min_straddle_value == 28.0, "a live tick above the seed must not overwrite it"
+
+    # Cross freeze time -- freezes at the seeded 28, not at whatever the live
+    # pair's own (never-that-low) ticks would have implied on their own.
+    s._day_low_freeze_time = dtime(0, 0)
+    s._defer_exit = lambda reason, now: True
+    s._position = _position(32.0, 22.0)   # 54 -- above the frozen 28, no exit yet
+    asyncio.run(s._check_exits())
+    assert s._session_min_straddle_frozen == 28.0
+    assert not close_calls
+
+    # Retest of the seeded historical low -- exits.
+    s._position = _position(15.0, 13.0)   # 28
+    asyncio.run(s._check_exits())
+    assert close_calls == ["day_low_reversal_exit"]
+
+
+def test_pair_starting_after_freeze_time_uses_seeded_low_instead_of_self_firing():
+    """Normal case (seed succeeds): unlike the unseeded edge case above, a
+    pair that starts running after freeze time does NOT trivially self-fire on
+    its own first tick, because it gets seeded with its real historical low
+    from earlier in the session -- exactly like any other pair would."""
+    s = _strategy()
+    s._day_low_exit_enabled = True
+    s._day_low_freeze_time = dtime(0, 0)   # already "past" freeze time
+    s._defer_exit = lambda reason, now: True
+    close_calls = _spy_close(s)
+    s._seed_day_low_for_pair = AsyncMock(return_value=50.0)   # real 09:15-now low
+
+    s._position = _position(40.0, 30.0)   # 70 -- this book's first tick, but seed(50) is lower
+    asyncio.run(s._check_exits())
+    assert s._session_min_straddle_frozen == 50.0
+    assert not close_calls, "must not self-fire -- the seeded historical low is below this tick's own value"
+
+    s._position = _position(25.0, 25.0)   # 50 -- retests the seeded low
+    asyncio.run(s._check_exits())
+    assert close_calls == ["day_low_reversal_exit"]

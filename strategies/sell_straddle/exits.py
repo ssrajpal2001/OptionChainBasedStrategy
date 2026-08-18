@@ -64,6 +64,73 @@ class ExitMixin:
         except Exception as exc:
             logger.warning("SellStraddle[%s]: entry-seed exec legs failed: %s", self._underlying, exc)
 
+    async def _seed_day_low_for_pair(self, ce_strike: int, pe_strike: int) -> float:
+        """REST-fetch today's 1-min intraday history for a pair the day-low
+        tracker hasn't seen before (first entry of the day, or the pair just
+        after a rollover) and compute the lowest combined (CE+PE) premium the
+        pair has genuinely traded SO FAR TODAY on the real market -- not just
+        from whenever this book started holding it. Direct user spec: "get
+        the rest api intraday historical data of 1 min for the pair and get
+        the min values and then ... find out what was the min low of the day
+        and then add that to the aggregator."
+
+        Combines CE/PE CLOSE prices minute-by-minute (aligned by timestamp),
+        NOT each leg's own independent low in isolation -- summing two legs'
+        separate lows would combine two price extremes that almost certainly
+        never occurred at the same instant, producing a floor the real
+        combined premium may never have actually touched. This matches how
+        the live tracker itself works (current_value = ce_ltp + pe_ltp, both
+        "last traded", not "lowest tick of the minute").
+
+        Returns float('inf') on ANY failure (crypto, no token, no data, no
+        overlapping minutes, network error) -- the caller always min()s this
+        against the live tick's own value, so a failed fetch degrades safely
+        to "start tracking from this tick", never blocks or sets a wrong
+        floor."""
+        try:
+            if getattr(self, "_is_crypto", False):
+                return float("inf")
+            from data_layer.historical_candles import fetch_upstox_intraday_1m
+            from data_layer.instrument_registry import REGISTRY
+            from data_layer.client_db import ClientDB
+            creds = await asyncio.to_thread(ClientDB().get_feeder_creds_sync, "upstox")
+            token = (creds or {}).get("access_token", "")
+            if not token:
+                return float("inf")
+            pos = self._position
+            if pos and pos.expiry_date:
+                exp = pos.expiry_date
+            else:
+                exp = REGISTRY.get_active_expiry(self._underlying, datetime.now(IST).date())
+            ce_key = REGISTRY.get_broker_symbol(self._underlying, exp, int(ce_strike), "CE", "upstox")
+            pe_key = REGISTRY.get_broker_symbol(self._underlying, exp, int(pe_strike), "PE", "upstox")
+            if not ce_key or not pe_key:
+                return float("inf")
+            ce_bars, pe_bars = await asyncio.gather(
+                fetch_upstox_intraday_1m(ce_key, token),
+                fetch_upstox_intraday_1m(pe_key, token),
+            )
+            if not ce_bars or not pe_bars:
+                return float("inf")
+            pe_close_by_ts = {b["ts"]: float(b["close"]) for b in pe_bars}
+            combined = [
+                float(b["close"]) + pe_close_by_ts[b["ts"]]
+                for b in ce_bars if b["ts"] in pe_close_by_ts
+            ]
+            if not combined:
+                return float("inf")
+            _low = min(combined)
+            self._clog.info(
+                "SellStraddle[%s]: DAY-LOW SEED — fetched %d aligned 1m bars for "
+                "CE%d/PE%d, today's historical intraday low=%.2f.",
+                self._underlying, len(combined), int(ce_strike), int(pe_strike), _low,
+            )
+            return _low
+        except Exception as exc:
+            self._clog.warning("SellStraddle[%s]: day-low REST seed failed for CE%d/PE%d: %s",
+                                self._underlying, int(ce_strike), int(pe_strike), exc)
+            return float("inf")
+
     def _exit_max_tf(self, reason: str) -> int:
         """Maximum timeframe (minutes) for an exit reason.
         Rule-based reasons use the max tf of their rule list; tick-based reasons default to 1."""
@@ -588,33 +655,41 @@ class ExitMixin:
         # only on running legs and its own lowest point of the day." A rollover
         # (or a fresh re-entry) swaps in a different pair (different strikes) --
         # the moment the running pair's own strike identity changes, tracking
-        # resets and starts fresh from that pair's own first observed tick; the
-        # PRIOR pair's tracked low is discarded, not inherited. Freeze the
-        # running-min ONCE, the first tick at/after self._day_low_freeze_time
-        # (default 15:00 IST), at whatever THIS pair's own low is at that
-        # instant. From the freeze tick onward (INCLUDING the freeze tick
-        # itself, same-tick, if that reading happens to BE this pair's low so
-        # far), the moment the current combined premium reaches (or undercuts)
-        # the frozen value, close the whole position and stop for the day.
-        # Opt-in (`day_low_exit_enabled`, default OFF).
+        # resets; the PRIOR pair's tracked low is discarded, not inherited.
+        # "From scratch" does NOT mean "start counting from this tick with no
+        # history" -- the new pair was genuinely trading on the real market
+        # since 09:15 even though this BOOK only started holding it just now,
+        # so _seed_day_low_for_pair() REST-fetches today's actual 1-min
+        # history for the new strikes and seeds the tracker with the true
+        # intraday low already achieved before this book ever touched them
+        # (falls back to "start from this tick" if the fetch fails for any
+        # reason). Freeze the running-min ONCE, the first tick at/after
+        # self._day_low_freeze_time (default 15:00 IST), at whatever THIS
+        # pair's own low is at that instant. From the freeze tick onward
+        # (INCLUDING the freeze tick itself, same-tick, if that reading
+        # happens to BE this pair's low so far), the moment the current
+        # combined premium reaches (or undercuts) the frozen value, close the
+        # whole position and stop for the day. Opt-in (`day_low_exit_enabled`,
+        # default OFF).
         # NOTE: a pair that only starts running AFTER the freeze time has
-        # already elapsed (e.g. a roll at 15:10 with freeze=15:00) has, by
-        # definition, zero real window to establish its own low before this
-        # check applies -- it freezes on its very first tick and can trigger on
-        # the very next tick that doesn't improve on it. Direct, accepted
-        # consequence of scoping "own lowest point" to the running pair rather
-        # than the whole day -- flagged, not silently smoothed over.
+        # already elapsed (e.g. a roll at 15:10 with freeze=15:00) still gets
+        # its real historical low seeded (covering 09:15-15:10, same as any
+        # other pair would by then) -- so this no longer trivially self-fires
+        # on the very first tick the way an unseeded reset would; it only
+        # fires once the live rate actually reaches that real historical low.
         if self._day_low_exit_enabled:
             _cv = pos.current_value
             _pair_id = (int(pos.ce_leg.strike), int(pos.pe_leg.strike))
             if tuple(getattr(self, "_day_low_tracked_pair", None) or ()) != _pair_id:
                 self._day_low_tracked_pair = _pair_id
-                self._session_min_straddle_value = _cv
+                _seed = await self._seed_day_low_for_pair(_pair_id[0], _pair_id[1])
+                self._session_min_straddle_value = min(_seed, _cv)
                 self._session_min_straddle_frozen = None
                 self._clog.info(
                     "SellStraddle[%s]: DAY-LOW TRACKING RESET — now tracking CE%d/PE%d's "
-                    "own low (prior pair's tracked low discarded on roll/re-entry).",
-                    self._underlying, _pair_id[0], _pair_id[1],
+                    "own low (prior pair's tracked low discarded on roll/re-entry); "
+                    "seeded low=%.2f (REST history vs current tick, whichever is lower).",
+                    self._underlying, _pair_id[0], _pair_id[1], self._session_min_straddle_value,
                 )
             if self._session_min_straddle_frozen is None:
                 if _cv < self._session_min_straddle_value:
