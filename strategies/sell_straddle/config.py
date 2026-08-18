@@ -77,6 +77,9 @@ class SellStraddleConfig:
     itm_pair_gate_profit_inr: float
     itm_pair_gate_min_strike_gap: float
 
+    day_low_exit_enabled: bool
+    day_low_freeze_time: dtime
+
     same_day_expiry_enabled: bool
 
 
@@ -94,7 +97,7 @@ def _apply_client_overrides(
     if not overrides:
         return
 
-    _time_fields = {"entry_start", "entry_cutoff", "force_exit"}
+    _time_fields = {"entry_start", "entry_cutoff", "force_exit", "day_low_freeze_time"}
     applied: List[str] = []
 
     for field in fields(cfg):
@@ -218,6 +221,18 @@ def load_sell_straddle_config(
     itm_pair_gate_profit_inr = float(ss.get("itm_pair_gate_profit_inr", 500.0))
     itm_pair_gate_min_strike_gap = float(ss.get("itm_pair_gate_min_strike_gap", 100.0))
 
+    # Day-low reversal exit (2026-08-18, user spec): the straddle's combined
+    # premium tends to bottom out somewhere in the 09:15-15:00 window then
+    # reverse upward into the close. Track the day's running-min combined
+    # premium from entry up to a freeze point (default 15:00 IST); from then
+    # until squareoff, exit the whole position the moment the current combined
+    # premium reaches that frozen low again (including the freeze tick itself,
+    # if that reading happens to BE the day's low). Opt-in (default OFF) --
+    # unlike itm_pair_gate this is brand new and unvalidated; must not silently
+    # activate on an existing live deployment.
+    day_low_exit_enabled = bool(ss.get("day_low_exit_enabled", False))
+    day_low_freeze_time = _parse_time(ss.get("day_low_freeze_time", "15:00"))
+
     same_day_expiry_enabled = bool(ss.get("same_day_expiry_enabled", False))
 
     config = SellStraddleConfig(
@@ -256,6 +271,8 @@ def load_sell_straddle_config(
         itm_pair_gate_enabled=itm_pair_gate_enabled,
         itm_pair_gate_profit_inr=itm_pair_gate_profit_inr,
         itm_pair_gate_min_strike_gap=itm_pair_gate_min_strike_gap,
+        day_low_exit_enabled=day_low_exit_enabled,
+        day_low_freeze_time=day_low_freeze_time,
         same_day_expiry_enabled=same_day_expiry_enabled,
     )
 
@@ -334,6 +351,13 @@ class ConfigMixin:
             # tracked independently. A rollover on one side must never wipe out a
             # still-active budget already armed on the other side.
             self._itm_roll_protection = {}
+
+        self._day_low_exit_enabled = cfg.day_low_exit_enabled
+        self._day_low_freeze_time = cfg.day_low_freeze_time
+        if not hasattr(self, "_session_min_straddle_value"):
+            self._session_min_straddle_value = float("inf")
+        if not hasattr(self, "_session_min_straddle_frozen"):
+            self._session_min_straddle_frozen = None
 
         self._same_day_expiry_enabled = cfg.same_day_expiry_enabled
 

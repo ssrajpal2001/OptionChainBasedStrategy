@@ -245,6 +245,13 @@ class ExitMixin:
                 return (f"Both legs ITM | cumulative P&L {self._ccy_symbol}{_inr:+.0f} ≥ threshold {self._ccy_symbol}{_thr:.0f} "
                         f"| CE{int(pos.ce_leg.strike)} PE{int(pos.pe_leg.strike)} spot={self._spot:.0f}")
 
+            if reason == "day_low_reversal_exit":
+                _cv = pos.current_value
+                _frozen = getattr(self, "_session_min_straddle_frozen", 0.0) or 0.0
+                return (f"Day-low reversal exit | straddle rate={_cv:.2f} reached frozen "
+                        f"day-low={_frozen:.2f} (frozen @{self._day_low_freeze_time.strftime('%H:%M')}) "
+                        f"→ closed, stopped for day")
+
             if reason.startswith("manual_squareoff_"):
                 return f"Manual square-off ({reason})"
             if reason == "kill_switch":
@@ -552,6 +559,70 @@ class ExitMixin:
                 logger.info("SellStraddle[%s]: STOPPED FOR DAY (loss SL hit).", self._underlying)
                 return
 
+        # 2b. ITM PAIR GATE + 70% ROLL PROTECTION -- must run BEFORE the generic
+        # ratio/ltp_decay/TSL/exit_rules/vwap_rise checks below, each of which
+        # `return`s immediately the moment its own condition fires. An itm-pair-gate
+        # pair is, by definition, two ITM legs with a wide strike gap -- exactly the
+        # shape most likely to keep the CE/PE premium ratio persistently elevated.
+        # 2026-08-17 real incident: ratio_exit kept re-triggering (and re-rolling)
+        # every cycle on such a pair, so _check_itm_roll_protection -- previously
+        # last in this list -- was starved and never got to run even though its own
+        # 70%-budget running loss had genuinely crossed the line. Running these two
+        # first (still cheap no-ops when the gate is off / nothing is armed) means a
+        # hard ₹-loss cap on an already-profit-funded leg always gets first look.
+        await self._check_itm_pair_gate(now)
+        await self._check_itm_roll_protection(now)
+        if not (self._position and self._position.status == "open"):
+            # Either check may have closed the position outright (no roll partner
+            # found / no valid recovery strike) -- don't fall through to the
+            # remaining checks below using the now-stale `pos` reference.
+            return
+        pos = self._position  # refresh -- a roll above may have swapped legs/strikes
+
+        # 2c. DAY-LOW REVERSAL EXIT (2026-08-18, user spec). The straddle's combined
+        # premium (CE_ltp+PE_ltp) typically decays to its lowest point of the day
+        # somewhere in the 09:15-15:00 window as theta drains, then tends to
+        # reverse upward into the close, eating back into profit already banked
+        # on paper. Track the day's running-min combined premium continuously
+        # from position-open; freeze it ONCE, the first tick at/after
+        # self._day_low_freeze_time (default 15:00 IST), at whatever the running
+        # min is at that instant -- i.e. the true lowest point observed anywhere
+        # from 09:15 through the freeze tick. From the freeze tick onward
+        # (INCLUDING the freeze tick itself -- if the freeze-time reading turns
+        # out to BE the day's low, that already-frozen value trivially equals the
+        # current reading, so this fires immediately, same tick, no separate
+        # retest needed), the moment the CURRENT combined premium reaches (or
+        # undercuts) the frozen value, close the whole position and stop for the
+        # day. Opt-in (`day_low_exit_enabled`, default OFF).
+        if self._day_low_exit_enabled:
+            _cv = pos.current_value
+            if self._session_min_straddle_frozen is None:
+                if _cv < self._session_min_straddle_value:
+                    self._session_min_straddle_value = _cv
+                if (now.time() >= self._day_low_freeze_time
+                        and self._session_min_straddle_value < float("inf")):
+                    self._session_min_straddle_frozen = self._session_min_straddle_value
+                    self._clog.info(
+                        "SellStraddle[%s]: DAY-LOW FROZEN @ %s — straddle rate=%.2f "
+                        "(lowest since position open today). From now until squareoff: "
+                        "exit in full the moment the rate reaches this value again.",
+                        self._underlying, self._day_low_freeze_time.strftime("%H:%M"),
+                        self._session_min_straddle_frozen,
+                    )
+            if self._session_min_straddle_frozen is not None and _cv <= self._session_min_straddle_frozen:
+                self._clog.info(
+                    "SellStraddle[%s]: DAY-LOW REVERSAL EXIT — straddle rate=%.2f "
+                    "reached the frozen day-low=%.2f (frozen @ %s) — closing full "
+                    "position, stopping for the day.",
+                    self._underlying, _cv, self._session_min_straddle_frozen,
+                    self._day_low_freeze_time.strftime("%H:%M"),
+                )
+                if not self._defer_exit("day_low_reversal", now):
+                    return
+                self._stop_for_day = True
+                await self._close_position("day_low_reversal_exit")
+                return
+
         # 3. LTP Decay → single-side roll
         if self._ltp_decay_enabled:
             _min_ltp = min(pos.ce_leg.ltp, pos.pe_leg.ltp)
@@ -663,20 +734,6 @@ class ExitMixin:
                             return
                         await self._single_side_roll(now, "vwap_rise_roll")
                         return
-
-        # 8. ITM PAIR GATE. Must run unconditionally every cycle -- _check_itm_pair_gate
-        # is the ONLY place that ever sets _itm_gate_armed=True (on first below-threshold
-        # both-ITM detection). Gating this call on "already armed" (2026-07-21 bug fix)
-        # meant the gate could never arm itself on a session with no rollover: it stayed
-        # permanently unreachable, so the real ₹-threshold close never fired even though
-        # exits.py's separate _build_exit_criteria kept logging "ITMgate ✓HIT" every
-        # cycle for display only. _check_itm_pair_gate itself cheaply no-ops when the
-        # toggle is off or the pair isn't both-ITM, so calling it unconditionally is safe.
-        await self._check_itm_pair_gate(now)
-
-        # 9. ITM-ROLL PROTECTION (70% rule, scoped to the ITM-pair-gate rollover path only).
-        # Must also run unconditionally -- cheap no-op when _itm_roll_protection is unset.
-        await self._check_itm_roll_protection(now)
 
     # ── Close / leg helpers ───────────────────────────────────────────────────
 

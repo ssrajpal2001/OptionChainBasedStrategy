@@ -278,6 +278,8 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                 "stop_for_day": self._stop_for_day,
                 "session_day": str(self._session_day(datetime.now(IST))),
                 "initial_net_credit": self._initial_net_credit,
+                "session_min_straddle_value": self._session_min_straddle_value,
+                "session_min_straddle_frozen": self._session_min_straddle_frozen,
             }, product_type="MIS")
         except Exception as exc:
             logger.debug("SellStraddle[%s]: session persist failed: %s", self._underlying, exc)
@@ -298,6 +300,12 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                 _saved_credit = float(_sess.get("initial_net_credit", 0.0) or 0.0)
                 if _saved_credit > 0 and self._initial_net_credit <= 0:
                     self._initial_net_credit = _saved_credit
+                _saved_min = _sess.get("session_min_straddle_value", None)
+                if _saved_min is not None:
+                    self._session_min_straddle_value = float(_saved_min)
+                _saved_frozen = _sess.get("session_min_straddle_frozen", None)
+                if _saved_frozen is not None:
+                    self._session_min_straddle_frozen = float(_saved_frozen)
                 # If session losses already breach day_loss_sl, lock immediately so a
                 # fresh book can't re-enter and trigger an immediate day_loss_sl exit.
                 if (not self._stop_for_day and self._day_loss_sl_pct > 0
@@ -528,11 +536,13 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
             f"║ ITM PAIR GATE: {'ON' if self._itm_pair_gate_enabled else 'OFF'} "
             f"(profit≥₹{self._itm_pair_gate_profit_inr:.0f}, gap>{self._itm_pair_gate_min_strike_gap:.0f}pts "
             f"→ rollover, 70% roll-protect)",
+            f"║ DAY-LOW REVERSAL EXIT: {'ON' if self._day_low_exit_enabled else 'OFF'} "
+            f"(freeze@{self._day_low_freeze_time.strftime('%H:%M')}, exit on retest of frozen day-low)",
             f"║ SAME-DAY EXPIRY: {'ALLOWED' if getattr(self, '_same_day_expiry_enabled', False) else 'SHIFT TO NEXT'}",
             f"║ DAY: T:{self._day_profit_target_pct:.0f}% SL:{self._day_loss_sl_pct:.0f}% "
             f"BASIS:{self._day_exit_basis.upper()}",
             f"║ DYNAMIC EXITS: {exit_rules}",
-            f"║ EXIT PRIORITY: EOD→Day%→LTPdecay→Ratio→ScalableTSL→exit_rules→VWAPrise→ITMgate",
+            f"║ EXIT PRIORITY: EOD→Day%→ITMgate→DayLow→LTPdecay→Ratio→ScalableTSL→exit_rules→VWAPrise",
             f"║ LIMITS: Max Daily Trades:{self._max_trades}",
             "╚══════════════════════════════════════════════════════════════════════",
         ]
@@ -695,6 +705,8 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         self._initial_entry_time_value = 0.0
         self._stop_for_day = False
         self._consecutive_entry_rejections = 0
+        self._session_min_straddle_value = float("inf")
+        self._session_min_straddle_frozen = None
         self._prem_closes.clear()
         self._prem_volumes.clear()
         self._chart_series.clear()

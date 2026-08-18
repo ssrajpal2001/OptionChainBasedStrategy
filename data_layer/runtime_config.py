@@ -47,6 +47,11 @@ _SS_INDEX_DEFAULT: Dict[str, Any] = {
     "roll_max_itm_steps":    5,
     "itm_pair_gate_enabled": True,
     "itm_pair_gate_profit_inr": 500.0,
+    # Day-low reversal exit: tracks the day's lowest CE+PE combined premium from
+    # entry to day_low_freeze_time, then exits full the moment the rate returns
+    # to that frozen low. Opt-in, unvalidated -- default OFF.
+    "day_low_exit_enabled": False,
+    "day_low_freeze_time": "15:00",
     "entry_rules_beginning": [],
     "entry_rules_reentry":   [],
     "exit_rules":            [],
