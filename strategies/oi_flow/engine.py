@@ -887,6 +887,19 @@ class OIFlowStrategy(AbstractStrategyBook):
                 )
                 self._clog.info("ENTRY ABORTED (broker unavailable/gate closed) event_id=%s -- discarding position",
                                  fill.event_id)
+                # 2026-08-19: surface the rejection to the dashboard's own
+                # remarks trail, not just the log files -- found live (real
+                # SellStraddle SENSEX BFO-segment rejection the same day)
+                # that a broker-rejected entry was otherwise completely
+                # invisible in the UI: the position never existed (correct,
+                # no phantom fill), but the OPERATOR had no way to see that
+                # from the dashboard, only by grepping pm2/strategy logs.
+                rejected_side = self._position.get("side", fill.option_type)
+                rejected_strike = self._position.get("strike", fill.strike)
+                self._recent_remarks.appendleft({
+                    "ts": datetime.now(IST).isoformat(), "side": rejected_side, "level": "warn",
+                    "text": f"{rejected_side} {int(rejected_strike)} ENTRY REJECTED by broker (event_id={fill.event_id}) -- no position opened",
+                })
                 self._position = None
                 self._persist_position()
                 return

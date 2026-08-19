@@ -992,6 +992,31 @@ def test_on_fill_entry_aborted_discards_optimistic_position():
     assert book._position is None
 
 
+def test_on_fill_entry_aborted_surfaces_to_dashboard_remarks():
+    """2026-08-19: a real production incident (SellStraddle SENSEX rejected
+    by the broker -- BFO segment restriction) was invisible anywhere in the
+    dashboard, only discoverable by grepping pm2/strategy logs -- the
+    position correctly never existed, but the OPERATOR had no way to see
+    that from the UI. Same architecture gap exists here (single-attempt
+    live order, discard-on-reject) -- this proves a rejected entry now also
+    lands in monitoring_state()'s own remarks trail, not just log files."""
+    book = _make_book()
+    book._position = dict(side="CE", strike=57700.0, entry_price=500.0, sl_price=480.0,
+                           entry_ts=datetime.now(IST), qty=30, _event_id="EV1")
+    fill = OIFlowFillEvent(action="BUY", underlying="BANKNIFTY", option_type="CE", strike=57700,
+                            fill_price=0.0, qty=30, client_id="ssrajpal2001", binding_id="SA5770",
+                            event_id="EV1", entry_aborted=True)
+    book._on_fill(fill)
+    assert book._position is None
+    remarks = list(book._recent_remarks)
+    assert len(remarks) == 1
+    assert remarks[0]["level"] == "warn"
+    assert "REJECTED" in remarks[0]["text"]
+    assert "CE" in remarks[0]["text"] and "57700" in remarks[0]["text"]
+    state = book.monitoring_state()
+    assert state["remarks"][0]["text"] == remarks[0]["text"]
+
+
 def test_on_fill_buy_partial_fill_reconciles_position_qty_down():
     """The position was booked optimistically at decision time before this
     confirmation arrives -- a partial fill (broker only filled 15 of the
