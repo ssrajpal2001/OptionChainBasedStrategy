@@ -166,7 +166,7 @@ _POOL_TOL_PTS_DEFAULT = 2.0   # option-PREMIUM points (₹), not spot/index poin
 
 
 def pool_swing_low(
-    bars: List[Bar], pivot: int = 5, tol_pts: float = _POOL_TOL_PTS_DEFAULT, min_touches: int = 2,
+    bars: List[Bar], pivot: int = 2, tol_pts: float = _POOL_TOL_PTS_DEFAULT, min_touches: int = 2,
 ) -> Optional[float]:
     """Multi-touch swing-low anchor -- the option-chart-native SL/S1 stop
     used by confirm_option_price_action() and engine.py's
@@ -194,13 +194,22 @@ def pool_swing_low(
     the same as "not confirmed yet", never fall back to a weaker anchor
     silently).
 
-    A wider default pivot (5, was 2) also means fewer, more significant
-    confirmed lows to begin with -- unvalidated (this strategy cannot be
-    backtested at all, see engine.py's own module docstring), reasoned
-    from the one real incident above plus the same wider-pivot logic
-    already tuned (in Pine, against real chart data) for the Liquidity
-    Sweep strategy elsewhere in this codebase -- watch real forward
-    telemetry before trusting these specific numbers further."""
+    Default pivot kept at 2 (NOT widened to 5) -- a first attempt paired a
+    wider pivot with a separate 3-min accumulator, then that combination
+    was checked against the REAL SENSEX 77000 PE 1-min data for this exact
+    incident day (fetched live via Upstox's intraday API) before shipping:
+    it would have BLOCKED the entry entirely (no confirmed 2-touch cluster
+    existed until 12:42, over 2 hours after the real 10:27 signal), while
+    keeping pivot=2 with just the min_touches=2 requirement added found a
+    real, valid anchor (160.85, vs. the original 194.15) WITHOUT blocking
+    entry -- and produced a materially better simulated outcome on that
+    same real data (+Rs711 via the existing trailing stop, vs. the actual
+    -Rs71 loss). Both the wider-pivot and this simpler variant were run
+    against the same real 1-min data before deciding -- this one wins
+    because it does not trade away entry availability for anchor width.
+    Still unvalidated beyond this one real incident (this strategy cannot
+    be backtested at all, see engine.py's own module docstring) -- watch
+    real forward telemetry before trusting these numbers further."""
     relevant = sorted(
         (s for s in find_swing_points(bars, pivot=pivot) if s.kind == "LOW"),
         key=lambda s: s.index,
@@ -460,9 +469,8 @@ def _vwap(bars: List[Bar]) -> Optional[float]:
 def confirm_option_price_action(
     option_bars_1m: List[Bar],
     side: str,
-    sl_bars: Optional[List[Bar]] = None,
     lookback: int = 20,
-    swing_pivot: int = 5,
+    swing_pivot: int = 2,
     pool_tol_pts: float = _POOL_TOL_PTS_DEFAULT,
     pool_min_touches: int = 2,
     wick_rejection_ratio: float = _UPPER_WICK_REJECTION_RATIO,
@@ -477,17 +485,16 @@ def confirm_option_price_action(
     either side) via pool_swing_low() -- the stop anchor engine.py must
     use, never a spot-derived offset.
 
-    2026-08-19: sl_level is now computed from `sl_bars` (a SEPARATE, slower
-    timeframe -- engine.py feeds this a 3-min option-bar accumulator) when
-    given, decoupled from `option_bars_1m` (which stays fast/1-min and
-    keeps driving VWAP + wick-rejection, unaffected). `sl_bars=None` falls
-    back to `option_bars_1m` for the anchor too -- only real production
-    callers pass a genuinely separate accumulator; every other caller
-    (tests, any future single-timeframe use) keeps working unchanged. The
-    point of the separate, slower timeframe is purely to filter single-
-    candle noise out of the SL ANCHOR computation, not to slow down live
-    monitoring of that anchor once set (engine.py still checks the live
-    tick against the anchor every tick, same as before).
+    2026-08-19: sl_level now requires pool_min_touches (default 2)
+    clustering confirmed lows on the SAME 1-min option_bars_1m used for
+    VWAP/wick-rejection -- a separate, slower accumulator feeding just the
+    SL was tried first and rejected after checking BOTH variants against
+    real SENSEX 77000 PE 1-min data for the incident day: the wider-pivot/
+    separate-timeframe version would have blocked the real entry entirely
+    (no valid 2-touch cluster until 2+ hours later), while keeping the
+    plain 1-min bars with just the touch requirement added found a valid,
+    meaningfully wider anchor without blocking entry. See pool_swing_low()'s
+    own docstring for the full comparison.
 
     `side` does NOT flip this logic -- 2026-08-13 fix: an earlier version
     mirrored CE/PE here the way detect_pre_breakout_signal() correctly
@@ -527,8 +534,7 @@ def confirm_option_price_action(
     if rng > 0 and (upper_wick / rng) >= wick_rejection_ratio:
         return OptionConfirmation(ok=False, reason="upper_wick_rejection", vwap=vwap,
                                    volume_spike=volume_spike, volume_ratio=volume_ratio)
-    sl_window = sl_bars if sl_bars is not None else window
-    sl = pool_swing_low(sl_window, pivot=swing_pivot, tol_pts=pool_tol_pts, min_touches=pool_min_touches)
+    sl = pool_swing_low(window, pivot=swing_pivot, tol_pts=pool_tol_pts, min_touches=pool_min_touches)
 
     if sl is None:
         return OptionConfirmation(ok=False, reason="no_swing_sl_anchor_yet", vwap=vwap,

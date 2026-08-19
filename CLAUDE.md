@@ -873,6 +873,53 @@ same way `_matrix_snapshot_loop` does: a brief flip is ignored (and the still-tr
 accumulated OI history survives untouched), a candidate sustained past the debounce window
 does switch, and `wall_debounce_sec=0` reproduces the old instant-follow behavior exactly.
 
+**⚠️ Real production incident: a SENSEX PE entry stopped out 13 seconds after entry —
+root-caused, fixed, and the fix itself verified against real market data before shipping
+(2026-08-19):** first real live signal (paper_route, BFO-segment-restricted account, so
+simulated fill only — no real capital at risk) fired correctly (spot 0.08% from the PE
+wall, opposing OI dropping, supporting OI building, PCR 0.52) at 10:27:00, entered PE
+77000 @197.65, and hit `sl_option_swing_low@194.15` at 10:27:13 — confirmed via a real
+TradingView 1-min chart review to be ordinary candle noise, not a genuine reversal. Root
+cause: the SL anchor (`swing_low()`, a bare single-touch `pivot=2` pivot) had no minimum-
+distance floor — it just took whatever the most recent confirmed pivot happened to be,
+which this time sat only 1.77% from entry.
+
+Fix: `pool_swing_low()` (`strategies/oi_flow/detector.py`) — the SAME "equal lows /
+liquidity pool" multi-touch concept already validated (in Pine, against real chart data)
+for the Liquidity Sweep strategy, independently reimplemented here (fresh code, no
+import, per this strategy's standalone mandate). Requires 2+ confirmed swing lows
+clustering within `tol_pts` (default ₹2) of each other before counting as a real anchor
+— a lone pivot no longer qualifies. Used by both `confirm_option_price_action()`'s
+entry-time SL and `_maybe_promote_s1()`'s trailing-stop promotion.
+
+**A first design (wider `pivot=5` + a separate, slower 3-min option-bar accumulator
+feeding only the SL) was built, then REJECTED after checking it against the real SENSEX
+77000 PE 1-min data for the actual incident day** (fetched live via Upstox's intraday
+API — `data_layer/historical_candles.py`'s existing `fetch_upstox_intraday_1m`, same
+function the app itself uses): that combination would have BLOCKED the real 10:27 entry
+entirely — no valid 2-touch cluster existed until 12:42, over 2 hours later. A second,
+simpler variant (**Config F**, what actually shipped) — keep the plain `pivot=2` on the
+SAME 1-min bars already used for VWAP/wick-rejection, just add `min_touches=2` — found a
+real, valid anchor (160.85, vs. the original 194.15) WITHOUT blocking the entry.
+Simulated forward against the same real data with a faithful intrabar (not close-only)
+tick model: the wider SL would have survived the early noise, ridden a genuine spike to
+280, and the EXISTING percentage trailing-stop (unchanged) would have locked and exited
+at 233.23 (11:07) for **+₹711.54**, vs. the real **−₹71** loss. Separately tested
+tightening/loosening the existing TSL step parameters against this same real trade: the
+current settings (`trail_trigger_pct=0.15, first_lock_pct=0.08, step_pct=0.10,
+step_lock_pct=0.05`) outperformed every tested variant — tightening caused premature
+exits that missed the spike entirely; loosening gave back more on the pullback. Left
+unchanged; a single real trade isn't enough evidence to retune this, and the point was to
+confirm the initial "exiting too early" impression wasn't itself a TSL problem (it
+mostly was the too-tight SL cutting the trade off before the TSL ever got a chance to
+work).
+
+5 new regression tests (`pool_swing_low` multi-touch/clustering behavior, `confirm_
+option_price_action` blocked-vs-confirmed with the new default). Still unvalidated
+beyond this one real incident — this strategy cannot be backtested at all (see this
+section's own opening note) — watch real forward telemetry before trusting these
+specific numbers (₹2 tolerance, 2-touch minimum) any further.
+
 ---
 
 ### Liquidity Sweep Strategy (`strategies/liquidity_sweep/`)

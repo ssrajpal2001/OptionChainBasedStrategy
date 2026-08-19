@@ -586,28 +586,22 @@ def test_pool_swing_low_ignores_a_distant_second_low():
     assert pool_swing_low(bars, pivot=5, tol_pts=2.0, min_touches=2) is None
 
 
-def test_confirm_option_price_action_uses_separate_sl_bars_when_given():
-    """2026-08-19: sl_bars, when provided, drives the SL anchor
-    independently of option_bars_1m (which keeps driving VWAP/wick-
-    rejection unaffected) -- proves the two are genuinely decoupled, not
-    just an alias."""
+def test_confirm_option_price_action_sl_level_requires_pool_confirmation():
+    """2026-08-19 (Config F, chosen after checking BOTH candidate designs
+    against real SENSEX 77000 PE 1-min data for the real incident day --
+    see pool_swing_low()'s own docstring): sl_level now requires a genuine
+    multi-touch pool on the SAME option_bars_1m already used for VWAP/
+    wick-rejection -- no separate accumulator/timeframe. A single lone
+    swing low is NOT enough (below); a real 2-touch cluster is."""
     base = _base()
-    # Fast 1-min bars: only enough for VWAP/wick, no real swing-low pool.
-    fast_bars = [Bar(base + timedelta(minutes=i), 520, 522, 518, 521) for i in range(3)]
-    fast_bars.append(Bar(base + timedelta(minutes=3), 524, 526, 522, 525))
-    # Separate, slower SL bars: a genuine multi-touch pool at 502.
-    sl_bars = _pool_bars(base, 503, 502)
+    lone_low_bars = [Bar(base + timedelta(minutes=i), 520, 522, 518, 521) for i in range(5)]
+    lone_low_bars.append(Bar(base + timedelta(minutes=5), 506, 512, 502, 508))
+    lone_low_bars += [Bar(base + timedelta(minutes=6 + i), 520, 522, 518, 521) for i in range(5)]
+    conf_blocked = confirm_option_price_action(lone_low_bars, "CE", lookback=len(lone_low_bars))
+    assert conf_blocked.ok is False
+    assert conf_blocked.reason == "no_swing_sl_anchor_yet"
 
-    conf = confirm_option_price_action(fast_bars, "CE", sl_bars=sl_bars, lookback=4)
-    assert conf.ok is True
-    assert conf.sl_level == 502
-
-
-def test_confirm_option_price_action_falls_back_to_option_bars_when_no_sl_bars_given():
-    """sl_bars=None (the default) must fall back to option_bars_1m for the
-    anchor too -- backward compatible for any single-timeframe caller."""
-    base = _base()
-    bars = _pool_bars(base, 503, 502)
-    conf = confirm_option_price_action(bars, "CE", lookback=len(bars))
-    assert conf.ok is True
-    assert conf.sl_level == 502
+    pool_bars = _pool_bars(base, 503, 502)
+    conf_ok = confirm_option_price_action(pool_bars, "CE", lookback=len(pool_bars))
+    assert conf_ok.ok is True
+    assert conf_ok.sl_level == 502
