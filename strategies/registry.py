@@ -15,6 +15,7 @@ from strategies.hourly_breakout import HourlyBreakoutBookManager
 from strategies.d1_trap_option import D1TrapOptionBookManager
 from strategies.fvg import FVGBookManager
 from strategies.oi_flow import OIFlowBookManager
+from strategies.liquidity_sweep import LiquiditySweepBookManager
 
 
 STRATEGY_REGISTRY: Dict[str, Dict[str, Any]] = {
@@ -52,6 +53,13 @@ STRATEGY_REGISTRY: Dict[str, Dict[str, Any]] = {
     # strategies/oi_flow/__init__.py.
     "oi_flow": {
         "manager_class": OIFlowBookManager,
+        "per_binding": True,
+    },
+    # 2026-08-19: fully standalone -- shares no runtime infra (Topics,
+    # events, bridge, book manager) with any other strategy above, same
+    # mandate as oi_flow. See strategies/liquidity_sweep/__init__.py.
+    "liquidity_sweep": {
+        "manager_class": LiquiditySweepBookManager,
         "per_binding": True,
     },
 }

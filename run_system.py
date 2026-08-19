@@ -486,6 +486,13 @@ async def _run_live(
         bus, router,
         log_dir=os.path.join(cfg.storage.log_dir, "trades"),
     )
+    # 2026-08-19: fully standalone bridge -- own Topics (LIQUIDITY_SWEEP_
+    # ORDER_REQUEST/FILL), shares no runtime state with any bridge above.
+    from execution_bridge.liquidity_sweep_bridge import LiquiditySweepExecutionBridge
+    liquidity_sweep_bridge = LiquiditySweepExecutionBridge(
+        bus, router,
+        log_dir=os.path.join(cfg.storage.log_dir, "trades"),
+    )
     client_mgr    = ClientManager(bus, registry)
     risk_mgr      = RiskManager(bus, registry, router=router)
 
@@ -571,6 +578,7 @@ async def _run_live(
                 d1_trap_manager=managers.get("d1_trap_option"),
                 fvg_manager=managers.get("fvg"),
                 oi_flow_manager=managers.get("oi_flow"),
+                liquidity_sweep_manager=managers.get("liquidity_sweep"),
             )
         except ImportError as exc:
             logger.warning("Could not start dashboard (missing deps): %s", exc)
@@ -661,6 +669,7 @@ async def _run_live(
         asyncio.create_task(d1_trap_bridge.run(),       name="d1_trap_bridge"),
         asyncio.create_task(fvg_bridge.run(),           name="fvg_bridge"),
         asyncio.create_task(oi_flow_bridge.run(),       name="oi_flow_bridge"),
+        asyncio.create_task(liquidity_sweep_bridge.run(), name="liquidity_sweep_bridge"),
         asyncio.create_task(client_mgr.run(),           name="client_mgr"),
         asyncio.create_task(risk_mgr.run(),             name="risk_mgr"),
         asyncio.create_task(rebalancer.run(),           name="rebalancer"),
@@ -700,6 +709,7 @@ async def _run_live(
     d1_trap_bridge.stop()
     fvg_bridge.stop()
     oi_flow_bridge.stop()
+    liquidity_sweep_bridge.stop()
     await router.stop()
     await client_mgr.stop()
     await admin.stop()   # stops console + dashboard server + cancels dashboard task

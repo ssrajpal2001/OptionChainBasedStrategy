@@ -213,6 +213,11 @@ class Topic:
     OI_FLOW_ORDER_FILL    = "oi_flow_order_fill"     # OI-Flow Pre-Breakout fill confirmations -- fully
                                                       # standalone strategy, own Topics by design (shares
                                                       # no runtime infra with D1Trap/FVG/SellStraddle)
+    LIQUIDITY_SWEEP_ORDER_REQUEST = "liquidity_sweep_order_request"  # Liquidity Sweep strategy orders
+    LIQUIDITY_SWEEP_ORDER_FILL    = "liquidity_sweep_order_fill"     # Liquidity Sweep fill confirmations --
+                                                      # fully standalone strategy (same mandate as OI-Flow),
+                                                      # own Topics, shares no runtime infra with any other
+                                                      # strategy in this codebase
 
 
 # ─────────────────────────────────────────────────────────────────────────────

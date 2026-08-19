@@ -2163,7 +2163,7 @@ document.addEventListener('alpine:init', () => {
     async toggleStrategyRun(dep, b) {
       const want = !this.depRunning(dep);
       const did = dep.deploy_id || `${this.authClientId}_${dep.binding_id}_${dep.strategy_name}_${dep.underlying}`;
-      const _stratLabel = {sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'D1 Trap Option',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow'};
+      const _stratLabel = {sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'D1 Trap Option',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow',liquidity_sweep:'Liquidity Sweep'};
       const _undLabel = u => u==='ALL_FNO'?'All FnO Stocks':u==='WATCHLIST'?'Watchlist (top-5)':u;
       const label = (_stratLabel[dep.strategy_name]||dep.strategy_name)+' · '+_undLabel(dep.underlying);
       const ok = want
@@ -2721,7 +2721,7 @@ document.addEventListener('alpine:init', () => {
             // default (SELL-to-open), mislabeling every D1Trap/FVG entry backwards.
             // d1_trap_sr added 2026-08-12 -- same option-buyer mechanic, only the entry
             // trigger (S&R ping-pong vs T1/T2) differs from d1_trap_bear_only.
-            const _buyerOnlyStrats = ['d1_trap_bear_only', 'd1_trap_sr', 'd1_trap_option', 'd1_trap_index', 'd1_trap_fno', 'fvg', 'oi_flow'];
+            const _buyerOnlyStrats = ['d1_trap_bear_only', 'd1_trap_sr', 'd1_trap_option', 'd1_trap_index', 'd1_trap_fno', 'fvg', 'oi_flow', 'liquidity_sweep'];
             const _openAction = (lg) => strat === 'v4_cascade'
                 ? (_isCryptoShort(lg) ? 'SELL' : 'BUY')
                 : _buyerOnlyStrats.includes(strat) ? 'BUY' : 'SELL';
@@ -7044,7 +7044,7 @@ function amoTest() {
                         <span class="absolute top-0.5 w-2.5 h-2.5 bg-white rounded-full shadow transition-all"
                               :style="depRunning(dep)?'left:16px':'left:2px'"></span>
                       </span>
-                      <span x-text="({sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'D1 Trap',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow'}[dep.strategy_name]||dep.strategy_name)+' · '+(dep.underlying==='ALL_FNO'?'All FnO Stocks':dep.underlying)+' — '+(depRunning(dep)?'RUNNING':'stopped')"></span>
+                      <span x-text="({sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'D1 Trap',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow',liquidity_sweep:'Liquidity Sweep'}[dep.strategy_name]||dep.strategy_name)+' · '+(dep.underlying==='ALL_FNO'?'All FnO Stocks':dep.underlying)+' — '+(depRunning(dep)?'RUNNING':'stopped')"></span>
                     </button>
                   </template>
                   <span x-show="!(clientDeployments||[]).some(d=>d.binding_id===b.binding_id)"
@@ -7166,10 +7166,10 @@ function amoTest() {
                 <div class="flex items-center gap-3">
                   <span class="font-mono text-xs font-bold px-2 py-0.5 rounded"
                         style="background:rgba(var(--t-cyan-rgb),0.12);color:var(--t-cyan)"
-                        x-text="({sell_straddle:'SS',v4_cascade:'V4',fno_positional:'FNO',hourly_breakout:'HB',d1_trap_option:'D1',d1_trap_index:'TI',d1_trap_fno:'TF',d1_trap_bear_only:'BT',d1_trap_sr:'SR',fvg:'FVG',oi_flow:'OIF'})[dep.strategy_name]||'??'"></span>
+                        x-text="({sell_straddle:'SS',v4_cascade:'V4',fno_positional:'FNO',hourly_breakout:'HB',d1_trap_option:'D1',d1_trap_index:'TI',d1_trap_fno:'TF',d1_trap_bear_only:'BT',d1_trap_sr:'SR',fvg:'FVG',oi_flow:'OIF',liquidity_sweep:'LSW'})[dep.strategy_name]||'??'"></span>
                   <div>
                     <div class="font-mono text-xs font-bold" style="color:var(--t-bright)"
-                         x-text="({sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'D1 Trap Option',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow'})[dep.strategy_name]||dep.strategy_name)+' · '+(dep.underlying==='ALL_FNO'?'All FnO Stocks':dep.underlying)"></div>
+                         x-text="({sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'D1 Trap Option',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow',liquidity_sweep:'Liquidity Sweep'})[dep.strategy_name]||dep.strategy_name)+' · '+(dep.underlying==='ALL_FNO'?'All FnO Stocks':dep.underlying)"></div>
                     <div class="font-mono text-xs" style="color:var(--t-muted)"
                          x-text="(dep.strategy_name==='fno_positional'||dep.strategy_name==='d1_trap_fno')
                            ? 'Lots: '+dep.lot_multiplier+' · '+(dep.product_type||'NRML')
@@ -7233,6 +7233,15 @@ function amoTest() {
                           deployForm.product_type='MIS';
                           deployForm.underlying='NIFTY';
                           deployForm.squareoff_time='15:15';
+                        } else if(deployForm.strategy_name==='liquidity_sweep'){
+                          // No dedicated advanced-params UI yet -- '{}' (set
+                          // below in the strategy_params ternary) lets
+                          // LiquiditySweepBookManager._parse_params() fill in
+                          // its own validated defaults (ltf=5m, liquidity_pool
+                          // source, atr_mult=0.7, disp_window=6, tgt1_rr=1.5).
+                          deployForm.product_type='MIS';
+                          deployForm.underlying='NIFTY';
+                          deployForm.squareoff_time='15:15';
                         } else if(deployForm.strategy_name==='fno_positional'){
                           deployForm.product_type='NRML';
                           deployForm.underlying='FNO_STOCKS';
@@ -7248,6 +7257,8 @@ function amoTest() {
                           ? JSON.stringify({htf_tf:deployForm._fvg_htf||10,ltf_tf:deployForm._fvg_ltf||3,direction_mode:deployForm._fvg_direction||'BOTH'})
                           : deployForm.strategy_name==='oi_flow'
                           ? '{}'
+                          : deployForm.strategy_name==='liquidity_sweep'
+                          ? '{}'
                           : JSON.stringify({htf:deployForm._htf||'D1',mtf:deployForm._mtf||'1H',itm:deployForm._itm||1});
                       ">
                 <option value="sell_straddle">Sell Straddle</option>
@@ -7261,6 +7272,7 @@ function amoTest() {
                 <option value="d1_trap_sr">D1 Trap S&amp;R (Option-Native, S&amp;R Ping-Pong)</option>
                 <option value="fvg">FVG (Fair Value Gap, NIFTY)</option>
                 <option value="oi_flow">OI-Flow Pre-Breakout</option>
+                <option value="liquidity_sweep">Liquidity Sweep (Sweep+FVG+Retest)</option>
                 <option value="fno_positional">FnO Positional (Swing, All FnO Stocks)</option>
               </select>
             </div>
@@ -7785,7 +7797,7 @@ function amoTest() {
                   <div class="flex items-center justify-between mb-3">
                     <div>
                       <div class="font-ui font-bold text-sm" style="color:var(--t-bright)"
-                           x-text="({sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'Trap Scanner',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow'}[dep.strategy_name]||dep.strategy_name)"></div>
+                           x-text="({sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'Trap Scanner',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow',liquidity_sweep:'Liquidity Sweep'}[dep.strategy_name]||dep.strategy_name)"></div>
                       <div class="flex items-center gap-2 mt-0.5">
                         <span class="font-mono text-xs" style="color:var(--t-cyan)" x-text="dep.underlying==='ALL_FNO'?'All 30 FnO Stocks':dep.underlying==='WATCHLIST'?'Watchlist (top-5)':dep.underlying"></span>
                         <span class="font-mono text-xs" style="color:var(--t-muted)"
@@ -8130,6 +8142,103 @@ function amoTest() {
                           </template>
                           <div x-show="(_bk.zones||[]).length>3" class="mt-1 text-right" style="color:var(--t-dim);font-size:10px"
                                x-text="'+ '+((_bk.zones||[]).length-3)+' more zone(s) scanning'"></div>
+                        </div>
+                      </template>
+                    </div>
+                  </template>
+
+                  <!-- Liquidity Sweep live panel (2026-08-19): LiquiditySweepStrategy's own
+                       monitoring_state() (strategies/liquidity_sweep/engine.py) -- shows the
+                       pipeline stage (idle/awaiting displacement/awaiting FVG/retest armed),
+                       BoS/CHoCH bias, active liquidity level, the recent remarks trail, and the
+                       open position (spot-based entry/SL/T1/T2 + running P&L). Same fetch/
+                       interval pattern as the OI-Flow panel above -- one book per
+                       (client,binding,underlying), own endpoint. -->
+                  <template x-if="dep.strategy_name==='liquidity_sweep'">
+                    <div class="rounded p-3 mb-2 text-xs font-mono" style="background:rgba(var(--t-cyan-rgb),0.04);border:1px solid rgba(var(--t-cyan-rgb),0.18)"
+                         x-data="{
+                           _bk: null,
+                           async _load() {
+                             try {
+                               const tok = localStorage.getItem('terminus_token') || (authToken||'');
+                               const r = await fetch('/api/liqsweep/status', {headers:{'Authorization':'Bearer '+tok}});
+                               const d = await r.json();
+                               if (d.ok) {
+                                 this._bk = (d.books||[]).find(bk => bk.binding_id===b.binding_id && bk.underlying===dep.underlying) || null;
+                               }
+                             } catch(e) {}
+                           }
+                         }"
+                         x-init="_load(); setInterval(()=>_load(), 15000)">
+                      <template x-if="!_bk">
+                        <div class="text-center" style="color:var(--t-dim)">Loading Liquidity Sweep state…</div>
+                      </template>
+                      <template x-if="_bk">
+                        <div>
+                          <div class="flex items-center justify-between mb-2">
+                            <span style="color:var(--t-muted)">SPOT <span style="color:var(--t-text);font-weight:600" x-text="fmt(_bk.spot||0)"></span></span>
+                            <span style="color:var(--t-muted)">BIAS
+                              <span :style="_bk.bias===1?'color:var(--t-green)':(_bk.bias===-1?'color:var(--t-red)':'color:var(--t-dim)')"
+                                    x-text="_bk.bias===1?'BULLISH':(_bk.bias===-1?'BEARISH':'NEUTRAL')"></span>
+                            </span>
+                            <span class="px-1.5 py-0.5 rounded" style="background:rgba(var(--t-cyan-rgb),0.15);color:var(--t-cyan)"
+                                  x-text="(_bk.pipeline_state||'idle').replace('_',' ')"></span>
+                          </div>
+
+                          <!-- Open position -->
+                          <template x-if="_bk.position">
+                            <div class="mb-2 pb-2" style="border-bottom:1px solid var(--t-border)"
+                                 x-data="{ get _p(){ return _bk.position; } }">
+                              <div class="flex items-center gap-2 mb-1" style="color:var(--t-green);font-weight:600">
+                                ● TRADE ACTIVE
+                                <span x-text="_p.side+' '+_p.strike"></span>
+                                <span x-show="_p.t1_hit" class="px-1 rounded" style="background:rgba(16,185,129,0.15);color:var(--t-green);font-size:10px">T1 HIT → BE</span>
+                              </div>
+                              <div class="flex justify-between">
+                                <span style="color:var(--t-muted)">Entry / LTP</span>
+                                <span x-text="fmt(_p.entry_price)+' / '+(_p.ltp!=null?fmt(_p.ltp):'—')"></span>
+                              </div>
+                              <div class="flex justify-between">
+                                <span style="color:var(--t-muted)">Spot SL / T1 / T2</span>
+                                <span x-text="fmt(_p.sl_spot)+' / '+fmt(_p.t1_spot)+' / '+fmt(_p.t2_spot)"></span>
+                              </div>
+                              <div class="flex justify-between" x-show="_p.pnl!=null">
+                                <span style="color:var(--t-muted)">P&amp;L</span>
+                                <span :style="_p.pnl>=0?'color:var(--t-green)':'color:var(--t-red)'"
+                                      x-text="(_p.pnl>=0?'+':'')+fmt(_p.pnl)"></span>
+                              </div>
+                            </div>
+                          </template>
+
+                          <!-- Active liquidity levels -->
+                          <template x-if="!_bk.position">
+                            <div class="mb-1.5">
+                              <div class="flex items-center justify-between">
+                                <span style="color:var(--t-muted)">Level High (resistance)</span>
+                                <span style="color:var(--t-red)" x-text="_bk.level_high!=null?fmt(_bk.level_high):'—'"></span>
+                              </div>
+                              <div class="flex items-center justify-between">
+                                <span style="color:var(--t-muted)">Level Low (support)</span>
+                                <span style="color:var(--t-green)" x-text="_bk.level_low!=null?fmt(_bk.level_low):'—'"></span>
+                              </div>
+                            </div>
+                          </template>
+
+                          <!-- Remarks trail -->
+                          <div class="mt-2 pt-2" style="border-top:1px solid var(--t-border)" x-show="(_bk.remarks||[]).length>0">
+                            <div class="mb-1" style="color:var(--t-muted);font-size:10px">RECENT REMARKS</div>
+                            <div style="max-height:110px;overflow-y:auto">
+                              <template x-for="(r,ri) in (_bk.remarks||[]).slice(0,8)" :key="ri">
+                                <div class="mb-0.5" :style="{
+                                    'entry':'color:var(--t-green)', 'exit':'color:var(--t-amber)',
+                                    'watch':'color:var(--t-cyan)', 'info':'color:var(--t-dim)',
+                                  }[r.level]||'color:var(--t-dim)'">
+                                  <span style="color:var(--t-dim)" x-text="(r.ts||'').slice(11,19)"></span>
+                                  <span x-text="' '+r.text"></span>
+                                </div>
+                              </template>
+                            </div>
+                          </div>
                         </div>
                       </template>
                     </div>

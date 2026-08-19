@@ -2,14 +2,16 @@
 
 Complete codebase reference for Claude Code. Updated after each major phase.
 
-> **CURRENT FOCUS (2026-08-12):** This project is **ONLY** working on four strategies:
+> **CURRENT FOCUS (2026-08-19):** This project is **ONLY** working on five strategies:
 > 1. **SellStraddle** — theta-decay option seller (mature, live in production)
 > 2. **D1 Trap FnO/Index** — zone-based option buyer (active development)
 > 3. **FVG (Fair Value Gap)** — Smart Money Concepts option buyer (new 2026-08-01/03, entering paper trading; see "FVG Strategy" section below)
 > 4. **OI-Flow Pre-Breakout** — OI-divergence option buyer (new 2026-08-12, built as a **fully standalone 4th strategy pipeline** — own package, own Topics, own execution bridge, own book manager; shares zero runtime infrastructure with strategies 1-3. Not yet deployed even in paper mode — see "OI-Flow Pre-Breakout Strategy" section below.)
+> 5. **Liquidity Sweep** — SMC/ICT sweep+displacement+FVG+retest option buyer (new 2026-08-19, built as a **fully standalone 5th strategy pipeline**, same zero-shared-infrastructure mandate as OI-Flow. Iteratively built and validated as a Pine Script indicator against real NIFTY chart data in TradingView BEFORE being ported to Python, per direct user instruction — not backtested in Python first. Not yet deployed even in paper mode — see "Liquidity Sweep Strategy" section below.)
 >
 > Do NOT suggest, implement, or discuss any other strategies. All new work belongs to
-> one of these four. When starting a new session, read the D1 Trap, FVG, and OI-Flow sections below first.
+> one of these five. When starting a new session, read the D1 Trap, FVG, OI-Flow, and
+> Liquidity Sweep sections below first.
 
 ---
 
@@ -870,6 +872,141 @@ telemetry review, not blind-fixed alongside this. 3 new regression tests
 same way `_matrix_snapshot_loop` does: a brief flip is ignored (and the still-tracked wall's
 accumulated OI history survives untouched), a candidate sustained past the debounce window
 does switch, and `wall_debounce_sec=0` reproduces the old instant-follow behavior exactly.
+
+---
+
+### Liquidity Sweep Strategy (`strategies/liquidity_sweep/`)
+
+SMC/ICT option **buyer** strategy: sweep (stop-hunt) → structure bias → displacement →
+Fair Value Gap (FVG) → retest entry. Detection runs on the underlying **spot/index
+chart** (same design as `D1TrapOptionBook`/FVG, not `D1TrapBearOnlyBook`'s option-native
+one). **Fully standalone** — own package, own order/fill events, own Topics
+(`Topic.LIQUIDITY_SWEEP_ORDER_REQUEST`/`LIQUIDITY_SWEEP_ORDER_FILL`), own execution
+bridge (`execution_bridge/liquidity_sweep_bridge.py`), own book manager — shares zero
+runtime infrastructure with SellStraddle/D1Trap/FVG/OI-Flow, same mandate as
+`strategies/oi_flow/`. Intraday only: EOD squareoff (default 15:15 IST), no overnight
+carry, full session-state reset every trading day.
+
+**Build process (2026-08-19, explicit direct user instruction — do NOT repeat the
+skipped step for any future strategy unless told to): built and iteratively tuned as a
+Pine Script v5 indicator in TradingView FIRST, against real NIFTY 5-minute chart data,
+BEFORE any Python code was written** — the user explicitly said not to do a Python
+backtest first for this one. The Pine files live in `pinescript/` (informational/
+reference only, not part of the running application):
+`pinescript/liquidity_sweep_indicator.pine` (first pure-visual version),
+`pinescript/liquidity_sweep_strategy.pine` (adds SL/Target1/Target2 for TradingView's
+own Strategy Tester), `pinescript/liquidity_sweep_indicator_with_risk.pine` (the
+**validated source of truth** — funnel diagnostics, scoreboard, all final tuned
+defaults). Tuning was funnel-diagnostic driven throughout (raw sweeps → passed bias →
+displaced → FVG confirmed → signals, with explicit counters at each stage) — every
+default below came from real evidence on that funnel, not a guess, and every version
+change was confirmed actually-applied on the user's chart via version tags
+(`[v7]`...`[v10]`) after two rounds of the user reporting stale/unrefreshed scripts.
+`strategies/liquidity_sweep/detector.py` is a direct, faithful Python port of the final
+validated script's logic — see that file's own module docstring for the full mechanic
+breakdown (rolling-base/swing-pivot/liquidity-pool sources, BoS/CHoCH structure replay,
+wick-vs-body sweep definition, displacement, multi-candle FVG confirmation window,
+retest).
+
+**Validated/default parameters** (all overridable per-deployment via `strategy_params`
+JSON, same pattern as every other strategy): `ltf_min=5` (single timeframe drives the
+whole pipeline — pivots/structure/sweep/displacement/FVG/retest all read the SAME bars;
+`htf_min=75` only matters for the non-default `rolling_base` liq_source),
+`liq_source="liquidity_pool"` (classic ICT equal-highs/equal-lows clustering — the
+user's own synthesized answer to "what counts as real liquidity" after cross-
+referencing multiple independent reference indicators plus this codebase's own FVG
+`group_equal_levels` precedent; `"swing_pivots"`/`"rolling_base"` kept for parity),
+`pivot_left=pivot_right=5`, `pool_tol_pts=5.0`, `pool_min_touches=2`,
+`use_struct_bias=True` (BoS/CHoCH replay gates sweep direction), `atr_len=14`,
+`atr_mult=0.7` (evidence-tuned DOWN from 1.5→1.0→0.7 — a live funnel diagnostic isolated
+the ATR ratio as the binding constraint at higher thresholds), `disp_window=6`,
+`swing_len=3`, `fvg_confirm_window=3` (multi-candle retry, not one-shot — real evidence
+this was silently killing the only displacement candidate that got through during
+tuning), `stale_bars=12`, `tgt1_rr=1.5`, `use_liquidity_target2=True` (Target2 = the
+opposing side's own currently-active liquidity level, confirmed formula from the source
+GitHub repo's `execution/risk_engine.py`; falls back to `tgt2_rr=3.0` R-multiple only
+when no valid correctly-sided opposing level exists), `itm_offset_pts=0.0` (ATM by
+default — deliberately NOT copying FVG's 1-strike-ITM default, since this strategy's
+option-side execution has zero validation of its own, unlike FVG's dedicated
+optimization pass).
+
+**SL/Target1/Target2 are SPOT-INDEX levels, not option premium — a deliberate, honestly-
+flagged design choice** (see `engine.py`'s own module docstring): the validated Pine
+script's whole risk pipeline is spot-based throughout (SL = the swept candle's own
+extreme, Target1/2 = R-multiples or opposing spot liquidity off spot risk), and
+translating that into option-premium terms would need a live delta/greeks model this
+codebase doesn't build elsewhere (`OptionTick.delta` exists as a field but its
+reliability across both Upstox/Fyers feeders was not verified under the time pressure
+of this build). `LiquiditySweepStrategy._check_exit_on_spot()` compares live SPOT ticks
+(checked on every tick, MORE often than the validated Pine script's own bar-close-only
+check) against these levels directly; the option's own live LTP is simply the fill price
+whenever a spot-level entry/exit condition fires — never itself a premium-based
+SL/target. On Target1 hit, SL moves to breakeven (spot terms) and the position keeps
+running toward Target2 — no partial booking at T1, matching the final tuned Pine
+version (an earlier `liquidity_sweep_strategy.pine` draft had partial-booking; the
+validated `_with_risk.pine` simplified it away). An independent hard ₹2000/lot
+option-premium risk-cap backstop (same constant every other option-buyer strategy in
+this codebase uses) runs alongside the spot-based SL as a safety net against IV
+crush/bid-ask blowouts the spot read alone wouldn't catch.
+
+**Strike selection**: ATM ± `itm_offset_pts`, rounded to the underlying's own
+`strike_step`; **current-week expiry** (`REGISTRY.get_active_expiry_strict`) — no
+optimization pass exists yet to justify FVG's next-week-expiry choice for this
+strategy, so it stays on the platform's plain default rather than copying an
+unvalidated assumption from a different strategy.
+
+**⚠️ Bug found and fixed during construction (2026-08-19), before any test run saw
+it**: `_try_enter()`'s opposing-liquidity Target2 selection was initially backwards —
+`opp_level = level_high if direction == -1 else level_low` picked the resistance level
+ABOVE for a BEARISH (PE) trade and the support level BELOW for a BULLISH (CE) trade,
+exactly inverted from "target the next liquidity in the trade's own profit direction."
+`compute_trade_plan()`'s own side-validity check (`opposing_liquidity` must sit on the
+correct side of entry) meant this would never have corrupted a live trade — it would
+just have silently disabled `use_liquidity_target2` in precisely the scenario where it
+should have fired, always falling back to the R-multiple instead. Caught while writing
+`tests/liquidity_sweep/test_engine.py::test_try_enter_uses_liquidity_target2_on_correct_side`
+before the code ever ran against real data. Fixed to `level_high if direction == 1 else
+level_low`.
+
+**Files**: `strategies/liquidity_sweep/detector.py` (pure functions — `Bar`/
+`BarAccumulator`, swing points, liquidity pool clustering, BoS/CHoCH structure,
+sweep/displacement/FVG/retest, `compute_trade_plan`), `engine.py`
+(`LiquiditySweepStrategy` — bar-by-bar pipeline state machine mirroring the Pine
+script's own var-state cascading EXACTLY, including same-bar cascading where a later
+stage can fire in the same closure as the stage that just unlocked it — e.g. FVG
+confirmation and its own retest check can both fire on the very same bar, since the
+FVG's own boundary is literally defined as that bar's own high/low; see
+`tests/liquidity_sweep/test_engine.py`'s `test_full_pipeline_sweep_to_retest_entry` for
+a fully-traced worked example and its own detailed comments on this), `book_manager.py`,
+`__init__.py`. Execution: `execution_bridge/liquidity_sweep_bridge.py` (modeled
+directly on `oi_flow_bridge.py` — same confirm-then-finalize contract, own
+`_LiquiditySweepTradeLogger`/`_record_history()`). Dedicated per-(underlying,client,
+binding,day) rotating log via `utils.logging_utils.make_strategy_logger` (own `_clog`,
+same pattern as every other strategy) — explicit user requirement ("it shodul haev its
+won log to knwo what exactly happend").
+
+**Strategy name in DB**: `liquidity_sweep`. Registered in `strategies/registry.py`; run
+with `--strategies liquidity_sweep` (add to the existing `--strategies` CLI flag
+alongside whatever else is already running — NOT automatic, the operator must include
+it explicitly at launch, same as every other strategy). Deploy form in `monitor.html`'s
+ADD STRATEGY dropdown (default underlying NIFTY, `strategy_params='{}'` lets
+`LiquiditySweepBookManager._parse_params()` fill in all the validated defaults above,
+same pattern as OI-Flow's own deploy-form entry). Live panel on the deployment card
+(pipeline stage, BoS/CHoCH bias, active liquidity levels, open position with spot SL/
+T1/T2 + running P&L, recent remarks trail) via `GET /api/liqsweep/status` →
+`LiquiditySweepStrategy.monitoring_state()`.
+
+**Status (2026-08-19)**: built, unit-tested (`tests/liquidity_sweep/` — 21 detector
+tests, 14 engine tests including a full traced sweep→displacement→FVG→retest→entry
+pipeline test), wired into registry/run_system/dashboard/UI. **Not yet deployed even in
+paper mode** — the user's own plan (stated before going offline) is to run this
+tomorrow on NIFTY in paper mode on one client and review results. Like OI-Flow, this
+strategy's option-side execution (strike selection, spot-to-premium translation) has
+**zero validation** beyond what's documented above — only the underlying spot-signal
+logic was validated (in Pine, on TradingView, against real chart data). Watch the first
+few real paper sessions closely before trusting default parameters broadly, and revisit
+`itm_offset_pts`/expiry choice once real forward data exists to tune them, same
+graduation discipline already established for OI-Flow.
 
 ---
 

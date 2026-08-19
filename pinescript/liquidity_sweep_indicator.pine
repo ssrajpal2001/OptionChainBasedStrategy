@@ -1,0 +1,210 @@
+//@version=5
+// =============================================================================
+// Liquidity Sweep — Sweep + HTF Bias + Displacement + FVG + Retest (indicator)
+//
+// Visual port of the signal pipeline in https://github.com/ssrajpal2001/Liquidity-Sweep
+// (strategy/rolling_base.py, sweep_detector.py, filters.py, displacement.py,
+// state_machine.py, retest_trigger.py). Indicator only -- no orders, no
+// backtest report -- by explicit request: validate visually on real charts
+// first, tune inputs live, THEN port the confirmed logic into
+// strategies/<new_package>/ for real algo execution.
+//
+// Pipeline per the source repo's state machine, reproduced here as a chart
+// overlay:
+//   1. Rolling HTF base (default 75m): a new base is captured whenever an
+//      HTF candle's CLOSE breaks the previous HTF candle's high/low.
+//   2. HTF bias: price vs. the current base's midpoint (bull/bear/neutral).
+//   3. Sweep: an LTF candle pierces the base high/low intrabar but closes
+//      back inside it. Blocked if it fights the HTF bias (counter-trend).
+//   4. Displacement: within `dispWindow` candles after a valid sweep, a
+//      candle whose body/ATR ratio exceeds `atrMult` AND whose close breaks
+//      the recent micro-swing in the reversal direction.
+//   5. FVG: classic 3-candle imbalance anchored on the displacement candle.
+//   6. Retest: the first later candle whose range overlaps the FVG zone
+//      fires the entry marker; the zone expires after `staleBars` candles
+//      with no retest.
+//
+// Micro-swing lookback (`swingLen`) and the exact retest-staleness/ATR
+// values are all exposed as inputs -- the source repo's own defaults are
+// pre-filled, but this is exactly the "see what it's showing, then tune"
+// step the workflow calls for.
+// =============================================================================
+indicator("Liquidity Sweep (Sweep+Displacement+FVG+Retest)", overlay=true,
+     max_boxes_count=500, max_labels_count=500, max_lines_count=500)
+
+// ── Inputs ───────────────────────────────────────────────────────────────
+grpHTF = "HTF Rolling Base"
+htfTF     = input.timeframe("75", "HTF timeframe (rolling base)", group=grpHTF)
+
+grpDisp = "Displacement"
+atrLen    = input.int(14, "ATR lookback (simple avg of H-L, no smoothing)", minval=1, group=grpDisp)
+atrMult   = input.float(1.5, "Displacement threshold: body / ATR >", minval=0.1, step=0.1, group=grpDisp)
+dispWindow= input.int(2, "Displacement window (candles after sweep)", minval=1, group=grpDisp)
+swingLen  = input.int(3, "Micro-swing lookback (bars each side)", minval=1, group=grpDisp,
+     tooltip="Not pinned down in the source repo's summarized logic -- tune this against real chart structure, then carry the confirmed value back into the Python port.")
+
+grpFVG = "FVG / Retest"
+staleBars = input.int(12, "Retest staleness (LTF candles)", minval=1, group=grpFVG)
+showZones = input.bool(true, "Draw FVG zone boxes", group=grpFVG)
+
+grpTime = "Time Filters (optional)"
+useTimeFilter = input.bool(false, "Enable high-probability / blocked windows", group=grpTime)
+hpWindow  = input.session("0920-1100", "High-probability window (only allow entries)", group=grpTime)
+blockedWindow = input.session("1130-1330", "Blocked window (low-volume chop)", group=grpTime)
+
+// ── HTF rolling base (last CLOSED htf bar vs. the one before it — no repaint) ──
+htf_c1 = request.security(syminfo.tickerid, htfTF, close[1], lookahead=barmerge.lookahead_off)
+htf_h1 = request.security(syminfo.tickerid, htfTF, high[1],  lookahead=barmerge.lookahead_off)
+htf_l1 = request.security(syminfo.tickerid, htfTF, low[1],   lookahead=barmerge.lookahead_off)
+htf_h2 = request.security(syminfo.tickerid, htfTF, high[2],  lookahead=barmerge.lookahead_off)
+htf_l2 = request.security(syminfo.tickerid, htfTF, low[2],   lookahead=barmerge.lookahead_off)
+htf_t1 = request.security(syminfo.tickerid, htfTF, time[1],  lookahead=barmerge.lookahead_off)
+newHtfClose = ta.change(htf_t1) != 0
+
+var float baseHigh = na
+var float baseLow  = na
+var int   baseDir  = 0   // +1 bullish base, -1 bearish base
+
+if newHtfClose and htf_c1 > htf_h2
+    baseHigh := htf_h1
+    baseLow  := htf_l1
+    baseDir  := 1
+else if newHtfClose and htf_c1 < htf_l2
+    baseHigh := htf_h1
+    baseLow  := htf_l1
+    baseDir  := -1
+
+plot(baseHigh, "Base High", color=color.new(color.orange, 0), style=plot.style_stepline, linewidth=1)
+plot(baseLow,  "Base Low",  color=color.new(color.orange, 0), style=plot.style_stepline, linewidth=1)
+
+// ── HTF bias (price vs. base midpoint) ──────────────────────────────────────
+baseMid = (baseHigh + baseLow) / 2
+bias = na(baseMid) ? 0 : (close > baseMid ? 1 : close < baseMid ? -1 : 0)
+
+// ── Sweep detection against the base extremes ───────────────────────────────
+rawBearSweep = not na(baseHigh) and high > baseHigh and close < baseHigh   // swept a high -> PUT setup
+rawBullSweep = not na(baseLow)  and low  < baseLow  and close > baseLow   // swept a low  -> CALL setup
+
+bearSweepOK = rawBearSweep and bias != 1   // blocked if HTF bias is bullish
+bullSweepOK = rawBullSweep and bias != -1  // blocked if HTF bias is bearish
+
+// Faint marker for every raw sweep (incl. ones the bias filter will reject),
+// bold marker only for the ones that actually arm the displacement watch --
+// lets you visually see how much the bias filter is throwing away.
+plotshape(rawBearSweep and not bearSweepOK, title="Sweep High (blocked by bias)", style=shape.triangledown,
+     location=location.abovebar, color=color.new(color.gray, 40), size=size.tiny)
+plotshape(rawBullSweep and not bullSweepOK, title="Sweep Low (blocked by bias)", style=shape.triangleup,
+     location=location.belowbar, color=color.new(color.gray, 40), size=size.tiny)
+plotshape(bearSweepOK, title="Sweep High (armed)", style=shape.triangledown,
+     location=location.abovebar, color=color.red, size=size.small)
+plotshape(bullSweepOK, title="Sweep Low (armed)", style=shape.triangleup,
+     location=location.belowbar, color=color.green, size=size.small)
+
+// ── Pending-sweep state -> displacement window -> FVG arm ──────────────────
+var int   pendingDir   = 0     // +1 watching for bullish displacement, -1 bearish, 0 idle
+var int   pendingBarsLeft = 0
+justArmed = false
+
+if bearSweepOK and pendingDir == 0
+    pendingDir := -1
+    pendingBarsLeft := dispWindow
+    justArmed := true
+if bullSweepOK and pendingDir == 0
+    pendingDir := 1
+    pendingBarsLeft := dispWindow
+    justArmed := true
+
+microHi = ta.highest(high[1], swingLen)
+microLo = ta.lowest(low[1], swingLen)
+
+atrSimple = ta.sma(high - low, atrLen)   // "simple average of H-L, no smoothing" per source repo
+body = math.abs(close - open)
+dispRatio = atrSimple > 0 ? body / atrSimple : 0.0
+
+var box   fvgBox   = na
+var int   fvgDir    = 0     // +1 bullish FVG (long setup), -1 bearish FVG
+var float fvgHi     = na
+var float fvgLo     = na
+var int   retestBarsLeft = 0
+var bool  retestArmed = false
+
+dispBull = pendingDir == 1  and close > open and close > microHi and dispRatio > atrMult
+dispBear = pendingDir == -1 and close < open and close < microLo and dispRatio > atrMult
+
+plotshape(dispBull or dispBear, title="Displacement", style=shape.diamond, location=location.belowbar,
+     color=color.new(color.blue, 0), size=size.tiny)
+
+// FVG forms one bar AFTER the displacement candle: candle1 = bar before
+// displacement, candle2 = displacement candle, candle3 = this confirmation bar.
+var float dispC1Hi = na
+var float dispC1Lo = na
+var bool  awaitFvgConfirm = false
+var int   awaitFvgDir = 0
+
+if dispBull or dispBear
+    dispC1Hi := high[1]
+    dispC1Lo := low[1]
+    awaitFvgConfirm := true
+    awaitFvgDir := dispBull ? 1 : -1
+    pendingDir := 0
+else if pendingDir != 0 and not justArmed
+    pendingBarsLeft := pendingBarsLeft - 1
+    if pendingBarsLeft <= 0
+        pendingDir := 0   // no displacement within the window -> discard as a false sweep
+
+else if awaitFvgConfirm
+    bullFvg = awaitFvgDir == 1  and dispC1Hi < low
+    bearFvg = awaitFvgDir == -1 and dispC1Lo > high
+    if bullFvg or bearFvg
+        fvgDir := bullFvg ? 1 : -1
+        fvgHi  := bullFvg ? low       : dispC1Lo
+        fvgLo  := bullFvg ? dispC1Hi  : high
+        retestArmed := true
+        retestBarsLeft := staleBars
+        if showZones
+            fvgBox := box.new(bar_index, fvgHi, bar_index + staleBars, fvgLo,
+                 border_color=fvgDir == 1 ? color.green : color.red,
+                 bgcolor=color.new(fvgDir == 1 ? color.green : color.red, 85))
+    awaitFvgConfirm := false
+
+// ── Time-window filter (optional) ───────────────────────────────────────────
+inHighProb = not useTimeFilter or (not na(time(timeframe.period, hpWindow)))
+inBlocked  = useTimeFilter and not na(time(timeframe.period, blockedWindow))
+timeOK = inHighProb and not inBlocked
+
+// ── Retest trigger ───────────────────────────────────────────────────────────
+retestHit = retestArmed and low <= fvgHi and high >= fvgLo
+
+if retestHit and timeOK
+    label.new(bar_index, fvgDir == 1 ? low : high, fvgDir == 1 ? "LONG (CE)" : "SHORT (PE)",
+         style=fvgDir == 1 ? label.style_label_up : label.style_label_down,
+         color=fvgDir == 1 ? color.green : color.red, textcolor=color.white, size=size.small)
+    retestArmed := false
+    if not na(fvgBox)
+        box.set_right(fvgBox, bar_index)
+else if retestHit and not timeOK
+    label.new(bar_index, fvgDir == 1 ? low : high, "retest (outside window)",
+         style=label.style_label_left, color=color.new(color.gray, 0), textcolor=color.white, size=size.tiny)
+    retestArmed := false
+    if not na(fvgBox)
+        box.set_right(fvgBox, bar_index)
+
+if retestArmed
+    retestBarsLeft := retestBarsLeft - 1
+    if retestBarsLeft <= 0
+        retestArmed := false
+        if not na(fvgBox)
+            box.set_right(fvgBox, bar_index)
+            box.set_border_color(fvgBox, color.new(color.gray, 60))
+            box.set_bgcolor(fvgBox, color.new(color.gray, 92))
+
+// ── Bias / status readout ───────────────────────────────────────────────────
+var label statusLbl = na
+if barstate.islast
+    label.delete(statusLbl)
+    biasTxt = bias == 1 ? "BULLISH" : bias == -1 ? "BEARISH" : "NEUTRAL"
+    statusLbl := label.new(bar_index + 3, close,
+         "HTF bias: " + biasTxt + "\nBase: " + str.tostring(baseLow, "#.##") + " - " + str.tostring(baseHigh, "#.##"),
+         style=label.style_label_left, color=color.new(color.black, 70), textcolor=color.white, size=size.small)
+
+bgcolor(useTimeFilter and inBlocked ? color.new(color.red, 92) : na, title="Blocked window shading")

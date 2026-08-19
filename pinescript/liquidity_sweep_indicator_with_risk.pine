@@ -1,0 +1,619 @@
+//@version=5
+// =============================================================================
+// Liquidity Sweep — INDICATOR version with SL/Target visualization + scoreboard
+//
+// Same signal pipeline as liquidity_sweep_strategy.pine (sweep -> HTF bias ->
+// displacement -> FVG -> retest -> SL/Target1/Target2), but declared as
+// indicator() instead of strategy() -- applies directly to the chart like
+// the plain indicator does, no Strategy Tester tab needed. In place of real
+// strategy.entry/exit orders, each signal is tracked by hand (one trade "in
+// flight" at a time, same flat-only gate as the strategy version) and its
+// outcome (SL / Target1 / Target2 / still running) is drawn as lines + a
+// label, with a running scoreboard table (signals/wins/losses/win rate) top-
+// right so you get a rough backtest-like read without leaving indicator mode.
+//
+// SL/Target formulas and their confirmed-vs-approximated status are the same
+// as liquidity_sweep_strategy.pine's header comment -- see that file for the
+// full source-repo citation (execution/risk_engine.py).
+// =============================================================================
+indicator("Liquidity Sweep (Sweep+Displacement+FVG+Retest+Risk) [v10]", overlay=true,
+     max_boxes_count=500, max_labels_count=500, max_lines_count=500)
+
+// ── Inputs ───────────────────────────────────────────────────────────────
+grpHTF = "HTF Rolling Base"
+htfTF     = input.timeframe("5", "HTF timeframe (rolling base) -- set equal to chart timeframe to use the chart's own native bars directly", group=grpHTF)
+
+grpLiq = "Liquidity Source (which level a 'sweep' pierces)"
+liqSource = input.string("Liquidity Pool (Equal Highs/Lows)", "Liquidity level source",
+     options=["Rolling HTF Base", "Swing Pivots", "Liquidity Pool (Equal Highs/Lows)"], group=grpLiq,
+     tooltip="Rolling HTF Base = the original ported repo's definition (a candle breaking the previous candle's range) -- structural, not really 'liquidity' in the stop-order sense. Swing Pivots = any single confirmed swing high/low. Liquidity Pool (recommended) = requires 2+ confirmed swings to cluster near the same price before counting as real liquidity -- classic ICT equal-highs/equal-lows, the same concept this codebase's own FVG strategy already uses and has validated (group_equal_levels).")
+pivotLeft  = input.int(5, "Pivot bars left", minval=1, group=grpLiq)
+pivotRight = input.int(5, "Pivot bars right (confirmation delay)", minval=1, group=grpLiq,
+     tooltip="A pivot only confirms this many bars AFTER it prints -- e.g. 5 on a 5m chart means a swing high/low isn't confirmed (and isn't tradeable as a liquidity level) until ~25 minutes after it actually happened. Lower = faster confirmation but noisier/less reliable pivots.")
+poolTolPts = input.float(5.0, "Pool cluster tolerance (points)", minval=0.1, group=grpLiq,
+     tooltip="Two swing highs (or two swing lows) within this many points of each other count as the SAME liquidity pool. Default matches this codebase's own FVG strategy's group_equal_levels tolerance on NIFTY's 50pt strike grid.")
+poolMinTouches = input.int(2, "Min swings clustered to count as a real pool", minval=1, group=grpLiq)
+
+grpStruct = "Market Structure Bias (BoS/CHoCH)"
+useStructBias = input.bool(true, "Use BoS/CHoCH structure instead of base-midpoint bias", group=grpStruct,
+     tooltip="Replaces the simple 'price vs level midpoint' bias with real market-structure state: bias flips the moment price closes beyond the most recent confirmed swing AGAINST the current direction (a Change of Character), and reconfirms every time it closes beyond the most recent swing WITH the current direction (a Break of Structure). Reuses the exact same confirmed swing pivots already computed for the Swing Pivots/Liquidity Pool sources above -- one shared set of pivots, not a second parallel zigzag.")
+
+grpDisp = "Displacement"
+atrLen    = input.int(14, "ATR lookback (simple avg of H-L, no smoothing)", minval=1, group=grpDisp)
+atrMult   = input.float(0.7, "Displacement threshold: body / ATR >", minval=0.1, step=0.1, group=grpDisp,
+     tooltip="Lowered 1.5 -> 1.0 -> 0.7 across two rounds of real evidence. The sub-condition funnel (watch bars / swing-break-only / ATR-ratio-only) isolated ATR as the binding constraint at 1.0: swing-break cleared 9 of 39 watched bars (~23%) vs. ATR-ratio only 3 of 39 (~8%) -- roughly 3x stricter, and the ~1.8% joint-probability estimate from those two rates matched the single observed displacement almost exactly. Watch the funnel's watch-bars/swing-break/ATR-ratio rows after this change and re-tune again from what they show, not another guess.")
+dispWindow= input.int(6, "Displacement window (candles after sweep)", minval=1, group=grpDisp,
+     tooltip="Widened from the source repo's implied default (2) after a live MCX Crude 5m chart showed the real displacement move routinely landing later than 2-3 candles after the sweep. Re-tune per instrument/timeframe.")
+swingLen  = input.int(3, "Micro-swing lookback (bars each side)", minval=1, group=grpDisp)
+
+grpFVG = "FVG / Retest"
+fvgConfirmWindow = input.int(3, "FVG confirmation window (candles after displacement)", minval=1, group=grpFVG,
+     tooltip="Was a one-shot check on ONLY the single candle immediately after displacement -- a real 2-week NIFTY funnel showed this killed the only displacement candidate that got through (0 of 1 confirmed). A big move often gets partially retraced by the very next candle before the gap actually forms. Now retries against candle1 (fixed at displacement time) for this many candles, same widening logic already applied to the sweep->displacement window.")
+staleBars = input.int(12, "Retest staleness (LTF candles)", minval=1, group=grpFVG)
+showZones = input.bool(true, "Draw FVG zone boxes", group=grpFVG)
+
+grpTime = "Time Filters (optional)"
+useTimeFilter = input.bool(false, "Enable high-probability / blocked windows", group=grpTime)
+hpWindow  = input.session("0920-1100", "High-probability window (only allow entries)", group=grpTime)
+blockedWindow = input.session("1130-1330", "Blocked window (low-volume chop)", group=grpTime)
+
+grpRisk = "Risk / Targets"
+tgt1RR   = input.float(1.5, "Target 1 R-multiple", minval=0.1, step=0.1, group=grpRisk,
+     tooltip="CONFIRMED repo formula (execution/risk_engine.py): entry + risk_distance * target1_rr.")
+useLiquidityTarget2 = input.bool(true, "Target 2 = next opposing liquidity level (repo's real definition)", group=grpRisk,
+     tooltip="execution/risk_engine.py defines Target2 as 'opposing PDH/PDL or unmitigated HTF zone,' NOT a fixed R-multiple -- this was approximated as an R-multiple earlier only because real structural target tracking didn't exist yet. Now uses whichever opposing-side liquidity level (refHigh for a long, refLow for a short) is currently active at entry time. Falls back to the R-multiple below if no opposing level is active at that moment.")
+tgt2RR   = input.float(3.0, "Target 2 R-multiple (fallback if no opposing liquidity level is active)", minval=0.1, step=0.1, group=grpRisk)
+maxTradeBars = input.int(100, "Max bars to track a trade before giving up as 'still running'", minval=5, group=grpRisk)
+slippagePct = input.float(0.05, "Slippage buffer on entry (%, worse fill in the trade's direction)", minval=0.0, step=0.01, group=grpRisk,
+     tooltip="This script trades the NIFTY index level, not option premium -- this only buffers the index-level fill, it does not model theta/IV/premium slippage at all.")
+
+grpDebug = "Diagnostic"
+bypassBias = input.bool(false, "DIAGNOSTIC: ignore HTF bias (let every raw sweep through)",
+     group=grpDebug, tooltip="Turn ON to check whether displacement/FVG/retest ever fire at all on this chart, independent of whether the bias filter is correctly blocking counter-trend setups. Turn back OFF for a real read -- this is a pipeline test, not a valid signal.")
+bypassFVG = input.bool(false, "DIAGNOSTIC: skip FVG gap requirement (retest the displacement candle's own body instead)",
+     group=grpDebug, tooltip="Turn ON to check whether trades start earlier/more often without waiting for a literal 3-candle price gap. Retest zone becomes the displacement candle's own open-to-close body -- a real, recognized alternative SMC entry technique, not an arbitrary shortcut -- and resolves immediately on the displacement bar itself instead of waiting up to fvgConfirmWindow more candles. Turn back OFF for a real read -- this is a pipeline test, not confirmed source-repo logic.")
+
+// ── Session reset (2026-08-19 correction, direct spec: "liquidity sweep is
+// intraday trade so work accordingly") -- the rolling base/pipeline must not
+// carry over across a day boundary. Same category of fix already applied for
+// real in this codebase's FVG strategy (strategies/fvg/engine.py's intraday-
+// only pool correction). newSessionDay fires on the first bar of each new
+// trading day; every piece of in-flight state below is wired to clear on it.
+newSessionDay = ta.change(time("D")) != 0
+
+// ── HTF rolling base (last CLOSED htf bar vs. the one before it — no repaint) ──
+// If htfTF is set to the SAME resolution as the chart itself (e.g. loading
+// this on a 5m chart with "HTF timeframe" also set to "5" -- literally
+// "treat 5m as my HTF"), read the chart's own native series directly instead
+// of request.security -- querying request.security at the chart's own
+// timeframe is a known Pine edge case, and native series avoids it entirely.
+// In that mode every chart bar is its own potential new "htf" close.
+useNativeHtf = htfTF == timeframe.period
+sec_c1 = request.security(syminfo.tickerid, htfTF, close[1], lookahead=barmerge.lookahead_off)
+sec_h1 = request.security(syminfo.tickerid, htfTF, high[1],  lookahead=barmerge.lookahead_off)
+sec_l1 = request.security(syminfo.tickerid, htfTF, low[1],   lookahead=barmerge.lookahead_off)
+sec_h2 = request.security(syminfo.tickerid, htfTF, high[2],  lookahead=barmerge.lookahead_off)
+sec_l2 = request.security(syminfo.tickerid, htfTF, low[2],   lookahead=barmerge.lookahead_off)
+sec_t1 = request.security(syminfo.tickerid, htfTF, time[1],  lookahead=barmerge.lookahead_off)
+
+htf_c1 = useNativeHtf ? close[1] : sec_c1
+htf_h1 = useNativeHtf ? high[1]  : sec_h1
+htf_l1 = useNativeHtf ? low[1]   : sec_l1
+htf_h2 = useNativeHtf ? high[2]  : sec_h2
+htf_l2 = useNativeHtf ? low[2]   : sec_l2
+newHtfClose = useNativeHtf ? true : (ta.change(sec_t1) != 0)
+
+var float baseHigh = na
+var float baseLow  = na
+
+if newSessionDay
+    baseHigh := na
+    baseLow  := na
+
+if newHtfClose and htf_c1 > htf_h2
+    baseHigh := htf_h1
+    baseLow  := htf_l1
+else if newHtfClose and htf_c1 < htf_l2
+    baseHigh := htf_h1
+    baseLow  := htf_l1
+
+plot(liqSource == "Rolling HTF Base" ? baseHigh : na, "Base High", color=color.new(color.orange, 0), style=plot.style_stepline, linewidth=1)
+plot(liqSource == "Rolling HTF Base" ? baseLow  : na, "Base Low",  color=color.new(color.orange, 0), style=plot.style_stepline, linewidth=1)
+
+// ── Swing-pivot liquidity levels (ta.pivothigh/pivotlow -- same mechanic as
+// the "Swing Points and Liquidity" script). A pivot confirms pivotRight bars
+// after it prints; the most recent confirmed one is held as the live
+// liquidity level UNTIL it gets swept, at which point it's consumed (reset
+// to na) so the NEXT confirmed pivot becomes the new reference -- matches
+// that script's own "extend until filled, then remove" behavior.
+var float swingHigh     = na   // outer boundary -- the wick extreme, where stops actually rest
+var float swingLow      = na
+var float swingHighBody = na   // inner boundary -- the candle's own body extreme (max(open,close))
+var float swingLowBody  = na
+
+if newSessionDay
+    swingHigh     := na
+    swingLow      := na
+    swingHighBody := na
+    swingLowBody  := na
+
+ph = ta.pivothigh(high, pivotLeft, pivotRight)
+pl = ta.pivotlow(low, pivotLeft, pivotRight)
+if not na(ph)
+    swingHigh     := ph
+    swingHighBody := math.max(close[pivotRight], open[pivotRight])
+if not na(pl)
+    swingLow     := pl
+    swingLowBody := math.min(close[pivotRight], open[pivotRight])
+
+plot(liqSource == "Swing Pivots" ? swingHigh : na, "Swing High", color=color.new(color.red, 0), style=plot.style_stepline, linewidth=1)
+plot(liqSource == "Swing Pivots" ? swingLow  : na, "Swing Low",  color=color.new(color.green, 0), style=plot.style_stepline, linewidth=1)
+
+// ── Market structure bias (BoS/CHoCH) ───────────────────────────────────────
+// Real structural directional state instead of a crude midpoint check. Bias
+// flips to bullish the instant close breaks above the most recent confirmed
+// swing HIGH (a Break of Structure if already bullish, a Change of Character
+// if it was bearish -- the label differs, the directional read doesn't) and
+// mirrors for bearish. Reuses ph/pl (same pivotLeft/pivotRight-confirmed
+// swings already computed above), not a separate zigzag length.
+var int   structTrend         = 0    // 0 undetermined, 1 bullish structure, -1 bearish
+var float lastConfirmedSwingHigh = na
+var float lastConfirmedSwingLow  = na
+
+if newSessionDay
+    structTrend            := 0
+    lastConfirmedSwingHigh := na
+    lastConfirmedSwingLow  := na
+
+if not na(ph)
+    lastConfirmedSwingHigh := ph
+if not na(pl)
+    lastConfirmedSwingLow := pl
+
+string structEventTxt = na
+if not na(lastConfirmedSwingHigh) and close > lastConfirmedSwingHigh
+    structEventTxt := structTrend == 1 ? "BoS" : "CHoCH"
+    structTrend := 1
+    lastConfirmedSwingHigh := na   // consumed -- the next confirmed high becomes the new reference
+if not na(lastConfirmedSwingLow) and close < lastConfirmedSwingLow
+    structEventTxt := structTrend == -1 ? "BoS" : "CHoCH"
+    structTrend := -1
+    lastConfirmedSwingLow := na
+
+if not na(structEventTxt)
+    label.new(bar_index, structTrend == 1 ? low : high, structEventTxt,
+         style=structTrend == 1 ? label.style_label_up : label.style_label_down,
+         color=color.new(structTrend == 1 ? color.teal : color.maroon, 0), textcolor=color.white, size=size.tiny)
+
+// ── Liquidity Pool (Equal Highs/Lows) -- MY synthesized answer to "what is a
+// liquidity sweep," after reviewing three independent reference scripts plus
+// this codebase's own prior art. A lone swing high/low isn't real liquidity
+// by itself -- what actually accumulates resting stop orders is MULTIPLE
+// swings clustering near the same price (classic ICT equal-highs/equal-lows).
+// Same concept this codebase's own FVG strategy already uses and has
+// validated (strategies/fvg/detector.py's group_equal_levels, 5pt tolerance
+// on NIFTY's 50pt grid -- poolTolPts defaults to the same 5pt). A new
+// confirmed pivot counts how many recent same-direction pivots already sit
+// within poolTolPts of it; once that cluster reaches poolMinTouches, it
+// becomes the active pool. Outer/inner zone boundary same as Swing Pivots
+// (wick vs. body) -- this mode is a strict refinement of that one, not a
+// different mechanic.
+var float[] recentHighs = array.new_float(0)
+var float[] recentLows  = array.new_float(0)
+_MAX_RECENT_PIVOTS = 20
+
+var float poolHigh     = na
+var float poolHighBody = na
+var float poolLow      = na
+var float poolLowBody  = na
+
+if newSessionDay
+    array.clear(recentHighs)
+    array.clear(recentLows)
+    poolHigh     := na
+    poolHighBody := na
+    poolLow      := na
+    poolLowBody  := na
+
+if not na(ph)
+    hCluster = 1
+    if array.size(recentHighs) > 0
+        for i = 0 to array.size(recentHighs) - 1
+            if math.abs(array.get(recentHighs, i) - ph) <= poolTolPts
+                hCluster += 1
+    array.unshift(recentHighs, ph)
+    if array.size(recentHighs) > _MAX_RECENT_PIVOTS
+        array.pop(recentHighs)
+    if hCluster >= poolMinTouches
+        poolHigh     := ph
+        poolHighBody := math.max(close[pivotRight], open[pivotRight])
+
+if not na(pl)
+    lCluster = 1
+    if array.size(recentLows) > 0
+        for i = 0 to array.size(recentLows) - 1
+            if math.abs(array.get(recentLows, i) - pl) <= poolTolPts
+                lCluster += 1
+    array.unshift(recentLows, pl)
+    if array.size(recentLows) > _MAX_RECENT_PIVOTS
+        array.pop(recentLows)
+    if lCluster >= poolMinTouches
+        poolLow     := pl
+        poolLowBody := math.min(close[pivotRight], open[pivotRight])
+
+plot(liqSource == "Liquidity Pool (Equal Highs/Lows)" ? poolHigh : na, "Pool High", color=color.new(color.fuchsia, 0), style=plot.style_stepline, linewidth=2)
+plot(liqSource == "Liquidity Pool (Equal Highs/Lows)" ? poolLow  : na, "Pool Low",  color=color.new(color.aqua, 0),    style=plot.style_stepline, linewidth=2)
+
+refHigh = switch liqSource
+    "Swing Pivots"                      => swingHigh
+    "Liquidity Pool (Equal Highs/Lows)" => poolHigh
+    => baseHigh
+refLow = switch liqSource
+    "Swing Pivots"                      => swingLow
+    "Liquidity Pool (Equal Highs/Lows)" => poolLow
+    => baseLow
+// Reject/close-back-inside boundary. Rolling HTF Base has no separate body
+// concept -- inner == outer, unchanged single-line pierce+reject behavior.
+// Swing Pivots and Liquidity Pool both use the LuxAlgo "Liquidity Swings"
+// zone idea: a genuine sweep must close back past the swing candle's own
+// BODY, not just barely tick under the exact wick tip.
+refHighInner = switch liqSource
+    "Swing Pivots"                      => swingHighBody
+    "Liquidity Pool (Equal Highs/Lows)" => poolHighBody
+    => baseHigh
+refLowInner = switch liqSource
+    "Swing Pivots"                      => swingLowBody
+    "Liquidity Pool (Equal Highs/Lows)" => poolLowBody
+    => baseLow
+
+// ── HTF bias ─────────────────────────────────────────────────────────────
+baseMid = (refHigh + refLow) / 2
+midpointBias = na(baseMid) ? 0 : (close > baseMid ? 1 : close < baseMid ? -1 : 0)
+bias = useStructBias ? structTrend : midpointBias
+
+// ── Sweep ────────────────────────────────────────────────────────────────
+rawBearSweep = not na(refHigh) and high > refHigh and close < refHighInner
+rawBullSweep = not na(refLow)  and low  < refLow  and close > refLowInner
+bearSweepOK = rawBearSweep and (bypassBias or bias != 1)
+bullSweepOK = rawBullSweep and (bypassBias or bias != -1)
+
+// ── Funnel diagnostic -- counts how many candidates reach each stage,
+// independent of the state machine's own single-pending-sequence limit, so
+// we can see exactly where candidates are dying instead of eyeballing
+// triangles across weeks of chart. Never resets daily (a running total
+// across the whole visible chart, same as the scoreboard's Signals/Wins).
+var int funnelRawSweep = 0
+var int funnelBiasPass = 0
+var int funnelDisp     = 0
+var int funnelFvg      = 0
+
+if rawBearSweep or rawBullSweep
+    funnelRawSweep := funnelRawSweep + 1
+if bearSweepOK or bullSweepOK
+    funnelBiasPass := funnelBiasPass + 1
+
+// Consume the swept level (Swing Pivots / Liquidity Pool modes only) so the
+// same level can't keep re-triggering a sweep on every subsequent bar.
+if liqSource == "Swing Pivots"
+    if rawBearSweep
+        swingHigh := na
+        swingHighBody := na
+    if rawBullSweep
+        swingLow := na
+        swingLowBody := na
+if liqSource == "Liquidity Pool (Equal Highs/Lows)"
+    if rawBearSweep
+        poolHigh := na
+        poolHighBody := na
+    if rawBullSweep
+        poolLow := na
+        poolLowBody := na
+
+plotshape(rawBearSweep and not bearSweepOK, title="Sweep High (blocked by bias)", style=shape.triangledown,
+     location=location.abovebar, color=color.new(color.gray, 40), size=size.tiny)
+plotshape(rawBullSweep and not bullSweepOK, title="Sweep Low (blocked by bias)", style=shape.triangleup,
+     location=location.belowbar, color=color.new(color.gray, 40), size=size.tiny)
+plotshape(bearSweepOK, title="Sweep High (armed)", style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small)
+plotshape(bullSweepOK, title="Sweep Low (armed)",  style=shape.triangleup,   location=location.belowbar, color=color.green, size=size.small)
+
+// ── Pending sweep -> displacement window ────────────────────────────────────
+var int   pendingDir      = 0
+var int   pendingBarsLeft = 0
+var float sweepExtreme    = na
+justArmed = false
+
+if newSessionDay
+    pendingDir := 0
+    pendingBarsLeft := 0
+
+// STRUCTURAL FIX (2026-08-19): the old `and pendingDir == 0` guard here meant
+// the first sweep to arm would block every OTHER bias-passed sweep for the
+// rest of its dispWindow -- those later sweeps were never tested against
+// displacement at all, just silently dropped. A real multi-week NIFTY funnel
+// showed 6 bias-passed sweeps but only 1 ever reached displacement, and this
+// is the actual reason why: most of the other 5 likely never got a turn.
+// Fixed so the FRESHEST bias-passed sweep always takes over the watch,
+// giving every genuine candidate a fair, full window instead of whichever
+// one happened to arrive first. Tradeoff, stated plainly: in a very choppy
+// stretch where sweeps fire on nearly every bar, this keeps resetting the
+// clock and a candidate already mid-development could get pre-empted before
+// its own window naturally expires -- accepted, since the alternative
+// (silently dropping most candidates) was clearly worse.
+if bearSweepOK
+    pendingDir := -1
+    pendingBarsLeft := dispWindow
+    sweepExtreme := high
+    justArmed := true
+if bullSweepOK
+    pendingDir := 1
+    pendingBarsLeft := dispWindow
+    sweepExtreme := low
+    justArmed := true
+
+microHi = ta.highest(high[1], swingLen)
+microLo = ta.lowest(low[1], swingLen)
+atrSimple = ta.sma(high - low, atrLen)
+body = math.abs(close - open)
+dispRatio = atrSimple > 0 ? body / atrSimple : 0.0
+
+// ── Sub-condition funnel -- which specific requirement is actually blocking
+// displacement, checked independently on every bar the watch is active
+// (pendingDir != 0), not just on bars where ALL conditions happened to align.
+var int funnelWatchBars   = 0   // bars spent actively watching for displacement
+var int funnelSwingBreak  = 0   // close beyond the micro-swing, ATR not required
+var int funnelAtrClear    = 0   // body/ATR ratio cleared threshold, swing-break not required
+if pendingDir != 0
+    funnelWatchBars := funnelWatchBars + 1
+    swingBreakNow = pendingDir == 1 ? (close > open and close > microHi) : (close < open and close < microLo)
+    if swingBreakNow
+        funnelSwingBreak := funnelSwingBreak + 1
+    if dispRatio > atrMult
+        funnelAtrClear := funnelAtrClear + 1
+
+dispBull = pendingDir == 1  and close > open and close > microHi and dispRatio > atrMult
+dispBear = pendingDir == -1 and close < open and close < microLo and dispRatio > atrMult
+plotshape(dispBull or dispBear, title="Displacement", style=shape.diamond, location=location.belowbar, color=color.new(color.blue, 0), size=size.tiny)
+if dispBull or dispBear
+    funnelDisp := funnelDisp + 1
+
+var float dispC1Hi = na
+var float dispC1Lo = na
+var bool  awaitFvgConfirm = false
+var int   awaitFvgDir = 0
+var float armedSweepExtreme = na
+
+if newSessionDay
+    awaitFvgConfirm := false
+
+if dispBull or dispBear
+    dispC1Hi := high[1]
+    dispC1Lo := low[1]
+    awaitFvgConfirm := true
+    awaitFvgDir := dispBull ? 1 : -1
+    armedSweepExtreme := sweepExtreme
+    pendingDir := 0
+else if pendingDir != 0 and not justArmed
+    pendingBarsLeft := pendingBarsLeft - 1
+    if pendingBarsLeft <= 0
+        pendingDir := 0
+
+// ── FVG confirmation + retest arm ───────────────────────────────────────────
+var box   fvgBox  = na
+var int   fvgDir  = 0
+var float fvgHi   = na
+var float fvgLo   = na
+var int   retestBarsLeft = 0
+var bool  retestArmed = false
+var float slAnchor = na
+var int   fvgBarsLeft = 0
+
+if newSessionDay
+    retestArmed := false
+    if not na(fvgBox)
+        box.delete(fvgBox)
+    fvgBox := na
+
+if dispBull or dispBear
+    fvgBarsLeft := fvgConfirmWindow
+
+if awaitFvgConfirm
+    if bypassFVG
+        // Diagnostic: skip the gap requirement entirely -- resolves
+        // immediately on the displacement bar itself (same bar this block
+        // first sees awaitFvgConfirm=true), using that candle's own
+        // open-to-close body as the retest zone instead of a genuine FVG.
+        fvgDir := awaitFvgDir
+        fvgHi  := math.max(close, open)
+        fvgLo  := math.min(close, open)
+        slAnchor := armedSweepExtreme
+        retestArmed := true
+        retestBarsLeft := staleBars
+        funnelFvg := funnelFvg + 1
+        if showZones
+            fvgBox := box.new(bar_index, fvgHi, bar_index + staleBars, fvgLo,
+                 border_color=fvgDir == 1 ? color.green : color.red,
+                 bgcolor=color.new(fvgDir == 1 ? color.green : color.red, 85))
+        awaitFvgConfirm := false
+    else
+        bullFvg = awaitFvgDir == 1  and dispC1Hi < low
+        bearFvg = awaitFvgDir == -1 and dispC1Lo > high
+        if bullFvg or bearFvg
+            fvgDir := bullFvg ? 1 : -1
+            fvgHi  := bullFvg ? low       : dispC1Lo
+            fvgLo  := bullFvg ? dispC1Hi  : high
+            slAnchor := armedSweepExtreme
+            retestArmed := true
+            retestBarsLeft := staleBars
+            funnelFvg := funnelFvg + 1
+            if showZones
+                fvgBox := box.new(bar_index, fvgHi, bar_index + staleBars, fvgLo,
+                     border_color=fvgDir == 1 ? color.green : color.red,
+                     bgcolor=color.new(fvgDir == 1 ? color.green : color.red, 85))
+            awaitFvgConfirm := false
+        else
+            fvgBarsLeft := fvgBarsLeft - 1
+            if fvgBarsLeft <= 0
+                awaitFvgConfirm := false   // no gap formed within the window -- discard
+
+// ── Time filter ──────────────────────────────────────────────────────────
+inHighProb = not useTimeFilter or (not na(time(timeframe.period, hpWindow)))
+inBlocked  = useTimeFilter and not na(time(timeframe.period, blockedWindow))
+timeOK = inHighProb and not inBlocked
+
+// ── Retest -> hand-tracked "trade" (no real orders -- pure visual/scoreboard) ─
+var bool  tradeOn   = false
+var int   tradeDir  = 0
+var float tEntry    = na
+var float tSL       = na
+var float tT1       = na
+var float tT2       = na
+var int   tStartBar = na
+var bool  tT1Hit    = false
+
+var int sigCount = 0
+var int winCount = 0
+var int lossCount = 0
+var int runningCount = 0
+var int eodCount = 0
+
+// Liquidity sweep is an intraday trade -- an in-flight hand-tracked "trade"
+// still open when a new session day begins is force-closed (EOD), same
+// discipline as every real strategy in this codebase's own squareoff logic.
+// Counted separately from "still running" (which means it timed out
+// mid-session via maxTradeBars) so the scoreboard doesn't conflate the two.
+if newSessionDay and tradeOn
+    eodCount := eodCount + 1
+    tradeOn := false
+
+retestHit = retestArmed and low <= fvgHi and high >= fvgLo
+if retestHit
+    retestArmed := false
+    if not na(fvgBox)
+        box.set_right(fvgBox, bar_index)
+
+if retestHit and timeOK and not tradeOn
+    tradeOn := true
+    tradeDir := fvgDir
+    // Slippage buffer: a worse fill than the bare close, in the trade's own
+    // direction (pay up on a long, get less on a short) -- index-level only,
+    // does not model option premium slippage.
+    tEntry := tradeDir == 1 ? close * (1 + slippagePct / 100) : close * (1 - slippagePct / 100)
+    riskDist = math.abs(tEntry - slAnchor)
+    tSL := slAnchor
+    tT1 := tradeDir == 1 ? tEntry + riskDist * tgt1RR : tEntry - riskDist * tgt1RR
+    // Target2 = the repo's real definition (opposing liquidity level), not
+    // an R-multiple guess. The OPPOSING side's currently-active reference
+    // level at entry time: refHigh (resistance) for a long, refLow
+    // (support) for a short -- whichever liquidity source is selected
+    // above. Only used if it's actually valid (not na, and on the correct
+    // side of entry to make sense as a target) -- falls back to the
+    // R-multiple otherwise.
+    liqTarget2 = tradeDir == 1 ? refHigh : refLow
+    useLiqT2   = useLiquidityTarget2 and not na(liqTarget2) and (tradeDir == 1 ? liqTarget2 > tEntry : liqTarget2 < tEntry)
+    tT2 := useLiqT2 ? liqTarget2 : (tradeDir == 1 ? tEntry + riskDist * tgt2RR : tEntry - riskDist * tgt2RR)
+    tStartBar := bar_index
+    tT1Hit := false
+    sigCount := sigCount + 1
+    label.new(bar_index, tradeDir == 1 ? low : high,
+         (tradeDir == 1 ? "LONG (CE)" : "SHORT (PE)") + (useLiqT2 ? " T2:liq" : " T2:R") +
+         "\nEntry: " + str.tostring(tEntry, "#.##") +
+         "\nSL: "    + str.tostring(tSL, "#.##") +
+         "\nT1: "    + str.tostring(tT1, "#.##") +
+         "\nT2: "    + str.tostring(tT2, "#.##"),
+         style=tradeDir == 1 ? label.style_label_up : label.style_label_down,
+         color=tradeDir == 1 ? color.green : color.red, textcolor=color.white, size=size.small)
+
+if retestArmed
+    retestBarsLeft := retestBarsLeft - 1
+    if retestBarsLeft <= 0
+        retestArmed := false
+        if not na(fvgBox)
+            box.set_right(fvgBox, bar_index)
+            box.set_border_color(fvgBox, color.new(color.gray, 60))
+            box.set_bgcolor(fvgBox, color.new(color.gray, 92))
+
+// ── Track the in-flight hand-simulated trade to a resolved outcome ──────────
+// Priority per bar: SL checked before Target1 (conservative, worst-case
+// ordering when a single bar's range could satisfy both). Once Target1 is
+// hit, SL moves to breakeven (tEntry) -- a subsequent breakeven-stop-out
+// still counts as a WIN (partial booked, no net loss), matching the
+// strategy.pine version's useBreakeven mechanic.
+if tradeOn
+    barsElapsed = bar_index - tStartBar
+    if not tT1Hit
+        hitSL = tradeDir == 1 ? low <= tSL : high >= tSL
+        hitT1 = tradeDir == 1 ? high >= tT1 : low <= tT1
+        if hitSL
+            line.new(tStartBar, tEntry, bar_index, tEntry, color=color.new(color.white, 40), width=1)
+            line.new(tStartBar, tSL, bar_index, tSL, color=color.new(color.red, 0), width=1, style=line.style_dashed)
+            lossCount := lossCount + 1
+            tradeOn := false
+        else if hitT1
+            tT1Hit := true
+            tSL := tEntry
+            line.new(tStartBar, tT1, bar_index, tT1, color=color.new(color.green, 20), width=1, style=line.style_dashed)
+    else
+        hitBE = tradeDir == 1 ? low <= tSL : high >= tSL
+        hitT2 = tradeDir == 1 ? high >= tT2 : low <= tT2
+        if hitBE
+            line.new(tStartBar, tEntry, bar_index, tEntry, color=color.new(color.white, 40), width=1)
+            winCount := winCount + 1
+            tradeOn := false
+        else if hitT2
+            line.new(tStartBar, tEntry, bar_index, tEntry, color=color.new(color.white, 40), width=1)
+            line.new(tStartBar, tT2, bar_index, tT2, color=color.new(color.green, 0), width=1, style=line.style_dashed)
+            winCount := winCount + 1
+            tradeOn := false
+
+    if tradeOn and barsElapsed >= maxTradeBars
+        runningCount := runningCount + 1
+        tradeOn := false
+
+// ── Scoreboard table ─────────────────────────────────────────────────────
+var table scoreTbl = table.new(position.top_right, 2, 6, bgcolor=color.new(color.black, 70), border_width=1)
+if barstate.islast
+    winRate = sigCount > 0 ? (winCount / sigCount) * 100.0 : 0.0
+    table.cell(scoreTbl, 0, 0, "Signals", text_color=color.white, text_size=size.small)
+    table.cell(scoreTbl, 1, 0, str.tostring(sigCount), text_color=color.white, text_size=size.small)
+    table.cell(scoreTbl, 0, 1, "Wins (T2)", text_color=color.white, text_size=size.small)
+    table.cell(scoreTbl, 1, 1, str.tostring(winCount), text_color=color.green, text_size=size.small)
+    table.cell(scoreTbl, 0, 2, "Losses (SL)", text_color=color.white, text_size=size.small)
+    table.cell(scoreTbl, 1, 2, str.tostring(lossCount), text_color=color.red, text_size=size.small)
+    table.cell(scoreTbl, 0, 3, "Still running", text_color=color.white, text_size=size.small)
+    table.cell(scoreTbl, 1, 3, str.tostring(runningCount), text_color=color.gray, text_size=size.small)
+    table.cell(scoreTbl, 0, 4, "EOD closed", text_color=color.white, text_size=size.small)
+    table.cell(scoreTbl, 1, 4, str.tostring(eodCount), text_color=color.orange, text_size=size.small)
+    table.cell(scoreTbl, 0, 5, "Win rate", text_color=color.white, text_size=size.small)
+    table.cell(scoreTbl, 1, 5, str.tostring(winRate, "#.#") + "%", text_color=color.yellow, text_size=size.small)
+
+// ── Funnel table -- where candidates are actually dying, top-left so it
+// never overlaps the trade-outcome scoreboard (top-right).
+var table funnelTbl = table.new(position.top_left, 2, 8, bgcolor=color.new(color.black, 70), border_width=1)
+if barstate.islast
+    table.cell(funnelTbl, 0, 0, "FUNNEL", text_color=color.yellow, text_size=size.small)
+    table.cell(funnelTbl, 1, 0, "", text_color=color.white, text_size=size.small)
+    table.cell(funnelTbl, 0, 1, "Raw sweeps", text_color=color.white, text_size=size.small)
+    table.cell(funnelTbl, 1, 1, str.tostring(funnelRawSweep), text_color=color.white, text_size=size.small)
+    table.cell(funnelTbl, 0, 2, "-> passed bias", text_color=color.white, text_size=size.small)
+    table.cell(funnelTbl, 1, 2, str.tostring(funnelBiasPass), text_color=color.white, text_size=size.small)
+    table.cell(funnelTbl, 0, 3, "-> displaced", text_color=color.white, text_size=size.small)
+    table.cell(funnelTbl, 1, 3, str.tostring(funnelDisp), text_color=color.white, text_size=size.small)
+    table.cell(funnelTbl, 0, 4, "-> FVG confirmed", text_color=color.white, text_size=size.small)
+    table.cell(funnelTbl, 1, 4, str.tostring(funnelFvg), text_color=color.white, text_size=size.small)
+    table.cell(funnelTbl, 0, 5, "watch bars (denom.)", text_color=color.gray, text_size=size.tiny)
+    table.cell(funnelTbl, 1, 5, str.tostring(funnelWatchBars), text_color=color.gray, text_size=size.tiny)
+    table.cell(funnelTbl, 0, 6, "  swing-break only", text_color=color.gray, text_size=size.tiny)
+    table.cell(funnelTbl, 1, 6, str.tostring(funnelSwingBreak), text_color=color.gray, text_size=size.tiny)
+    table.cell(funnelTbl, 0, 7, "  ATR-ratio only", text_color=color.gray, text_size=size.tiny)
+    table.cell(funnelTbl, 1, 7, str.tostring(funnelAtrClear), text_color=color.gray, text_size=size.tiny)
+
+// ── Bias readout ─────────────────────────────────────────────────────────
+var label statusLbl = na
+if barstate.islast
+    label.delete(statusLbl)
+    biasTxt = bias == 1 ? "BULLISH" : bias == -1 ? "BEARISH" : "NEUTRAL"
+    modeTxt = bypassBias ? "\n[DIAGNOSTIC: bias filter OFF]" : ""
+    statusLbl := label.new(bar_index + 3, close, "HTF bias: " + biasTxt + modeTxt,
+         style=label.style_label_left, color=color.new(bypassBias ? color.red : color.black, 70), textcolor=color.white, size=size.small)
+
+bgcolor(useTimeFilter and inBlocked ? color.new(color.red, 92) : na, title="Blocked window shading")

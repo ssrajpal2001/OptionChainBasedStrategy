@@ -659,6 +659,7 @@ class DashboardServer:
         d1_trap_manager=None,  # D1TrapOptionBookManager — trap scanner (index + FnO)
         fvg_manager=None,  # FVGBookManager — Fair Value Gap SMC books
         oi_flow_manager=None,  # OIFlowBookManager — OI-Flow Pre-Breakout books
+        liquidity_sweep_manager=None,  # LiquiditySweepBookManager — Sweep+Displacement+FVG+Retest books
     ) -> None:
         self._bus = bus
         self._cfg = cfg
@@ -676,6 +677,7 @@ class DashboardServer:
         self._d1_trap_manager = d1_trap_manager
         self._fvg_manager = fvg_manager
         self._oi_flow_manager = oi_flow_manager
+        self._liquidity_sweep_manager = liquidity_sweep_manager
         self._fno_monitor = None          # set via set_fno_monitor()
         self._ws_bridge = WsBridge(bus, cfg=cfg)
         self._uvicorn_server = None
@@ -5951,6 +5953,7 @@ pm2 save
         self._register_d1trap_routes(app)
         self._register_fvg_routes(app)
         self._register_oi_flow_routes(app)
+        self._register_liquidity_sweep_routes(app)
         return app
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -6242,6 +6245,35 @@ pm2 save
                         getattr(b, "_underlying", "?"),
                     )
             # Books with an open position first, then by underlying.
+            result.sort(key=lambda r: (0 if r.get("position") else 1, r.get("underlying", "")))
+            return {"ok": True, "books": result}
+
+    # ── Liquidity Sweep monitoring endpoint ──────────────────────────────────
+
+    def _register_liquidity_sweep_routes(self, app) -> None:
+        _srv = self
+
+        @app.get("/api/liqsweep/status")
+        async def liquidity_sweep_status():
+            """Same shape/intent as /api/oiflow/status above: pipeline state
+            (idle/awaiting_displacement/awaiting_fvg/retest_armed), bias,
+            active liquidity level, the recent remarks trail, and the open
+            position with running P&L, straight from LiquiditySweepStrategy.
+            monitoring_state() (strategies/liquidity_sweep/engine.py)."""
+            if _srv._liquidity_sweep_manager is None:
+                return {"ok": True, "books": []}
+            books = getattr(_srv._liquidity_sweep_manager, "books", [])
+            result = []
+            for b in books:
+                if not hasattr(b, "monitoring_state"):
+                    continue
+                try:
+                    result.append(b.monitoring_state())
+                except Exception:
+                    logger.exception(
+                        "liquidity_sweep_status: monitoring_state() raised for %s -- dropped from panel.",
+                        getattr(b, "_underlying", "?"),
+                    )
             result.sort(key=lambda r: (0 if r.get("position") else 1, r.get("underlying", "")))
             return {"ok": True, "books": result}
 
