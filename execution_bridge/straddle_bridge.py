@@ -923,6 +923,54 @@ class StraddleExecutionBridge:
                 self._trade_log.log_event(client_id, binding_id,
                     f"{ev.action} {ev.underlying} {opt_type}{int(strike)} filled "
                     f"{_fq}@{_px:.4f} ({'LIMIT-chase' if _use_limit else 'MARKET'}; orders={_oids})")
+                # 2026-08-19: a MARKET order that looks fully filled by QUANTITY on the
+                # very first poll used to be trusted immediately, with zero further
+                # reconciliation -- but the broker's own avg_price field can still be
+                # settling for a short moment after the quantity itself looks complete
+                # (the exchange-side trade confirmation and the broker API's own
+                # average-price reconciliation don't always land in the same instant).
+                # Confirmed live: a real gurmeet NIFTY entry recorded CE=102.35/PE=108.90
+                # from this exact fast path while the broker's own terminal settled to
+                # CE=101.45/PE=108.30 moments later -- both reads we took were genuine
+                # broker-reported averages, just captured before the broker had finished
+                # updating them. ENTRY only (the case under discussion; EXIT/P&L timing
+                # has different risk characteristics and isn't touched here). The
+                # _fq < qty branch below already does its own, more thorough
+                # reconciliation loop for a genuine under-fill -- this covers the
+                # complementary "looked fully filled immediately" case that branch never
+                # reaches.
+                if ev.action == "ENTRY" and _avg > 0 and _fq >= qty:
+                    _settled_px = _px
+                    try:
+                        if _oids and hasattr(broker, "get_order_status"):
+                            await asyncio.sleep(1.5)
+                            _settled = await broker.get_order_status(str(_oids[-1]))
+                            _settled_avg = float(getattr(_settled, "avg_price", 0.0) or 0.0)
+                            if _settled_avg > 0:
+                                _settled_px = _settled_avg
+                        if hasattr(broker, "get_positions"):
+                            _all_pos = await broker.get_positions()
+                            for _pos in _all_pos:
+                                if (_pos.symbol == symbol and _pos.avg_price > 0
+                                        and abs(_pos.qty) >= qty):
+                                    _settled_px = _pos.avg_price   # ground truth wins over the order-status re-poll
+                                    break
+                        if abs(_settled_px - _px) > 1e-6:
+                            logger.info(
+                                "[LIVE] %s %s %s — avg price SETTLED after re-check: %.4f -> %.4f "
+                                "(first read was still updating on the broker's side)",
+                                ev.action, ev.underlying, opt_type, _px, _settled_px,
+                            )
+                            self._trade_log.log_event(client_id, binding_id,
+                                f"{ev.action} {ev.underlying} {opt_type}{int(strike)} avg SETTLED "
+                                f"{_px:.4f} -> {_settled_px:.4f}")
+                            _px = _settled_px
+                            _avg = _settled_px
+                    except Exception:
+                        logger.debug(
+                            "[LIVE] %s %s %s settle re-check failed (keeping first-read avg=%.4f).",
+                            ev.action, ev.underlying, opt_type, _px,
+                        )
                 # Under-fill with NO exception (order was accepted but didn't fully fill) — pull the
                 # EXCHANGE's final order state so the reason is exchange-sourced, not inferred
                 # (distinguishes 'rested unfilled / cancelled' from a margin/contract rejection).
