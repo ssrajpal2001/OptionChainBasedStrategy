@@ -14,7 +14,7 @@ import pytest
 from config.global_config import IST
 from strategies.oi_flow.detector import (
     Bar, BarAccumulator, SwingPoint, find_swing_points, has_recent_structure_break,
-    swing_low, detect_pre_breakout_signal, confirm_option_price_action,
+    swing_low, pool_swing_low, detect_pre_breakout_signal, confirm_option_price_action,
     detect_volume_spike, explain_no_signal,
 )
 from strategies.oi_flow.tracker import OIFlowTracker
@@ -441,7 +441,7 @@ def test_option_confirmation_ok_above_vwap_no_rejection():
         _bar(base + timedelta(minutes=2), 514, 520, 511, 518),
         _bar(base + timedelta(minutes=3), 519, 525, 516, 523),   # last bar: closes near its high
     ]
-    conf = confirm_option_price_action(bars, "CE", lookback=4, swing_pivot=1)
+    conf = confirm_option_price_action(bars, "CE", lookback=4, swing_pivot=1, pool_min_touches=1)
     assert conf.ok is True
     assert conf.vwap is not None and conf.vwap < 523   # last close sits above the rolling VWAP
     assert conf.sl_level == 502
@@ -477,7 +477,7 @@ def test_option_confirmation_sl_level_matches_real_swing_low():
         _bar(base + timedelta(minutes=2), 514, 520, 511, 518),
         _bar(base + timedelta(minutes=3), 519, 525, 516, 523),
     ]
-    conf = confirm_option_price_action(bars, "CE", lookback=4, swing_pivot=1)
+    conf = confirm_option_price_action(bars, "CE", lookback=4, swing_pivot=1, pool_min_touches=1)
     assert conf.ok is True
     assert conf.sl_level == 502
 
@@ -493,7 +493,7 @@ def test_option_confirmation_surfaces_volume_spike_without_blocking_ok():
         Bar(base + timedelta(minutes=2), 514, 520, 511, 518, volume=1000.0),
         Bar(base + timedelta(minutes=3), 519, 525, 516, 523, volume=2500.0),   # absorption spike
     ]
-    conf = confirm_option_price_action(bars, "CE", lookback=4, swing_pivot=1)
+    conf = confirm_option_price_action(bars, "CE", lookback=4, swing_pivot=1, pool_min_touches=1)
     assert conf.ok is True
     assert conf.sl_level == 502
     assert conf.volume_spike is True
@@ -514,8 +514,8 @@ def test_option_confirmation_pe_side_uses_identical_long_premium_logic_as_ce():
         _bar(base + timedelta(minutes=2), 514, 520, 511, 518),
         _bar(base + timedelta(minutes=3), 519, 525, 516, 523),
     ]
-    conf_ce = confirm_option_price_action(bars, "CE", lookback=4, swing_pivot=1)
-    conf_pe = confirm_option_price_action(bars, "PE", lookback=4, swing_pivot=1)
+    conf_ce = confirm_option_price_action(bars, "CE", lookback=4, swing_pivot=1, pool_min_touches=1)
+    conf_pe = confirm_option_price_action(bars, "PE", lookback=4, swing_pivot=1, pool_min_touches=1)
     assert conf_pe.ok is True
     assert conf_pe.sl_level == 502   # swing LOW, not swing high (the old bug's anchor)
     assert conf_pe.ok == conf_ce.ok and conf_pe.sl_level == conf_ce.sl_level and conf_pe.vwap == conf_ce.vwap
@@ -544,3 +544,70 @@ def test_option_confirmation_volume_fields_populated_even_when_blocked():
     assert conf.reason == "below_vwap"
     assert conf.volume_spike is True
     assert conf.volume_ratio == pytest.approx(3.0)
+
+
+# ── pool_swing_low (2026-08-19, multi-touch SL/S1 anchor) ────────────────────
+
+def _pool_bars(base, low1, low2, hi=530):
+    """Same dip-hump-dip-hump shape used in tests/oi_flow/test_engine.py's
+    own _pool_swing_low_bars -- kept independently here (this module tests
+    the pure function directly, not through the engine)."""
+    lows = [hi, hi - 4, hi - 8, hi - 12, hi - 16, low1, hi - 16, hi - 12, hi - 8, hi - 4, hi,
+            hi - 4, hi - 8, hi - 12, hi - 16, low2, hi - 16, hi - 12, hi - 8, hi - 4, hi]
+    return [Bar(base + timedelta(minutes=i), lo, lo, lo, lo) for i, lo in enumerate(lows)]
+
+
+def test_pool_swing_low_requires_min_touches():
+    """A single confirmed swing low (default min_touches=2) is NOT enough
+    on its own -- this is the exact fix for a real incident where a lone
+    2-bar wiggle became an SL only 1.77% from entry and got clipped by
+    ordinary noise 13 seconds later."""
+    base = _base()
+    bars = [Bar(base + timedelta(minutes=i), 530, 530, 530, 530) for i in range(5)]
+    bars.append(Bar(base + timedelta(minutes=5), 502, 502, 502, 502))
+    bars += [Bar(base + timedelta(minutes=6 + i), 530, 530, 530, 530) for i in range(5)]
+    assert pool_swing_low(bars, pivot=5, tol_pts=2.0, min_touches=2) is None
+    # The same lone low DOES count when min_touches is relaxed to 1.
+    assert pool_swing_low(bars, pivot=5, tol_pts=2.0, min_touches=1) == 502
+
+
+def test_pool_swing_low_activates_on_second_clustered_touch():
+    base = _base()
+    bars = _pool_bars(base, 503, 502)   # two lows, 1pt apart -- within tol_pts=2.0
+    assert pool_swing_low(bars, pivot=5, tol_pts=2.0, min_touches=2) == 502
+
+
+def test_pool_swing_low_ignores_a_distant_second_low():
+    """Two swing lows that DON'T cluster (far apart in price) must not
+    combine into a false pool -- real support requires touches near the
+    SAME price, not just any two prior lows."""
+    base = _base()
+    bars = _pool_bars(base, 503, 460)   # 43pts apart -- well outside tol_pts=2.0
+    assert pool_swing_low(bars, pivot=5, tol_pts=2.0, min_touches=2) is None
+
+
+def test_confirm_option_price_action_uses_separate_sl_bars_when_given():
+    """2026-08-19: sl_bars, when provided, drives the SL anchor
+    independently of option_bars_1m (which keeps driving VWAP/wick-
+    rejection unaffected) -- proves the two are genuinely decoupled, not
+    just an alias."""
+    base = _base()
+    # Fast 1-min bars: only enough for VWAP/wick, no real swing-low pool.
+    fast_bars = [Bar(base + timedelta(minutes=i), 520, 522, 518, 521) for i in range(3)]
+    fast_bars.append(Bar(base + timedelta(minutes=3), 524, 526, 522, 525))
+    # Separate, slower SL bars: a genuine multi-touch pool at 502.
+    sl_bars = _pool_bars(base, 503, 502)
+
+    conf = confirm_option_price_action(fast_bars, "CE", sl_bars=sl_bars, lookback=4)
+    assert conf.ok is True
+    assert conf.sl_level == 502
+
+
+def test_confirm_option_price_action_falls_back_to_option_bars_when_no_sl_bars_given():
+    """sl_bars=None (the default) must fall back to option_bars_1m for the
+    anchor too -- backward compatible for any single-timeframe caller."""
+    base = _base()
+    bars = _pool_bars(base, 503, 502)
+    conf = confirm_option_price_action(bars, "CE", lookback=len(bars))
+    assert conf.ok is True
+    assert conf.sl_level == 502

@@ -106,6 +106,7 @@ def _make_book() -> OIFlowStrategy:
     book._oi_tracker = OIFlowTracker(max_history_sec=600)
     book._spot_acc = BarAccumulator(1)
     book._option_acc = {"CE": BarAccumulator(1), "PE": BarAccumulator(1)}
+    book._option_acc_sl = {"CE": BarAccumulator(3), "PE": BarAccumulator(3)}
     book._latest_snap = None
     book._live_option_ltp = {}
     book._tracked_option_strike = {"CE": None, "PE": None}
@@ -142,23 +143,36 @@ def _seed_oi_for_signal(book: OIFlowStrategy, base) -> None:
     book._oi_tracker.on_option_tick(_FakeTick(57600.0, "PE", 53_000, t1))
 
 
+def _pool_swing_low_bars(base, low1: float, low2: float, hi: float = 530):
+    """Builds a 21-bar sequence with TWO confirmed pivot=5 swing LOWS (dips
+    to low1, then low2, both well below the `hi` background level) close
+    enough together to form a real pool_swing_low() cluster (min_touches=2)
+    -- the ENGINE's real default since 2026-08-19 needs a genuinely
+    confirmable multi-touch anchor, not a lone 2-bar wiggle. Shape: descend
+    to low1 (confirmed via 5 higher-low bars each side), ascend back to
+    `hi`, descend to low2, ascend again."""
+    lows = [hi, hi - 4, hi - 8, hi - 12, hi - 16, low1, hi - 16, hi - 12, hi - 8, hi - 4, hi,
+            hi - 4, hi - 8, hi - 12, hi - 16, low2, hi - 16, hi - 12, hi - 8, hi - 4, hi]
+    return [Bar(base + timedelta(minutes=i), lo, lo, lo, lo) for i, lo in enumerate(lows)]
+
+
 def _seed_option_bars_ok(book: OIFlowStrategy, base) -> None:
-    """CE-side option bars that pass confirm_option_price_action at the
-    ENGINE's real default swing_pivot=2 -- needs >=5 bars for find_swing_
-    points' range(pivot, n-pivot) to be non-empty at all (a 4-bar fixture,
-    as used in test_detector.py's own hand-tuned pivot=1 tests, silently
-    confirms nothing here and returns ok=False/no_swing_sl_anchor_yet --
-    caught by actually running this against the real book instead of
-    assuming the smaller fixture would transfer)."""
+    """CE-side option bars that pass confirm_option_price_action: a short
+    VWAP/wick-passing sequence on the fast 1-min accumulator (self.
+    _option_acc, unchanged), plus a genuinely confirmable multi-touch
+    pool_swing_low() anchor (@502, two clustered touches ~1pt apart) on
+    the separate, slower SL accumulator (self._option_acc_sl, 2026-08-19)
+    that confirm_option_price_action() now reads its sl_bars from."""
     bars = [
         Bar(base, 520, 522, 518, 521),
         Bar(base + timedelta(minutes=1), 519, 521, 515, 518),
-        Bar(base + timedelta(minutes=2), 506, 512, 502, 508),   # confirmed swing low @ 502 (pivot=2)
+        Bar(base + timedelta(minutes=2), 506, 512, 502, 508),
         Bar(base + timedelta(minutes=3), 514, 518, 511, 515),
         Bar(base + timedelta(minutes=4), 519, 524, 516, 522),
         Bar(base + timedelta(minutes=5), 523, 528, 520, 526),   # last bar: closes near its high
     ]
     book._option_acc["CE"].bars = bars
+    book._option_acc_sl["CE"].bars = _pool_swing_low_bars(base, 503, 502)   # returns the MORE RECENT (502) of the two clustered lows
     book._live_option_ltp["CE"] = 526.0
 
 
@@ -714,14 +728,10 @@ def test_maybe_promote_s1_promotes_to_a_new_higher_confirmed_swing_low():
     base = _base()
     book._position = dict(side="CE", strike=57700.0, entry_price=520.0, sl_price=480.0,
                            entry_ts=datetime.now(IST), qty=30, high_lock_pct=0.0, s1_floor=480.0)
-    book._option_acc["CE"].bars = [
-        Bar(base, 520, 522, 518, 521),
-        Bar(base + timedelta(minutes=1), 519, 521, 515, 518),
-        Bar(base + timedelta(minutes=2), 506, 512, 502, 508),   # confirmed swing low @ 502 (pivot=2)
-        Bar(base + timedelta(minutes=3), 514, 518, 511, 515),
-        Bar(base + timedelta(minutes=4), 519, 524, 516, 522),
-        Bar(base + timedelta(minutes=5), 523, 528, 520, 526),
-    ]
+    # Two clustered swing lows (503, then 502) on the SLOWER SL accumulator
+    # -- pool_swing_low() (min_touches=2, 2026-08-19) returns the more
+    # recent of the two.
+    book._option_acc_sl["CE"].bars = _pool_swing_low_bars(base, 503, 502)
 
     book._maybe_promote_s1("CE")
 
@@ -733,16 +743,9 @@ def test_maybe_promote_s1_never_demotes():
     base = _base()
     book._position = dict(side="CE", strike=57700.0, entry_price=520.0, sl_price=480.0,
                            entry_ts=datetime.now(IST), qty=30, high_lock_pct=0.0, s1_floor=502.0)
-    # This sequence's OWN confirmed swing low (482) is LOWER than the
+    # This sequence's OWN confirmed pool swing low (482) is LOWER than the
     # already-promoted s1_floor (502) -- must not un-ratchet.
-    book._option_acc["CE"].bars = [
-        Bar(base, 500, 502, 498, 500),
-        Bar(base + timedelta(minutes=1), 499, 501, 495, 497),
-        Bar(base + timedelta(minutes=2), 486, 492, 482, 488),   # confirmed swing low @ 482
-        Bar(base + timedelta(minutes=3), 494, 498, 491, 495),
-        Bar(base + timedelta(minutes=4), 499, 504, 496, 502),
-        Bar(base + timedelta(minutes=5), 503, 508, 500, 506),
-    ]
+    book._option_acc_sl["CE"].bars = _pool_swing_low_bars(base, 483, 482)
 
     book._maybe_promote_s1("CE")
 

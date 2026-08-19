@@ -39,7 +39,7 @@ from data_layer import position_store
 from data_layer.instrument_registry import REGISTRY
 from strategies.core.base_book import AbstractStrategyBook
 from strategies.oi_flow.detector import (
-    BarAccumulator, detect_pre_breakout_signal, confirm_option_price_action, swing_low,
+    BarAccumulator, detect_pre_breakout_signal, confirm_option_price_action, pool_swing_low,
     explain_no_signal,
 )
 from strategies.oi_flow.events import OIFlowOrderEvent, OIFlowFillEvent
@@ -165,6 +165,15 @@ class OIFlowStrategy(AbstractStrategyBook):
         self._oi_tracker = OIFlowTracker(max_history_sec=max(window_sec * 2, 600))
         self._spot_acc = BarAccumulator(timeframe_min=1)
         self._option_acc: Dict[str, BarAccumulator] = {"CE": BarAccumulator(1), "PE": BarAccumulator(1)}
+        # 2026-08-19: separate, slower-timeframe accumulator feeding ONLY the
+        # SL/S1 anchor computation (pool_swing_low()) -- decoupled from
+        # self._option_acc above, which stays 1-min and keeps driving VWAP/
+        # wick-rejection/live monitoring unaffected. See confirm_option_
+        # price_action()'s own docstring (detector.py) for why: a real
+        # incident (SENSEX PE stopped out 13s after entry by ordinary 1-min
+        # candle noise) showed the fast timeframe alone produced an anchor
+        # too tight to survive normal option-premium chop.
+        self._option_acc_sl: Dict[str, BarAccumulator] = {"CE": BarAccumulator(3), "PE": BarAccumulator(3)}
         self._latest_snap = None
         self._live_option_ltp: Dict[str, float] = {}   # "CE"/"PE" -> latest live LTP of that side's wall strike
         self._watched_strikes: Dict[tuple, str] = {}   # (strike, side) -> "opposing"|"supporting", for option bar routing
@@ -211,6 +220,7 @@ class OIFlowStrategy(AbstractStrategyBook):
         self._today = None
         self._spot_acc = BarAccumulator(timeframe_min=1)
         self._option_acc = {"CE": BarAccumulator(1), "PE": BarAccumulator(1)}
+        self._option_acc_sl = {"CE": BarAccumulator(3), "PE": BarAccumulator(3)}
         self._live_option_ltp = {}
         self._tracked_option_strike = {"CE": None, "PE": None}
         self._last_position_tick_ts = None
@@ -511,7 +521,7 @@ class OIFlowStrategy(AbstractStrategyBook):
             return
 
         option_bars = self._option_acc[side].bars
-        confirmation = confirm_option_price_action(option_bars, side)
+        confirmation = confirm_option_price_action(option_bars, side, sl_bars=self._option_acc_sl[side].bars)
         row.option_vwap = confirmation.vwap
         row.option_sl_level = confirmation.sl_level
         row.option_gate_ok = confirmation.ok
@@ -586,13 +596,19 @@ class OIFlowStrategy(AbstractStrategyBook):
             # can drift many times a day while flat/scanning.
             if target_strike != self._tracked_option_strike.get(side):
                 self._option_acc[side] = BarAccumulator(1)
+                self._option_acc_sl[side] = BarAccumulator(3)
                 self._live_option_ltp.pop(side, None)
                 self._tracked_option_strike[side] = target_strike
             is_target_strike = target_strike is not None and float(ev.strike) == target_strike
             if is_target_strike:
                 self._live_option_ltp[side] = ev.ltp
-                closed = self._option_acc[side].on_tick(ev.timestamp, ev.ltp, ev.volume)
-                if closed and has_position:
+                self._option_acc[side].on_tick(ev.timestamp, ev.ltp, ev.volume)
+                # S1 promotion is driven by the SLOWER SL accumulator's own
+                # bar closes (see pool_swing_low()'s docstring) -- not the
+                # fast 1-min one above, which still exists purely for VWAP/
+                # wick-rejection and is otherwise untouched by this change.
+                closed_sl = self._option_acc_sl[side].on_tick(ev.timestamp, ev.ltp, ev.volume)
+                if closed_sl and has_position:
                     self._maybe_promote_s1(side)
 
             if has_position and is_target_strike:
@@ -664,17 +680,18 @@ class OIFlowStrategy(AbstractStrategyBook):
     def _maybe_promote_s1(self, side: str) -> None:
         """S1 trailing stop, per the user's own framing ('S1 will act as
         TSL'): as the option's own premium chart prints a new CONFIRMED
-        swing low (swing_low(), the SAME function already used for the
-        entry-time SL anchor -- this strategy's own utility, not another
-        strategy's S&R code) ABOVE the current s1_floor, promote the floor
-        to it. Ratchets only, same discipline as the percentage TSL. Called
-        only on an option-bar CLOSE for the position's OWN strike (a
-        confirmed swing point can't change mid-bar), never on the non-
-        position side."""
+        multi-touch swing low (pool_swing_low(), the SAME function now used
+        for the entry-time SL anchor -- this strategy's own utility, not
+        another strategy's S&R code) ABOVE the current s1_floor, promote
+        the floor to it. Ratchets only, same discipline as the percentage
+        TSL. Called only on an option-bar CLOSE, on the SLOWER SL
+        accumulator (self._option_acc_sl, 3-min -- see that field's own
+        comment) for the position's OWN strike, never on the non-position
+        side."""
         pos = self._position
         if pos is None or pos["side"] != side:
             return
-        new_s1 = swing_low(self._option_acc[side].bars, pivot=2)
+        new_s1 = pool_swing_low(self._option_acc_sl[side].bars, pivot=5, tol_pts=2.0, min_touches=2)
         if new_s1 is not None and new_s1 > pos.get("s1_floor", pos["sl_price"]):
             old = pos.get("s1_floor", pos["sl_price"])
             pos["s1_floor"] = new_s1

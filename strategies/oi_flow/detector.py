@@ -151,13 +151,66 @@ def has_recent_structure_break(bars: List[Bar], swings: List[SwingPoint], direct
 
 
 def swing_low(bars: List[Bar], pivot: int = 2) -> Optional[float]:
-    """Most recent confirmed swing LOW price -- used as the option-chart-
-    native stop-loss anchor in confirm_option_price_action(). None if no
-    swing low is confirmed yet (too few bars)."""
+    """Most recent confirmed swing LOW price -- a simple, single-touch
+    pivot low. Kept as a small, independently tested primitive; the SL/S1
+    anchor logic itself now uses pool_swing_low() below (see that
+    function's own docstring for why). None if no swing low is confirmed
+    yet (too few bars)."""
     lows = [s for s in find_swing_points(bars, pivot=pivot) if s.kind == "LOW"]
     if not lows:
         return None
     return max(lows, key=lambda s: s.index).price
+
+
+_POOL_TOL_PTS_DEFAULT = 2.0   # option-PREMIUM points (₹), not spot/index points
+
+
+def pool_swing_low(
+    bars: List[Bar], pivot: int = 5, tol_pts: float = _POOL_TOL_PTS_DEFAULT, min_touches: int = 2,
+) -> Optional[float]:
+    """Multi-touch swing-low anchor -- the option-chart-native SL/S1 stop
+    used by confirm_option_price_action() and engine.py's
+    _maybe_promote_s1(). Same "equal lows / liquidity pool" CONCEPT
+    strategies/liquidity_sweep/detector.py's own latest_pool_level()
+    already uses (a fresh, independent implementation here per this
+    strategy's standalone mandate -- see this module's own header
+    docstring -- not an import).
+
+    2026-08-19, direct user request, root-caused against a real incident:
+    the original swing_low() (a bare single-touch pivot=2) produced an SL
+    only 1.77% below a real SENSEX PE entry (197.65 -> 194.15), which got
+    clipped by ordinary 1-min candle noise 13 seconds later (confirmed via
+    a real TradingView chart review -- no unusual price action, just a
+    stop that was too tight to survive normal option-premium chop). A lone
+    2-bar wiggle isn't real support; what a genuinely defended level looks
+    like is MULTIPLE confirmed swing lows clustering near the same price
+    (the same reasoning already validated for Liquidity Sweep's own
+    liquidity-pool default). Walks the confirmed LOW swings in
+    chronological order; each one counts how many EARLIER swings already
+    sit within tol_pts of it. The most recent swing whose own cluster size
+    reaches min_touches becomes the active anchor. Returns None if no
+    swing has ever reached that threshold (a real possibility, e.g. thin
+    option history or a genuinely one-off low -- callers must treat this
+    the same as "not confirmed yet", never fall back to a weaker anchor
+    silently).
+
+    A wider default pivot (5, was 2) also means fewer, more significant
+    confirmed lows to begin with -- unvalidated (this strategy cannot be
+    backtested at all, see engine.py's own module docstring), reasoned
+    from the one real incident above plus the same wider-pivot logic
+    already tuned (in Pine, against real chart data) for the Liquidity
+    Sweep strategy elsewhere in this codebase -- watch real forward
+    telemetry before trusting these specific numbers further."""
+    relevant = sorted(
+        (s for s in find_swing_points(bars, pivot=pivot) if s.kind == "LOW"),
+        key=lambda s: s.index,
+    )
+    active: Optional[float] = None
+    for i, s in enumerate(relevant):
+        cluster = 1 + sum(1 for prior in relevant[:i] if abs(prior.price - s.price) <= tol_pts)
+        if cluster >= min_touches:
+            active = s.price
+    return active
 
 
 # ── 2c. Spot-side pre-breakout signal ────────────────────────────────────────
@@ -407,8 +460,11 @@ def _vwap(bars: List[Bar]) -> Optional[float]:
 def confirm_option_price_action(
     option_bars_1m: List[Bar],
     side: str,
+    sl_bars: Optional[List[Bar]] = None,
     lookback: int = 20,
-    swing_pivot: int = 2,
+    swing_pivot: int = 5,
+    pool_tol_pts: float = _POOL_TOL_PTS_DEFAULT,
+    pool_min_touches: int = 2,
     wick_rejection_ratio: float = _UPPER_WICK_REJECTION_RATIO,
     volume_spike_ratio: float = _VOLUME_SPIKE_RATIO_DEFAULT,
 ) -> OptionConfirmation:
@@ -417,9 +473,21 @@ def confirm_option_price_action(
     IDENTICAL for both sides: premium must be holding ABOVE its own recent
     VWAP with no active upper-wick rejection on the most recent candle
     (rejection = seller pressure right at the current price, a bad time to
-    buy into strength). sl_level is the option's own most recent confirmed
-    swing LOW (for either side) -- the stop anchor engine.py must use,
-    never a spot-derived offset.
+    buy into strength). sl_level is a MULTI-TOUCH confirmed swing LOW (for
+    either side) via pool_swing_low() -- the stop anchor engine.py must
+    use, never a spot-derived offset.
+
+    2026-08-19: sl_level is now computed from `sl_bars` (a SEPARATE, slower
+    timeframe -- engine.py feeds this a 3-min option-bar accumulator) when
+    given, decoupled from `option_bars_1m` (which stays fast/1-min and
+    keeps driving VWAP + wick-rejection, unaffected). `sl_bars=None` falls
+    back to `option_bars_1m` for the anchor too -- only real production
+    callers pass a genuinely separate accumulator; every other caller
+    (tests, any future single-timeframe use) keeps working unchanged. The
+    point of the separate, slower timeframe is purely to filter single-
+    candle noise out of the SL ANCHOR computation, not to slow down live
+    monitoring of that anchor once set (engine.py still checks the live
+    tick against the anchor every tick, same as before).
 
     `side` does NOT flip this logic -- 2026-08-13 fix: an earlier version
     mirrored CE/PE here the way detect_pre_breakout_signal() correctly
@@ -459,7 +527,8 @@ def confirm_option_price_action(
     if rng > 0 and (upper_wick / rng) >= wick_rejection_ratio:
         return OptionConfirmation(ok=False, reason="upper_wick_rejection", vwap=vwap,
                                    volume_spike=volume_spike, volume_ratio=volume_ratio)
-    sl = swing_low(window, pivot=swing_pivot)
+    sl_window = sl_bars if sl_bars is not None else window
+    sl = pool_swing_low(sl_window, pivot=swing_pivot, tol_pts=pool_tol_pts, min_touches=pool_min_touches)
 
     if sl is None:
         return OptionConfirmation(ok=False, reason="no_swing_sl_anchor_yet", vwap=vwap,
