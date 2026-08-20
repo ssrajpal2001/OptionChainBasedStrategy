@@ -18,6 +18,14 @@ logger = logging.getLogger(__name__)
 # spamming partner searches every tick when a market condition persists.
 _ROLL_RETRY_SECONDS = 60
 
+# 2026-08-20 user spec: BEGINNING keeps the real listed strike grid (50pt for NIFTY),
+# but every rollover/roll-protection partner search rounds ATM and enumerates
+# candidate strikes on a 100pt grid instead -- deliberately NOT derived from
+# ExchangeConfig.strike_steps (which stays 50, the real tradeable grid, for
+# BEGINNING/quoting purposes) so this can't silently drift if the exchange config
+# changes for unrelated reasons.
+_ROLLOVER_STRIKE_STEP = 100.0
+
 
 def _summarize_partner_trace(trace: list) -> dict:
     """Return a human-readable summary of why select_partner_for rejected every candidate."""
@@ -144,7 +152,7 @@ class RollingMixin:
 
         ss = RuntimeConfig.index_section(self._underlying, "sell_straddle")
         rules = ss.get("entry_rules_reentry", [])
-        step = self._cfg.exchange.strike_steps.get(self._underlying, 50.0) if self._cfg else 50.0
+        step = _ROLLOVER_STRIKE_STEP
         offset = int(max(int(ss.get("pool_otm_depth", 0) or 0), int(ss.get("pool_itm_depth", 0) or 0)) or ss.get("v_slope_pool_offset") or ss.get("reentry_offset") or 4)
         ltp_target = self._ltp_target if self._ltp_target > 0 else 50.0
         max_itm = int(ss.get("roll_max_itm_steps", 5))
@@ -602,7 +610,7 @@ class RollingMixin:
 
         ss = RuntimeConfig.index_section(self._underlying, "sell_straddle")
         rules = ss.get("entry_rules_reentry", [])
-        step = self._cfg.exchange.strike_steps.get(self._underlying, 50.0) if self._cfg else 50.0
+        step = _ROLLOVER_STRIKE_STEP
         offset = int(max(int(ss.get("pool_otm_depth", 0) or 0), int(ss.get("pool_itm_depth", 0) or 0)) or ss.get("v_slope_pool_offset") or ss.get("reentry_offset") or 4)
         ltp_target = self._ltp_target if self._ltp_target > 0 else 50.0
         max_itm = int(ss.get("roll_max_itm_steps", 5))

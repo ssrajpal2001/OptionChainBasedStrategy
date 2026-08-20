@@ -65,6 +65,22 @@ class StraddlePosition:
     # to render qty and rupee P&L. Without it the UI shows qty=0 → P&L always 0.
     lot_size: int = 0
 
+    # EOD hedge-and-carry (2026-08-20, user spec): when both sold legs are running in
+    # loss at close-of-day (and it isn't T-1 from expiry), each sold leg gets a bought
+    # protective leg on the SAME side, far enough OTM that its LTP is <=50% of the sold
+    # leg's running LTP. The position then carries forward as a positional (NRML) trade
+    # instead of the normal EOD square-off. `is_hedged_positional` is the flag that
+    # tells the EOD/exit machinery "this position is deliberately not being flattened
+    # today" -- persisted via to_dict()/from_dict() same as everything else so a
+    # restart the next trading day recognizes and keeps managing it, not treats it as
+    # stale. The hedge legs are NEVER touched by the normal sold-leg rollover/exit
+    # logic -- they only ever get closed together with the sold legs, either by the
+    # T-1-from-expiry forced closure or the same-strike-collision guard (see
+    # exits.py/rolling.py).
+    hedge_ce_leg: Optional[StraddleLeg] = None
+    hedge_pe_leg: Optional[StraddleLeg] = None
+    is_hedged_positional: bool = False
+
     def to_dict(self) -> dict:
         """JSON-serialisable snapshot for PositionStore."""
         def _leg(l: StraddleLeg) -> dict:
@@ -87,6 +103,9 @@ class StraddlePosition:
             "entry_time_value": self.entry_time_value,
             "session_min_vwap": self.session_min_vwap,
             "vwap_last_good": self.vwap_last_good,
+            "hedge_ce_leg": _leg(self.hedge_ce_leg) if self.hedge_ce_leg else None,
+            "hedge_pe_leg": _leg(self.hedge_pe_leg) if self.hedge_pe_leg else None,
+            "is_hedged_positional": self.is_hedged_positional,
         }
 
     @classmethod
@@ -112,6 +131,9 @@ class StraddlePosition:
             entry_time_value=d.get("entry_time_value", 0.0),
             session_min_vwap=d.get("session_min_vwap", float("inf")),
             vwap_last_good=d.get("vwap_last_good", 0.0),
+            hedge_ce_leg=_leg(d["hedge_ce_leg"]) if d.get("hedge_ce_leg") else None,
+            hedge_pe_leg=_leg(d["hedge_pe_leg"]) if d.get("hedge_pe_leg") else None,
+            is_hedged_positional=bool(d.get("is_hedged_positional", False)),
         )
 
     @property

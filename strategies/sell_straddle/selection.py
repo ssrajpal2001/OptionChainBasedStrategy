@@ -15,6 +15,39 @@ from typing import Dict, List, Optional, Tuple
 Key = Tuple[int, str]
 
 
+def find_hedge_strike(
+    strike_prem: Dict[Key, dict],
+    side: str,
+    leg_strike: float,
+    leg_ltp: float,
+    step: float,
+    max_offset_steps: int = 20,
+) -> Optional[Tuple[int, float]]:
+    """EOD hedge-and-carry (2026-08-20, user spec): find the protective strike
+    for a sold leg running in loss. Moves further OTM from `leg_strike` (CE:
+    increasing strike; PE: decreasing strike) in `step` increments, and
+    returns the FIRST quoted strike whose LTP is <= 50% of `leg_ltp` -- i.e.
+    the closest-to-half-price strike found by walking outward, not a search
+    for the closest match to exactly 50%.
+
+    Returns (strike, ltp) or None if no quoted strike within max_offset_steps
+    satisfies the 50%-or-below condition (caller should fall back to a normal
+    EOD close rather than leave a sold leg unprotected)."""
+    if leg_ltp <= 0 or step <= 0:
+        return None
+    target = leg_ltp * 0.5
+    direction = 1 if side == "CE" else -1
+    for i in range(1, max_offset_steps + 1):
+        candidate = int(leg_strike + direction * i * step)
+        leg = strike_prem.get((candidate, side))
+        if not leg:
+            continue
+        ltp = float(leg.get("ltp", 0.0) or 0.0)
+        if ltp > 0 and ltp <= target:
+            return (candidate, ltp)
+    return None
+
+
 def _available_strikes(strike_prem: Dict[Key, dict], side: str) -> List[int]:
     """Return all available strike prices for `side` with positive LTP."""
     return [
@@ -363,6 +396,7 @@ def select_balanced_pair_at(
     rule_pass=None,  # optional callable(ce_strike, pe_strike) -> bool
     variable_strikes: bool = False,
     balance_ratio: float = 1.0,
+    anchor_otm_steps: int = 0,
 ) -> Optional[Tuple[int, int, float, float]]:
     """
     Same anchor+partner balanced-pair search as select_balanced_pair(), but takes the
@@ -373,13 +407,25 @@ def select_balanced_pair_at(
     candidates instead of only ever considering the single nearest-rounded strike.
 
       1. Both sides quoted at `atm`; require both LTP > 0.
-      2. Anchor = side with LOWER TIME VALUE at `atm`.
-      3. Anchor must pass the dual floor (raw LTP >= ltp_target, time value >= theta_target).
-      4. Partner = scan the other side over atm +/- offset for a strike whose raw LTP is
+      2. Anchor SIDE = whichever side has LOWER TIME VALUE at `atm` -- this decision is
+         always made from the raw ATM reading, regardless of `anchor_otm_steps` below.
+      3. If `anchor_otm_steps > 0` (2026-08-20, user spec): the anchor SIDE from step 2
+         is kept, but the anchor's own STRIKE (and the LTP/time-value used for the floor
+         check and the partner's balance target) shifts `anchor_otm_steps` strikes further
+         OTM from `atm` on that side (CE: atm + steps*step; PE: atm - steps*step) --
+         i.e. "anchor selection is correct, but for pairing use 1-OTM of the anchored
+         side" rather than pairing off the literal ATM reading. If that shifted strike
+         isn't quoted or has no live LTP, no pair is returned (same as any other missing
+         leg). Default 0 preserves the original at-ATM anchor behaviour unchanged --
+         RE-ENTRY keeps anchor_otm_steps=0.
+      4. Anchor must pass the dual floor (raw LTP >= ltp_target, time value >= theta_target)
+         at its (possibly shifted) strike.
+      5. Partner = scan the other side over atm +/- offset for a strike whose raw LTP is
          <= anchor_time_value * balance_ratio and passes the dual floor. If rule_pass is
          supplied, the combined (ce_strike, pe_strike) pair must also pass it. Pick the
          HIGHEST such LTP (closest to anchor time value from below). The partner may be
-         ITM or OTM.
+         ITM or OTM. (Unchanged by anchor_otm_steps -- still scans around the original
+         `atm`, not the shifted anchor strike.)
 
     Returns (ce_strike, pe_strike, ce_ltp, pe_ltp) or None.
     """
@@ -395,9 +441,8 @@ def select_balanced_pair_at(
     ce_tv = strip_intrinsic(ce_ltp, "CE", atm, spot)
     pe_tv = strip_intrinsic(pe_ltp, "PE", atm, spot)
 
-    # Anchor = side with lower TIME VALUE at ATM.  The partner's raw LTP must not
-    # exceed the anchor's TIME VALUE * balance_ratio so the pair is balanced in
-    # theta/extrinsic value while allowing a small configurable skew.
+    # Anchor SIDE = side with lower TIME VALUE at ATM -- this decision always reads the
+    # raw ATM quotes, independent of anchor_otm_steps below.
     if ce_tv < pe_tv:
         anchor_side, anchor_strike, anchor_ltp, anchor_tv, partner_side = "CE", atm, ce_ltp, ce_tv, "PE"
     else:
@@ -406,6 +451,32 @@ def select_balanced_pair_at(
     if trace is not None:
         trace.append(
             f"ANCHOR atm={atm} ce_tv={ce_tv:.2f} pe_tv={pe_tv:.2f} -> "
+            f"anchor_side={anchor_side} (lower time value at ATM)"
+        )
+
+    if anchor_otm_steps > 0:
+        _shift = anchor_otm_steps * step
+        shifted_strike = int(atm + _shift) if anchor_side == "CE" else int(atm - _shift)
+        shifted_leg = strike_prem.get((shifted_strike, anchor_side))
+        shifted_ltp = shifted_leg.get("ltp", 0.0) if shifted_leg else 0.0
+        if not shifted_leg or shifted_ltp <= 0:
+            if trace is not None:
+                trace.append(
+                    f"REJECT anchor {anchor_side}{shifted_strike} (1-OTM of {anchor_side}@{atm}) "
+                    f"-- no live quote"
+                )
+            return None
+        anchor_strike = shifted_strike
+        anchor_ltp = shifted_ltp
+        anchor_tv = strip_intrinsic(shifted_ltp, anchor_side, shifted_strike, spot)
+        if trace is not None:
+            trace.append(
+                f"ANCHOR SHIFTED {anchor_otm_steps}-OTM -> {anchor_side}@{anchor_strike} "
+                f"ltp={anchor_ltp:.2f} tv={anchor_tv:.2f}"
+            )
+
+    if trace is not None:
+        trace.append(
             f"anchor={anchor_side}@{anchor_strike} ltp={anchor_ltp:.2f} tv={anchor_tv:.2f} "
             f"(need ltp>={ltp_target:.0f} theta>={theta_target:.0f}); partner={partner_side} "
             f"wants same floor and ltp<={anchor_tv * balance_ratio:.2f} (ratio={balance_ratio:.2f})"

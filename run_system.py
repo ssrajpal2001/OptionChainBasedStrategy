@@ -493,6 +493,15 @@ async def _run_live(
         bus, router,
         log_dir=os.path.join(cfg.storage.log_dir, "trades"),
     )
+    # 2026-08-20: SellStraddle's EOD hedge-and-carry feature -- deliberately its own
+    # standalone BUY-to-open/SELL-to-close bridge (own Topics, STRADDLE_HEDGE_ORDER_
+    # REQUEST/FILL) rather than touching straddle_bridge.py above, which is hardcoded
+    # SELL-to-open and is actively routing real live sold-leg orders.
+    from execution_bridge.straddle_hedge_bridge import StraddleHedgeExecutionBridge
+    straddle_hedge_bridge = StraddleHedgeExecutionBridge(
+        bus, router,
+        log_dir=os.path.join(cfg.storage.log_dir, "trades"),
+    )
     client_mgr    = ClientManager(bus, registry)
     risk_mgr      = RiskManager(bus, registry, router=router)
 
@@ -670,6 +679,7 @@ async def _run_live(
         asyncio.create_task(fvg_bridge.run(),           name="fvg_bridge"),
         asyncio.create_task(oi_flow_bridge.run(),       name="oi_flow_bridge"),
         asyncio.create_task(liquidity_sweep_bridge.run(), name="liquidity_sweep_bridge"),
+        asyncio.create_task(straddle_hedge_bridge.run(), name="straddle_hedge_bridge"),
         asyncio.create_task(client_mgr.run(),           name="client_mgr"),
         asyncio.create_task(risk_mgr.run(),             name="risk_mgr"),
         asyncio.create_task(rebalancer.run(),           name="rebalancer"),
@@ -710,6 +720,7 @@ async def _run_live(
     fvg_bridge.stop()
     oi_flow_bridge.stop()
     liquidity_sweep_bridge.stop()
+    straddle_hedge_bridge.stop()
     await router.stop()
     await client_mgr.stop()
     await admin.stop()   # stops console + dashboard server + cancels dashboard task

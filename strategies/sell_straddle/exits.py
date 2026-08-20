@@ -431,6 +431,217 @@ class ExitMixin:
                 "ind_by_tf": _exit_dump or {}, "ts": now.timestamp(),
             })
 
+    # ── EOD hedge-and-carry (2026-08-20, user spec) ─────────────────────────────
+
+    def _is_t1_from_expiry(self, pos: "StraddlePosition", now: datetime) -> bool:
+        """True the trading day immediately before (or on/after) the position's own
+        expiry date. Deliberately a plain calendar-date check against the position's
+        already-known real expiry_date -- no separate trading-calendar logic needed,
+        since both `now` and `expiry_date` are always real trading days by
+        construction (a weekly Tue-expiry position held over a weekend still yields
+        exactly `.days == 1` on the Monday before it, matching the user's own
+        Monday/Tuesday example)."""
+        if not pos.expiry_date:
+            return False
+        return (pos.expiry_date - now.date()).days <= 1
+
+    def _both_legs_in_loss(self, pos: "StraddlePosition") -> bool:
+        """Any loss at all on BOTH legs -- no threshold (user spec: 'any loss')."""
+        ce_pnl = float(getattr(pos.ce_leg, "entry_price", 0.0) or 0.0) - float(getattr(pos.ce_leg, "ltp", 0.0) or 0.0)
+        pe_pnl = float(getattr(pos.pe_leg, "entry_price", 0.0) or 0.0) - float(getattr(pos.pe_leg, "ltp", 0.0) or 0.0)
+        return ce_pnl < 0 and pe_pnl < 0
+
+    async def _dispatch_hedge_order(
+        self, action: str, side: str, strike: int, price: float, entry_price: float,
+        expiry, reason: str,
+    ):
+        """BUY (open) or SELL (close) one hedge leg via the standalone
+        StraddleHedgeExecutionBridge (Topic.STRADDLE_HEDGE_ORDER_REQUEST/FILL) --
+        never touches the sold-leg StraddleOrderEvent/StraddleFillEvent flow.
+        Waits (confirm-then-finalize, same contract every bridge in this codebase
+        uses) for the matching StraddleHedgeFillEvent. Returns that event, or None
+        on a 15s confirm timeout."""
+        from strategies.sell_straddle.hedge_events import StraddleHedgeOrderEvent
+        self._event_counter += 1
+        eid = f"{self._underlying}_HEDGE_{action}_{side}{int(strike)}_{self._event_counter}"
+        qty = self._lot_size * self._lot_multiplier
+        order_ev = StraddleHedgeOrderEvent(
+            client_id=self._client_id, binding_id=self._binding_id, action=action,
+            underlying=self._underlying, option_type=side, strike=int(strike),
+            expiry=expiry, quantity=qty, entry_price=entry_price,
+            exit_price=price if action == "SELL" else 0.0,
+            reason=reason, event_id=eid,
+            product_type=self._current_product_type(),
+        )
+        waiter = asyncio.Event()
+        self._hedge_fill_waiters[eid] = waiter
+        try:
+            await self._bus.publish(Topic.STRADDLE_HEDGE_ORDER_REQUEST, order_ev)
+            try:
+                await asyncio.wait_for(waiter.wait(), timeout=15.0)
+            except asyncio.TimeoutError:
+                logger.critical(
+                    "SellStraddle[%s]: HEDGE %s %s%d fill NOT CONFIRMED within 15s "
+                    "(event_id=%s reason=%s).",
+                    self._underlying, action, side, strike, eid, reason,
+                )
+                return None
+        finally:
+            self._hedge_fill_waiters.pop(eid, None)
+        return self._hedge_fill_results.pop(eid, None)
+
+    async def _try_build_hedge(self, pos: "StraddlePosition", now: datetime) -> bool:
+        """Both sold legs in loss at EOD, not T-1 -- find + buy a protective leg for
+        each side (further OTM, LTP <=50% of the running sold leg's own LTP, same
+        qty). Returns True once the position is (at least partially) hedged and
+        should NOT also receive a normal EOD close; False if no valid hedge could be
+        built at all, so the caller should fall back to a normal close."""
+        from strategies.sell_straddle.selection import find_hedge_strike
+        from strategies.sell_straddle.dataclasses import StraddleLeg
+
+        step = self._cfg.exchange.strike_steps.get(self._underlying, 50.0) if self._cfg else 50.0
+        ce_ltp = float(getattr(pos.ce_leg, "ltp", 0.0) or 0.0)
+        pe_ltp = float(getattr(pos.pe_leg, "ltp", 0.0) or 0.0)
+        ce_hedge = find_hedge_strike(self._strike_prem, "CE", pos.ce_leg.strike, ce_ltp, step)
+        pe_hedge = find_hedge_strike(self._strike_prem, "PE", pos.pe_leg.strike, pe_ltp, step)
+
+        if ce_hedge is None or pe_hedge is None:
+            self._clog.info(
+                "HEDGE — no valid 50%%-or-below strike found for %s -- falling back to normal EOD close",
+                "CE" if ce_hedge is None else "PE",
+            )
+            return False
+        ce_strike, ce_hedge_ltp = ce_hedge
+        pe_strike, pe_hedge_ltp = pe_hedge
+
+        # Degenerate case (2026-08-20 user spec): the computed hedge strike lands on
+        # the exact same strike as the sold leg it's meant to protect -- buying that
+        # back is not a real hedge, it's just closing the leg. Don't hedge; let the
+        # caller do a normal full close instead.
+        if int(ce_strike) == int(pos.ce_leg.strike) or int(pe_strike) == int(pos.pe_leg.strike):
+            self._clog.info(
+                "HEDGE — computed hedge strike collided with its own sold leg's strike "
+                "(CE %d vs %d, PE %d vs %d) -- skipping hedge, normal close instead",
+                ce_strike, int(pos.ce_leg.strike), pe_strike, int(pos.pe_leg.strike),
+            )
+            return False
+
+        ce_fill = await self._dispatch_hedge_order(
+            "BUY", "CE", ce_strike, ce_hedge_ltp, ce_hedge_ltp, pos.expiry_date, "eod_hedge",
+        )
+        if ce_fill is None or ce_fill.entry_aborted or ce_fill.routing_failed or ce_fill.fill_price <= 0:
+            self._clog.critical("HEDGE — CE %d BUY failed/unconfirmed -- aborting hedge, normal EOD close instead", ce_strike)
+            return False
+
+        pe_fill = await self._dispatch_hedge_order(
+            "BUY", "PE", pe_strike, pe_hedge_ltp, pe_hedge_ltp, pos.expiry_date, "eod_hedge",
+        )
+        pos.hedge_ce_leg = StraddleLeg("CE", ce_strike, ce_fill.fill_price, ce_fill.fill_price,
+                                       open_time=now, open_reason="eod_hedge")
+        if pe_fill is None or pe_fill.entry_aborted or pe_fill.routing_failed or pe_fill.fill_price <= 0:
+            # CE already genuinely bought -- do NOT discard it, it's a real position.
+            # Mark hedged (partial) and flag loudly for manual review rather than
+            # silently leaving a real bought leg untracked.
+            logger.critical(
+                "SellStraddle[%s]: HEDGE PE %d BUY failed/unconfirmed AFTER CE already filled -- "
+                "position is PARTIALLY hedged (CE only). Needs manual review.",
+                self._underlying, pe_strike,
+            )
+            self._clog.critical(
+                "HEDGE PE %d BUY failed AFTER CE%d already filled @ %.2f -- PARTIALLY hedged, "
+                "needs manual review", pe_strike, ce_strike, ce_fill.fill_price,
+            )
+            pos.is_hedged_positional = True
+            self._persist()
+            return True
+
+        pos.hedge_pe_leg = StraddleLeg("PE", pe_strike, pe_fill.fill_price, pe_fill.fill_price,
+                                       open_time=now, open_reason="eod_hedge")
+        pos.is_hedged_positional = True
+        logger.info(
+            "SellStraddle[%s]: HEDGE BUILT — CE%d@%.2f PE%d@%.2f -- position converted to "
+            "positional carry (NRML), will only close on T-1-from-expiry or a same-strike "
+            "collision after a future rollover.",
+            self._underlying, ce_strike, ce_fill.fill_price, pe_strike, pe_fill.fill_price,
+        )
+        self._clog.info(
+            "HEDGE BUILT — CE%d@%.2f PE%d@%.2f -- position converted to positional carry (NRML)",
+            ce_strike, ce_fill.fill_price, pe_strike, pe_fill.fill_price,
+        )
+        self._persist()
+        return True
+
+    async def _close_hedge_legs(self, pos: "StraddlePosition", reason: str) -> None:
+        """Close (SELL) both hedge legs, if any. Never touches the sold legs --
+        caller is responsible for closing those separately (_close_position)."""
+        for attr in ("hedge_ce_leg", "hedge_pe_leg"):
+            leg = getattr(pos, attr, None)
+            if leg is None:
+                continue
+            current = self._strike_prem.get((int(leg.strike), leg.option_type), {})
+            current_ltp = float(current.get("ltp", 0.0) or 0.0) or float(leg.ltp or 0.0)
+            fill = await self._dispatch_hedge_order(
+                "SELL", leg.option_type, int(leg.strike), current_ltp,
+                leg.entry_price, pos.expiry_date, reason,
+            )
+            if fill is None or fill.exit_failed or fill.routing_failed:
+                logger.critical(
+                    "SellStraddle[%s]: HEDGE CLOSE %s%d NOT confirmed (reason=%s) -- hedge leg "
+                    "stays OPEN, will retry next cycle.",
+                    self._underlying, leg.option_type, int(leg.strike), reason,
+                )
+                self._clog.critical(
+                    "HEDGE CLOSE %s%d NOT confirmed (reason=%s) -- stays open, retrying",
+                    leg.option_type, int(leg.strike), reason,
+                )
+                continue
+            logger.info(
+                "SellStraddle[%s]: HEDGE CLOSED — %s%d @ %.2f (reason=%s).",
+                self._underlying, leg.option_type, int(leg.strike), fill.fill_price, reason,
+            )
+            self._clog.info("HEDGE CLOSED — %s%d @ %.2f (reason=%s)",
+                            leg.option_type, int(leg.strike), fill.fill_price, reason)
+            setattr(pos, attr, None)
+        if pos.hedge_ce_leg is None and pos.hedge_pe_leg is None:
+            pos.is_hedged_positional = False
+        self._persist()
+
+    async def _eod_close_or_hedge(self, pos: "StraddlePosition", now: datetime) -> None:
+        """The EOD decision, in priority order (2026-08-20, user spec):
+          1. T-1-from-expiry always forces a full, normal close -- sold legs AND any
+             standing hedge legs from a prior day -- regardless of profit/loss.
+          2. Already hedged (carried from a prior day), not T-1 -- do nothing, let it
+             keep running (ongoing sold-leg exit/rollover logic already applies every
+             tick regardless of this EOD pass).
+          3. Not yet hedged, both legs in loss, feature enabled -- try to build the
+             hedge instead of closing.
+          4. Otherwise -- normal EOD close, exactly as before this feature existed.
+        """
+        if self._is_t1_from_expiry(pos, now):
+            if pos.is_hedged_positional:
+                logger.info("SellStraddle[%s]: T-1-FROM-EXPIRY — closing hedge legs before sold legs.",
+                            self._underlying)
+                await self._close_hedge_legs(pos, "t1_expiry_close")
+            logger.info("SellStraddle[%s]: EOD SQUAREOFF — time=%s", self._underlying, now.strftime("%H:%M"))
+            await self._close_position("eod_squareoff")
+            self._stop_for_day = True
+            return
+
+        if pos.is_hedged_positional:
+            # Carried from a prior day, not yet T-1 -- leave it running.
+            return
+
+        if getattr(self, "_hedge_carry_enabled", False) and self._both_legs_in_loss(pos):
+            hedged = await self._try_build_hedge(pos, now)
+            if hedged:
+                self._stop_for_day = True
+                return
+            # Hedge couldn't be built -- fall through to a normal close below.
+
+        logger.info("SellStraddle[%s]: EOD SQUAREOFF — time=%s", self._underlying, now.strftime("%H:%M"))
+        await self._close_position("eod_squareoff")
+        self._stop_for_day = True
+
     async def _check_exits(self) -> None:
         pos = self._position
         if not pos:
@@ -510,12 +721,10 @@ class ExitMixin:
                 self._initial_net_credit, self._force_exit.strftime("%H:%M"), _active,
             )
 
-        # 1. EOD FORCE SQUARE-OFF
+        # 1. EOD FORCE SQUARE-OFF (2026-08-20: hedge-and-carry + T-1-from-expiry, user spec)
         if self._past_squareoff(now):
             if self._position and self._position.status == "open":
-                logger.info("SellStraddle[%s]: EOD SQUAREOFF — time=%s", self._underlying, now.strftime("%H:%M"))
-                await self._close_position("eod_squareoff")
-                self._stop_for_day = True
+                await self._eod_close_or_hedge(self._position, now)
             return
 
         # A single-side roll is in flight (close fill awaited / open fill pending).
@@ -582,6 +791,33 @@ class ExitMixin:
                 return
             else:
                 return
+
+        # 1b. HEDGE SAME-STRIKE COLLISION GUARD (2026-08-20, user spec): a standing
+        # hedge leg from a prior EOD hedge-and-carry can end up sharing the exact
+        # same strike as a FRESH sold leg taken after a later rollover/re-entry --
+        # the market moved enough that the normal pair-selection logic, run
+        # independently of the hedge, happened to land back on it. A sold leg and
+        # its own hedge leg at the identical strike+expiry net to ~zero real
+        # exposure on that side -- not worth continuing to carry. Close everything
+        # (sold + hedge) and let the next eligible entry cycle start genuinely
+        # fresh, no hedge attached.
+        if pos.is_hedged_positional and (
+            (pos.hedge_ce_leg is not None and int(pos.hedge_ce_leg.strike) == int(pos.ce_leg.strike))
+            or (pos.hedge_pe_leg is not None and int(pos.hedge_pe_leg.strike) == int(pos.pe_leg.strike))
+        ):
+            logger.info(
+                "SellStraddle[%s]: HEDGE SAME-STRIKE COLLISION — sold CE%d/PE%d now matches a "
+                "standing hedge leg -- closing everything and starting fresh.",
+                self._underlying, int(pos.ce_leg.strike), int(pos.pe_leg.strike),
+            )
+            self._clog.info(
+                "HEDGE SAME-STRIKE COLLISION — sold CE%d/PE%d matches standing hedge -- "
+                "closing everything, starting fresh",
+                int(pos.ce_leg.strike), int(pos.pe_leg.strike),
+            )
+            await self._close_hedge_legs(pos, "hedge_strike_collision")
+            await self._close_position("hedge_strike_collision")
+            return
 
         # 2. DAY-LEVEL % GUARDRAILS
         if self._initial_net_credit > 0:
@@ -994,6 +1230,20 @@ class ExitMixin:
                 return
 
             # ── Confirmed by the broker (or a paper/paper_route sim fill) — finalize ──────
+            # 2026-08-20: a standing hedge OUTLIVES the sold pair it was built against --
+            # stash it before this position object is discarded so the NEXT fresh entry
+            # (_open_position) can carry it forward and re-run the same-strike-collision
+            # guard. Only stash on a genuine full close of a hedged position (reason
+            # already handles t1_expiry_close's own hedge teardown separately via
+            # _close_hedge_legs -- by the time we get here for that reason the hedge legs
+            # are already None, so this is a no-op for that path).
+            if pos.hedge_ce_leg is not None or pos.hedge_pe_leg is not None:
+                self._pending_hedge_ce_leg = pos.hedge_ce_leg
+                self._pending_hedge_pe_leg = pos.hedge_pe_leg
+                self._clog.info(
+                    "HEDGE — standing hedge legs carried past this close (reason=%s), "
+                    "will attach to the next fresh entry.", reason,
+                )
             self._position = None
             pos.realized_pnl = realized_pnl
             pos.close_reason = reason

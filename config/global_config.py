@@ -218,6 +218,13 @@ class Topic:
                                                       # fully standalone strategy (same mandate as OI-Flow),
                                                       # own Topics, shares no runtime infra with any other
                                                       # strategy in this codebase
+    STRADDLE_HEDGE_ORDER_REQUEST = "straddle_hedge_order_request"  # SellStraddle EOD hedge-and-carry
+    STRADDLE_HEDGE_ORDER_FILL    = "straddle_hedge_order_fill"     # (2026-08-20) -- BUY-to-open/SELL-to-close
+                                                      # protective legs. Deliberately its OWN Topic/bridge,
+                                                      # separate from ORDER_REQUEST/ORDER_FILL (the sold-leg
+                                                      # SellStraddle flow), which is hardcoded SELL-to-open
+                                                      # only -- keeps the new BUY-to-open path from ever
+                                                      # touching the existing live sold-leg order flow.
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -110,6 +110,19 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         # and full-position closes). Consumed by _close_leg / _close_position to see whether the
         # wake-up was a REAL confirmed exit or an exit_aborted (broker unavailable) fill.
         self._roll_close_results: Dict[str, object] = {}
+        # EOD hedge-and-carry (2026-08-20): own waiter/result dicts, own fill loop,
+        # own Topic (STRADDLE_HEDGE_ORDER_FILL) -- deliberately parallel to, never
+        # sharing state with, the sold-leg _roll_close_waiters/_roll_close_results
+        # above, since a hedge leg is the opposite order direction (buy-to-open).
+        self._hedge_fill_waiters: Dict[str, asyncio.Event] = {}
+        self._hedge_fill_results: Dict[str, object] = {}
+        # A hedge's protective legs outlive the SOLD pair they were built against --
+        # a rollover/re-entry fully closes the old StraddlePosition and constructs a
+        # brand-new one. Stashed here (by _close_position, right before the old
+        # position object is discarded) so _open_position can carry them onto the
+        # fresh position and re-check the same-strike-collision guard.
+        self._pending_hedge_ce_leg = None
+        self._pending_hedge_pe_leg = None
         self._roll_in_progress: bool = False
         self._last_roll_attempt: Dict[str, datetime] = {}
         self._last_exit_rules_bucket: str = ""
@@ -365,6 +378,7 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
             asyncio.create_task(self._tick_loop(), name=f"ss_{_tag}_tick"),
             asyncio.create_task(self._option_loop(), name=f"ss_{_tag}_opt"),
             asyncio.create_task(self._fill_loop(), name=f"ss_{_tag}_fill"),
+            asyncio.create_task(self._hedge_fill_loop(), name=f"ss_{_tag}_hedge_fill"),
         ]
         asyncio.create_task(self._seed_pool())
         logger.info("SellStraddleStrategy[%s]: started.", self._underlying)
@@ -911,6 +925,39 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         finally:
             self._bus.unsubscribe(Topic.ORDER_FILL, q)
             self._loop_queues.pop("fill", None)
+
+    async def _hedge_fill_loop(self) -> None:
+        """EOD hedge-and-carry (2026-08-20): own fill loop for
+        Topic.STRADDLE_HEDGE_ORDER_FILL, completely separate from _fill_loop above
+        (which only ever handles the sold-leg StraddleFillEvent flow). Same
+        client_id/binding_id identity filter as _fill_loop -- this Topic is also a
+        true broadcast (EventBus.publish() has no per-book routing), and two
+        different books trading the same underlying concurrently is a real,
+        confirmed-live scenario (see _fill_loop's own 2026-08-06 comment)."""
+        from strategies.sell_straddle.hedge_events import StraddleHedgeFillEvent
+        q = self._bus.subscribe(Topic.STRADDLE_HEDGE_ORDER_FILL)
+        self._loop_queues["hedge_fill"] = q
+        try:
+            while self._running:
+                try:
+                    ev = await asyncio.wait_for(q.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    continue
+                except asyncio.CancelledError:
+                    break
+                if not isinstance(ev, StraddleHedgeFillEvent):
+                    continue
+                if ev.underlying != self._underlying:
+                    continue
+                if ev.client_id != self._client_id or ev.binding_id != self._binding_id:
+                    continue
+                self._hedge_fill_results[ev.event_id] = ev
+                waiter = self._hedge_fill_waiters.get(ev.event_id)
+                if waiter is not None:
+                    waiter.set()
+        finally:
+            self._bus.unsubscribe(Topic.STRADDLE_HEDGE_ORDER_FILL, q)
+            self._loop_queues.pop("hedge_fill", None)
 
     def _on_fill(self, fill) -> None:
         try:

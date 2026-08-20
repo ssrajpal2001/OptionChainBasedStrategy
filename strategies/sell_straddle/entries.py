@@ -18,6 +18,7 @@ from strategies.sell_straddle.audit import (
     audit_entry_eval,
     audit_entry_exec,
 )
+from strategies.sell_straddle.rolling import _ROLLOVER_STRIKE_STEP
 
 logger = logging.getLogger(__name__)
 
@@ -348,6 +349,11 @@ class EntryMixin:
 
         from strategies.sell_straddle.selection import select_balanced_pair, reentry_block_reason
 
+        # 2026-08-20 user spec: RE-ENTRY (like rollover) rounds ATM and enumerates
+        # candidate strikes on a 100pt grid, NOT the real 50pt NIFTY grid `step` above
+        # (which stays 50 and is only used for BEGINNING).
+        reentry_step = _ROLLOVER_STRIKE_STEP
+
         _trace: list = []
         # Re-entry now uses the same balanced-pair logic as beginning: anchor at the
         # ATM side with lower TIME VALUE, partner raw LTP must be <= anchor time value
@@ -356,7 +362,7 @@ class EntryMixin:
         # CE6500/PE7300 when ATM was 6900).  The re-entry rules are evaluated AFTER the
         # pair is selected, not during selection (same as beginning).
         sel = select_balanced_pair(
-            self._strike_prem, self._spot, step, offset, ltp_target, trace=_trace,
+            self._strike_prem, self._spot, reentry_step, offset, ltp_target, trace=_trace,
             entry_basis=self._entry_basis, theta_target=self._theta_target,
             variable_strikes=variable_strikes, balance_ratio=balance_ratio,
         )
@@ -372,7 +378,7 @@ class EntryMixin:
                 )
             else:
                 diag = reentry_block_reason(
-                    self._strike_prem, self._spot, step, offset, ltp_target,
+                    self._strike_prem, self._spot, reentry_step, offset, ltp_target,
                     rule_eval=lambda cs, ps: _eval_rules(rules, self._ind_by_tf(cs, ps, rules)),
                     theta_target=self._theta_target,
                     variable_strikes=variable_strikes,
@@ -421,10 +427,14 @@ class EntryMixin:
         candidates: list = []
         for label, atm in (("near", near), ("far", far)):
             _trace: list = []
+            # 2026-08-20 user spec: anchor SIDE decision stays at raw ATM, but the
+            # anchor's own strike used for pairing shifts 1 step further OTM (BEGINNING
+            # only -- RE-ENTRY keeps anchor_otm_steps=0/unshifted).
             sel = select_balanced_pair_at(
                 self._strike_prem, atm, self._spot, step, offset, ltp_target, trace=_trace,
                 entry_basis=self._entry_basis, theta_target=theta_target,
                 variable_strikes=variable_strikes, balance_ratio=balance_ratio,
+                anchor_otm_steps=1,
             )
             for _ln in _trace:
                 self._clog.info("SELECT %s | [%s@%d] %s", self._underlying, label, atm, _ln)
@@ -570,6 +580,25 @@ class EntryMixin:
             expiry_date=expiry_date,
         )
         self._position.entry_time_value = _ctv(ce_strike, pe_strike, self._spot, ce_ltp, pe_ltp)
+
+        # 2026-08-20 user spec: a standing hedge from a prior EOD hedge-and-carry
+        # outlives the sold pair it was built against -- carry it onto this fresh
+        # position. The same-strike-collision guard (in _check_exits) catches the
+        # case where this fresh pair happens to land on the hedge's own strike on
+        # the very next tick.
+        if self._pending_hedge_ce_leg is not None or self._pending_hedge_pe_leg is not None:
+            self._position.hedge_ce_leg = self._pending_hedge_ce_leg
+            self._position.hedge_pe_leg = self._pending_hedge_pe_leg
+            self._position.is_hedged_positional = True
+            self._clog.info(
+                "HEDGE — carried standing hedge (CE%s / PE%s) onto fresh pair CE%d/PE%d",
+                int(self._pending_hedge_ce_leg.strike) if self._pending_hedge_ce_leg else "-",
+                int(self._pending_hedge_pe_leg.strike) if self._pending_hedge_pe_leg else "-",
+                ce_strike, pe_strike,
+            )
+            self._pending_hedge_ce_leg = None
+            self._pending_hedge_pe_leg = None
+
         self._pin_position_legs(self._position)
         self._persist()
         asyncio.create_task(self._seed_exec_legs(int(ce_strike), int(pe_strike)))

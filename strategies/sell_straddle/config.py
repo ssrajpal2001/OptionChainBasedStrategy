@@ -82,6 +82,8 @@ class SellStraddleConfig:
 
     same_day_expiry_enabled: bool
 
+    hedge_carry_enabled: bool
+
 
 def _apply_client_overrides(
     cfg: SellStraddleConfig,
@@ -235,6 +237,15 @@ def load_sell_straddle_config(
 
     same_day_expiry_enabled = bool(ss.get("same_day_expiry_enabled", False))
 
+    # EOD hedge-and-carry (2026-08-20, user spec): if BOTH sold legs are running in
+    # loss at close-of-day (and it isn't T-1 from expiry), buy a protective leg on
+    # each side (further OTM, LTP <=50% of the running sold leg) instead of the
+    # normal EOD square-off, and carry the whole 4-leg position forward as a
+    # positional (NRML) trade. Opt-in, default OFF -- brand new, must not silently
+    # activate on an existing live deployment. Requires product_type=NRML on this
+    # binding to actually survive the broker's own overnight square-off.
+    hedge_carry_enabled = bool(ss.get("hedge_carry_enabled", False))
+
     config = SellStraddleConfig(
         entry_start=entry_start,
         entry_cutoff=entry_cutoff,
@@ -274,6 +285,7 @@ def load_sell_straddle_config(
         day_low_exit_enabled=day_low_exit_enabled,
         day_low_freeze_time=day_low_freeze_time,
         same_day_expiry_enabled=same_day_expiry_enabled,
+        hedge_carry_enabled=hedge_carry_enabled,
     )
 
     # Apply per-client risk overrides if a client_id is provided.
@@ -362,6 +374,8 @@ class ConfigMixin:
             self._day_low_tracked_pair = None
 
         self._same_day_expiry_enabled = cfg.same_day_expiry_enabled
+
+        self._hedge_carry_enabled = cfg.hedge_carry_enabled
 
     def reconfigure(self) -> None:
         self._load_thresholds()
