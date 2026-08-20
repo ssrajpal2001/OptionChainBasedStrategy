@@ -119,7 +119,8 @@ class PoolIndicatorEngine:
         return True
 
     def pair_indicators(self, ce_strike: int, pe_strike: int,
-                        stale_sec: float = 0.0) -> Optional[Dict[str, float]]:
+                        stale_sec: float = 0.0,
+                        session_start_min: Optional[int] = None) -> Optional[Dict[str, float]]:
         ce, pe = self._key(ce_strike, "CE"), self._key(pe_strike, "PE")
         if ce not in self._latest or pe not in self._latest:
             return None
@@ -131,15 +132,20 @@ class PoolIndicatorEngine:
         # Freshness flag for callers/logs (diagnoses TF1/TF2 divergence & frozen illiquid legs).
         ind["stale_atp"] = 0.0 if self.pair_atp_fresh(ce_strike, pe_strike, stale_sec) else 1.0
         # SLOPE (VWAP delta) is INTRADAY — it must use POST-SESSION bars only.
-        # Seeds (negative minute index) and PRE-OPEN bars (9:10–9:14, minute < 555) are excluded.
+        # Seeds (negative minute index) and PRE-OPEN bars are excluded via a floor minute.
         # Pre-open bars have positive minute indices so `m >= 0` incorrectly included them, causing
-        # SLOPE to compare pre-open ATP vs the 9:15 bar → false SLOPE at 9:16:05 → early trade.
-        # With session start at minute=555 (09:15 IST), SLOPE requires the 9:15 bar + 9:16 bar
-        # (both committed), so the first valid SLOPE evaluation is at 09:17:05 as expected.
+        # SLOPE to compare pre-open ATP vs the first live bar → false SLOPE → early trade.
+        # `session_start_min` defaults to the fixed 09:15 market-open constant, but callers that
+        # know their own configured entry_start (e.g. SellStraddle, when entry_start is later than
+        # market open) should pass that instead — otherwise a candle that closed BEFORE the
+        # strategy's own entry window opened can still count as the first of the 2 bars SLOPE
+        # needs (2026-08-20 fix: a deployment with entry_start=09:16 was getting a valid SLOPE at
+        # 09:16:05 off the pre-entry-start 09:15 bar, one full candle earlier than intended).
+        _floor_min = _SESSION_START_MIN if session_start_min is None else int(session_start_min)
         ca, pa = self._atps.get(ce), self._atps.get(pe)
         cm, pm = self._mins.get(ce), self._mins.get(pe)
-        ca_live = [a for a, m in zip(ca, cm) if m >= _SESSION_START_MIN] if (ca and cm) else []
-        pa_live = [a for a, m in zip(pa, pm) if m >= _SESSION_START_MIN] if (pa and pm) else []
+        ca_live = [a for a, m in zip(ca, cm) if m >= _floor_min] if (ca and cm) else []
+        pa_live = [a for a, m in zip(pa, pm) if m >= _floor_min] if (pa and pm) else []
         if len(ca_live) >= 2 and len(pa_live) >= 2:
             _curr = ca_live[-1] + pa_live[-1]
             _prev = ca_live[-2] + pa_live[-2]

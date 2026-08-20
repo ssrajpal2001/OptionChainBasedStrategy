@@ -44,8 +44,10 @@ class IndicatorMixin:
         self._ind["ltp"] = ltp
         self._ind["close"] = ltp
         if self._position and self._position.status == "open":
+            _floor_min = self._entry_start.hour * 60 + self._entry_start.minute
             _pe = self._pool_engine.pair_indicators(
-                int(self._position.ce_leg.strike), int(self._position.pe_leg.strike))
+                int(self._position.ce_leg.strike), int(self._position.pe_leg.strike),
+                session_start_min=_floor_min)
             if _pe:
                 for _k in ("rsi", "roc", "slope", "vwap", "vwap_prev", "close"):
                     if _k in _pe:
@@ -99,9 +101,22 @@ class IndicatorMixin:
                 self._ind["roc"] = float((closes[-1] - _ref) / _ref * 100.0)
 
     def _pair_indicators(self, ce_strike: int, pe_strike: int) -> Optional[Dict[str, float]]:
-        """Per-pair {close, vwap, slope, rsi, roc}."""
-        ind = self._pool_engine.pair_indicators(int(ce_strike), int(pe_strike))
-        if ind is not None and "rsi" in ind:
+        """Per-pair {close, vwap, slope, rsi, roc}.
+
+        2026-08-20 fix: this used to only trust the real pool-engine result (genuinely
+        closed-candle-vs-closed-candle SLOPE) once "rsi" was present in it — but RSI needs
+        15 committed bars while SLOPE only needs 2, and a BEGINNING entry always evaluates a
+        freshly-selected strike pair that can never have 15 bars this early in the session.
+        That gated every early-session SLOPE(1m) rule into the weaker fallback below (live
+        current tick vs one prior close) even once the real engine already had a valid,
+        fully-closed-candle SLOPE ready. Now: trust the real engine whenever it returns
+        anything at all (it already reports partial data correctly — close/vwap as soon as
+        one tick exists, slope only once 2 real closed bars exist) and only fall back when
+        it has no data whatsoever for this pair yet (e.g. truly zero ticks received)."""
+        _floor_min = self._entry_start.hour * 60 + self._entry_start.minute
+        ind = self._pool_engine.pair_indicators(
+            int(ce_strike), int(pe_strike), session_start_min=_floor_min)
+        if ind is not None:
             return ind
         from strategies.sell_straddle.selection import pair_indicators
         return pair_indicators(self._strike_prem, self._prev_atp_closed, ce_strike, pe_strike)

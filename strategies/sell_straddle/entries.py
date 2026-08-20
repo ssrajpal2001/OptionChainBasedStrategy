@@ -32,21 +32,40 @@ class EntryMixin:
         Mirrors old base.py _is_in_priming_wait():
           wait = max_rule_tf × 2   if any rule uses SLOPE / VWAP_SLOPE
                = max_rule_tf × 1   otherwise
+
+        2026-08-20 fix: a rule stored in "advanced" (operand1/operand2) form used to be
+        skipped by the has_slope check entirely, regardless of what it actually compares --
+        so a SLOPE rule built via the advanced editor never got the extra ×2 wait a plain
+        SLOPE rule gets, letting entries prime a full candle earlier than intended. Now an
+        "advanced" rule counts as slope-based if either operand names a slope indicator.
         """
         if not rules:
             return 0
         tfs = [int(r.get("tf", 1)) for r in rules if r.get("tf")]
         max_tf = max(tfs) if tfs else 1
         slope_names = {"slope", "vwap_slope", "slope_curr", "slope_prev"}
-        has_slope = any(
-            r.get("indicator", "").lower() in slope_names
-            for r in rules
-            if r.get("indicator", "").lower() != "advanced"
-        )
+
+        def _uses_slope(r: dict) -> bool:
+            ind = (r.get("indicator") or "").lower()
+            if ind == "advanced":
+                o1 = (r.get("operand1") or "").lower()
+                o2 = (r.get("operand2") or "").lower()
+                return o1 in slope_names or o2 in slope_names
+            return ind in slope_names
+
+        has_slope = any(_uses_slope(r) for r in rules)
         return max_tf * (2 if has_slope else 1)
 
     def _is_primed(self, now: datetime, rules: List[dict]) -> bool:
-        """True once market_open + wait_minutes has passed."""
+        """True once priming_anchor + wait_minutes has passed.
+
+        2026-08-20 fix: the anchor used to always be `_market_open_dt` (the fixed 09:15
+        market-open constant), even when the strategy's own configured `entry_start` is
+        later than that. That let the priming window count a candle that closed BEFORE
+        the entry window even opened as part of the required warm-up -- e.g. entry_start
+        09:16 still primed off 09:15+wait, one candle too early. The anchor is now
+        whichever is later: real market open or this deployment's own entry_start.
+        """
         if self._primed:
             return True
         if self._market_open_dt is None:
@@ -60,7 +79,12 @@ class EntryMixin:
         if wait_min == 0:
             self._primed = True
             return True
-        ready_at = self._market_open_dt + timedelta(minutes=wait_min)
+        entry_start_dt = self._market_open_dt.replace(
+            hour=self._entry_start.hour, minute=self._entry_start.minute,
+            second=0, microsecond=0,
+        )
+        anchor = max(self._market_open_dt, entry_start_dt)
+        ready_at = anchor + timedelta(minutes=wait_min)
         if now >= ready_at:
             self._primed = True
             logger.info(

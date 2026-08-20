@@ -991,14 +991,29 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                     # the broker connection works right now -- clear the rejection streak so
                     # a later, unrelated rejection doesn't inherit count from an old one.
                     self._consecutive_entry_rejections = 0
+                    # 2026-08-20 fix: do NOT set `.ltp` here to the broker's real fill
+                    # price. `.ltp` is a purely LIVE, continuously-updated field (already
+                    # initialized from the live feed at optimistic-open in entries.py, and
+                    # kept fresh every tick by the OPTION_TICK handler above) -- only
+                    # `entry_price` should ever reflect the real fill. Real incident: a
+                    # live Zerodha fill (CE=45.90) landed noticeably below the strategy's
+                    # own live LTP estimate (CE=55.40) at entry; setting `.ltp` to the fill
+                    # briefly made `pos.current_value` read ~114 instead of the genuinely
+                    # traded ~122 -- and the Day-Low Reversal Exit tracker (which reads
+                    # `pos.current_value` on every tick to find the pair's own running
+                    # minimum) latched onto that one-tick artifact as the day's low, since
+                    # it ran before the very next live tick corrected `.ltp` back. The
+                    # frozen 15:00 low ended up ~8pts below anything the live market ever
+                    # actually traded at, for that client only (paper/simulated fills
+                    # always match the strategy's own LTP exactly, so this never surfaced
+                    # there). `.ltp` is left untouched here; only `entry_price` (used for
+                    # real P&L) is set from the fill.
                     _legs = getattr(fill, "legs", ["CE", "PE"])
                     if "CE" in _legs and fill.ce_fill and fill.ce_fill > 0:
-                        self._position.ce_leg.ltp = fill.ce_fill
                         self._position.ce_leg.entry_price = fill.ce_fill
                         if getattr(fill, "ce_symbol", ""):
                             self._position.ce_leg.symbol = fill.ce_symbol
                     if "PE" in _legs and fill.pe_fill and fill.pe_fill > 0:
-                        self._position.pe_leg.ltp = fill.pe_fill
                         self._position.pe_leg.entry_price = fill.pe_fill
                         if getattr(fill, "pe_symbol", ""):
                             self._position.pe_leg.symbol = fill.pe_symbol
