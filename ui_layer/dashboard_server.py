@@ -660,6 +660,7 @@ class DashboardServer:
         fvg_manager=None,  # FVGBookManager — Fair Value Gap SMC books
         oi_flow_manager=None,  # OIFlowBookManager — OI-Flow Pre-Breakout books
         liquidity_sweep_manager=None,  # LiquiditySweepBookManager — Sweep+Displacement+FVG+Retest books
+        liquidity_trap_manager=None,  # LiquidityTrapBookManager — 15m/5m/1m cascade + CHoCH + scale-in books
     ) -> None:
         self._bus = bus
         self._cfg = cfg
@@ -678,6 +679,7 @@ class DashboardServer:
         self._fvg_manager = fvg_manager
         self._oi_flow_manager = oi_flow_manager
         self._liquidity_sweep_manager = liquidity_sweep_manager
+        self._liquidity_trap_manager = liquidity_trap_manager
         self._fno_monitor = None          # set via set_fno_monitor()
         self._ws_bridge = WsBridge(bus, cfg=cfg)
         self._uvicorn_server = None
@@ -5954,6 +5956,7 @@ pm2 save
         self._register_fvg_routes(app)
         self._register_oi_flow_routes(app)
         self._register_liquidity_sweep_routes(app)
+        self._register_liquidity_trap_routes(app)
         return app
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -6272,6 +6275,33 @@ pm2 save
                 except Exception:
                     logger.exception(
                         "liquidity_sweep_status: monitoring_state() raised for %s -- dropped from panel.",
+                        getattr(b, "_underlying", "?"),
+                    )
+            result.sort(key=lambda r: (0 if r.get("position") else 1, r.get("underlying", "")))
+            return {"ok": True, "books": result}
+
+    def _register_liquidity_trap_routes(self, app) -> None:
+        _srv = self
+
+        @app.get("/api/liqtrap/status")
+        async def liquidity_trap_status():
+            """Same shape/intent as /api/liqsweep/status above: pipeline
+            stage (bias/sl_hit/confirmed), the open position with running
+            lots/P&L, and the recent remarks trail, straight from
+            LiquidityTrapStrategy.monitoring_state() (strategies/
+            liquidity_trap/engine.py)."""
+            if _srv._liquidity_trap_manager is None:
+                return {"ok": True, "books": []}
+            books = getattr(_srv._liquidity_trap_manager, "books", [])
+            result = []
+            for b in books:
+                if not hasattr(b, "monitoring_state"):
+                    continue
+                try:
+                    result.append(b.monitoring_state())
+                except Exception:
+                    logger.exception(
+                        "liquidity_trap_status: monitoring_state() raised for %s -- dropped from panel.",
                         getattr(b, "_underlying", "?"),
                     )
             result.sort(key=lambda r: (0 if r.get("position") else 1, r.get("underlying", "")))

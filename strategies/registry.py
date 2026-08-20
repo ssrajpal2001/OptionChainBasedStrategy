@@ -16,6 +16,7 @@ from strategies.d1_trap_option import D1TrapOptionBookManager
 from strategies.fvg import FVGBookManager
 from strategies.oi_flow import OIFlowBookManager
 from strategies.liquidity_sweep import LiquiditySweepBookManager
+from strategies.liquidity_trap import LiquidityTrapBookManager
 
 
 STRATEGY_REGISTRY: Dict[str, Dict[str, Any]] = {
@@ -60,6 +61,15 @@ STRATEGY_REGISTRY: Dict[str, Dict[str, Any]] = {
     # mandate as oi_flow. See strategies/liquidity_sweep/__init__.py.
     "liquidity_sweep": {
         "manager_class": LiquiditySweepBookManager,
+        "per_binding": True,
+    },
+    # 2026-08-21: fully standalone -- shares no runtime infra (Topics,
+    # events, bridge, book manager) with any other strategy above, same
+    # mandate as oi_flow/liquidity_sweep. See strategies/liquidity_trap/
+    # __init__.py. Built and validated as a real-data (1yr SENSEX spot)
+    # backtest first -- scripts/liquidity_trap_backtest.py.
+    "liquidity_trap": {
+        "manager_class": LiquidityTrapBookManager,
         "per_binding": True,
     },
 }

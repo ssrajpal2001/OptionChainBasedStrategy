@@ -2163,7 +2163,7 @@ document.addEventListener('alpine:init', () => {
     async toggleStrategyRun(dep, b) {
       const want = !this.depRunning(dep);
       const did = dep.deploy_id || `${this.authClientId}_${dep.binding_id}_${dep.strategy_name}_${dep.underlying}`;
-      const _stratLabel = {sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'D1 Trap Option',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow',liquidity_sweep:'Liquidity Sweep'};
+      const _stratLabel = {sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'D1 Trap Option',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow',liquidity_sweep:'Liquidity Sweep',liquidity_trap:'Liquidity Trap'};
       const _undLabel = u => u==='ALL_FNO'?'All FnO Stocks':u==='WATCHLIST'?'Watchlist (top-5)':u;
       const label = (_stratLabel[dep.strategy_name]||dep.strategy_name)+' · '+_undLabel(dep.underlying);
       const ok = want
@@ -2721,7 +2721,7 @@ document.addEventListener('alpine:init', () => {
             // default (SELL-to-open), mislabeling every D1Trap/FVG entry backwards.
             // d1_trap_sr added 2026-08-12 -- same option-buyer mechanic, only the entry
             // trigger (S&R ping-pong vs T1/T2) differs from d1_trap_bear_only.
-            const _buyerOnlyStrats = ['d1_trap_bear_only', 'd1_trap_sr', 'd1_trap_option', 'd1_trap_index', 'd1_trap_fno', 'fvg', 'oi_flow', 'liquidity_sweep'];
+            const _buyerOnlyStrats = ['d1_trap_bear_only', 'd1_trap_sr', 'd1_trap_option', 'd1_trap_index', 'd1_trap_fno', 'fvg', 'oi_flow', 'liquidity_sweep', 'liquidity_trap'];
             const _openAction = (lg) => strat === 'v4_cascade'
                 ? (_isCryptoShort(lg) ? 'SELL' : 'BUY')
                 : _buyerOnlyStrats.includes(strat) ? 'BUY' : 'SELL';
@@ -7044,7 +7044,7 @@ function amoTest() {
                         <span class="absolute top-0.5 w-2.5 h-2.5 bg-white rounded-full shadow transition-all"
                               :style="depRunning(dep)?'left:16px':'left:2px'"></span>
                       </span>
-                      <span x-text="({sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'D1 Trap',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow',liquidity_sweep:'Liquidity Sweep'}[dep.strategy_name]||dep.strategy_name)+' · '+(dep.underlying==='ALL_FNO'?'All FnO Stocks':dep.underlying)+' — '+(depRunning(dep)?'RUNNING':'stopped')"></span>
+                      <span x-text="({sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'D1 Trap',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow',liquidity_sweep:'Liquidity Sweep',liquidity_trap:'Liquidity Trap'}[dep.strategy_name]||dep.strategy_name)+' · '+(dep.underlying==='ALL_FNO'?'All FnO Stocks':dep.underlying)+' — '+(depRunning(dep)?'RUNNING':'stopped')"></span>
                     </button>
                   </template>
                   <span x-show="!(clientDeployments||[]).some(d=>d.binding_id===b.binding_id)"
@@ -7166,10 +7166,10 @@ function amoTest() {
                 <div class="flex items-center gap-3">
                   <span class="font-mono text-xs font-bold px-2 py-0.5 rounded"
                         style="background:rgba(var(--t-cyan-rgb),0.12);color:var(--t-cyan)"
-                        x-text="({sell_straddle:'SS',v4_cascade:'V4',fno_positional:'FNO',hourly_breakout:'HB',d1_trap_option:'D1',d1_trap_index:'TI',d1_trap_fno:'TF',d1_trap_bear_only:'BT',d1_trap_sr:'SR',fvg:'FVG',oi_flow:'OIF',liquidity_sweep:'LSW'})[dep.strategy_name]||'??'"></span>
+                        x-text="({sell_straddle:'SS',v4_cascade:'V4',fno_positional:'FNO',hourly_breakout:'HB',d1_trap_option:'D1',d1_trap_index:'TI',d1_trap_fno:'TF',d1_trap_bear_only:'BT',d1_trap_sr:'SR',fvg:'FVG',oi_flow:'OIF',liquidity_sweep:'LSW',liquidity_trap:'LTR'})[dep.strategy_name]||'??'"></span>
                   <div>
                     <div class="font-mono text-xs font-bold" style="color:var(--t-bright)"
-                         x-text="({sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'D1 Trap Option',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow',liquidity_sweep:'Liquidity Sweep'})[dep.strategy_name]||dep.strategy_name)+' · '+(dep.underlying==='ALL_FNO'?'All FnO Stocks':dep.underlying)"></div>
+                         x-text="({sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'D1 Trap Option',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow',liquidity_sweep:'Liquidity Sweep',liquidity_trap:'Liquidity Trap'})[dep.strategy_name]||dep.strategy_name)+' · '+(dep.underlying==='ALL_FNO'?'All FnO Stocks':dep.underlying)"></div>
                     <div class="font-mono text-xs" style="color:var(--t-muted)"
                          x-text="(dep.strategy_name==='fno_positional'||dep.strategy_name==='d1_trap_fno')
                            ? 'Lots: '+dep.lot_multiplier+' · '+(dep.product_type||'NRML')
@@ -7242,6 +7242,17 @@ function amoTest() {
                           deployForm.product_type='MIS';
                           deployForm.underlying='NIFTY';
                           deployForm.squareoff_time='15:15';
+                        } else if(deployForm.strategy_name==='liquidity_trap'){
+                          // No dedicated advanced-params UI yet -- '{}' (set
+                          // below in the strategy_params ternary) lets
+                          // LiquidityTrapBookManager._parse_params() fill in
+                          // its own validated defaults (lots_initial=2, rr=2.0
+                          // i.e. 1:2, scale_in_enabled=true) -- see CLAUDE.md's
+                          // Liquidity Trap section for the real 1yr SENSEX
+                          // spot backtest this was validated against.
+                          deployForm.product_type='MIS';
+                          deployForm.underlying='SENSEX';
+                          deployForm.squareoff_time='15:15';
                         } else if(deployForm.strategy_name==='fno_positional'){
                           deployForm.product_type='NRML';
                           deployForm.underlying='FNO_STOCKS';
@@ -7259,6 +7270,8 @@ function amoTest() {
                           ? '{}'
                           : deployForm.strategy_name==='liquidity_sweep'
                           ? '{}'
+                          : deployForm.strategy_name==='liquidity_trap'
+                          ? '{}'
                           : JSON.stringify({htf:deployForm._htf||'D1',mtf:deployForm._mtf||'1H',itm:deployForm._itm||1});
                       ">
                 <option value="sell_straddle">Sell Straddle</option>
@@ -7273,6 +7286,7 @@ function amoTest() {
                 <option value="fvg">FVG (Fair Value Gap, NIFTY)</option>
                 <option value="oi_flow">OI-Flow Pre-Breakout</option>
                 <option value="liquidity_sweep">Liquidity Sweep (Sweep+FVG+Retest)</option>
+                <option value="liquidity_trap">Liquidity Trap (15m/5m/1m Cascade+CHoCH)</option>
                 <option value="fno_positional">FnO Positional (Swing, All FnO Stocks)</option>
               </select>
             </div>
@@ -7797,7 +7811,7 @@ function amoTest() {
                   <div class="flex items-center justify-between mb-3">
                     <div>
                       <div class="font-ui font-bold text-sm" style="color:var(--t-bright)"
-                           x-text="({sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'Trap Scanner',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow',liquidity_sweep:'Liquidity Sweep'}[dep.strategy_name]||dep.strategy_name)"></div>
+                           x-text="({sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'Trap Scanner',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow',liquidity_sweep:'Liquidity Sweep',liquidity_trap:'Liquidity Trap'}[dep.strategy_name]||dep.strategy_name)"></div>
                       <div class="flex items-center gap-2 mt-0.5">
                         <span class="font-mono text-xs" style="color:var(--t-cyan)" x-text="dep.underlying==='ALL_FNO'?'All 30 FnO Stocks':dep.underlying==='WATCHLIST'?'Watchlist (top-5)':dep.underlying"></span>
                         <span class="font-mono text-xs" style="color:var(--t-muted)"
@@ -8229,6 +8243,105 @@ function amoTest() {
                             <div class="mb-1" style="color:var(--t-muted);font-size:10px">RECENT REMARKS</div>
                             <div style="max-height:110px;overflow-y:auto">
                               <template x-for="(r,ri) in (_bk.remarks||[]).slice(0,8)" :key="ri">
+                                <div class="mb-0.5" :style="{
+                                    'entry':'color:var(--t-green)', 'exit':'color:var(--t-amber)',
+                                    'watch':'color:var(--t-cyan)', 'info':'color:var(--t-dim)',
+                                  }[r.level]||'color:var(--t-dim)'">
+                                  <span style="color:var(--t-dim)" x-text="(r.ts||'').slice(11,19)"></span>
+                                  <span x-text="' '+r.text"></span>
+                                </div>
+                              </template>
+                            </div>
+                          </div>
+                        </div>
+                      </template>
+                    </div>
+                  </template>
+
+                  <!-- Liquidity Trap live panel (2026-08-21): LiquidityTrapStrategy's own
+                       monitoring_state() (strategies/liquidity_trap/engine.py) -- shows the
+                       cascade stage (bias locked / SL-hit / 5m confirmed), the open position
+                       (side/strike/lots incl. whether the scale-in add-on has fired, spot
+                       SL/target, entry price), and the recent remarks trail. Same fetch/
+                       interval pattern as the other standalone-strategy panels -- one book
+                       per (client,binding,underlying), own endpoint. -->
+                  <template x-if="dep.strategy_name==='liquidity_trap'">
+                    <div class="rounded p-3 mb-2 text-xs font-mono" style="background:rgba(var(--t-cyan-rgb),0.04);border:1px solid rgba(var(--t-cyan-rgb),0.18)"
+                         x-data="{
+                           _bk: null,
+                           async _load() {
+                             try {
+                               const tok = localStorage.getItem('terminus_token') || (authToken||'');
+                               const r = await fetch('/api/liqtrap/status', {headers:{'Authorization':'Bearer '+tok}});
+                               const d = await r.json();
+                               if (d.ok) {
+                                 this._bk = (d.books||[]).find(bk => bk.binding_id===b.binding_id && bk.underlying===dep.underlying) || null;
+                               }
+                             } catch(e) {}
+                           }
+                         }"
+                         x-init="_load(); setInterval(()=>_load(), 15000)">
+                      <template x-if="!_bk">
+                        <div class="text-center" style="color:var(--t-dim)">Loading Liquidity Trap state…</div>
+                      </template>
+                      <template x-if="_bk">
+                        <div>
+                          <div class="flex items-center justify-between mb-2">
+                            <span style="color:var(--t-muted)">BIAS
+                              <span :style="_bk.bias==='BULL'?'color:var(--t-green)':(_bk.bias==='BEAR'?'color:var(--t-red)':'color:var(--t-dim)')"
+                                    x-text="_bk.bias||'unlocked'"></span>
+                            </span>
+                            <span class="px-1.5 py-0.5 rounded" style="background:rgba(var(--t-cyan-rgb),0.15);color:var(--t-cyan)"
+                                  x-text="_bk.position ? 'IN TRADE' : (_bk.confirmed ? '5m confirmed → watching CHoCH' : (_bk.sl_hit ? 'SL-hit → watching 5m confirm' : (_bk.bias ? 'bias locked → watching SL-hit' : 'watching for ref/bias')))"></span>
+                          </div>
+
+                          <!-- Open position -->
+                          <template x-if="_bk.position">
+                            <div class="mb-2 pb-2" style="border-bottom:1px solid var(--t-border)"
+                                 x-data="{ get _p(){ return _bk.position; } }">
+                              <div class="flex items-center gap-2 mb-1" style="color:var(--t-green);font-weight:600">
+                                ● TRADE ACTIVE
+                                <span x-text="_p.side+' '+_p.strike"></span>
+                                <span class="px-1 rounded" style="background:rgba(6,182,212,0.15);color:var(--t-cyan);font-size:10px"
+                                      x-text="_p.lots+' lots'+(_p.add_on_done?' (scaled in)':' (half size)')"></span>
+                              </div>
+                              <div class="flex justify-between">
+                                <span style="color:var(--t-muted)">Entry price</span>
+                                <span x-text="fmt(_p.entry_price)"></span>
+                              </div>
+                              <div class="flex justify-between">
+                                <span style="color:var(--t-muted)">Spot SL / Target (1:2 RR)</span>
+                                <span x-text="fmt(_p.sl_spot)+' / '+fmt(_p.target_spot)"></span>
+                              </div>
+                              <div class="flex justify-between">
+                                <span style="color:var(--t-muted)">Entry spot</span>
+                                <span x-text="fmt(_p.entry_spot)"></span>
+                              </div>
+                            </div>
+                          </template>
+
+                          <!-- Cascade levels -->
+                          <template x-if="!_bk.position">
+                            <div class="mb-1.5">
+                              <div class="flex items-center justify-between">
+                                <span style="color:var(--t-muted)">SL-hit (15m)</span>
+                                <span x-text="_bk.sl_hit ? _bk.sl_hit.slice(11,19) : '—'"></span>
+                              </div>
+                              <div class="flex items-center justify-between">
+                                <span style="color:var(--t-muted)">5m confirmed</span>
+                                <span x-text="_bk.confirmed ? _bk.confirmed.slice(11,19) : '—'"></span>
+                              </div>
+                              <div class="flex items-center justify-between" x-show="_bk.day_done && !_bk.position">
+                                <span style="color:var(--t-amber)">Day's one attempt already used</span>
+                              </div>
+                            </div>
+                          </template>
+
+                          <!-- Remarks trail -->
+                          <div class="mt-2 pt-2" style="border-top:1px solid var(--t-border)" x-show="(_bk.recent_remarks||[]).length>0">
+                            <div class="mb-1" style="color:var(--t-muted);font-size:10px">RECENT REMARKS</div>
+                            <div style="max-height:110px;overflow-y:auto">
+                              <template x-for="(r,ri) in (_bk.recent_remarks||[]).slice(0,8)" :key="ri">
                                 <div class="mb-0.5" :style="{
                                     'entry':'color:var(--t-green)', 'exit':'color:var(--t-amber)',
                                     'watch':'color:var(--t-cyan)', 'info':'color:var(--t-dim)',

@@ -225,6 +225,11 @@ class Topic:
                                                       # SellStraddle flow), which is hardcoded SELL-to-open
                                                       # only -- keeps the new BUY-to-open path from ever
                                                       # touching the existing live sold-leg order flow.
+    LIQUIDITY_TRAP_ORDER_REQUEST = "liquidity_trap_order_request"  # Liquidity Trap strategy orders
+    LIQUIDITY_TRAP_ORDER_FILL    = "liquidity_trap_order_fill"     # (2026-08-21) -- fully standalone
+                                                      # strategy (same mandate as OI-Flow/Liquidity Sweep),
+                                                      # own Topics, shares no runtime infra with any other
+                                                      # strategy in this codebase.
 
 
 # ─────────────────────────────────────────────────────────────────────────────
