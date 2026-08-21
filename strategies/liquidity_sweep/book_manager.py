@@ -91,6 +91,12 @@ class LiquiditySweepBookManager(StrategyBookManager):
     def _spawn_book(self, key: tuple, value: dict) -> LiquiditySweepStrategy:
         client_id, binding_id, underlying = key
         self._enable_chain(underlying)
+        feeder_token = ""
+        try:
+            creds = self._db.get_feeder_creds_sync("upstox") or {}
+            feeder_token = creds.get("access_token", "")
+        except Exception:
+            pass
         book = LiquiditySweepStrategy(
             self._bus, self._cfg, underlying, client_id, binding_id,
             lot_multiplier=value["lots"],
@@ -107,6 +113,7 @@ class LiquiditySweepBookManager(StrategyBookManager):
             hard_risk_rs_per_lot=value["hard_risk_rs_per_lot"],
             sl_cooldown_minutes=value["sl_cooldown_minutes"],
             product_type=value["product_type"], squareoff_time=value["squareoff_time"],
+            feeder_token=feeder_token,
         )
         logger.info(
             "LiquiditySweepBookManager: spawned %s/%s/%s (lots=%d ltf=%dm liq_source=%s "

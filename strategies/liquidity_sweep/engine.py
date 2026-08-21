@@ -105,6 +105,16 @@ _DEFAULT_SL_COOLDOWN_MINUTES = 15.0
 _EOD_TIME_DEFAULT = time(15, 15)
 _EXIT_CONFIRM_TIMEOUT_SEC = 15.0
 _MAX_PLAUSIBLE_TICK_DATE_DRIFT_DAYS = 1
+_SESSION_OPEN = time(9, 15)
+
+# Standalone (per this strategy's own zero-shared-runtime mandate -- same
+# reasoning already applied throughout this module, not imported from any
+# other strategy's own key table).
+_UPSTOX_INDEX_KEYS = {
+    "NIFTY": "NSE_INDEX|Nifty 50",
+    "SENSEX": "BSE_INDEX|SENSEX",
+    "BANKNIFTY": "NSE_INDEX|Nifty Bank",
+}
 
 
 class LiquiditySweepStrategy(AbstractStrategyBook):
@@ -140,9 +150,12 @@ class LiquiditySweepStrategy(AbstractStrategyBook):
         sl_cooldown_minutes: float = _DEFAULT_SL_COOLDOWN_MINUTES,
         product_type: str = "MIS",
         squareoff_time: str = "15:15",
+        feeder_token: str = "",
     ) -> None:
         super().__init__(bus, cfg, underlying, client_id, binding_id)
         self._strategy_name = "liquidity_sweep"
+        self._feeder_token = feeder_token
+        self._warming_up = False   # True while replaying today's REST history on a mid-day (re)start
         self._lot_multiplier = max(1, lot_multiplier)
         self._ltf_min = max(1, int(ltf_min))
         self._htf_min = max(1, int(htf_min))
@@ -238,10 +251,99 @@ class LiquiditySweepStrategy(AbstractStrategyBook):
         self._subscribe(Topic.OPTION_TICK)
         self._subscribe(Topic.LIQUIDITY_SWEEP_ORDER_FILL)
         self._restore_position()
-        self._tasks.append(asyncio.create_task(self._index_tick_loop(), name=f"liqsweep_idx_{self._underlying}"))
+        # Subscribing above already starts buffering live ticks onto this book's
+        # own queue even though nothing drains it yet -- so warmup can safely
+        # await the REST fetch+replay first (no live tick is lost, just queued)
+        # and only THEN start draining/processing them, avoiding any interleaving
+        # between historical (possibly-earlier) timestamps and live ones inside
+        # the same BarAccumulators. Same pattern as strategies/liquidity_trap/
+        # engine.py's own _warmup_then_index_tick_loop.
+        self._tasks.append(asyncio.create_task(self._warmup_then_index_tick_loop(), name=f"liqsweep_idx_{self._underlying}"))
         self._tasks.append(asyncio.create_task(self._option_tick_loop(), name=f"liqsweep_opt_{self._underlying}"))
         self._tasks.append(asyncio.create_task(self._fill_loop(), name=f"liqsweep_fill_{self._underlying}"))
         self._tasks.append(asyncio.create_task(self._eod_loop(), name=f"liqsweep_eod_{self._underlying}"))
+
+    async def _warmup_then_index_tick_loop(self) -> None:
+        await self._warmup_intraday()
+        await self._index_tick_loop()
+
+    async def _warmup_intraday(self) -> None:
+        """On a mid-day (re)start, REST-fetch today's real 1-min spot history
+        and replay it through the SAME BarAccumulators + _on_ltf_bar_close()
+        pipeline live ticks use, so the book doesn't sit silently rebuilding
+        its entire sweep/structure/FVG pipeline from scratch for however long
+        it takes live ticks alone to accumulate (this strategy is fully
+        intraday -- reset_session() wipes everything daily, so a restart with
+        no warmup means literally zero history until now). Confirmed gap
+        found 2026-08-21 (this strategy had never been warmup-covered at all,
+        unlike D1Trap/FVG/Liquidity Trap, which already have this).
+
+        Order placement (_try_enter) is suppressed during replay via
+        self._warming_up -- a retest that already fired hours ago can't be
+        safely entered now at a stale historical price; _try_enter() logs and
+        no-ops instead of firing a live order off old data (mirrors
+        D1TrapOptionBook / LiquidityTrapStrategy's own established pattern)."""
+        now = datetime.now(IST)
+        if now.time() < _SESSION_OPEN:
+            return  # pre-market -- nothing has traded yet today, nothing to replay
+        if not self._feeder_token:
+            self._clog.warning(
+                "LiquiditySweep[%s]: no Upstox feeder token available -- skipping intraday "
+                "warmup, will build up the sweep/structure/FVG pipeline live from here instead.",
+                self._underlying,
+            )
+            return
+        key = _UPSTOX_INDEX_KEYS.get(self._underlying.upper(), f"NSE_INDEX|{self._underlying}")
+        try:
+            from data_layer.historical_candles import fetch_upstox_intraday_1m
+            raw_bars = await fetch_upstox_intraday_1m(key, self._feeder_token)
+        except Exception as exc:
+            self._clog.warning("LiquiditySweep[%s]: intraday warmup fetch failed: %s", self._underlying, exc)
+            return
+        if not raw_bars:
+            self._clog.warning("LiquiditySweep[%s]: intraday warmup -- 0 bars returned (API empty or key mismatch).",
+                                self._underlying)
+            return
+
+        self._warming_up = True
+        try:
+            # CRITICAL: set _today BEFORE replaying -- _index_tick_loop's own
+            # "if self._today != today: reset_session()" new-day check runs on
+            # the very first LIVE tick it processes, right after this method
+            # returns. self._today is still None at this point, so without this
+            # line that first live tick would silently wipe out everything just
+            # replayed via reset_session(), with zero log trace (the exact bug
+            # found and fixed in strategies/liquidity_trap/engine.py earlier
+            # today).
+            self._today = now.date()
+            replayed = 0
+            for b in raw_bars:
+                try:
+                    ts = datetime.fromisoformat(b["ts"]).astimezone(IST)
+                    o, h, l, c = float(b["open"]), float(b["high"]), float(b["low"]), float(b["close"])
+                except Exception:
+                    continue
+                if ts.date() != now.date() or ts.time() < _SESSION_OPEN:
+                    continue
+                # Feed open->high->low->close as 4 synthetic ticks at the bar's own
+                # timestamp -- reconstructs the exact same OHLC bucket the live
+                # tick-based BarAccumulator would have built minute-by-minute,
+                # with zero changes to that already-validated pure class.
+                for px in (o, h, l, c):
+                    if self._liq_source == "rolling_base":
+                        self._htf_acc.on_tick(ts, px)
+                    closed = self._ltf_acc.on_tick(ts, px)
+                    if closed:
+                        self._on_ltf_bar_close()
+                replayed += 1
+            self._clog.info(
+                "LiquiditySweep[%s]: intraday warmup complete -- %d 1m bars replayed, "
+                "pending_dir=%d awaiting_fvg_dir=%d fvg_dir=%d position=%s day_done=%s.",
+                self._underlying, replayed, self._pending_dir, self._awaiting_fvg_dir,
+                self._fvg_dir, "OPEN" if self._position else "flat", self._day_done,
+            )
+        finally:
+            self._warming_up = False
 
     def _is_own_underlying_tick(self, symbol: str) -> bool:
         u = self._underlying.upper()
@@ -398,6 +500,16 @@ class LiquiditySweepStrategy(AbstractStrategyBook):
 
     def _try_enter(self, direction: int, entry_spot: float, level_high, level_low) -> None:
         side = "CE" if direction == 1 else "PE"
+        if self._warming_up:
+            # This retest already happened hours ago, before this process was
+            # even watching -- entering NOW would mean paying a live fill price
+            # against an hours-stale spot reference. No retroactive entry; the
+            # caller (_on_ltf_bar_close) always resets _fvg_dir=0 right after
+            # calling this regardless, so the pipeline moves on to watch for the
+            # next sweep normally once live ticks resume.
+            self._clog.info("%s retest already fired @ %.2f before this session started watching "
+                             "-- missed for today (no stale-price retroactive entry).", side, entry_spot)
+            return
         if self._day_done or self._position is not None:
             self._clog.info("%s retest fired but skipped (day_done=%s, already_in_position=%s)",
                              side, self._day_done, self._position is not None)

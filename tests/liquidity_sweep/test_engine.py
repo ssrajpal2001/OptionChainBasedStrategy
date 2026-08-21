@@ -68,6 +68,8 @@ def _make_book(**overrides) -> LiquiditySweepStrategy:
     book._persist_key = "test_liqsweep_persist_key"
 
     book._today = None
+    book._feeder_token = ""
+    book._warming_up = False
     book._ltf_acc = BarAccumulator(timeframe_min=book._ltf_min)
     book._htf_acc = BarAccumulator(timeframe_min=book._htf_min)
     book._live_ltp = {}
@@ -250,6 +252,18 @@ def test_try_enter_skips_when_already_in_position():
     assert book._bus.published == []
 
 
+def test_try_enter_noop_while_warming_up():
+    """A retest found during intraday warmup replay (2026-08-21 fix) must
+    never fire a live order off an hours-stale price."""
+    book = _make_book()
+    book._warming_up = True
+    book._sl_anchor = 90.0
+    book._live_ltp[(100.0, "CE")] = 25.0
+    book._try_enter(1, 100.0, None, None)
+    assert book._position is None
+    assert book._bus.published == []
+
+
 # ── exit checks ───────────────────────────────────────────────────────────
 
 def _open_position(book, direction=1, entry_price=20.0, entry_spot=100.0, sl_spot=90.0, t1_spot=115.0, t2_spot=130.0):
@@ -373,3 +387,129 @@ def test_reset_session_wipes_pipeline_state():
     assert book._fvg_lo is None
     assert book._day_done is False
     assert book._cooldown_until is None
+
+
+# ── mid-day intraday warmup (2026-08-21) ─────────────────────────────────────
+# Confirmed gap: unlike D1Trap/FVG/Liquidity Trap, this strategy had NO
+# REST-based warmup at all -- a mid-day restart rebuilt its entire sweep/
+# structure/FVG pipeline from live ticks alone, which could take hours.
+
+def test_warmup_intraday_skips_gracefully_without_feeder_token(monkeypatch):
+    import strategies.liquidity_sweep.engine as eng_mod
+
+    class _FakeDT(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 8, 21, 10, 0, tzinfo=IST)
+
+    monkeypatch.setattr(eng_mod, "datetime", _FakeDT)
+
+    async def run():
+        book = _make_book()
+        book._feeder_token = ""
+        await book._warmup_intraday()          # must not raise
+        assert book._pending_dir == 0
+        assert book._warming_up is False
+    asyncio.run(run())
+
+
+def test_warmup_intraday_skips_before_market_open(monkeypatch):
+    import strategies.liquidity_sweep.engine as eng_mod
+
+    class _FakeDT(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 8, 21, 8, 30, tzinfo=IST)   # pre-market
+
+    monkeypatch.setattr(eng_mod, "datetime", _FakeDT)
+
+    async def run():
+        book = _make_book()
+        book._feeder_token = "FAKE_TOKEN"
+        await book._warmup_intraday()
+        assert len(book._ltf_acc.bars) == 0   # nothing replayed
+    asyncio.run(run())
+
+
+def test_warmup_intraday_replays_history_and_sets_today(monkeypatch):
+    import strategies.liquidity_sweep.engine as eng_mod
+    import data_layer.historical_candles as hc_mod
+
+    class _FakeDT(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 8, 21, 10, 0, tzinfo=IST)
+
+    async def _fake_fetch(key, token):
+        return [
+            {"ts": "2026-08-21T09:15:00+05:30", "open": 100, "high": 105, "low": 95, "close": 102},
+            {"ts": "2026-08-21T09:20:00+05:30", "open": 102, "high": 108, "low": 101, "close": 106},
+            {"ts": "2026-08-21T09:25:00+05:30", "open": 106, "high": 107, "low": 105, "close": 106},
+            {"ts": "2026-08-21T09:30:00+05:30", "open": 106, "high": 109, "low": 104, "close": 108},
+            {"ts": "2026-08-21T09:35:00+05:30", "open": 108, "high": 110, "low": 106, "close": 109},
+            {"ts": "2026-08-21T09:40:00+05:30", "open": 109, "high": 111, "low": 107, "close": 110},
+        ]
+
+    monkeypatch.setattr(eng_mod, "datetime", _FakeDT)
+    monkeypatch.setattr(hc_mod, "fetch_upstox_intraday_1m", _fake_fetch)
+
+    async def run():
+        book = _make_book(ltf_min=5)
+        book._ltf_acc = BarAccumulator(timeframe_min=5)
+        book._feeder_token = "FAKE_TOKEN"
+        await book._warmup_intraday()
+        # 6 raw 5-min-spaced source bars -> 6 closed ltf bars fed in as
+        # synthetic o/h/l/c ticks; BarAccumulator only closes a bucket on the
+        # NEXT bucket's first tick, so 6 source bars yield 5 CLOSED ltf bars.
+        assert len(book._ltf_acc.bars) == 5
+        assert book._warming_up is False        # reset after replay finishes
+        assert book._bus.published == []        # state catch-up only, never a live order
+        # Regression: _today must be set to today's real date by warmup itself,
+        # same critical fix already applied to strategies/liquidity_trap/
+        # engine.py -- otherwise the first live tick's own new-day check
+        # would silently reset_session() and wipe everything just replayed.
+        from datetime import date
+        assert book._today == date(2026, 8, 21)
+    asyncio.run(run())
+
+
+def test_warmup_intraday_never_fires_a_live_order_even_if_a_retest_completes(monkeypatch):
+    """If the full sweep->displacement->FVG->retest sequence completes
+    entirely within the replayed history, _try_enter's own _warming_up guard
+    must block it -- no stale-price live order."""
+    import strategies.liquidity_sweep.engine as eng_mod
+    import data_layer.historical_candles as hc_mod
+
+    class _FakeDT(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 8, 21, 12, 0, tzinfo=IST)
+
+    async def _fake_fetch(key, token):
+        # Deliberately volatile synthetic sequence -- doesn't need to produce a
+        # real signal, just proves that IF one fires during replay, no order
+        # is published (the guard is the thing under test, not the detector).
+        base = datetime(2026, 8, 21, 9, 15, tzinfo=IST)
+        rows = []
+        price = 100.0
+        for i in range(40):
+            ts = (base + timedelta(minutes=5 * i)).isoformat()
+            o = price
+            h = price + 3
+            l = price - 6 if i % 7 == 0 else price - 1
+            c = price + (2 if i % 2 == 0 else -1)
+            rows.append({"ts": ts, "open": o, "high": h, "low": l, "close": c})
+            price = c
+        return rows
+
+    monkeypatch.setattr(eng_mod, "datetime", _FakeDT)
+    monkeypatch.setattr(hc_mod, "fetch_upstox_intraday_1m", _fake_fetch)
+
+    async def run():
+        book = _make_book(ltf_min=5, liq_source="liquidity_pool")
+        book._ltf_acc = BarAccumulator(timeframe_min=5)
+        book._feeder_token = "FAKE_TOKEN"
+        await book._warmup_intraday()
+        assert book._position is None
+        assert book._bus.published == []
+    asyncio.run(run())
