@@ -124,6 +124,53 @@ def find_ref_and_bias(bars_15m_today: List[Bar]) -> Optional[Tuple[str, int, int
     return None
 
 
+# ── Stage 1 (multi-ref variant, 2026-08-21 user spec) ────────────────────────
+# "Each candle can be a separate ref, for long or short" -- every consecutive
+# pair is checked independently, instead of a single rolling ref for the
+# whole day. Backtested against real SENSEX data (scripts/liquidity_trap_
+# multiref_backtest.py) before being ported here; find_ref_and_bias() above
+# is kept as-is (superseded live, not deleted, in case of a future rollback).
+
+@dataclass
+class Setup:
+    ref_idx: int
+    direction: str   # "BULL" | "BEAR"
+    locked_idx: int  # index of the candle that did the one-sided breach
+
+
+def find_all_setups(bars_ref_today: List[Bar]) -> List[Setup]:
+    """Every consecutive pair (candle[i-1] as ref, candle[i] as the breach
+    check) independently spawns its own setup on a clean one-sided breach.
+    Any number of setups, in either direction, across the day -- not a
+    single rolling ref."""
+    setups: List[Setup] = []
+    for i in range(1, len(bars_ref_today)):
+        ref = bars_ref_today[i - 1]
+        cur = bars_ref_today[i]
+        broke_high = cur.high > ref.high
+        broke_low = cur.low < ref.low
+        if broke_high and not broke_low:
+            setups.append(Setup(ref_idx=i - 1, direction="BULL", locked_idx=i))
+        elif broke_low and not broke_high:
+            setups.append(Setup(ref_idx=i - 1, direction="BEAR", locked_idx=i))
+    return setups
+
+
+def compute_trend(bars_trend_tf: List[Bar], sma_len: int) -> Optional[str]:
+    """Higher-timeframe trend filter (2026-08-21, real-data-validated
+    optimization -- see scripts/liquidity_trap_tf_and_trend_sweep.py):
+    'UP'/'DOWN' off the latest CLOSED trend-tf bar's close vs a simple
+    sma_len-period SMA of trend-tf closes. None if not enough history yet
+    (never guess). Live callers only ever pass already-closed bars, so
+    there's no lookahead concern here (unlike the backtest sweep's own
+    as-of-timestamp lookup, which had to guard against seeing future bars)."""
+    if len(bars_trend_tf) < sma_len:
+        return None
+    closes = [b.close for b in bars_trend_tf[-sma_len:]]
+    sma = sum(closes) / sma_len
+    return "UP" if bars_trend_tf[-1].close > sma else "DOWN"
+
+
 # ── Stage 2: watch the locked ref candle's own opposite level ───────────────
 
 def find_sl_hit(bars_15m_today: List[Bar], ref_idx: int, lock_idx: int, bias: str) -> Optional[datetime]:

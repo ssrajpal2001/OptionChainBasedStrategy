@@ -25,9 +25,18 @@ _DEFAULT_PARAMS = {
     "rr": 2.0,
     "itm_offset_pts": 0.0,
     "hard_risk_rs_per_lot": 2000.0,
+    # Real-data-validated optimization defaults (2026-08-21, see
+    # strategies/liquidity_trap/engine.py's own module docstring +
+    # scripts/liquidity_trap_tf_and_trend_sweep.py): 930 trades/77.8% win/
+    # PF 1.81 -> 392 trades/82.7% win/PF 2.67 on the 1-year SENSEX backtest.
+    "ref_tf_min": 20,
+    "confirm_tf_min": 3,
+    "trend_tf_min": 60,
+    "trend_sma_len": 10,
 }
 _FLOAT_KEYS = tuple(_DEFAULT_PARAMS.keys())
 _BOOL_DEFAULT_SCALE_IN_ENABLED = True
+_BOOL_DEFAULT_TREND_FILTER_ENABLED = True
 
 
 def _parse_params(raw: str) -> dict:
@@ -38,6 +47,7 @@ def _parse_params(raw: str) -> dict:
     for k, v in _DEFAULT_PARAMS.items():
         params.setdefault(k, v)
     params.setdefault("scale_in_enabled", _BOOL_DEFAULT_SCALE_IN_ENABLED)
+    params.setdefault("trend_filter_enabled", _BOOL_DEFAULT_TREND_FILTER_ENABLED)
     return params
 
 
@@ -59,7 +69,8 @@ class LiquidityTrapBookManager(StrategyBookManager):
             params = _parse_params(d.get("strategy_params", "{}"))
             cfg = {"lots": lots, "product_type": d.get("product_type") or "MIS",
                    "squareoff_time": d.get("squareoff_time") or "15:15",
-                   "scale_in_enabled": bool(params["scale_in_enabled"])}
+                   "scale_in_enabled": bool(params["scale_in_enabled"]),
+                   "trend_filter_enabled": bool(params["trend_filter_enabled"])}
             for k in _FLOAT_KEYS:
                 cfg[k] = float(params.get(k, _DEFAULT_PARAMS[k]))
             wanted[(cid, bid, underlying)] = cfg
@@ -83,11 +94,16 @@ class LiquidityTrapBookManager(StrategyBookManager):
             hard_risk_rs_per_lot=value["hard_risk_rs_per_lot"],
             product_type=value["product_type"], squareoff_time=value["squareoff_time"],
             feeder_token=feeder_token,
+            ref_tf_min=int(value["ref_tf_min"]), confirm_tf_min=int(value["confirm_tf_min"]),
+            trend_tf_min=int(value["trend_tf_min"]), trend_sma_len=int(value["trend_sma_len"]),
+            trend_filter_enabled=value["trend_filter_enabled"],
         )
         logger.info(
-            "LiquidityTrapBookManager: spawned %s/%s/%s (lots=%d lots_initial=%d rr=%.1f scale_in=%s).",
+            "LiquidityTrapBookManager: spawned %s/%s/%s (lots=%d lots_initial=%d rr=%.1f scale_in=%s "
+            "ref_tf=%dm confirm_tf=%dm trend_filter=%s[%dm/sma%d]).",
             client_id, binding_id, underlying, value["lots"], value["lots_initial"],
-            value["rr"], value["scale_in_enabled"],
+            value["rr"], value["scale_in_enabled"], int(value["ref_tf_min"]), int(value["confirm_tf_min"]),
+            value["trend_filter_enabled"], int(value["trend_tf_min"]), int(value["trend_sma_len"]),
         )
         return book
 
@@ -95,6 +111,8 @@ class LiquidityTrapBookManager(StrategyBookManager):
         if book._lot_multiplier != value["lots"]:
             return True
         if book._scale_in_enabled != value["scale_in_enabled"]:
+            return True
+        if book._trend_filter_enabled != value["trend_filter_enabled"]:
             return True
         return any(getattr(book, f"_{k}") != value[k] for k in _FLOAT_KEYS)
 

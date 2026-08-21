@@ -12,6 +12,7 @@ from config.global_config import IST
 from strategies.liquidity_trap.detector import (
     Bar, BarAccumulator, find_ref_and_bias, find_sl_hit, find_5m_confirmation,
     find_swing_points, find_choch_entry, compute_sl_target, find_scale_in_level,
+    Setup, find_all_setups, compute_trend,
 )
 
 BASE = datetime(2026, 8, 20, 9, 15, tzinfo=IST)
@@ -64,6 +65,71 @@ def test_ref_rolls_forward_on_outside_bar():
 def test_ref_bias_none_until_a_clean_breach_happens():
     bars = [_bar(0, 100, 105, 95, 102)]   # only one candle -- nothing to compare yet
     assert find_ref_and_bias(bars) is None
+
+
+# ── Stage 1 (multi-ref variant): every consecutive pair spawns its own setup ─
+
+def test_find_all_setups_one_bull_and_one_bear_from_three_candles():
+    bars = [
+        _bar(0, 100, 105, 95, 102),      # candle 0
+        _bar(15, 102, 110, 101, 108),    # breaks candle0's high only -> BULL setup, ref=0
+        _bar(30, 108, 109, 90, 92),      # breaks candle1's low only -> BEAR setup, ref=1
+    ]
+    setups = find_all_setups(bars)
+    assert len(setups) == 2
+    assert setups[0] == Setup(ref_idx=0, direction="BULL", locked_idx=1)
+    assert setups[1] == Setup(ref_idx=1, direction="BEAR", locked_idx=2)
+
+
+def test_find_all_setups_no_setup_on_inside_or_outside_bar():
+    bars = [
+        _bar(0, 100, 105, 95, 102),
+        _bar(15, 102, 104, 96, 100),      # inside bar -- neither side breached
+        _bar(30, 100, 112, 88, 105),      # outside bar -- both sides breached
+    ]
+    assert find_all_setups(bars) == []
+
+
+def test_find_all_setups_independent_of_each_other_not_a_rolling_chain():
+    """Unlike find_ref_and_bias, a later pair is checked against its OWN
+    immediately preceding candle regardless of what any earlier pair did --
+    so a setup can form from candle[i-1]/candle[i] even if candle[i-1] was
+    itself already consumed as the LOCKING candle of an earlier setup."""
+    bars = [
+        _bar(0, 100, 105, 95, 102),
+        _bar(15, 102, 110, 101, 108),     # locks BULL, ref=candle0
+        _bar(30, 108, 109, 103, 106),     # vs candle1 (H=110,L=101): neither side breached -> no new setup
+        _bar(45, 106, 107, 98, 100),      # vs candle2 (H=109,L=103): breaks low only -> BEAR setup, ref=candle2
+    ]
+    setups = find_all_setups(bars)
+    assert setups == [
+        Setup(ref_idx=0, direction="BULL", locked_idx=1),
+        Setup(ref_idx=2, direction="BEAR", locked_idx=3),
+    ]
+
+
+def test_find_all_setups_empty_with_fewer_than_two_bars():
+    assert find_all_setups([_bar(0, 100, 105, 95, 102)]) == []
+    assert find_all_setups([]) == []
+
+
+# ── HTF trend filter (real-data-validated optimization) ─────────────────────
+
+def test_compute_trend_up_when_close_above_sma():
+    bars = [_bar(i * 60, 100 + i, 100 + i, 100 + i, 100 + i) for i in range(10)]
+    # closes: 100..109, latest close=109, SMA of last 10 = 104.5 -> UP
+    assert compute_trend(bars, sma_len=10) == "UP"
+
+
+def test_compute_trend_down_when_close_below_sma():
+    bars = [_bar(i * 60, 110 - i, 110 - i, 110 - i, 110 - i) for i in range(10)]
+    # closes: 110..101, latest close=101, SMA of last 10 = 105.5 -> DOWN
+    assert compute_trend(bars, sma_len=10) == "DOWN"
+
+
+def test_compute_trend_none_with_insufficient_history():
+    bars = [_bar(i * 60, 100, 100, 100, 100) for i in range(5)]
+    assert compute_trend(bars, sma_len=10) is None
 
 
 # ── Stage 2: SL-hit (ref candle's own opposite level) ───────────────────────

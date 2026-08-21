@@ -4,8 +4,32 @@ strategies/liquidity_trap/engine.py — LiquidityTrapStrategy.
 Live per-(client,binding,underlying) book driving strategies/liquidity_trap/
 detector.py's pipeline. Re-scans GROWING per-day bar lists on every new bar
 close (not an incremental/streaming state machine) -- exactly mirrors
-scripts/liquidity_trap_backtest.py, the real-data-validated source of truth,
-so this can never behaviorally drift from what was actually backtested.
+scripts/liquidity_trap_multiref_backtest.py, the real-data-validated source
+of truth, so this can never behaviorally drift from what was actually
+backtested.
+
+MULTI-REF mechanic (2026-08-21, user spec, superseding the original single-
+lock design scripts/liquidity_trap_backtest.py validated): "each candle can
+be a separate ref, for long or short" -- every consecutive 15m-or-configured
+ref-tf candle pair independently spawns its own setup on a clean one-sided
+breach, tracked fully in parallel via self._setups (Stage 1-3 all run
+per-setup, simultaneously, regardless of what any other setup is doing).
+Only ONE option position open at a time: a setup reaching Stage 4 (CHoCH)
+while flat enters; while ALREADY in a position, a same-direction CHoCH is
+silently ignored (already in that direction) and an opposite-direction CHoCH
+is also skipped, not a flip (skip-if-blocked variant -- the higher-PF of the
+two variants backtested; flip was tested too but not adopted, see
+scripts/liquidity_trap_multiref_backtest.py's own history/results).
+
+Real-data-validated optimization pass (scripts/liquidity_trap_
+tf_and_trend_sweep.py) on top of the multi-ref mechanic: ref_tf=20m /
+confirm_tf=3m (was 15m/5m) + a 60m/10-period-SMA higher-timeframe trend
+filter (only enter WITH the trend) together took the 1-year SENSEX backtest
+from 930 trades/77.8% win/PF 1.81 to 392 trades/82.7% win/PF 2.67 -- fewer
+trades, higher win rate, AND higher PF simultaneously, the only tested
+config that hit all three. Both are now the LIVE defaults (still fully
+overridable per-deployment via strategy_params, same as every other tunable
+in this strategy).
 
 SL/Target are SPOT-INDEX levels (see strategies/liquidity_trap/__init__.py's
 own docstring for the full rationale, same honest design choice as
@@ -14,16 +38,23 @@ the validated backtest's own bar-close-only checks, never less. The
 option's own live LTP is simply the fill price whenever a spot-level
 entry/exit/add-on condition fires.
 
-Not yet deployed even in paper mode as of this build -- built and unit-
-tested first, per this codebase's established discipline (see CLAUDE.md).
+VWAP / change-in-OI / max-pain / open-interest filters were explicitly
+considered and are NOT implemented here -- confirmed impossible to backtest
+with this codebase's historical data source (Upstox's historical index-
+candle API returns volume=0 and oi=0 on every row for spot indices, same
+root limitation strategies/oi_flow/ already hit and documented). Only
+forward/live telemetry could validate those; not attempted in this pass.
+
+Already live-deployed on NIFTY/SENSEX as of this build (see CLAUDE.md) --
+this mechanic change ships to that existing deployment, not a fresh rollout.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 from collections import deque
-from datetime import date, datetime, time
-from typing import Deque, Dict, Optional
+from datetime import date, datetime, time, timedelta
+from typing import Deque, Dict, List, Optional
 
 from config.global_config import IST, Topic
 from data_layer.base_feeder import IndexTick, OptionTick
@@ -31,8 +62,9 @@ from data_layer import position_store
 from strategies.core.base_book import AbstractStrategyBook
 from strategies.liquidity_trap.detector import (
     Bar, BarAccumulator,
-    find_ref_and_bias, find_sl_hit, find_5m_confirmation,
+    find_sl_hit, find_5m_confirmation,
     find_choch_entry, compute_sl_target, find_scale_in_level,
+    find_all_setups, compute_trend,
 )
 from strategies.liquidity_trap.events import LiquidityTrapOrderEvent, LiquidityTrapFillEvent
 
@@ -58,6 +90,14 @@ _EXIT_CONFIRM_TIMEOUT_SEC = 15.0
 _MAX_PLAUSIBLE_TICK_DATE_DRIFT_DAYS = 1
 _SESSION_OPEN = time(9, 15)
 
+# Real-data-validated optimization defaults (2026-08-21,
+# scripts/liquidity_trap_tf_and_trend_sweep.py) -- see module docstring.
+_DEFAULT_REF_TF_MIN = 20
+_DEFAULT_CONFIRM_TF_MIN = 3
+_DEFAULT_TREND_TF_MIN = 60
+_DEFAULT_TREND_SMA_LEN = 10
+_DEFAULT_TREND_FILTER_ENABLED = True
+
 # Standalone (per this strategy's own zero-shared-runtime mandate -- not
 # imported from strategies/d1_trap_option/book.py's own _upstox_key_for,
 # same reasoning already applied to detector.py's swing/pool logic).
@@ -66,6 +106,25 @@ _UPSTOX_INDEX_KEYS = {
     "SENSEX": "BSE_INDEX|SENSEX",
     "BANKNIFTY": "NSE_INDEX|Nifty Bank",
 }
+
+
+class _LiveSetup:
+    """Mutable per-setup pipeline state (multi-ref, 2026-08-21) -- one of
+    these is created for every setup find_all_setups() spawns, tracked
+    independently in LiquidityTrapStrategy._setups until it's consumed
+    (entered, or its one CHoCH moment fires but gets skipped/filtered)."""
+
+    __slots__ = ("ref_idx", "direction", "locked_idx", "sl_hit_ts", "confirm_ts",
+                 "sweep_extreme", "dead")
+
+    def __init__(self, ref_idx: int, direction: str, locked_idx: int) -> None:
+        self.ref_idx = ref_idx
+        self.direction = direction
+        self.locked_idx = locked_idx
+        self.sl_hit_ts: Optional[datetime] = None
+        self.confirm_ts: Optional[datetime] = None
+        self.sweep_extreme: Optional[float] = None
+        self.dead = False   # entered, or its CHoCH fired but was filtered/skipped/stale
 
 
 class LiquidityTrapStrategy(AbstractStrategyBook):
@@ -87,6 +146,11 @@ class LiquidityTrapStrategy(AbstractStrategyBook):
         product_type: str = "MIS",
         squareoff_time: str = "15:15",
         feeder_token: str = "",
+        ref_tf_min: int = _DEFAULT_REF_TF_MIN,
+        confirm_tf_min: int = _DEFAULT_CONFIRM_TF_MIN,
+        trend_tf_min: int = _DEFAULT_TREND_TF_MIN,
+        trend_sma_len: int = _DEFAULT_TREND_SMA_LEN,
+        trend_filter_enabled: bool = _DEFAULT_TREND_FILTER_ENABLED,
     ) -> None:
         super().__init__(bus, cfg, underlying, client_id, binding_id)
         self._strategy_name = "liquidity_trap"
@@ -99,6 +163,11 @@ class LiquidityTrapStrategy(AbstractStrategyBook):
         self._scale_in_enabled = scale_in_enabled
         self._hard_risk_rs_per_lot = hard_risk_rs_per_lot
         self._product_type = product_type
+        self._ref_tf_min = max(1, int(ref_tf_min))
+        self._confirm_tf_min = max(1, int(confirm_tf_min))
+        self._trend_tf_min = max(1, int(trend_tf_min))
+        self._trend_sma_len = max(1, int(trend_sma_len))
+        self._trend_filter_enabled = bool(trend_filter_enabled)
         try:
             _h, _m = str(squareoff_time or "15:15").split(":")
             self._squareoff_time = time(int(_h), int(_m))
@@ -111,21 +180,19 @@ class LiquidityTrapStrategy(AbstractStrategyBook):
         self._clog = _make_strategy_logger(underlying, client_id, binding_id)
 
         self._today: Optional[date] = None
-        self._acc_15m = BarAccumulator(timeframe_min=15)
-        self._acc_5m = BarAccumulator(timeframe_min=5)
+        self._acc_ref = BarAccumulator(timeframe_min=self._ref_tf_min)
+        self._acc_confirm = BarAccumulator(timeframe_min=self._confirm_tf_min)
+        self._acc_trend = BarAccumulator(timeframe_min=self._trend_tf_min)
         self._acc_1m = BarAccumulator(timeframe_min=1)
         self._live_ltp: Dict[tuple, float] = {}
 
-        # ── pipeline state (mirrors scripts/liquidity_trap_backtest.py exactly) ──
-        self._bias: Optional[str] = None            # "BULL" | "BEAR", locked for the day
-        self._ref_idx: Optional[int] = None
-        self._lock_idx: Optional[int] = None
-        self._sl_hit_ts: Optional[datetime] = None
-        self._confirm_ts: Optional[datetime] = None
-        self._sweep_extreme: Optional[float] = None
-        self._day_done = False                        # one trade attempt per day
-        self._ref_watch_count = 0    # len(bars_15m) as of the last REF log line, so we
-                                      # only log once per new 15m close, not every 1m tick
+        # ── pipeline state (multi-ref, mirrors scripts/liquidity_trap_multiref_
+        # backtest.py exactly) -- any number of setups tracked in parallel,
+        # instead of one single global bias/ref_idx/lock_idx. ──
+        self._setups: List["_LiveSetup"] = []
+        self._day_done = False       # past squareoff time only -- NOT "one trade per day"
+        self._ref_watch_count = 0    # len(bars_ref) as of the last REF log line, so we
+                                      # only log once per new ref-tf close, not every 1m tick
 
         self._position: Optional[dict] = None
         self._cooldown_until: Optional[datetime] = None
@@ -138,16 +205,15 @@ class LiquidityTrapStrategy(AbstractStrategyBook):
 
     def reset_session(self) -> None:
         self._today = None
-        self._acc_15m = BarAccumulator(timeframe_min=15)
-        self._acc_5m = BarAccumulator(timeframe_min=5)
+        self._acc_ref = BarAccumulator(timeframe_min=self._ref_tf_min)
+        self._acc_confirm = BarAccumulator(timeframe_min=self._confirm_tf_min)
+        # _acc_trend is deliberately NOT reset here -- trend context spans
+        # multiple days (see _seed_trend_history's own docstring); wiping it
+        # daily would mean the 10-period SMA can never have enough history
+        # within a single ~6.25-hour trading day.
         self._acc_1m = BarAccumulator(timeframe_min=1)
         self._live_ltp = {}
-        self._bias = None
-        self._ref_idx = None
-        self._lock_idx = None
-        self._sl_hit_ts = None
-        self._confirm_ts = None
-        self._sweep_extreme = None
+        self._setups = []
         self._day_done = False
         self._ref_watch_count = 0
         self._cooldown_until = None
@@ -171,8 +237,54 @@ class LiquidityTrapStrategy(AbstractStrategyBook):
         self._tasks.append(asyncio.create_task(self._eod_loop(), name=f"liqtrap_eod_{self._underlying}"))
 
     async def _warmup_then_index_tick_loop(self) -> None:
+        await self._seed_trend_history()
         await self._warmup_intraday()
         await self._index_tick_loop()
+
+    async def _seed_trend_history(self) -> None:
+        """The 60m/SMA10 trend filter needs 10 HOURS of closed trend-tf bars
+        -- a single trading day (~6.25 hours) can never accumulate that much,
+        so self._acc_trend legitimately spans MULTIPLE days (same reasoning
+        as FVG's own PDH/PDL and swing structure staying multi-day while its
+        intraday-only FVG pool doesn't -- see CLAUDE.md's FVG section,
+        mechanic 5b). reset_session() never touches self._acc_trend (unlike
+        _acc_ref/_acc_confirm/_acc_1m, which are correctly intraday-only).
+        Seeds with real PAST trading days' data via REST before the live
+        tick loop starts; a failure here just means the trend filter starts
+        blind (compute_trend() returns None -> no entries at all until it
+        warms up from scratch on live ticks over the following days) rather
+        than blocking startup."""
+        if not self._feeder_token or self._acc_trend.bars:
+            return   # no token, or already seeded (never re-seed on a same-process restart)
+        key = _UPSTOX_INDEX_KEYS.get(self._underlying.upper(), f"NSE_INDEX|{self._underlying}")
+        try:
+            from data_layer.historical_candles import fetch_upstox_range_1m
+            end = datetime.now(IST).date() - timedelta(days=1)
+            start = end - timedelta(days=10)   # comfortably covers >=2 real trading days past weekends/holidays
+            raw_bars = await fetch_upstox_range_1m(key, self._feeder_token, start, end)
+        except Exception as exc:
+            self._clog.warning(
+                "LiquidityTrap[%s]: trend history seed fetch failed: %s -- trend filter starts "
+                "blind, will warm up live over the following days instead.", self._underlying, exc,
+            )
+            return
+        if not raw_bars:
+            self._clog.warning("LiquidityTrap[%s]: trend history seed -- 0 bars returned.", self._underlying)
+            return
+        tmp = BarAccumulator(timeframe_min=self._trend_tf_min)
+        for b in raw_bars:
+            try:
+                ts = datetime.fromisoformat(b["ts"]).astimezone(IST)
+                o, h, l, c = float(b["open"]), float(b["high"]), float(b["low"]), float(b["close"])
+            except Exception:
+                continue
+            for px in (o, h, l, c):
+                tmp.on_tick(ts, px)
+        self._acc_trend.bars = tmp.bars[-(self._trend_sma_len * 3):]   # generous cap, not unbounded growth
+        self._clog.info(
+            "LiquidityTrap[%s]: trend history seeded -- %d closed %dm bars from %s..%s.",
+            self._underlying, len(self._acc_trend.bars), self._trend_tf_min, start, end,
+        )
 
     async def _warmup_intraday(self) -> None:
         """On a mid-day (re)start, REST-fetch today's real 1-min spot history and
@@ -181,18 +293,20 @@ class LiquidityTrapStrategy(AbstractStrategyBook):
         hours it already lived through before this process started.
 
         Order placement (Stage4 CHoCH -> _try_enter) is suppressed during replay
-        via self._warming_up: a CHoCH that already fired hours ago can't be safely
-        entered now at that stale historical price, so _on_bar_close() marks the
-        day as done instead of firing a live order off old data (mirrors
-        D1TrapOptionBook._warmup_intraday's own established pattern -- state
-        catch-up yes, phantom/stale-price live orders no)."""
+        via self._warming_up: a setup whose CHoCH already fired hours ago can't
+        be safely entered now at that stale historical price, so it's simply
+        marked dead/consumed instead of firing a live order off old data
+        (mirrors D1TrapOptionBook._warmup_intraday's own established pattern --
+        state catch-up yes, phantom/stale-price live orders no). Other setups
+        that haven't reached Stage 4 yet are unaffected and keep being tracked
+        normally once live ticks resume."""
         now = datetime.now(IST)
         if now.time() < _SESSION_OPEN:
             return  # pre-market -- nothing has traded yet today, nothing to replay
         if not self._feeder_token:
             self._clog.warning(
                 "LiquidityTrap[%s]: no Upstox feeder token available -- skipping intraday "
-                "warmup, will build up ref/bias state live from here instead.",
+                "warmup, will build up setup state live from here instead.",
                 self._underlying,
             )
             return
@@ -216,11 +330,10 @@ class LiquidityTrapStrategy(AbstractStrategyBook):
             # this method returns. self._today is still None at this point
             # (never set anywhere else before the first tick), so without this
             # line that very first live tick would silently wipe out everything
-            # just replayed (bias/ref_idx/sl_hit_ts/confirm_ts + the accumulators
-            # themselves) via reset_session(), with zero log trace -- exactly
-            # what happened on a real EC2 run before this fix (STAGE1 locked
-            # during warmup, then silently reverted to "watching for ref" the
-            # moment live ticks resumed).
+            # just replayed via reset_session(), with zero log trace -- exactly
+            # what happened on a real EC2 run before this fix (state locked
+            # during warmup, then silently reverted the moment live ticks
+            # resumed).
             self._today = now.date()
             replayed = 0
             for b in raw_bars:
@@ -234,21 +347,23 @@ class LiquidityTrapStrategy(AbstractStrategyBook):
                 # Feed open->high->low->close as 4 synthetic ticks at the bar's own
                 # timestamp -- reconstructs the exact same OHLC bucket the live
                 # tick-based BarAccumulator would have built minute-by-minute, with
-                # zero changes to that already-validated pure class.
+                # zero changes to that already-validated pure class. Also feeds
+                # _acc_trend so today's still-forming trend-tf bar builds up
+                # correctly on top of the multi-day seed above.
                 for px in (o, h, l, c):
                     closed_1m = self._acc_1m.on_tick(ts, px)
-                    self._acc_5m.on_tick(ts, px)
-                    self._acc_15m.on_tick(ts, px)
+                    self._acc_confirm.on_tick(ts, px)
+                    self._acc_ref.on_tick(ts, px)
+                    self._acc_trend.on_tick(ts, px)
                     if closed_1m:
                         self._on_bar_close()
                 replayed += 1
+            active = sum(1 for s in self._setups if not s.dead)
             self._clog.info(
                 "LiquidityTrap[%s]: intraday warmup complete -- %d 1m bars replayed, "
-                "bias=%s sl_hit=%s confirmed=%s day_done=%s.",
-                self._underlying, replayed, self._bias,
-                self._sl_hit_ts.strftime("%H:%M") if self._sl_hit_ts else None,
-                self._confirm_ts.strftime("%H:%M") if self._confirm_ts else None,
-                self._day_done,
+                "%d setups tracked (%d still active), position=%s, day_done=%s.",
+                self._underlying, replayed, len(self._setups), active,
+                "OPEN" if self._position else "flat", self._day_done,
             )
         finally:
             self._warming_up = False
@@ -292,8 +407,9 @@ class LiquidityTrapStrategy(AbstractStrategyBook):
                 self._today = today
 
             closed_1m = self._acc_1m.on_tick(ev.timestamp, ev.ltp)
-            self._acc_5m.on_tick(ev.timestamp, ev.ltp)
-            self._acc_15m.on_tick(ev.timestamp, ev.ltp)
+            self._acc_confirm.on_tick(ev.timestamp, ev.ltp)
+            self._acc_ref.on_tick(ev.timestamp, ev.ltp)
+            self._acc_trend.on_tick(ev.timestamp, ev.ltp)
             if closed_1m:
                 self._on_bar_close()
 
@@ -301,73 +417,124 @@ class LiquidityTrapStrategy(AbstractStrategyBook):
                 self._check_exit_and_scale_in(ev.ltp)
 
     # ── pipeline (Stages 1-4): re-scan CLOSED bars on every new 1m close ────────
+    # Multi-ref (2026-08-21): re-derives the FULL day's setup list fresh every
+    # call (matches this module's own "never behaviorally drift from the
+    # backtest" discipline), reconciles against self._setups to find genuinely
+    # NEW setups, then advances every still-pending setup through Stage 2/3/4
+    # independently. See module docstring for the full mechanic.
 
     def _on_bar_close(self) -> None:
-        if self._day_done or self._position is not None:
+        if self._day_done:
             return
-        bars_15m = self._acc_15m.bars   # closed only, per the validated backtest
-        bars_5m = self._acc_5m.bars
+        bars_ref = self._acc_ref.bars   # closed only, per the validated backtest
+        bars_confirm = self._acc_confirm.bars
         bars_1m = self._acc_1m.bars
+        bars_trend = self._acc_trend.bars
 
-        if self._bias is None:
-            res = find_ref_and_bias(bars_15m)
-            if res is None:
-                # Not locked yet -- but log the tentative ref (always the most
-                # recently closed 15m candle while unlocked, per find_ref_and_bias'
-                # own roll-forward rule) once per new 15m close, so the log/UI
-                # aren't silent while we're still watching for a breach.
-                if bars_15m and len(bars_15m) != self._ref_watch_count:
-                    self._ref_watch_count = len(bars_15m)
-                    ref = bars_15m[-1]
+        # ── Stage 1: find genuinely NEW setups ──────────────────────────────
+        if bars_ref:
+            all_found = find_all_setups(bars_ref)
+            known = {(s.ref_idx, s.direction, s.locked_idx) for s in self._setups}
+            new_ones = [f for f in all_found if (f.ref_idx, f.direction, f.locked_idx) not in known]
+            for f in new_ones:
+                self._setups.append(_LiveSetup(f.ref_idx, f.direction, f.locked_idx))
+            active_n = sum(1 for s in self._setups if not s.dead)
+            if new_ones:
+                for f in new_ones:
                     self._clog.info(
-                        "REF candle [%s] high=%.2f low=%.2f -- watching next 15m candle for a breach",
-                        ref.ts.strftime("%H:%M"), ref.high, ref.low,
+                        "STAGE1 NEW setup dir=%s ref=[%.2f,%.2f] locked_by_candle_idx=%d (active setups=%d)",
+                        f.direction, bars_ref[f.ref_idx].low, bars_ref[f.ref_idx].high, f.locked_idx, active_n,
                     )
-                return
-            self._ref_watch_count = len(bars_15m)
-            self._bias, self._ref_idx, self._lock_idx = res
-            self._clog.info("STAGE1 bias=%s ref_idx=%d lock_idx=%d ref=[%.2f,%.2f]",
-                            self._bias, self._ref_idx, self._lock_idx,
-                            bars_15m[self._ref_idx].low, bars_15m[self._ref_idx].high)
+            elif len(bars_ref) != self._ref_watch_count:
+                ref = bars_ref[-1]
+                self._clog.info(
+                    "REF candle [%s] high=%.2f low=%.2f -- watching for new setups (active=%d)",
+                    ref.ts.strftime("%H:%M"), ref.high, ref.low, active_n,
+                )
+            self._ref_watch_count = len(bars_ref)
 
-        if self._sl_hit_ts is None:
-            ts = find_sl_hit(bars_15m, self._ref_idx, self._lock_idx, self._bias)
-            if ts is None:
-                return
-            self._sl_hit_ts = ts
-            self._clog.info("STAGE2 SL-hit @ %s", ts.strftime("%H:%M"))
+        # ── Stage 2: SL-hit, per still-pending setup ────────────────────────
+        for s in self._setups:
+            if s.dead or s.sl_hit_ts is not None:
+                continue
+            ts = find_sl_hit(bars_ref, s.ref_idx, s.locked_idx, s.direction)
+            if ts is not None:
+                s.sl_hit_ts = ts
+                self._clog.info("STAGE2 SL-hit @ %s (dir=%s ref=[%.2f,%.2f])",
+                                ts.strftime("%H:%M"), s.direction,
+                                bars_ref[s.ref_idx].low, bars_ref[s.ref_idx].high)
 
-        if self._confirm_ts is None:
-            bars_5m_since = [b for b in bars_5m if b.ts >= self._sl_hit_ts]
-            res = find_5m_confirmation(bars_5m_since, self._bias)
+        # ── Stage 3: 5m/confirm-tf single-fixed-reference confirmation ──────
+        for s in self._setups:
+            if s.dead or s.sl_hit_ts is None or s.confirm_ts is not None:
+                continue
+            bars_confirm_since = [b for b in bars_confirm if b.ts >= s.sl_hit_ts]
+            res = find_5m_confirmation(bars_confirm_since, s.direction)
+            if res is not None:
+                s.confirm_ts, s.sweep_extreme = res
+                self._clog.info("STAGE3 confirmed @ %s sweep_extreme=%.2f (dir=%s)",
+                                s.confirm_ts.strftime("%H:%M"), s.sweep_extreme, s.direction)
+
+        # ── Stage 4: 1m CHoCH -> entry (or filtered/skipped/stale) ──────────
+        for s in self._setups:
+            if s.dead or s.confirm_ts is None:
+                continue
+            bars_1m_since = [b for b in bars_1m if b.ts >= s.confirm_ts]
+            res = find_choch_entry(bars_1m_since, s.direction)
             if res is None:
-                return
-            self._confirm_ts, self._sweep_extreme = res
-            self._clog.info("STAGE3 confirmed @ %s sweep_extreme=%.2f",
-                            self._confirm_ts.strftime("%H:%M"), self._sweep_extreme)
+                continue
+            entry_ts, entry_price = res
+            s.dead = True   # this setup's one CHoCH moment is consumed either way
 
-        bars_1m_since = [b for b in bars_1m if b.ts >= self._confirm_ts]
-        res = find_choch_entry(bars_1m_since, self._bias)
-        if res is None:
-            return
-        entry_ts, entry_price = res
-        if self._warming_up:
-            # CHoCH already happened earlier today, before this process was even
-            # watching -- entering NOW would mean paying a live fill price against
-            # an hours-stale spot reference. No retroactive entry; today's one
-            # attempt is simply already gone, same as a real trader who wasn't
-            # looking when it printed.
-            self._clog.info(
-                "STAGE4 CHoCH already fired @ %s price=%.2f before this session started "
-                "watching -- missed for today (no stale-price retroactive entry).",
-                entry_ts.strftime("%H:%M"), entry_price,
-            )
-            self._day_done = True
-            return
-        self._clog.info("STAGE4 CHoCH entry @ %s price=%.2f", entry_ts.strftime("%H:%M"), entry_price)
-        self._try_enter(entry_ts, entry_price)
+            if self._warming_up:
+                # CHoCH already happened earlier today, before this process was
+                # even watching -- entering NOW would mean paying a live fill
+                # price against an hours-stale spot reference. No retroactive
+                # entry; this setup's one attempt is simply already gone, same
+                # as a real trader who wasn't looking when it printed. Other
+                # still-pending setups are unaffected.
+                self._clog.info(
+                    "STAGE4 CHoCH already fired @ %s price=%.2f dir=%s before this session "
+                    "started watching -- setup consumed, no retroactive entry.",
+                    entry_ts.strftime("%H:%M"), entry_price, s.direction,
+                )
+                continue
 
-    def _try_enter(self, entry_ts: datetime, entry_price: float) -> None:
+            if self._trend_filter_enabled:
+                trend = compute_trend(bars_trend, self._trend_sma_len)
+                if trend is None:
+                    self._clog.info(
+                        "STAGE4 CHoCH @ %s price=%.2f dir=%s -- skipped, not enough %dm trend "
+                        "history yet", entry_ts.strftime("%H:%M"), entry_price, s.direction, self._trend_tf_min,
+                    )
+                    continue
+                wants = "BULL" if trend == "UP" else "BEAR"
+                if s.direction != wants:
+                    self._clog.info(
+                        "STAGE4 CHoCH @ %s price=%.2f dir=%s -- filtered out, against %dm trend (%s)",
+                        entry_ts.strftime("%H:%M"), entry_price, s.direction, self._trend_tf_min, trend,
+                    )
+                    continue
+
+            if self._position is None:
+                self._clog.info("STAGE4 CHoCH entry @ %s price=%.2f dir=%s",
+                                entry_ts.strftime("%H:%M"), entry_price, s.direction)
+                self._try_enter(entry_ts, entry_price, s.direction, s.sweep_extreme)
+            else:
+                pos_dir = "BULL" if self._position["direction"] == 1 else "BEAR"
+                if s.direction == pos_dir:
+                    self._clog.info(
+                        "STAGE4 CHoCH @ %s price=%.2f dir=%s -- same direction as the running "
+                        "position, ignored", entry_ts.strftime("%H:%M"), entry_price, s.direction,
+                    )
+                else:
+                    self._clog.info(
+                        "STAGE4 CHoCH @ %s price=%.2f dir=%s -- opposite of the running position, "
+                        "but only one position at a time (skip-if-blocked, not flip) -- missed",
+                        entry_ts.strftime("%H:%M"), entry_price, s.direction,
+                    )
+
+    def _try_enter(self, entry_ts: datetime, entry_price: float, bias: str, sweep_extreme: float) -> None:
         if self._day_done or self._position is not None:
             return
         now = datetime.now(IST)
@@ -378,9 +545,9 @@ class LiquidityTrapStrategy(AbstractStrategyBook):
         if self._cooldown_until is not None and now < self._cooldown_until:
             return
 
-        direction = 1 if self._bias == "BULL" else -1
+        direction = 1 if bias == "BULL" else -1
         side = "CE" if direction == 1 else "PE"
-        sl, target = compute_sl_target(direction, entry_price, self._sweep_extreme, rr=self._rr)
+        sl, target = compute_sl_target(direction, entry_price, sweep_extreme, rr=self._rr)
 
         atm = round(entry_price / self._strike_step) * self._strike_step
         offset = self._itm_offset_pts
@@ -393,7 +560,11 @@ class LiquidityTrapStrategy(AbstractStrategyBook):
                             side, int(strike))
             return
 
-        self._day_done = True   # one trade attempt per day, whether it fills or not
+        # Multi-ref: NOT setting self._day_done here -- multiple sequential
+        # trades per day are expected (one setup at a time, gated only by
+        # "only one position open at once" in _on_bar_close's Stage 4, not by
+        # a day-level trade cap). self._day_done is now reserved solely for
+        # "past squareoff time" (set above).
         qty_unit = self._lot_size * self._lot_multiplier
         self._event_counter += 1
         eid = f"{self._underlying}_{side}{int(strike)}_ENTRY_{self._event_counter}"
@@ -700,20 +871,41 @@ class LiquidityTrapStrategy(AbstractStrategyBook):
     # ── monitoring / UI ──────────────────────────────────────────────────────
 
     def monitoring_state(self) -> dict:
-        bars_15m = self._acc_15m.bars
+        bars_ref = self._acc_ref.bars
+        active = [s for s in self._setups if not s.dead]
+        # Top-level bias/sl_hit/confirmed/ref_* mirror whichever ACTIVE setup is
+        # furthest along the pipeline (confirmed > sl_hit > locked-only), so the
+        # existing dashboard panel (built for the old single-setup shape) still
+        # shows something sensible without needing its own rewrite; the full
+        # per-setup detail is in `setups` below for a future richer panel.
+        lead = None
+        for s in sorted(active, key=lambda s: (s.confirm_ts is not None, s.sl_hit_ts is not None), reverse=True):
+            lead = s
+            break
         ref_bar = None
-        if self._bias is not None and self._ref_idx is not None and self._ref_idx < len(bars_15m):
-            ref_bar = bars_15m[self._ref_idx]      # locked ref
-        elif bars_15m:
-            ref_bar = bars_15m[-1]                 # tentative ref while still watching
+        if lead is not None and lead.ref_idx < len(bars_ref):
+            ref_bar = bars_ref[lead.ref_idx]
+        elif bars_ref:
+            ref_bar = bars_ref[-1]
+        trend = compute_trend(self._acc_trend.bars, self._trend_sma_len) if self._trend_filter_enabled else None
         return dict(
             underlying=self._underlying, client_id=self._client_id, binding_id=self._binding_id,
-            bias=self._bias, sl_hit=self._sl_hit_ts.isoformat() if self._sl_hit_ts else None,
-            confirmed=self._confirm_ts.isoformat() if self._confirm_ts else None,
+            bias=(lead.direction if lead else None),
+            sl_hit=lead.sl_hit_ts.isoformat() if (lead and lead.sl_hit_ts) else None,
+            confirmed=lead.confirm_ts.isoformat() if (lead and lead.confirm_ts) else None,
             day_done=self._day_done,
             ref_ts=ref_bar.ts.isoformat() if ref_bar else None,
             ref_high=ref_bar.high if ref_bar else None,
             ref_low=ref_bar.low if ref_bar else None,
+            trend=trend,
+            active_setup_count=len(active),
+            setups=[dict(
+                direction=s.direction,
+                ref_high=bars_ref[s.ref_idx].high if s.ref_idx < len(bars_ref) else None,
+                ref_low=bars_ref[s.ref_idx].low if s.ref_idx < len(bars_ref) else None,
+                sl_hit=s.sl_hit_ts.isoformat() if s.sl_hit_ts else None,
+                confirmed=s.confirm_ts.isoformat() if s.confirm_ts else None,
+            ) for s in active],
             position=(dict(self._position) if self._position else None),
             recent_remarks=list(self._recent_remarks),
         )
