@@ -110,3 +110,50 @@ class OIFlowTracker:
         if anchor_oi is None:
             return None
         return latest_oi - anchor_oi
+
+    # ── persistence (2026-08-21) ─────────────────────────────────────────────
+    # OI has no historical REST source (Upstox hardcodes OI=0 on every
+    # historical candle, confirmed by direct inspection) -- there is no way to
+    # backfill a mid-day restart's lost window the way every other strategy's
+    # own warmup does. But the live samples this tracker already collected
+    # before a restart are real, genuinely-observed data; persisting them to
+    # disk and reloading on startup means a restart only ever costs the
+    # samples collected in the gap between the last periodic save and the
+    # restart itself (a few seconds), not the full max_history_sec window.
+
+    def to_dict(self) -> Dict[str, list]:
+        """Serializable snapshot of every watched key's current sample
+        history. Key format "strike|SIDE" (dict keys must be strings for
+        JSON)."""
+        return {
+            f"{strike}|{side}": [[ts.isoformat(), oi] for ts, oi in samples]
+            for (strike, side), samples in self._samples.items()
+        }
+
+    def load_dict(self, data: Dict[str, list], now: datetime) -> None:
+        """Restore from a to_dict() snapshot, pruning anything older than
+        max_history_sec relative to the REAL current time (`now`), not the
+        samples' own timestamps -- restoring genuinely stale samples without
+        this would let oi_roc() silently compute a "valid-looking" result
+        entirely from pre-restart data (several of this tracker's own
+        engine-side callers don't pass their own `now=`, defaulting to the
+        bucket's latest sample timestamp -- exactly the "silently lies"
+        failure mode this tracker's own oi_roc() docstring already commits to
+        never doing). Does NOT filter by self._watched -- a restart may not
+        know the current wall strikes yet (that itself depends on live
+        ticks); the existing, already-correct watch_strikes() call that
+        follows shortly after startup will naturally drop anything no longer
+        relevant, same as it already does for any watch-list change."""
+        cutoff = now - timedelta(seconds=self._max_history_sec)
+        restored: Dict[_Key, List[Tuple[datetime, int]]] = {}
+        for key_str, rows in (data or {}).items():
+            try:
+                strike_str, side = key_str.rsplit("|", 1)
+                key: _Key = (float(strike_str), side)
+                samples = [(datetime.fromisoformat(ts), int(oi)) for ts, oi in rows]
+            except Exception:
+                continue
+            kept = [(ts, oi) for ts, oi in samples if ts >= cutoff]
+            if kept:
+                restored[key] = kept
+        self._samples = restored

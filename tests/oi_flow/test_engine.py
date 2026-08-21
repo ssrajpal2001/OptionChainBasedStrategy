@@ -1257,3 +1257,67 @@ def test_try_enter_logs_option_gate_rejection_reason(monkeypatch):
     assert row.spot_gate_fired is True
     assert row.option_gate_ok is False
     assert row.option_gate_reason == "below_vwap"
+
+
+# ── OI tracker persistence (2026-08-21) -- restart-proofing since REST ──────
+# backfill is structurally impossible for OI (Upstox historical candles
+# hardcode oi=0, confirmed by direct inspection).
+
+def test_persist_oi_tracker_saves_snapshot(monkeypatch):
+    saved = {}
+    monkeypatch.setattr(engine_module.position_store, "save",
+                        lambda key, data, product_type="MIS": saved.update(key=key, data=data) or True)
+    book = _make_book()
+    base = _base()
+    book._oi_tracker.watch_strikes({(57700.0, "CE"): True})
+    book._oi_tracker.on_option_tick(_FakeTick(57700.0, "CE", 100_000, base))
+
+    book._persist_oi_tracker()
+
+    assert saved["key"] == book._persist_key + "_oi_tracker"
+    assert "57700.0|CE" in saved["data"]
+
+
+def test_restore_oi_tracker_reloads_and_prunes_by_real_now(monkeypatch):
+    base = _base()
+    snapshot = {"57700.0|CE": [[base.isoformat(), 100_000]]}
+    monkeypatch.setattr(engine_module.position_store, "load", lambda key: snapshot)
+
+    class _FakeDT(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return base + timedelta(seconds=30)   # well within max_history_sec -- must survive
+
+    monkeypatch.setattr(engine_module, "datetime", _FakeDT)
+    book = _make_book()
+    book._oi_tracker = OIFlowTracker(max_history_sec=600)
+
+    book._restore_oi_tracker()
+
+    assert book._oi_tracker.oi_now(57700.0, "CE") == 100_000
+
+
+def test_restore_oi_tracker_drops_stale_snapshot(monkeypatch):
+    base = _base()
+    snapshot = {"57700.0|CE": [[base.isoformat(), 100_000]]}
+    monkeypatch.setattr(engine_module.position_store, "load", lambda key: snapshot)
+
+    class _FakeDT(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return base + timedelta(seconds=3600)   # 1hr later -- past max_history_sec
+
+    monkeypatch.setattr(engine_module, "datetime", _FakeDT)
+    book = _make_book()
+    book._oi_tracker = OIFlowTracker(max_history_sec=600)
+
+    book._restore_oi_tracker()
+
+    assert book._oi_tracker.oi_now(57700.0, "CE") is None
+
+
+def test_restore_oi_tracker_handles_missing_data_gracefully(monkeypatch):
+    monkeypatch.setattr(engine_module.position_store, "load", lambda key: None)
+    book = _make_book()
+    book._restore_oi_tracker()   # must not raise
+    assert book._oi_tracker.oi_now(57700.0, "CE") is None

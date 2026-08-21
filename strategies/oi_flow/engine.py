@@ -228,11 +228,48 @@ class OIFlowStrategy(AbstractStrategyBook):
         self._subscribe(Topic.MATRIX_SNAPSHOT)
         self._subscribe(Topic.OI_FLOW_ORDER_FILL)
         self._restore_position()
+        self._restore_oi_tracker()
         self._tasks.append(asyncio.create_task(self._index_tick_loop(), name=f"oiflow_idx_{self._underlying}"))
         self._tasks.append(asyncio.create_task(self._option_tick_loop(), name=f"oiflow_opt_{self._underlying}"))
         self._tasks.append(asyncio.create_task(self._matrix_snapshot_loop(), name=f"oiflow_snap_{self._underlying}"))
         self._tasks.append(asyncio.create_task(self._fill_loop(), name=f"oiflow_fill_{self._underlying}"))
         self._tasks.append(asyncio.create_task(self._eod_loop(), name=f"oiflow_eod_{self._underlying}"))
+        self._tasks.append(asyncio.create_task(self._oi_tracker_persist_loop(), name=f"oiflow_oipersist_{self._underlying}"))
+
+    async def _oi_tracker_persist_loop(self) -> None:
+        """Periodically saves self._oi_tracker's rolling sample history to
+        disk (2026-08-21) -- OI has no historical REST source to backfill
+        from on a restart (Upstox hardcodes oi=0 on every historical candle,
+        confirmed by direct inspection), so the only way to survive a restart
+        without going fully blind for oi_roc()'s own window (default 180s,
+        tracker keeps up to max_history_sec, >=600s) is to persist the real
+        LIVE samples this book already observed before the restart happened.
+        Runs independently of position state (unlike _eod_loop, which only
+        ticks while a position is open) -- OI tracking matters most while
+        flat and scanning, not just while holding a position."""
+        while self._running:
+            try:
+                await asyncio.sleep(15)
+            except asyncio.CancelledError:
+                break
+            self._persist_oi_tracker()
+
+    def _persist_oi_tracker(self) -> None:
+        try:
+            position_store.save(self._persist_key + "_oi_tracker", self._oi_tracker.to_dict(),
+                                 product_type=self._product_type)
+        except Exception as exc:
+            logger.debug("OIFlow[%s]: OI tracker persist failed: %s", self._underlying, exc)
+
+    def _restore_oi_tracker(self) -> None:
+        try:
+            data = position_store.load(self._persist_key + "_oi_tracker")
+            if data:
+                self._oi_tracker.load_dict(data, now=datetime.now(IST))
+                logger.info("OIFlow[%s]: restored OI tracker state (%d key(s) survived staleness pruning).",
+                            self._underlying, len(data))
+        except Exception as exc:
+            logger.debug("OIFlow[%s]: OI tracker restore failed: %s", self._underlying, exc)
 
     # ── matrix snapshot -> OI wall tracking ─────────────────────────────────────
 
