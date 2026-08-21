@@ -162,6 +162,84 @@ class PoolIndicatorEngine:
                 ind["roc"] = float((combined[-1] - ref) / ref * 100.0)
         return ind
 
+    # ── persistence (2026-08-21) ─────────────────────────────────────────────
+    # VWAP/SLOPE are deliberately NEVER REST-seeded (the 2026-08-19 "Seed VWAP
+    # Contamination" fix -- a real prior bug where REST-seeded bars poisoned
+    # the intraday VWAP/SLOPE baseline). Persisting+restoring the engine's own
+    # already-correctly-computed live bars is NOT the same thing as REST-
+    # seeding: it's the exact same live data surviving a process restart, not
+    # a different data source with different characteristics being fed in.
+    # The original minute indices are preserved verbatim, so the seed-vs-live
+    # boundary (m >= _SESSION_START_MIN / g >= 0) that pair_indicators()/
+    # pair_indicators_tf() already rely on stays exactly as correct after a
+    # restore as it was before the restart.
+    #
+    # Callers are responsible for only restoring a SAME-TRADING-DAY snapshot
+    # (VWAP/SLOPE are inherently intraday) -- this class has no day-awareness
+    # of its own, matching its own pure/generic design; see
+    # SellStraddleStrategy._restore_pool_engine()'s own session-day check.
+
+    def to_dict(self) -> dict:
+        """Serializable snapshot of the full rolling series + latest tick per
+        key."""
+        def _enc(d: Dict[Key, deque]) -> dict:
+            return {f"{k[0]}|{k[1]}": list(v) for k, v in d.items()}
+        return {
+            "closes": _enc(self._closes),
+            "atps": _enc(self._atps),
+            "mins": _enc(self._mins),
+            "latest": {f"{k[0]}|{k[1]}": list(v) for k, v in self._latest.items()},
+        }
+
+    def load_dict(self, data: dict) -> None:
+        """Restore from a to_dict() snapshot. Tolerates malformed/partial
+        entries (skips them individually) rather than failing the whole
+        restore."""
+        def _parse_key(s: str) -> Optional[Key]:
+            try:
+                strike_str, side = s.rsplit("|", 1)
+                return (int(strike_str), side)
+            except Exception:
+                return None
+
+        def _dec(raw: dict) -> Dict[Key, deque]:
+            out: Dict[Key, deque] = {}
+            for s, values in (raw or {}).items():
+                k = _parse_key(s)
+                if k is None:
+                    continue
+                try:
+                    out[k] = deque((float(x) for x in values), maxlen=self._maxlen)
+                except Exception:
+                    continue
+            return out
+
+        self._closes = _dec(data.get("closes"))
+        self._atps = _dec(data.get("atps"))
+        # mins are ints, not floats -- decode separately.
+        mins_raw = (data or {}).get("mins") or {}
+        mins: Dict[Key, deque] = {}
+        for s, values in mins_raw.items():
+            k = _parse_key(s)
+            if k is None:
+                continue
+            try:
+                mins[k] = deque((int(x) for x in values), maxlen=self._maxlen)
+            except Exception:
+                continue
+        self._mins = mins
+        latest_raw = (data or {}).get("latest") or {}
+        latest: Dict[Key, Tuple[float, float]] = {}
+        for s, pair in latest_raw.items():
+            k = _parse_key(s)
+            if k is None:
+                continue
+            try:
+                latest[k] = (float(pair[0]), float(pair[1]))
+            except Exception:
+                continue
+        self._latest = latest
+
     def _tf_groups(self, key: Key, tf: int):
         """Resample a leg's 1-min (minute, close, atp) to tf-minute candles.
         Returns dict group_id -> (close, atp) using the LAST 1-min bar per group, with the

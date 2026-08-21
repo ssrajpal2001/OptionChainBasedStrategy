@@ -150,3 +150,57 @@ def test_tf_vwap_slope_live_only_rsi_seeded():
     assert ind["vwap"] < 200
     assert "slope" in ind and abs(ind["slope"]) < 50   # small live delta, not a seed jump
     assert "rsi" in ind                                # seed-warmed
+
+
+# ── persistence (2026-08-21) -- restart-proofing VWAP/SLOPE, NOT REST-seeding ─
+
+def test_to_dict_load_dict_round_trip_preserves_indicators():
+    """The core requirement: an engine restored from a snapshot must produce
+    IDENTICAL pair_indicators() output to the original -- proves this is a
+    faithful restore of the same live data, not a lossy/altered one."""
+    eng = PoolIndicatorEngine(rsi_len=3, roc_len=3)
+    for i, m in enumerate(range(555, 562)):   # >= _SESSION_START_MIN (555) -- genuinely live
+        eng.update_tick(100, "CE", 60 + i, 50 + i)
+        eng.update_tick(100, "PE", 40 + i, 30 + i)
+        eng.commit_bar(minute=m)
+    original = eng.pair_indicators(100, 100)
+    assert original is not None and "slope" in original and "rsi" in original
+
+    snapshot = eng.to_dict()
+    restored = PoolIndicatorEngine(rsi_len=3, roc_len=3)
+    restored.load_dict(snapshot)
+
+    assert restored.pair_indicators(100, 100) == original
+
+
+def test_load_dict_preserves_live_vs_seed_minute_boundary():
+    """A restored engine must still correctly separate seed (negative
+    minute) bars from live (>= _SESSION_START_MIN) bars for VWAP/SLOPE --
+    this is the exact invariant the 2026-08-19 'Seed VWAP Contamination' fix
+    depends on; a persistence bug that lost minute indices would silently
+    reintroduce that bug on every restart."""
+    eng = PoolIndicatorEngine(rsi_len=3, roc_len=3)
+    eng.seed_strike(100, "CE", closes=[60] * 10, atps=[1000] * 10)   # seed -- huge fake ATP
+    eng.seed_strike(100, "PE", closes=[40] * 10, atps=[1000] * 10)
+    for i, m in enumerate(range(555, 558)):
+        eng.update_tick(100, "CE", 60 + i, 50 + i)   # real, small live ATP
+        eng.update_tick(100, "PE", 40, 50)
+        eng.commit_bar(minute=m)
+
+    restored = PoolIndicatorEngine(rsi_len=3, roc_len=3)
+    restored.load_dict(eng.to_dict())
+    ind = restored.pair_indicators(100, 100)
+    assert ind is not None
+    assert ind["vwap"] < 200, "restored VWAP must still be live-only (~100), not ~2000 from seeds"
+
+
+def test_load_dict_tolerates_malformed_snapshot():
+    eng = PoolIndicatorEngine()
+    eng.load_dict({"closes": {"not-a-valid-key": [1, 2, 3]}, "mins": {"100|CE": ["bad", "data"]}})
+    assert eng.pair_indicators(100, 100) is None   # nothing usable survived, no crash
+
+
+def test_load_dict_empty_snapshot_is_a_noop():
+    eng = PoolIndicatorEngine()
+    eng.load_dict({})
+    assert eng.pair_indicators(100, 100) is None

@@ -339,9 +339,58 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         except Exception as exc:
             logger.debug("SellStraddle[%s]: session restore failed: %s", self._underlying, exc)
 
+    def _persist_pool_engine(self) -> None:
+        """Persists self._pool_engine's rolling VWAP/SLOPE/RSI/ROC series
+        (2026-08-21) -- restart-proofing, NOT REST-seeding. VWAP/SLOPE are
+        deliberately never REST-seeded (2026-08-19 'Seed VWAP Contamination'
+        fix -- REST-derived bars poisoned the intraday baseline), which left
+        them exposed to a different gap: every one of today's routine mid-day
+        restarts cold-starts VWAP/SLOPE from scratch, running degraded on
+        whatever pair is currently open until enough fresh live ticks
+        re-accumulate. Persisting the engine's OWN already-correctly-computed
+        live bars (verbatim, including their original minute indices) is not
+        REST-seeding -- it's the same live data surviving a restart, so the
+        already-correct seed-vs-live boundary pair_indicators() relies on
+        stays exactly as correct after a restore as before it."""
+        try:
+            from data_layer import position_store as _ps
+            _ps.save(self._persist_key + "_pool", {
+                "session_day": str(self._session_day(datetime.now(IST))),
+                "pool_state": self._pool_engine.to_dict(),
+            }, product_type="MIS")
+        except Exception as exc:
+            logger.debug("SellStraddle[%s]: pool engine persist failed: %s", self._underlying, exc)
+
+    def _restore_pool_engine(self) -> None:
+        try:
+            from data_layer import position_store as _ps
+            _saved = _ps.load(self._persist_key + "_pool")
+            if not _saved:
+                return
+            if str(_saved.get("session_day", "")) != str(self._session_day(datetime.now(IST))):
+                logger.info("SellStraddle[%s]: persisted pool-engine state is from a prior "
+                            "trading day — starting VWAP/SLOPE fresh (intraday-only, by design).",
+                            self._underlying)
+                return
+            self._pool_engine.load_dict(_saved.get("pool_state") or {})
+            logger.info("SellStraddle[%s]: restored pool-engine VWAP/SLOPE/RSI/ROC state.", self._underlying)
+        except Exception as exc:
+            logger.debug("SellStraddle[%s]: pool engine restore failed: %s", self._underlying, exc)
+
+    async def _pool_engine_persist_loop(self) -> None:
+        """Periodic save (independent of position state -- VWAP/SLOPE matter
+        just as much while scanning/flat as while holding a position)."""
+        while self._running:
+            try:
+                await asyncio.sleep(15)
+            except asyncio.CancelledError:
+                break
+            self._persist_pool_engine()
+
     def start(self) -> None:
         self._running = True
         self._restore_session()
+        self._restore_pool_engine()
         try:
             from data_layer import position_store as _ps
             _saved = _ps.load(self._persist_key)
@@ -377,6 +426,7 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
             asyncio.create_task(self._hedge_fill_loop(), name=f"ss_{_tag}_hedge_fill"),
         ]
         asyncio.create_task(self._seed_pool())
+        self._tasks.append(asyncio.create_task(self._pool_engine_persist_loop(), name=f"ss_{_tag}_pool_persist"))
         logger.info("SellStraddleStrategy[%s]: started.", self._underlying)
         try:
             self._log_settings_banner()
