@@ -45,6 +45,20 @@ from config.global_config import IST
 from data_layer.base_feeder import EventBus
 from strategies.d1_trap_option.bear_only_book import D1TrapBearOnlyBook, _Bar, _OptionSeries
 
+# The real 2026-08-07 incident's own wall-clock date is used only for narrative
+# fidelity in the module docstring above. The zone-age gate in
+# _process_new_bar (_MAX_ZONE_AGE_DAYS=14) compares a zone's lock_ts against
+# REAL datetime.now(IST) -- a hardcoded absolute date would silently rot past
+# that 14-day window as real time marches on (confirmed: this test started
+# failing once "today" passed 2026-08-21). Anchor to "2 days before real now"
+# instead, comfortably inside the window forever, same times-of-day as the
+# original incident.
+_BASE_DATE = (datetime.now(IST) - timedelta(days=2)).date()
+
+
+def _dt(hour: int, minute: int) -> datetime:
+    return datetime(_BASE_DATE.year, _BASE_DATE.month, _BASE_DATE.day, hour, minute, tzinfo=IST)
+
 
 def _make_book() -> D1TrapBearOnlyBook:
     return D1TrapBearOnlyBook(
@@ -117,7 +131,7 @@ async def test_two_zones_sharing_same_ref_candle_across_separate_calls_fire_once
     book._series["CE"] = _OptionSeries(strike=24350, side="CE")
     book._series["PE"] = _OptionSeries(strike=24700, side="PE")
 
-    ref_open = datetime(2026, 8, 7, 10, 47, tzinfo=IST)
+    ref_open = _dt(10, 47)
     ref_close_time = ref_open + timedelta(minutes=15)
     ref_high, ref_low = 290.40, 259.63
     zone_lo = ref_low - 5
@@ -127,7 +141,7 @@ async def test_two_zones_sharing_same_ref_candle_across_separate_calls_fire_once
 
     # Call 1: zone A (its own distinct zone object) breaches and fires for real.
     zone_a = _seed_zone(ref_open, ref_close_time, ref_high, ref_low,
-                         lock_ts=datetime(2026, 8, 7, 10, 40, tzinfo=IST))
+                         lock_ts=_dt(10, 40))
     book._series["CE"].zones = [zone_a]
     book._process_new_bar("CE")
     await asyncio.sleep(0)
@@ -142,7 +156,7 @@ async def test_two_zones_sharing_same_ref_candle_across_separate_calls_fire_once
     # alone would NOT have blocked a second real order.
     book._positions = []
     zone_b = _seed_zone(ref_open, ref_close_time, ref_high, ref_low,
-                         lock_ts=datetime(2026, 8, 7, 10, 41, tzinfo=IST))
+                         lock_ts=_dt(10, 41))
     book._series["CE"].zones = [zone_b]
     book._process_new_bar("CE")
     await asyncio.sleep(0)
@@ -167,26 +181,26 @@ async def test_different_ref_candle_is_a_genuinely_new_signal_and_fires():
     book._series["CE"] = _OptionSeries(strike=24350, side="CE")
     book._series["PE"] = _OptionSeries(strike=24700, side="PE")
 
-    ref_open_1 = datetime(2026, 8, 7, 10, 47, tzinfo=IST)
+    ref_open_1 = _dt(10, 47)
     ref_close_1 = ref_open_1 + timedelta(minutes=15)
     ref_high_1, ref_low_1 = 290.40, 259.63
     bars = _bars_for_breach(ref_close_1, ref_high_1, ref_low_1 - 5)
     book._series["CE"].bars_1m = bars
     zone_1 = _seed_zone(ref_open_1, ref_close_1, ref_high_1, ref_low_1,
-                         lock_ts=datetime(2026, 8, 7, 10, 40, tzinfo=IST))
+                         lock_ts=_dt(10, 40))
     book._series["CE"].zones = [zone_1]
     book._process_new_bar("CE")
     await asyncio.sleep(0)
     assert len(book._bus.published) == 1
 
     book._positions = []
-    ref_open_2 = datetime(2026, 8, 7, 13, 0, tzinfo=IST)   # a genuinely different, later candle
+    ref_open_2 = _dt(13, 0)   # a genuinely different, later candle
     ref_close_2 = ref_open_2 + timedelta(minutes=15)
     ref_high_2, ref_low_2 = 310.00, 275.00
     more_bars = _bars_for_breach(ref_close_2, ref_high_2, ref_low_2 - 5)
     book._series["CE"].bars_1m = book._series["CE"].bars_1m + more_bars
     zone_2 = _seed_zone(ref_open_2, ref_close_2, ref_high_2, ref_low_2,
-                         lock_ts=datetime(2026, 8, 7, 12, 55, tzinfo=IST))
+                         lock_ts=_dt(12, 55))
     book._series["CE"].zones = [zone_2]
     book._process_new_bar("CE")
     await asyncio.sleep(0)

@@ -768,13 +768,39 @@ _MCX_FY_OPT_RE = _re.compile(r"^MCX:([A-Z]+?)(\d{2})([A-Z]{3})(\d+)(CE|PE)$")
 
 
 def _parse_mcx_fyers_option(symbol: str):
-    """Parse 'MCX:CRUDEOIL26JUN8850CE' -> (underlying, strike, opt_type, expiry)."""
+    """Parse 'MCX:CRUDEOIL26JUN8850CE' -> (underlying, strike, opt_type, expiry).
+
+    Resolves the expiry actually ENCODED in the symbol (yy+mon), not just
+    "whatever the registry currently considers active" -- mirrors
+    SymbolTranslator.from_fyers()'s own monthly-format resolution
+    (data_layer/symbol_translator.py), which already learned this lesson
+    (see get_active_expiry_strict's 2026-08-09 incident docstring: silently
+    substituting the active/nearest expiry for a specific requested one fed
+    real historical prices for the WRONG contract, valid-looking data with a
+    wrong-month bug). A stale/rolled tick for a symbol whose exact month
+    isn't in the currently-loaded registry falls back to get_active_expiry
+    (logged, since that fallback path is the one that can silently mismatch).
+    """
     m = _MCX_FY_OPT_RE.match(symbol or "")
     if not m:
         return None
-    underlying, _yy, _mon, strike, ot = m.groups()
+    underlying, yy, mon3, strike, ot = m.groups()
     from data_layer.instrument_registry import REGISTRY
-    exp = REGISTRY.get_active_expiry(underlying)
+    from data_layer.symbol_translator import _MONTH_3
+    exp = None
+    try:
+        year = 2000 + int(yy)
+        month = _MONTH_3.index(mon3) + 1
+        month_exps = [e for e in REGISTRY.all_expiries(underlying) if e.year == year and e.month == month]
+        if month_exps:
+            exp = max(month_exps)
+    except Exception:
+        exp = None
+    if exp is None:
+        logger.warning("_parse_mcx_fyers_option: no loaded expiry matches %s%s in symbol %r -- "
+                        "falling back to the current active expiry (may be a different contract).",
+                        yy, mon3, symbol)
+        exp = REGISTRY.get_active_expiry(underlying)
     return (underlying, float(strike), ot, exp)
 
 

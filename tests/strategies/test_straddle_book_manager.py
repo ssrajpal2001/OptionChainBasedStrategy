@@ -5,9 +5,11 @@ from strategies.straddle_book_manager import StraddleBookManager
 
 
 class _FakeBook:
-    def __init__(self, bus, cfg, underlying="NIFTY", lot_multiplier=1, client_id="", binding_id=""):
+    def __init__(self, bus, cfg, underlying="NIFTY", lot_multiplier=1, client_id="", binding_id="",
+                 shadow_on_reject=False):
         self._underlying = underlying; self._client_id = client_id; self._binding_id = binding_id
         self._lot_multiplier = lot_multiplier
+        self._shadow_on_reject = shadow_on_reject
         self._position = None
         self.started = False; self.stopped = False
     def set_client_db(self, db): self._db = db

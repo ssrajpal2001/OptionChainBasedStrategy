@@ -5,10 +5,14 @@ def test_pair_indicators_combined_close_and_vwap():
     eng = PoolIndicatorEngine(rsi_len=14, roc_len=10)
     # (ce_ltp, ce_atp, pe_ltp, pe_atp) per 1-min bar
     bars = [(50, 49, 40, 39), (51, 50, 41, 40), (52, 51, 42, 41)]
-    for cl, ca, pl, pa in bars:
+    # minute >= _SESSION_START_MIN (555 = 9:15) -- VWAP/SLOPE are LIVE-only by
+    # design (2026-08-19 Seed VWAP Contamination fix); commit_bar()'s default
+    # auto-increment starts at minute=0, which the same live/seed boundary
+    # would treat as pre-session seed data and correctly omit slope/vwap for.
+    for i, (cl, ca, pl, pa) in enumerate(bars):
         eng.update_tick(100, "CE", cl, ca)
         eng.update_tick(100, "PE", pl, pa)
-        eng.commit_bar()
+        eng.commit_bar(minute=555 + i)
     ind = eng.pair_indicators(100, 100)
     assert ind["close"] == 52 + 42
     assert ind["vwap"] == 51 + 41
@@ -120,14 +124,15 @@ def test_slope_and_vwap_ignore_seed_atp_contamination():
     eng = PoolIndicatorEngine(rsi_len=14, roc_len=10)
     eng.seed_strike(100, "CE", closes=[60] * 20, atps=[1000] * 20)
     eng.seed_strike(100, "PE", closes=[40] * 20, atps=[1000] * 20)
-    # one LIVE bar -> slope unavailable (only 1 live atp), NOT a seed->live jump
+    # one LIVE bar (minute >= _SESSION_START_MIN=555, i.e. 9:15) -> slope
+    # unavailable (only 1 live atp), NOT a seed->live jump
     eng.update_tick(100, "CE", 60, 50); eng.update_tick(100, "PE", 40, 50)
-    eng.commit_bar(minute=540)
+    eng.commit_bar(minute=555)
     ind1 = eng.pair_indicators(100, 100)
     assert "slope" not in ind1
     # second LIVE bar -> slope from LIVE atps only
     eng.update_tick(100, "CE", 61, 52); eng.update_tick(100, "PE", 41, 52)
-    eng.commit_bar(minute=541)
+    eng.commit_bar(minute=556)
     ind2 = eng.pair_indicators(100, 100)
     assert "slope" in ind2
     assert abs(ind2["slope"] - ((52 + 52) - (50 + 50))) < 1e-9   # = 4, not ~ -1900
