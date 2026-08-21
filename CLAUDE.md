@@ -2,16 +2,20 @@
 
 Complete codebase reference for Claude Code. Updated after each major phase.
 
-> **CURRENT FOCUS (2026-08-19):** This project is **ONLY** working on five strategies:
+> **CURRENT FOCUS (2026-08-22):** This project is **ONLY** working on six strategies.
+> **Actually live-deployed and running right now: SellStraddle, OI-Flow, and Liquidity
+> Trap.** D1 Trap FnO/Index, FVG, and Liquidity Sweep are built but not part of the
+> current live rotation (see each one's own status below).
 > 1. **SellStraddle** — theta-decay option seller (mature, live in production)
-> 2. **D1 Trap FnO/Index** — zone-based option buyer (active development)
-> 3. **FVG (Fair Value Gap)** — Smart Money Concepts option buyer (new 2026-08-01/03, entering paper trading; see "FVG Strategy" section below)
-> 4. **OI-Flow Pre-Breakout** — OI-divergence option buyer (new 2026-08-12, built as a **fully standalone 4th strategy pipeline** — own package, own Topics, own execution bridge, own book manager; shares zero runtime infrastructure with strategies 1-3. Not yet deployed even in paper mode — see "OI-Flow Pre-Breakout Strategy" section below.)
+> 2. **D1 Trap FnO/Index** — zone-based option buyer (built, not in the current live rotation — see "D1 Trap FnO / Index" section below)
+> 3. **FVG (Fair Value Gap)** — Smart Money Concepts option buyer (new 2026-08-01/03, built for paper trading, not in the current live rotation; see "FVG Strategy" section below)
+> 4. **OI-Flow Pre-Breakout** — OI-divergence option buyer (new 2026-08-12, built as a **fully standalone 4th strategy pipeline** — own package, own Topics, own execution bridge, own book manager; shares zero runtime infrastructure with strategies 1-3. **Live-deployed** — see "OI-Flow Pre-Breakout Strategy" section below.)
 > 5. **Liquidity Sweep** — SMC/ICT sweep+displacement+FVG+retest option buyer (new 2026-08-19, built as a **fully standalone 5th strategy pipeline**, same zero-shared-infrastructure mandate as OI-Flow. Iteratively built and validated as a Pine Script indicator against real NIFTY chart data in TradingView BEFORE being ported to Python, per direct user instruction — not backtested in Python first. Not yet deployed even in paper mode — see "Liquidity Sweep Strategy" section below.)
+> 6. **Liquidity Trap** — ref-candle sweep/CHoCH option buyer (new 2026-08-20/21, built as a **fully standalone 6th strategy pipeline**, same zero-shared-infrastructure mandate. **Live-deployed** on NIFTY/SENSEX — see "Liquidity Trap Strategy" section below.)
 >
 > Do NOT suggest, implement, or discuss any other strategies. All new work belongs to
-> one of these five. When starting a new session, read the D1 Trap, FVG, OI-Flow, and
-> Liquidity Sweep sections below first.
+> one of these six. When starting a new session, read the D1 Trap, FVG, OI-Flow,
+> Liquidity Sweep, and Liquidity Trap sections below first.
 
 ---
 
@@ -1054,6 +1058,113 @@ logic was validated (in Pine, on TradingView, against real chart data). Watch th
 few real paper sessions closely before trusting default parameters broadly, and revisit
 `itm_offset_pts`/expiry choice once real forward data exists to tune them, same
 graduation discipline already established for OI-Flow.
+
+---
+
+### Liquidity Trap Strategy (`strategies/liquidity_trap/`)
+
+Option **buyer** strategy, distinct package from Liquidity Sweep above (different
+mechanic, different files, same zero-shared-runtime mandate as OI-Flow/Liquidity
+Sweep — own events, own Topics, own execution bridge, own book manager). **Live
+deployed** on NIFTY/SENSEX — one of the three strategies actually running in
+production right now, alongside SellStraddle and OI-Flow.
+
+**Mechanic**: ref-candle (default 20m) rolling bias → SL-watch (ref candle's own
+opposite level swept on a later ref-tf candle) → confirm-tf (default 3m)
+single-fixed-reference confirmation → 1m CHoCH entry (half size, 2 lots) → 1:2
+risk-reward SL/target off the confirm-tf sweep extreme → a 3-candle
+(ref/sweep/reclaim) scale-in zone on 1m adds the other half (2 more lots, 4 total)
+on a retrace into the lowest/highest third of that zone, SL/target unchanged by
+the add-on. SL/Target are **spot-index levels**, not option premium — same
+honest, deliberate design choice as Liquidity Sweep (no validated delta/greeks
+model exists in this codebase); checked every spot tick. Entry executes 1-strike
+ITM (`itm_offset_pts`, live-configured per-deployment — code default is `0.0`
+(ATM); this was corrected live on 2026-08-20 to `50` (NIFTY) / `100` (SENSEX)
+after a review of that day's live trades showed ATM was actually being used).
+
+**MULTI-REF mechanic** (2026-08-21, superseded the original single-lock design):
+every consecutive ref-tf candle pair independently spawns its own setup on a
+clean one-sided breach, tracked fully in parallel (`self._setups` in
+`engine.py`) — Stage 1-3 all run per-setup simultaneously regardless of what any
+other setup is doing. Only ONE option position open at a time: a setup reaching
+Stage 4 (CHoCH) while flat enters; while already in a position, both a
+same-direction AND an opposite-direction CHoCH are skipped (**skip-if-blocked**,
+not a flip-exit) — backtested as the higher-PF of the two variants on SENSEX
+(1.81 vs 1.67 lot-weighted PF); flip was re-tested against real NIFTY data on
+2026-08-22 and ties-or-beats skip on every NIFTY combo tested, but the edge is
+marginal (PF +0.04 to +0.15) and the opposite of the SENSEX result — kept skip
+everywhere rather than add asymmetric per-underlying exit-style logic to a live
+engine for a marginal, underlying-inconsistent gain.
+
+**Mid-day restart intraday warmup** (`_warmup_intraday()`): REST-fetches today's
+1-min history and replays it through the exact same live pipeline before the
+first live tick, gated by `self._warming_up` so replay never places real orders.
+`self._today` is set **before** replay (not after) — the same critical-fix
+pattern as every other strategy's warmup in this codebase — so the first live
+tick's own new-day check can't silently wipe the just-replayed state via
+`reset_session()`.
+
+**Real-data-validated timeframe/trend-filter optimization** (2026-08-21,
+`scripts/liquidity_trap_tf_and_trend_sweep.py`, 1-year real SENSEX spot via
+Upstox): `ref_tf_min=20` / `confirm_tf_min=3` (was 15m/5m) + a `trend_tf_min=60`
+/ `trend_sma_len=10` higher-timeframe trend filter (only enter WITH the trend —
+current close above/below a simple SMA on the coarser series) together took the
+backtest from 930 trades/77.8% win/PF 1.81 to 392 trades/82.7% win/PF 2.67 —
+fewer trades, higher win rate, AND higher PF simultaneously, the only tested
+config that hit all three. VWAP / change-in-OI / max-pain / open-interest
+filters were explicitly considered and are **confirmed impossible to backtest**
+— Upstox's historical index-candle API returns `volume=0`/`oi=0` on every row
+for spot indices, same root limitation OI-Flow already hit. These are now the
+LIVE defaults (`strategies/liquidity_trap/book_manager.py`'s `_DEFAULT_PARAMS`),
+fully overridable per-deployment via `strategy_params`. Deploy dropdown label
+(`monitor.html`) reflects this: "Liquidity Trap (Multi-Ref 20m/3m + 60m Trend
+Filter)".
+
+**NIFTY-specific optimization pass** (2026-08-22, `scripts/liquidity_trap_
+nifty_tf_and_trend_sweep.py` + `scripts/liquidity_trap_nifty_full_optimization.py`,
+1-year real NIFTY spot, 247 trading days / 92,310 1m bars): the prior pass only
+ever ran against SENSEX data, so the same tf/trend sweep was repeated on NIFTY,
+plus two more axes (target_mode `liquidity` vs `rr2`, exit-style `skip` vs
+`flip`) that hadn't been swept for either underlying before. Result: **the
+existing SENSEX-derived global default (20m/3m/liquidity-target/skip/60m-SMA10
+trend) holds up well on NIFTY too** — PF 2.67, win% 81.3%, n=380 over the year —
+confirming it wasn't accidentally a SENSEX-only tuning blindly applied
+elsewhere. `target_mode=rr2` (fixed 2R target instead of the opposing-side
+liquidity level) was confirmed worse on NIFTY too — win% collapses to 52-61%
+despite a higher raw ₹ net, consistent with the existing design choice. SL
+concept itself was not varied in either optimization pass — it is always the
+swept reference candle's own extreme (a structural, price-action-anchored
+stop) in every mode ever tested for this strategy; no alternate SL concept
+(ATR-based, fixed-points, etc.) has been built or requested.
+
+**Known live incident (2026-08-20, diagnosed only, not a codebase bug)**: a
+live order was rejected by Dhan with `Expecting value: line 1 column 1 (char
+0)` — root-caused to `dhanhq`'s `_parse_response()` calling `json_loads()` on
+an empty HTTP body from Dhan's `/v2/orders` endpoint. Confirmed NOT a symbol-
+resolution or codebase bug (verified correct via direct inspection); recurred
+3 times same day across different underlyings/times — recommend checking the
+Dhan account's own order-placement permissions if it recurs.
+
+**Files**: `strategies/liquidity_trap/detector.py` (pure functions —
+`find_all_setups`, `find_sl_hit`, `find_5m_confirmation`/configurable-tf
+confirm, `find_choch_entry`, `compute_sl_target`, `find_scale_in_level`,
+`compute_trend`), `engine.py` (`LiquidityTrapStrategy` — re-scans growing
+per-day bar lists on every new bar close, exactly mirroring the backtest
+script so the live engine can never behaviorally drift from what was actually
+validated), `book_manager.py`, `events.py`. Backtest/optimization scripts:
+`scripts/liquidity_trap_backtest.py` (original single-lock baseline, source of
+truth the live engine was first ported from), `scripts/liquidity_trap_
+multiref_backtest.py` (multi-ref + flip-vs-skip comparison), `scripts/
+liquidity_trap_tf_and_trend_sweep.py` / `liquidity_trap_nifty_tf_and_trend_
+sweep.py` (per-underlying tf/trend optimization), `scripts/liquidity_trap_
+nifty_full_optimization.py` (target-mode + exit-style sweep), `scripts/
+liquidity_trap_today_whatif.py` (what-if P&L reconstruction for a real trading
+day using REST history, e.g. to sanity-check a broker-rejected order).
+
+**Status (2026-08-22)**: live-deployed on NIFTY/SENSEX, actively running
+alongside SellStraddle and OI-Flow (D1 Trap FnO/Index, FVG, and Liquidity
+Sweep are built but not part of the current live rotation — see each
+section above for their own status).
 
 ---
 
