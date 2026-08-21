@@ -111,6 +111,8 @@ class LiquidityTrapStrategy(AbstractStrategyBook):
         self._confirm_ts: Optional[datetime] = None
         self._sweep_extreme: Optional[float] = None
         self._day_done = False                        # one trade attempt per day
+        self._ref_watch_count = 0    # len(bars_15m) as of the last REF log line, so we
+                                      # only log once per new 15m close, not every 1m tick
 
         self._position: Optional[dict] = None
         self._cooldown_until: Optional[datetime] = None
@@ -134,6 +136,7 @@ class LiquidityTrapStrategy(AbstractStrategyBook):
         self._confirm_ts = None
         self._sweep_extreme = None
         self._day_done = False
+        self._ref_watch_count = 0
         self._cooldown_until = None
         self._recent_remarks.clear()
 
@@ -207,7 +210,19 @@ class LiquidityTrapStrategy(AbstractStrategyBook):
         if self._bias is None:
             res = find_ref_and_bias(bars_15m)
             if res is None:
+                # Not locked yet -- but log the tentative ref (always the most
+                # recently closed 15m candle while unlocked, per find_ref_and_bias'
+                # own roll-forward rule) once per new 15m close, so the log/UI
+                # aren't silent while we're still watching for a breach.
+                if bars_15m and len(bars_15m) != self._ref_watch_count:
+                    self._ref_watch_count = len(bars_15m)
+                    ref = bars_15m[-1]
+                    self._clog.info(
+                        "REF candle [%s] high=%.2f low=%.2f -- watching next 15m candle for a breach",
+                        ref.ts.strftime("%H:%M"), ref.high, ref.low,
+                    )
                 return
+            self._ref_watch_count = len(bars_15m)
             self._bias, self._ref_idx, self._lock_idx = res
             self._clog.info("STAGE1 bias=%s ref_idx=%d lock_idx=%d ref=[%.2f,%.2f]",
                             self._bias, self._ref_idx, self._lock_idx,
@@ -570,11 +585,20 @@ class LiquidityTrapStrategy(AbstractStrategyBook):
     # ── monitoring / UI ──────────────────────────────────────────────────────
 
     def monitoring_state(self) -> dict:
+        bars_15m = self._acc_15m.bars
+        ref_bar = None
+        if self._bias is not None and self._ref_idx is not None and self._ref_idx < len(bars_15m):
+            ref_bar = bars_15m[self._ref_idx]      # locked ref
+        elif bars_15m:
+            ref_bar = bars_15m[-1]                 # tentative ref while still watching
         return dict(
             underlying=self._underlying, client_id=self._client_id, binding_id=self._binding_id,
             bias=self._bias, sl_hit=self._sl_hit_ts.isoformat() if self._sl_hit_ts else None,
             confirmed=self._confirm_ts.isoformat() if self._confirm_ts else None,
             day_done=self._day_done,
+            ref_ts=ref_bar.ts.isoformat() if ref_bar else None,
+            ref_high=ref_bar.high if ref_bar else None,
+            ref_low=ref_bar.low if ref_bar else None,
             position=(dict(self._position) if self._position else None),
             recent_remarks=list(self._recent_remarks),
         )

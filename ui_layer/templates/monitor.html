@@ -8312,6 +8312,11 @@ function amoTest() {
                           <template x-if="!_bk.position">
                             <div class="mb-1.5">
                               <div class="flex items-center justify-between">
+                                <span style="color:var(--t-muted)"
+                                      x-text="_bk.bias ? 'Locked ref candle' : 'Ref candle (watching)'"></span>
+                                <span x-text="_bk.ref_ts ? (_bk.ref_ts.slice(11,16)+' H:'+fmt(_bk.ref_high)+' L:'+fmt(_bk.ref_low)) : '—'"></span>
+                              </div>
+                              <div class="flex items-center justify-between">
                                 <span style="color:var(--t-muted)">SL-hit (15m)</span>
                                 <span x-text="_bk.sl_hit ? _bk.sl_hit.slice(11,19) : '—'"></span>
                               </div>
