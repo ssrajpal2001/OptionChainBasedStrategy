@@ -743,7 +743,6 @@ document.addEventListener('alpine:init', () => {
     telemetry: { upstox_latency_ms: 0, fyers_latency_ms: 0, ws_clients: 0 },
 
     /* ── Strategy telemetry ─────────────────────────────────────────── */
-    strategyTelemetry: { trap_engine: {}, active: false, ts: '' },
     strategyRegistry: { strategies: [], ts: '' },
 
     /* ── Strategy runtime config ─────────────────────────────────────── */
@@ -994,9 +993,6 @@ document.addEventListener('alpine:init', () => {
     get myEvents() {
       return this.events.filter(e => e.type !== 'fill' || e.client_id === this.authClientId);
     },
-    get trapState() {
-      return (this.strategyTelemetry.trap_engine || {})[this.activeIndex] || {};
-    },
     _zoneProximity(price, zoneHigh, zoneLow) {
       if (!price || (!zoneHigh && !zoneLow)) return false;
       const tol = 0.001;
@@ -1172,8 +1168,8 @@ document.addEventListener('alpine:init', () => {
       });
       setInterval(() => { if (this.screen === 'admin') { this.loadTelemetry(); this.loadFeederStatus(); this.loadAuthAlerts(); } }, 10000);
       setInterval(() => { if (this.screen === 'admin') this.loadIvMatrix(); }, 5000);
-      setInterval(() => { if (this.screen === 'admin' && this.adminTab === 'dashboard') { this.loadStrategyTelemetry(); this.loadStrategyRegistry(); } }, 5000);
-      setInterval(() => { if (this.screen === 'admin' && this.adminTab === 'strategies') { this.loadStrategyRegistry(); this.loadStrategyTelemetry(); } }, 5000);
+      setInterval(() => { if (this.screen === 'admin' && this.adminTab === 'dashboard') { this.loadStrategyRegistry(); } }, 5000);
+      setInterval(() => { if (this.screen === 'admin' && this.adminTab === 'strategies') { this.loadStrategyRegistry(); } }, 5000);
       setInterval(() => { if (this.screen === 'admin' && this.adminTab === 'clients') { this.loadClientProfiles(); this.loadPendingClients(); this.loadRiskSummary(); } }, 5000);
       setInterval(() => { if (this.screen === 'admin' && this.adminTab === 'fno_pos') this.loadFnoPositions(); }, 30000);
       setInterval(() => { if (this.screen === 'client') this.loadClientStatus(); }, 8000);
@@ -1192,7 +1188,7 @@ document.addEventListener('alpine:init', () => {
       this.loadAuthAlerts();
       this.loadRms();
       setTimeout(() => { this.loadTelemetry(); this.loadIvMatrix(); }, 800);
-      setTimeout(() => { this.loadStrategyTelemetry(); this.loadStrategyRegistry(); }, 1200);
+      setTimeout(() => { this.loadStrategyRegistry(); }, 1200);
       setTimeout(() => { this.loadIndexConfig(this.adminSelectedIndex); }, 1500);
     },
 
@@ -1787,14 +1783,6 @@ document.addEventListener('alpine:init', () => {
         }
       } catch {}
       finally { this.posLoading = false; }
-    },
-
-    /* ── Strategy telemetry ──────────────────────────────────────────────── */
-    async loadStrategyTelemetry() {
-      try {
-        const r = await this._fetch('/api/admin/strategy/telemetry');
-        if (r && r.ok) { const d = await r.json(); this.strategyTelemetry = d; }
-      } catch {}
     },
 
     async loadStrategyRegistry() {
@@ -3438,7 +3426,7 @@ function amoTest() {
     <button class="admin-tab" :class="{active: adminTab==='dashboard'}"
             @click="adminTab='dashboard'">DASHBOARD</button>
     <button class="admin-tab" :class="{active: adminTab==='strategies'}"
-            @click="adminTab='strategies'; loadStrategyConfig(); loadStrategyRegistry(); loadStrategyTelemetry(); loadIndexConfig(adminSelectedIndex)">&#x2699; STRATEGY ADMIN</button>
+            @click="adminTab='strategies'; loadStrategyConfig(); loadStrategyRegistry(); loadIndexConfig(adminSelectedIndex)">&#x2699; STRATEGY ADMIN</button>
     <button class="admin-tab" :class="{active: adminTab==='feeder'}"
             @click="adminTab='feeder'">&#x26A1; DATA FEEDER</button>
     <button class="admin-tab" :class="{active: adminTab==='trap'}"
