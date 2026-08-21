@@ -210,6 +210,18 @@ class LiquidityTrapStrategy(AbstractStrategyBook):
 
         self._warming_up = True
         try:
+            # CRITICAL: set _today BEFORE replaying. _index_tick_loop's own
+            # "if self._today != today: reset_session()" new-day check runs on
+            # the very first LIVE tick it processes -- which happens right after
+            # this method returns. self._today is still None at this point
+            # (never set anywhere else before the first tick), so without this
+            # line that very first live tick would silently wipe out everything
+            # just replayed (bias/ref_idx/sl_hit_ts/confirm_ts + the accumulators
+            # themselves) via reset_session(), with zero log trace -- exactly
+            # what happened on a real EC2 run before this fix (STAGE1 locked
+            # during warmup, then silently reverted to "watching for ref" the
+            # moment live ticks resumed).
+            self._today = now.date()
             replayed = 0
             for b in raw_bars:
                 try:

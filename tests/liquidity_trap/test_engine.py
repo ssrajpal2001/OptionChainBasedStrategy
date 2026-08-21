@@ -312,6 +312,12 @@ def test_warmup_intraday_replays_history_and_locks_bias_without_entering(monkeyp
         assert book._bias == "BULL"            # candle2 breached candle1's high only -> locked
         assert book._warming_up is False        # reset after replay finishes
         assert book._bus.published == []        # state catch-up only, never a live order
+        # Regression: _today must be set to today's real date by warmup itself --
+        # _index_tick_loop's own new-day check ("if self._today != today:
+        # reset_session()") runs on the very first live tick right after this
+        # returns; if _today were still None, that check would silently wipe
+        # out everything just replayed the instant live ticks resume.
+        assert book._today == date(2026, 8, 21)
     asyncio.run(run())
 
 
