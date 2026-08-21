@@ -2,10 +2,11 @@
 scripts/check_day_low_nifty_pair.py — one-off diagnostic: what was the REAL
 lowest combined (CE+PE) premium today for a given pair, from market open up
 to a cutoff time, per the exact same REST-fetch + minute-alignment
-methodology strategies/sell_straddle/exits.py's _seed_day_low_for_pair()
-uses (CE.close + PE.close aligned by timestamp -- NOT each leg's own
-independent low, since summing two legs' separate lows would combine two
-price extremes that almost certainly never occurred at the same instant).
+methodology strategies/sell_straddle/exits.py's _compute_day_low_for_pair()
+uses (CE.low + PE.low, keyed by hour:minute -- direct user instruction,
+2026-08-21: "we want the low value not the close value"). Accepted tradeoff:
+this can combine two price extremes that occurred at different moments
+within the same minute.
 
 Run on EC2 (uses the real stored Upstox feeder token from data/clients.db,
 no token argument needed):
@@ -74,17 +75,27 @@ async def main():
     cutoff_h, cutoff_m = (int(x) for x in args.cutoff.split(":"))
     cutoff = dtime(cutoff_h, cutoff_m)
 
-    by_ts2 = {b["ts"]: float(b["close"]) for b in bars2}
-    rows = []
-    for b in bars1:
-        ts_str = b["ts"]
-        ts = datetime.fromisoformat(ts_str)
+    # Keyed by (hour, minute), not the raw ISO string -- matches the live
+    # engine's own robustness fix (2026-08-21), independent of whether
+    # seconds happen to line up exactly between the two legs' bars.
+    by_hm2 = {}
+    ts_by_hm2 = {}
+    for b in bars2:
+        ts = datetime.fromisoformat(b["ts"])
         if ts.time() > cutoff:
             continue
-        if ts_str not in by_ts2:
+        by_hm2[(ts.hour, ts.minute)] = float(b["low"])
+        ts_by_hm2[(ts.hour, ts.minute)] = ts
+    rows = []
+    for b in bars1:
+        ts = datetime.fromisoformat(b["ts"])
+        if ts.time() > cutoff:
             continue
-        combined = float(b["close"]) + by_ts2[ts_str]
-        rows.append((ts, float(b["close"]), by_ts2[ts_str], combined))
+        hm = (ts.hour, ts.minute)
+        if hm not in by_hm2:
+            continue
+        combined = float(b["low"]) + by_hm2[hm]
+        rows.append((ts, float(b["low"]), by_hm2[hm], combined))
 
     if not rows:
         print("No overlapping 1-min bars between the two legs up to cutoff -- nothing to compute.")

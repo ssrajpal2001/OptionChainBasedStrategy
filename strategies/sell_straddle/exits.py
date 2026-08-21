@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, time as dtime, timedelta
 from typing import TYPE_CHECKING
 
 from config.global_config import IST, Topic
@@ -64,28 +64,37 @@ class ExitMixin:
         except Exception as exc:
             logger.warning("SellStraddle[%s]: entry-seed exec legs failed: %s", self._underlying, exc)
 
-    async def _seed_day_low_for_pair(self, ce_strike: int, pe_strike: int) -> float:
-        """REST-fetch today's 1-min intraday history for a pair the day-low
-        tracker hasn't seen before (first entry of the day, or the pair just
-        after a rollover) and compute the lowest combined (CE+PE) premium the
-        pair has genuinely traded SO FAR TODAY on the real market -- not just
-        from whenever this book started holding it. Direct user spec: "get
-        the rest api intraday historical data of 1 min for the pair and get
-        the min values and then ... find out what was the min low of the day
-        and then add that to the aggregator."
+    async def _compute_day_low_for_pair(self, ce_strike: int, pe_strike: int,
+                                        cutoff: dtime) -> float:
+        """REST-fetch today's 1-min intraday history for a pair and compute
+        the lowest combined (CE+PE) premium up to `cutoff` (a datetime.time),
+        in ONE SHOT -- this is the whole point (2026-08-21 redesign, direct
+        user spec): the day-low is no longer tracked tick-by-tick from
+        whenever a pair starts running (that design depended on continuous
+        in-memory tracking surviving every restart until the freeze moment,
+        which it didn't -- a real 95.05 low at 14:20 was correctly tracked
+        live, then silently lost to a routine restart at 14:49, well before
+        the 15:00 freeze). Instead: don't track anything at all before the
+        freeze time. The MOMENT the freeze time is reached (by however many
+        restarts it took to get there), do exactly ONE REST fetch covering
+        the pair's ENTIRE real trading history up to `cutoff` and compute the
+        true low directly from that -- correct regardless of restart count,
+        since it's derived from real historical data, not accumulated live
+        state.
 
-        Combines CE/PE CLOSE prices minute-by-minute (aligned by timestamp),
-        NOT each leg's own independent low in isolation -- summing two legs'
-        separate lows would combine two price extremes that almost certainly
-        never occurred at the same instant, producing a floor the real
-        combined premium may never have actually touched. This matches how
-        the live tracker itself works (current_value = ce_ltp + pe_ltp, both
-        "last traded", not "lowest tick of the minute").
+        Combines CE.low + PE.low minute-by-minute (aligned by timestamp) --
+        direct user instruction (2026-08-21), overriding this function's own
+        prior CLOSE-based design (2026-08-19): "we want the low value not the
+        close value." Explicitly flagged to the user and confirmed: this can
+        combine two price extremes that occurred at different moments within
+        the same minute (CE's low at :05, PE's low at :47, say), producing a
+        floor the real combined premium may never have touched at any single
+        instant -- accepted tradeoff, the user's own informed choice for
+        their strategy.
 
         Returns float('inf') on ANY failure (crypto, no token, no data, no
-        overlapping minutes, network error) -- the caller always min()s this
-        against the live tick's own value, so a failed fetch degrades safely
-        to "start tracking from this tick", never blocks or sets a wrong
+        overlapping minutes, network error) -- caller falls back to the
+        current tick's own value, never blocks or silently sets a wrong
         floor."""
         try:
             if getattr(self, "_is_crypto", False):
@@ -112,22 +121,35 @@ class ExitMixin:
             )
             if not ce_bars or not pe_bars:
                 return float("inf")
-            pe_close_by_ts = {b["ts"]: float(b["close"]) for b in pe_bars}
-            combined = [
-                float(b["close"]) + pe_close_by_ts[b["ts"]]
-                for b in ce_bars if b["ts"] in pe_close_by_ts
-            ]
+            # Key by (hour, minute) only, not the raw ISO string -- Upstox 1-min
+            # candles should always land on :00 seconds, but matching on
+            # hour:minute directly removes any dependence on that holding exactly,
+            # at zero cost (user's explicit instruction, 2026-08-21).
+            def _hm(ts_str: str):
+                t = datetime.fromisoformat(ts_str)
+                return (t.hour, t.minute), t.time()
+            pe_low_by_hm = {}
+            for b in pe_bars:
+                (hm, t) = _hm(b["ts"])
+                if t <= cutoff:
+                    pe_low_by_hm[hm] = float(b["low"])
+            combined = []
+            for b in ce_bars:
+                (hm, t) = _hm(b["ts"])
+                if t <= cutoff and hm in pe_low_by_hm:
+                    combined.append(float(b["low"]) + pe_low_by_hm[hm])
             if not combined:
                 return float("inf")
             _low = min(combined)
             self._clog.info(
-                "SellStraddle[%s]: DAY-LOW SEED — fetched %d aligned 1m bars for "
-                "CE%d/PE%d, today's historical intraday low=%.2f.",
-                self._underlying, len(combined), int(ce_strike), int(pe_strike), _low,
+                "SellStraddle[%s]: DAY-LOW ONE-TIME CALC — fetched %d aligned 1m bars "
+                "(CE.low+PE.low, up to %s) for CE%d/PE%d, low=%.2f.",
+                self._underlying, len(combined), cutoff.strftime("%H:%M"),
+                int(ce_strike), int(pe_strike), _low,
             )
             return _low
         except Exception as exc:
-            self._clog.warning("SellStraddle[%s]: day-low REST seed failed for CE%d/PE%d: %s",
+            self._clog.warning("SellStraddle[%s]: day-low one-time calc failed for CE%d/PE%d: %s",
                                 self._underlying, int(ce_strike), int(pe_strike), exc)
             return float("inf")
 
@@ -883,63 +905,71 @@ class ExitMixin:
             return
         pos = self._position  # refresh -- a roll above may have swapped legs/strikes
 
-        # 2c. DAY-LOW REVERSAL EXIT (2026-08-18/19, user spec). Track the
-        # CURRENTLY RUNNING pair's OWN lowest combined premium since IT started
-        # running -- explicit user correction: "exit will fire from the current
-        # running pair not the pair which was there prev when the roll
-        # happened... when roll happened prev data is of no use... will focus
-        # only on running legs and its own lowest point of the day." A rollover
-        # (or a fresh re-entry) swaps in a different pair (different strikes) --
-        # the moment the running pair's own strike identity changes, tracking
-        # resets; the PRIOR pair's tracked low is discarded, not inherited.
-        # "From scratch" does NOT mean "start counting from this tick with no
-        # history" -- the new pair was genuinely trading on the real market
-        # since 09:15 even though this BOOK only started holding it just now,
-        # so _seed_day_low_for_pair() REST-fetches today's actual 1-min
-        # history for the new strikes and seeds the tracker with the true
-        # intraday low already achieved before this book ever touched them
-        # (falls back to "start from this tick" if the fetch fails for any
-        # reason). Freeze the running-min ONCE, the first tick at/after
-        # self._day_low_freeze_time (default 15:00 IST), at whatever THIS
-        # pair's own low is at that instant. From the freeze tick onward
-        # (INCLUDING the freeze tick itself, same-tick, if that reading
-        # happens to BE this pair's low so far), the moment the current
-        # combined premium reaches (or undercuts) the frozen value, close the
-        # whole position and stop for the day. Opt-in (`day_low_exit_enabled`,
-        # default OFF).
-        # NOTE: a pair that only starts running AFTER the freeze time has
-        # already elapsed (e.g. a roll at 15:10 with freeze=15:00) still gets
-        # its real historical low seeded (covering 09:15-15:10, same as any
-        # other pair would by then) -- so this no longer trivially self-fires
-        # on the very first tick the way an unseeded reset would; it only
-        # fires once the live rate actually reaches that real historical low.
+        # 2c. DAY-LOW REVERSAL EXIT (2026-08-18/19, user spec; ONE-TIME REST
+        # CALC redesign 2026-08-21). Original design tick-tracked a running
+        # minimum in memory from whenever the pair started running, seeded
+        # via REST on pair-change, frozen at self._day_low_freeze_time
+        # (default 15:00 IST). Real incident: that running-min lived ONLY in
+        # memory between position-lifecycle persists -- a genuine 95.05 low
+        # at 14:20 was correctly tracked live, then silently erased by a
+        # routine restart at 14:49 (well before the 15:00 freeze), leaving
+        # the frozen value at 97.15 instead of the true 95.05.
+        #
+        # Direct user redesign: don't track anything continuously AT ALL.
+        # Do NOTHING until self._day_low_freeze_time is reached. The moment
+        # it is (by however many restarts it took to get there), do exactly
+        # ONE REST fetch covering the pair's entire real trading history up
+        # to that moment and compute the true low directly from it --
+        # correct regardless of restart count, since it's derived from real
+        # historical data, not accumulated live state. self._day_low_computing
+        # guards against firing the same REST call twice concurrently (this
+        # block runs on every tick; the fetch can take a moment).
+        #
+        # A rollover/re-entry mid-day still resets tracking to the NEW pair's
+        # own history (prior pair's frozen low discarded, not inherited) --
+        # same "focus only on the running pair" principle as before. A pair
+        # that starts running AFTER freeze time has already elapsed still
+        # gets a correct one-time calc, using "now" (not the fixed freeze
+        # time) as the cutoff, so it captures that pair's real history up to
+        # the moment it's actually checked.
         if self._day_low_exit_enabled:
             _cv = pos.current_value
             _pair_id = (int(pos.ce_leg.strike), int(pos.pe_leg.strike))
             if tuple(getattr(self, "_day_low_tracked_pair", None) or ()) != _pair_id:
                 self._day_low_tracked_pair = _pair_id
-                _seed = await self._seed_day_low_for_pair(_pair_id[0], _pair_id[1])
-                self._session_min_straddle_value = min(_seed, _cv)
                 self._session_min_straddle_frozen = None
+                self._persist_session()
                 self._clog.info(
-                    "SellStraddle[%s]: DAY-LOW TRACKING RESET — now tracking CE%d/PE%d's "
-                    "own low (prior pair's tracked low discarded on roll/re-entry); "
-                    "seeded low=%.2f (REST history vs current tick, whichever is lower).",
-                    self._underlying, _pair_id[0], _pair_id[1], self._session_min_straddle_value,
+                    "SellStraddle[%s]: DAY-LOW TRACKING RESET — now watching CE%d/PE%d "
+                    "(prior pair's frozen low discarded on roll/re-entry); one-time calc "
+                    "deferred until %s.",
+                    self._underlying, _pair_id[0], _pair_id[1],
+                    self._day_low_freeze_time.strftime("%H:%M"),
                 )
-            if self._session_min_straddle_frozen is None:
-                if _cv < self._session_min_straddle_value:
-                    self._session_min_straddle_value = _cv
-                if now.time() >= self._day_low_freeze_time:
-                    self._session_min_straddle_frozen = self._session_min_straddle_value
-                    self._clog.info(
-                        "SellStraddle[%s]: DAY-LOW FROZEN @ %s — CE%d/PE%d rate=%.2f "
-                        "(lowest since this pair started running). From now until "
-                        "squareoff: exit in full the moment the rate reaches this "
-                        "value again.",
-                        self._underlying, self._day_low_freeze_time.strftime("%H:%M"),
-                        _pair_id[0], _pair_id[1], self._session_min_straddle_frozen,
-                    )
+            if (self._session_min_straddle_frozen is None
+                    and not getattr(self, "_day_low_computing", False)
+                    and now.time() >= self._day_low_freeze_time):
+                self._day_low_computing = True
+                try:
+                    _low = await self._compute_day_low_for_pair(_pair_id[0], _pair_id[1], now.time())
+                except Exception:
+                    _low = float("inf")
+                finally:
+                    self._day_low_computing = False
+                # Re-check nothing changed (a roll/close) while the REST call was in flight.
+                if not (self._position and self._position.status == "open"):
+                    return
+                if tuple(getattr(self, "_day_low_tracked_pair", None) or ()) != _pair_id:
+                    return
+                self._session_min_straddle_frozen = _low if _low != float("inf") else _cv
+                self._persist_session()
+                self._clog.info(
+                    "SellStraddle[%s]: DAY-LOW FROZEN (one-time REST calc @ %s) — CE%d/PE%d "
+                    "low=%.2f. From now until squareoff: exit in full the moment the rate "
+                    "reaches this value again.",
+                    self._underlying, now.strftime("%H:%M"),
+                    _pair_id[0], _pair_id[1], self._session_min_straddle_frozen,
+                )
             if self._session_min_straddle_frozen is not None and _cv <= self._session_min_straddle_frozen:
                 self._clog.info(
                     "SellStraddle[%s]: DAY-LOW REVERSAL EXIT — CE%d/PE%d rate=%.2f "

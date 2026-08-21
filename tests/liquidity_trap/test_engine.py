@@ -90,7 +90,16 @@ def _make_book(**overrides) -> LiquidityTrapStrategy:
 
 # ── _try_enter ───────────────────────────────────────────────────────────────
 
-def test_try_enter_publishes_order_and_sets_position():
+def test_try_enter_publishes_order_and_sets_position(monkeypatch):
+    import strategies.liquidity_trap.engine as eng_mod
+
+    class _FakeDT(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 8, 21, 10, 0, tzinfo=IST)   # well before squareoff (15:15)
+
+    monkeypatch.setattr(eng_mod, "datetime", _FakeDT)
+
     async def run():
         book = _make_book()
         book._live_ltp[(79600.0, "CE")] = 150.0
@@ -359,7 +368,16 @@ def test_stage4_choch_filtered_out_against_trend():
     assert s.dead is True   # CHoCH moment consumed, but filtered out -- not entered
 
 
-def test_stage4_choch_enters_when_trend_agrees():
+def test_stage4_choch_enters_when_trend_agrees(monkeypatch):
+    import strategies.liquidity_trap.engine as eng_mod
+
+    class _FakeDT(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 8, 21, 10, 0, tzinfo=IST)   # well before squareoff (15:15)
+
+    monkeypatch.setattr(eng_mod, "datetime", _FakeDT)
+
     async def run():
         book = _make_book(trend_filter_enabled=True)
         book._live_ltp[(100.0, "CE")] = 50.0

@@ -366,12 +366,12 @@ class ConfigMixin:
 
         self._day_low_exit_enabled = cfg.day_low_exit_enabled
         self._day_low_freeze_time = cfg.day_low_freeze_time
-        if not hasattr(self, "_session_min_straddle_value"):
-            self._session_min_straddle_value = float("inf")
         if not hasattr(self, "_session_min_straddle_frozen"):
             self._session_min_straddle_frozen = None
         if not hasattr(self, "_day_low_tracked_pair"):
             self._day_low_tracked_pair = None
+        if not hasattr(self, "_day_low_computing"):
+            self._day_low_computing = False
 
         self._same_day_expiry_enabled = cfg.same_day_expiry_enabled
 

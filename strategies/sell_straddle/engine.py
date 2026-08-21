@@ -291,7 +291,6 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                 "stop_for_day": self._stop_for_day,
                 "session_day": str(self._session_day(datetime.now(IST))),
                 "initial_net_credit": self._initial_net_credit,
-                "session_min_straddle_value": self._session_min_straddle_value,
                 "session_min_straddle_frozen": self._session_min_straddle_frozen,
                 "day_low_tracked_pair": list(self._day_low_tracked_pair) if self._day_low_tracked_pair else None,
             }, product_type="MIS")
@@ -314,9 +313,6 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                 _saved_credit = float(_sess.get("initial_net_credit", 0.0) or 0.0)
                 if _saved_credit > 0 and self._initial_net_credit <= 0:
                     self._initial_net_credit = _saved_credit
-                _saved_min = _sess.get("session_min_straddle_value", None)
-                if _saved_min is not None:
-                    self._session_min_straddle_value = float(_saved_min)
                 _saved_frozen = _sess.get("session_min_straddle_frozen", None)
                 if _saved_frozen is not None:
                     self._session_min_straddle_frozen = float(_saved_frozen)
@@ -723,9 +719,9 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         self._initial_entry_time_value = 0.0
         self._stop_for_day = False
         self._consecutive_entry_rejections = 0
-        self._session_min_straddle_value = float("inf")
         self._session_min_straddle_frozen = None
         self._day_low_tracked_pair = None
+        self._day_low_computing = False
         self._prem_closes.clear()
         self._prem_volumes.clear()
         self._chart_series.clear()
