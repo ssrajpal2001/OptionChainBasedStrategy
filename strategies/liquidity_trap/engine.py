@@ -56,6 +56,16 @@ _DEFAULT_HARD_RISK_RS_PER_LOT = 2000.0
 _EOD_TIME_DEFAULT = time(15, 15)
 _EXIT_CONFIRM_TIMEOUT_SEC = 15.0
 _MAX_PLAUSIBLE_TICK_DATE_DRIFT_DAYS = 1
+_SESSION_OPEN = time(9, 15)
+
+# Standalone (per this strategy's own zero-shared-runtime mandate -- not
+# imported from strategies/d1_trap_option/book.py's own _upstox_key_for,
+# same reasoning already applied to detector.py's swing/pool logic).
+_UPSTOX_INDEX_KEYS = {
+    "NIFTY": "NSE_INDEX|Nifty 50",
+    "SENSEX": "BSE_INDEX|SENSEX",
+    "BANKNIFTY": "NSE_INDEX|Nifty Bank",
+}
 
 
 class LiquidityTrapStrategy(AbstractStrategyBook):
@@ -76,9 +86,12 @@ class LiquidityTrapStrategy(AbstractStrategyBook):
         hard_risk_rs_per_lot: float = _DEFAULT_HARD_RISK_RS_PER_LOT,
         product_type: str = "MIS",
         squareoff_time: str = "15:15",
+        feeder_token: str = "",
     ) -> None:
         super().__init__(bus, cfg, underlying, client_id, binding_id)
         self._strategy_name = "liquidity_trap"
+        self._feeder_token = feeder_token
+        self._warming_up = False   # True while replaying today's REST history on a mid-day (re)start
         self._lot_multiplier = max(1, lot_multiplier)
         self._lots_initial = max(1, int(lots_initial))
         self._rr = rr
@@ -146,10 +159,87 @@ class LiquidityTrapStrategy(AbstractStrategyBook):
         self._subscribe(Topic.OPTION_TICK)
         self._subscribe(Topic.LIQUIDITY_TRAP_ORDER_FILL)
         self._restore_position()
-        self._tasks.append(asyncio.create_task(self._index_tick_loop(), name=f"liqtrap_idx_{self._underlying}"))
+        # Subscribing above already starts buffering live ticks onto this book's
+        # own queue even though nothing drains it yet -- so warmup can safely
+        # await the REST fetch+replay first (no live tick is lost, just queued)
+        # and only THEN start draining/processing them, avoiding any interleaving
+        # between historical (possibly-earlier) timestamps and live ones inside
+        # the same BarAccumulators.
+        self._tasks.append(asyncio.create_task(self._warmup_then_index_tick_loop(), name=f"liqtrap_idx_{self._underlying}"))
         self._tasks.append(asyncio.create_task(self._option_tick_loop(), name=f"liqtrap_opt_{self._underlying}"))
         self._tasks.append(asyncio.create_task(self._fill_loop(), name=f"liqtrap_fill_{self._underlying}"))
         self._tasks.append(asyncio.create_task(self._eod_loop(), name=f"liqtrap_eod_{self._underlying}"))
+
+    async def _warmup_then_index_tick_loop(self) -> None:
+        await self._warmup_intraday()
+        await self._index_tick_loop()
+
+    async def _warmup_intraday(self) -> None:
+        """On a mid-day (re)start, REST-fetch today's real 1-min spot history and
+        replay it through the SAME BarAccumulators + _on_bar_close() pipeline live
+        ticks use, so the book doesn't sit silently 'waiting for ref candle' for
+        hours it already lived through before this process started.
+
+        Order placement (Stage4 CHoCH -> _try_enter) is suppressed during replay
+        via self._warming_up: a CHoCH that already fired hours ago can't be safely
+        entered now at that stale historical price, so _on_bar_close() marks the
+        day as done instead of firing a live order off old data (mirrors
+        D1TrapOptionBook._warmup_intraday's own established pattern -- state
+        catch-up yes, phantom/stale-price live orders no)."""
+        now = datetime.now(IST)
+        if now.time() < _SESSION_OPEN:
+            return  # pre-market -- nothing has traded yet today, nothing to replay
+        if not self._feeder_token:
+            self._clog.warning(
+                "LiquidityTrap[%s]: no Upstox feeder token available -- skipping intraday "
+                "warmup, will build up ref/bias state live from here instead.",
+                self._underlying,
+            )
+            return
+        key = _UPSTOX_INDEX_KEYS.get(self._underlying.upper(), f"NSE_INDEX|{self._underlying}")
+        try:
+            from data_layer.historical_candles import fetch_upstox_intraday_1m
+            raw_bars = await fetch_upstox_intraday_1m(key, self._feeder_token)
+        except Exception as exc:
+            self._clog.warning("LiquidityTrap[%s]: intraday warmup fetch failed: %s", self._underlying, exc)
+            return
+        if not raw_bars:
+            self._clog.warning("LiquidityTrap[%s]: intraday warmup -- 0 bars returned (API empty or key mismatch).",
+                                self._underlying)
+            return
+
+        self._warming_up = True
+        try:
+            replayed = 0
+            for b in raw_bars:
+                try:
+                    ts = datetime.fromisoformat(b["ts"]).astimezone(IST)
+                    o, h, l, c = float(b["open"]), float(b["high"]), float(b["low"]), float(b["close"])
+                except Exception:
+                    continue
+                if ts.date() != now.date() or ts.time() < _SESSION_OPEN:
+                    continue
+                # Feed open->high->low->close as 4 synthetic ticks at the bar's own
+                # timestamp -- reconstructs the exact same OHLC bucket the live
+                # tick-based BarAccumulator would have built minute-by-minute, with
+                # zero changes to that already-validated pure class.
+                for px in (o, h, l, c):
+                    closed_1m = self._acc_1m.on_tick(ts, px)
+                    self._acc_5m.on_tick(ts, px)
+                    self._acc_15m.on_tick(ts, px)
+                    if closed_1m:
+                        self._on_bar_close()
+                replayed += 1
+            self._clog.info(
+                "LiquidityTrap[%s]: intraday warmup complete -- %d 1m bars replayed, "
+                "bias=%s sl_hit=%s confirmed=%s day_done=%s.",
+                self._underlying, replayed, self._bias,
+                self._sl_hit_ts.strftime("%H:%M") if self._sl_hit_ts else None,
+                self._confirm_ts.strftime("%H:%M") if self._confirm_ts else None,
+                self._day_done,
+            )
+        finally:
+            self._warming_up = False
 
     def _is_own_underlying_tick(self, symbol: str) -> bool:
         u = self._underlying.upper()
@@ -249,6 +339,19 @@ class LiquidityTrapStrategy(AbstractStrategyBook):
         if res is None:
             return
         entry_ts, entry_price = res
+        if self._warming_up:
+            # CHoCH already happened earlier today, before this process was even
+            # watching -- entering NOW would mean paying a live fill price against
+            # an hours-stale spot reference. No retroactive entry; today's one
+            # attempt is simply already gone, same as a real trader who wasn't
+            # looking when it printed.
+            self._clog.info(
+                "STAGE4 CHoCH already fired @ %s price=%.2f before this session started "
+                "watching -- missed for today (no stale-price retroactive entry).",
+                entry_ts.strftime("%H:%M"), entry_price,
+            )
+            self._day_done = True
+            return
         self._clog.info("STAGE4 CHoCH entry @ %s price=%.2f", entry_ts.strftime("%H:%M"), entry_price)
         self._try_enter(entry_ts, entry_price)
 

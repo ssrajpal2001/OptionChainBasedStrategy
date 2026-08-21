@@ -49,7 +49,8 @@ def _make_book(**overrides) -> LiquidityTrapStrategy:
     book._lot_size = 20
     book._strike_step = 100.0
     book._persist_key = "test_liqtrap"
-    book._clog = type("L", (), {"info": lambda *a, **k: None, "critical": lambda *a, **k: None})()
+    book._clog = type("L", (), {"info": lambda *a, **k: None, "critical": lambda *a, **k: None,
+                                  "warning": lambda *a, **k: None})()
 
     book._today = BASE.date()
     book._acc_15m = BarAccumulator(timeframe_min=15)
@@ -64,6 +65,9 @@ def _make_book(**overrides) -> LiquidityTrapStrategy:
     book._confirm_ts = None
     book._sweep_extreme = None
     book._day_done = False
+    book._ref_watch_count = 0
+    book._warming_up = False
+    book._feeder_token = ""
 
     book._position = None
     book._cooldown_until = None
@@ -249,3 +253,82 @@ def test_on_fill_add_on_failure_reverts_lots_without_discarding_position():
     book._on_fill(fill)
     assert book._position is not None
     assert book._position["lots"] == 2   # reverted to lots_initial, original entry untouched
+
+
+# ── Mid-day intraday warmup (2026-08-21) ────────────────────────────────────
+
+def test_on_bar_close_warming_up_marks_day_done_instead_of_stale_price_entry():
+    # Reuses the exact CHoCH bar sequence from test_detector.py's own
+    # test_choch_entry_fires_on_close_above_confirmed_swing_high -- Stage1-3
+    # pre-seeded as already resolved (mirrors what a real warmup replay would
+    # have caught up to), only Stage4 (CHoCH) evaluated on this call.
+    book = _make_book()
+    book._bias = "BULL"
+    book._ref_idx = 0
+    book._lock_idx = 1
+    book._sl_hit_ts = BASE
+    book._confirm_ts = BASE
+    book._warming_up = True
+    book._acc_1m.bars = [
+        Bar(ts=BASE + timedelta(minutes=0), open=100, high=101, low=99, close=100),
+        Bar(ts=BASE + timedelta(minutes=1), open=100, high=102, low=100, close=101),
+        Bar(ts=BASE + timedelta(minutes=2), open=101, high=105, low=101, close=104),
+        Bar(ts=BASE + timedelta(minutes=3), open=104, high=104.5, low=102, close=103),
+        Bar(ts=BASE + timedelta(minutes=4), open=103, high=103.5, low=101, close=102),
+        Bar(ts=BASE + timedelta(minutes=5), open=102, high=106, low=101, close=106),
+    ]
+    book._on_bar_close()
+    assert book._day_done is True          # missed for today, not entered late
+    assert book._position is None
+    assert book._bus.published == []       # no stale-price order ever fired
+
+
+def test_warmup_intraday_replays_history_and_locks_bias_without_entering(monkeypatch):
+    import strategies.liquidity_trap.engine as eng_mod
+    import data_layer.historical_candles as hc_mod
+
+    class _FakeDT(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 8, 21, 10, 0, tzinfo=IST)
+
+    async def _fake_fetch(key, token):
+        return [
+            {"ts": "2026-08-21T09:15:00+05:30", "open": 100, "high": 105, "low": 95, "close": 102},
+            {"ts": "2026-08-21T09:30:00+05:30", "open": 102, "high": 108, "low": 101, "close": 106},
+            # a 3rd bar is required only so the 2nd 15m bucket's own first tick
+            # closes it (a bucket closes on the NEXT bucket's first tick, same
+            # as live) -- its own OHLC values are irrelevant to this test.
+            {"ts": "2026-08-21T09:45:00+05:30", "open": 106, "high": 107, "low": 105, "close": 106},
+        ]
+
+    monkeypatch.setattr(eng_mod, "datetime", _FakeDT)
+    monkeypatch.setattr(hc_mod, "fetch_upstox_intraday_1m", _fake_fetch)
+
+    async def run():
+        book = _make_book()
+        book._feeder_token = "FAKE_TOKEN"
+        await book._warmup_intraday()
+        assert book._bias == "BULL"            # candle2 breached candle1's high only -> locked
+        assert book._warming_up is False        # reset after replay finishes
+        assert book._bus.published == []        # state catch-up only, never a live order
+    asyncio.run(run())
+
+
+def test_warmup_intraday_skips_gracefully_without_feeder_token(monkeypatch):
+    import strategies.liquidity_trap.engine as eng_mod
+
+    class _FakeDT(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 8, 21, 10, 0, tzinfo=IST)
+
+    monkeypatch.setattr(eng_mod, "datetime", _FakeDT)
+
+    async def run():
+        book = _make_book()
+        book._feeder_token = ""
+        await book._warmup_intraday()          # must not raise
+        assert book._bias is None
+        assert book._warming_up is False
+    asyncio.run(run())

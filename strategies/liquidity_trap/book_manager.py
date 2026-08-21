@@ -68,6 +68,12 @@ class LiquidityTrapBookManager(StrategyBookManager):
     def _spawn_book(self, key: tuple, value: dict) -> LiquidityTrapStrategy:
         client_id, binding_id, underlying = key
         self._enable_chain(underlying)
+        feeder_token = ""
+        try:
+            creds = self._db.get_feeder_creds_sync("upstox") or {}
+            feeder_token = creds.get("access_token", "")
+        except Exception:
+            pass
         book = LiquidityTrapStrategy(
             self._bus, self._cfg, underlying, client_id, binding_id,
             lot_multiplier=value["lots"],
@@ -76,6 +82,7 @@ class LiquidityTrapBookManager(StrategyBookManager):
             scale_in_enabled=value["scale_in_enabled"],
             hard_risk_rs_per_lot=value["hard_risk_rs_per_lot"],
             product_type=value["product_type"], squareoff_time=value["squareoff_time"],
+            feeder_token=feeder_token,
         )
         logger.info(
             "LiquidityTrapBookManager: spawned %s/%s/%s (lots=%d lots_initial=%d rr=%.1f scale_in=%s).",
