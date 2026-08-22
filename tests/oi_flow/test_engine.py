@@ -546,6 +546,56 @@ async def test_enter_publishes_order_event_via_bus():
     assert order.entry_price == 526.0
 
 
+# ── raw-wall-vs-debounced-wall mismatch (2026-08-22 fix) ────────────────────
+# The wall-selection debounce (2026-08-19) only ever controlled what
+# OIFlowTracker.watch_strikes() retains history for -- _try_enter_inner and
+# detect_pre_breakout_signal still independently re-derived the wall from
+# snap.max_call_oi_strike/max_put_oi_strike on every call, the RAW value.
+# Any evaluation instant where the raw wall has already drifted away from
+# the still-debounced (sticky) one asks oi_tracker.oi_roc() for a strike
+# with zero history -> None -> silently reproduces the exact zero-trades
+# failure the debounce was built to fix, just via this code path.
+
+@pytest.mark.asyncio
+async def test_try_enter_uses_sticky_wall_not_raw_jittering_wall():
+    # async: _enter() internally does asyncio.create_task(...) to publish
+    # the order event, which needs a running event loop.
+    book = _make_book()
+    base = _base()
+    book._spot_acc.bars = _flat_spot_bars(base, price=57690.0)
+    # Adopt 57700 as the sticky/debounced CE wall and seed real OI history
+    # for it (mirrors _seed_oi_for_signal, but keeps the raw snap wall
+    # DIFFERENT afterward to simulate jitter the debounce hasn't caught up
+    # to yet -- self._sticky_wall stays 57700 even though the raw snapshot
+    # now reports a different strike).
+    book._latest_snap = _FakeSnap(max_call_oi_strike=57700.0, max_put_oi_strike=57200.0, pcr=1.3)
+    book._rewatch_oi_strikes(book._latest_snap)
+    assert book._sticky_wall.get("CE") == 57700.0
+    t0 = base
+    t1 = base + timedelta(seconds=book._window_sec + 10)
+    book._oi_tracker.on_option_tick(_FakeTick(57700.0, "CE", 100_000, t0))
+    book._oi_tracker.on_option_tick(_FakeTick(57700.0, "CE", 95_000, t1))
+    book._oi_tracker.on_option_tick(_FakeTick(57600.0, "PE", 50_000, t0))
+    book._oi_tracker.on_option_tick(_FakeTick(57600.0, "PE", 53_000, t1))
+    # Raw wall has now jittered to a DIFFERENT strike with zero seeded
+    # history -- the debounce (by design) hasn't adopted it yet, so
+    # _sticky_wall still correctly says 57700. Simulates the exact
+    # in-between-debounce-window moment the 2026-08-19 incident hit.
+    book._latest_snap = _FakeSnap(max_call_oi_strike=57800.0, max_put_oi_strike=57200.0, pcr=1.3)
+    _seed_option_bars_ok(book, base)
+
+    book._try_enter("CE")
+    await asyncio.sleep(0.01)
+
+    assert book._position is not None, (
+        "entry must use the STICKY wall (57700, which has real OI history) "
+        "for its oi_roc() query, not the raw snapshot's jittered wall "
+        "(57800, zero history) -- otherwise this silently reproduces the "
+        "2026-08-19 zero-trades bug the wall debounce was built to fix"
+    )
+    assert book._position["strike"] == 57700.0
+
+
 # ── _option_tick_loop ────────────────────────────────────────────────────────
 
 def _real_option_tick(strike, side, ltp, volume, ts, underlying="BANKNIFTY"):

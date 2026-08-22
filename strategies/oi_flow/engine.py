@@ -515,8 +515,17 @@ class OIFlowStrategy(AbstractStrategyBook):
         if self._spot_acc.bars:
             row.spot = self._spot_acc.bars[-1].close
         snap = self._latest_snap
+        # 2026-08-22 fix: use the DEBOUNCED wall (self._sticky_wall), not the
+        # raw/possibly-jittering snap.max_call_oi_strike/max_put_oi_strike --
+        # OIFlowTracker only retains history for the debounced wall
+        # (_rewatch_oi_strikes), so querying the raw wall here can silently
+        # ask for a strike the tracker was never told to watch, reproducing
+        # the 2026-08-19 zero-trades incident this debounce was built to fix.
+        # Falls back to the raw wall only before the debounce has adopted a
+        # first value yet (self._sticky_wall empty on a fresh start).
+        sticky = self._sticky_wall.get(side) if hasattr(self, "_sticky_wall") else None
         if snap is not None:
-            wall = snap.max_call_oi_strike if side == "CE" else snap.max_put_oi_strike
+            wall = sticky or (snap.max_call_oi_strike if side == "CE" else snap.max_put_oi_strike)
             supporting_strike = (wall - self._strike_step) if side == "CE" else (wall + self._strike_step)
             supporting_side = "PE" if side == "CE" else "CE"
             row.wall_strike = wall
@@ -532,6 +541,7 @@ class OIFlowStrategy(AbstractStrategyBook):
             min_supporting_roc_pct=self._min_supporting_roc_pct,
             min_pcr_bias=self._min_pcr_bias, max_pcr_bias=self._max_pcr_bias,
             proximity_pct=self._proximity_pct, strike_step=self._strike_step,
+            wall_override=sticky,
         )
         row.spot_gate_fired = spot_signal is not None
         if spot_signal is None:
@@ -544,6 +554,7 @@ class OIFlowStrategy(AbstractStrategyBook):
                     min_supporting_roc_pct=self._min_supporting_roc_pct,
                     min_pcr_bias=self._min_pcr_bias, max_pcr_bias=self._max_pcr_bias,
                     proximity_pct=self._proximity_pct, strike_step=self._strike_step,
+                    wall_override=sticky,
                 )
             return
 

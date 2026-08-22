@@ -248,6 +248,7 @@ def detect_pre_breakout_signal(
     strike_step: float = 100.0,
     swing_pivot: int = 2,
     now: Optional[datetime] = None,
+    wall_override: Optional[float] = None,
 ) -> Optional[OIPreEntrySignal]:
     """CE watches the call-OI wall (resistance); PE watches the put-OI wall
     (support), mirrored logic. Returns None (never a false signal) on any
@@ -256,7 +257,22 @@ def detect_pre_breakout_signal(
     .reason, i.e. this function purposely does NOT itself log why it
     returned None; the caller (engine.py) is expected to re-derive that
     for telemetry using the same tracker/snap it already has, keeping this
-    function a pure boolean-shaped decision, not a logger."""
+    function a pure boolean-shaped decision, not a logger.
+
+    wall_override (2026-08-22 fix): the engine's wall-selection debounce
+    (_debounced_wall, see engine.py's own module docstring for the
+    2026-08-19 OI-wall-jitter incident) only ever controlled what
+    OIFlowTracker.watch_strikes() retains history for -- this function
+    still independently re-derived the wall from snap.max_call_oi_strike/
+    max_put_oi_strike on every call, which is the RAW, unsmoothed,
+    possibly-still-jittering value. Any evaluation instant where the raw
+    wall differs from the debounced one asks oi_tracker.oi_roc() for a
+    strike the tracker was never told to watch -> None -> silently
+    reproduces the exact "insufficient OI history" zero-trades failure the
+    debounce was built to fix, just via this code path instead. Callers
+    that have a debounced/sticky wall should pass it here; wall stays
+    self-derived from snap (old behavior, still correct for tests/callers
+    that don't debounce) only when this is None or falsy."""
     if side not in ("CE", "PE"):
         raise ValueError(f"side must be CE or PE, got {side!r}")
     if not spot_bars_1m:
@@ -264,12 +280,12 @@ def detect_pre_breakout_signal(
     spot = spot_bars_1m[-1].close
 
     if side == "CE":
-        wall = snap.max_call_oi_strike
+        wall = wall_override or snap.max_call_oi_strike
         supporting_strike = wall - strike_step
         opposing_type, supporting_type = "CE", "PE"
         direction = "BULLISH"
     else:
-        wall = snap.max_put_oi_strike
+        wall = wall_override or snap.max_put_oi_strike
         supporting_strike = wall + strike_step
         opposing_type, supporting_type = "PE", "CE"
         direction = "BEARISH"
@@ -323,11 +339,16 @@ def explain_no_signal(
     strike_step: float = 100.0,
     swing_pivot: int = 2,
     now: Optional[datetime] = None,
+    wall_override: Optional[float] = None,
 ) -> str:
     """Diagnostic-only twin of detect_pre_breakout_signal(): re-runs the
     EXACT same checks, in the EXACT same order, purely to report WHICH one
     is actually blocking the signal, in plain English -- for the dashboard
     remarks trail / telemetry, never for the real entry decision.
+
+    wall_override: same 2026-08-22 fix as detect_pre_breakout_signal's own
+    parameter -- must be passed the same value the real decision call used,
+    or this diagnostic can disagree with the decision it's explaining.
 
     2026-08-13, built after a real production observation: NIFTY PE's
     remark said "not consolidating at the wall yet" while spot was
@@ -350,12 +371,12 @@ def explain_no_signal(
     spot = spot_bars_1m[-1].close
 
     if side == "CE":
-        wall = snap.max_call_oi_strike
+        wall = wall_override or snap.max_call_oi_strike
         supporting_strike = wall - strike_step
         opposing_type, supporting_type = "CE", "PE"
         direction = "BULLISH"
     else:
-        wall = snap.max_put_oi_strike
+        wall = wall_override or snap.max_put_oi_strike
         supporting_strike = wall + strike_step
         opposing_type, supporting_type = "PE", "CE"
         direction = "BEARISH"
