@@ -72,7 +72,23 @@ def load(key: str) -> Optional[dict]:
         with open(p) as f:
             payload = json.load(f)
     except Exception as exc:
-        logger.warning("PositionStore.load[%s] failed: %s", key, exc)
+        # 2026-08-23: escalated from a WARNING to CRITICAL. save() writes
+        # atomically (tmp file + os.replace), which already protects against
+        # the most common corruption path (a crash mid-write) -- but this
+        # branch means the file EXISTS and still failed to parse (disk
+        # corruption, manual tampering, a bug elsewhere overwriting it). The
+        # caller (every strategy's own _restore_position/start()) just sees
+        # None and proceeds as if flat -- if a real broker position is still
+        # open, NOTHING in this codebase cross-checks that belief against the
+        # broker's actual positions (see this session's own audit). A
+        # WARNING-level log for exactly this failure mode is easy to miss in
+        # a busy log stream; CRITICAL is not.
+        logger.critical(
+            "PositionStore.load[%s] FAILED TO PARSE an existing persistence file (%s) -- "
+            "treating as flat, but a real broker position may still be open and now "
+            "completely unmonitored. Manually verify against the broker's own position "
+            "book for this deployment before trusting the dashboard.", key, exc,
+        )
         return None
 
     stored_date = payload.get("date", "")
