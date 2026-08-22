@@ -270,9 +270,28 @@ class ClientDB:
         )
 
     async def upsert_client(self, client_id: str, **kwargs) -> None:
-        """Partial update of any client columns."""
+        """Partial update of any client columns.
+
+        Column NAMES (not values) get interpolated into the SQL string below
+        -- `?` placeholders can only parameterize values, never identifiers.
+        Every caller in this codebase currently passes literal kwargs, except
+        one (dashboard_server.py's kill_broker endpoint, which builds a key
+        from a URL path parameter: f"trade_enabled_{binding_id}"). That call
+        site is presently gated by an earlier 404 check that rejects any
+        binding_id not matching a real running worker, but a gate elsewhere
+        in the code is not the same guarantee as this method being safe on
+        its own -- a future refactor could loosen or remove that check
+        without anyone realizing this method would then accept raw SQL
+        column-name injection. Enforce a strict safe-identifier allowlist
+        here, once, so this method can never be the injection vector
+        regardless of what any current or future caller passes.
+        """
+        import re as _re
         now = datetime.now(IST).isoformat()
         kwargs["updated_at"] = now
+        for k in kwargs:
+            if not _re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", k):
+                raise ValueError(f"upsert_client: refusing unsafe column name {k!r}")
         sets = ", ".join(f"{k} = ?" for k in kwargs)
         vals = list(kwargs.values()) + [client_id]
         await asyncio.to_thread(
@@ -1222,6 +1241,22 @@ class ClientDB:
 
     def _create_tables(self) -> None:
         con = sqlite3.connect(self._db_path)
+        # WAL mode is a persistent, on-disk DB-file setting (not per-connection) --
+        # set once here at boot and every one of the many ad-hoc sqlite3.connect()
+        # calls scattered through this module (reads + the write helper alike)
+        # benefits from it for the DB's lifetime. Default rollback-journal mode
+        # takes an exclusive lock on the whole file for the duration of any write,
+        # serializing every concurrent client/strategy/binding's DB access against
+        # each other -- a real contention risk at multi-tenant commercial scale.
+        # WAL lets readers proceed concurrently with a single writer. busy_timeout
+        # gives a writer that does hit contention a real retry window instead of
+        # immediately raising "database is locked".
+        try:
+            con.execute("PRAGMA journal_mode=WAL")
+            con.execute("PRAGMA busy_timeout=5000")
+        except sqlite3.Error as exc:
+            logger.warning("ClientDB: could not enable WAL mode (%s) -- falling back to "
+                            "default journal mode, contention risk under concurrent load.", exc)
         con.executescript(_DDL)
         # Additive migrations: add columns that may not exist in older DBs
         for migration in (

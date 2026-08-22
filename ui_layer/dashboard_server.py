@@ -5738,10 +5738,25 @@ pm2 save
         async def api_telemetry(_: dict = Depends(_current_user)):
             feeder   = _srv._feeder
             dual_lat = feeder.dual_latency if feeder and hasattr(feeder, "dual_latency") else {}
+            # EventBus.drop_stats() existed but was never surfaced anywhere --
+            # a consumer falling behind under load silently drops ticks with
+            # nothing but a log line every 1000 drops (base_feeder.py). Exposed
+            # here so a slow-consumer degradation is actually visible to
+            # whoever's watching the dashboard, not just discoverable by
+            # tailing raw logs after the fact.
+            drop_stats: dict = {}
+            try:
+                if _srv._bus is not None and hasattr(_srv._bus, "drop_stats"):
+                    drop_stats = _srv._bus.drop_stats()
+            except Exception:
+                pass
+            raw_feed_drops = getattr(feeder, "_raw_drop_count", None) if feeder else None
             return {
                 "upstox_latency_ms": round(dual_lat.get("upstox", 0.0), 3),
                 "fyers_latency_ms":  round(dual_lat.get("fyers",  0.0), 3),
                 "ws_clients":        len(bridge._connections),
+                "eventbus_drops":    drop_stats,
+                "raw_feed_drops":    raw_feed_drops,
             }
 
         # ── WebSocket endpoint ────────────────────────────────────────────────
