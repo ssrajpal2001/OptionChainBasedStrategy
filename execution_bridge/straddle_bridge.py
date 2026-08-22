@@ -453,7 +453,16 @@ class StraddleExecutionBridge:
             live_bindings: list = []
             if db and hasattr(db, "get_bindings_safe_sync"):
                 try:
-                    live_bindings = db.get_bindings_safe_sync(client.client_id)
+                    # 2026-08-23 fix: get_bindings_safe_sync() is a SYNC sqlite3
+                    # call that internally retries with a blocking time.sleep()
+                    # on "database is locked" contention (client_db.py's own
+                    # docstring anticipates this) -- called directly (not via
+                    # asyncio.to_thread) here, it freezes the ENTIRE event loop
+                    # for every client's tick processing and order routing, not
+                    # just this one, for the duration of the retry+DB latency.
+                    # Gets worse as more concurrent clients/bindings mean more
+                    # DB write contention.
+                    live_bindings = await asyncio.to_thread(db.get_bindings_safe_sync, client.client_id)
                 except Exception:
                     live_bindings = []
 

@@ -387,31 +387,46 @@ class OIFlowStrategy(AbstractStrategyBook):
                 continue
             except asyncio.CancelledError:
                 break
-            if not isinstance(ev, IndexTick) or not self._is_own_underlying_tick(ev.symbol):
-                continue
-            today = ev.timestamp.date() if hasattr(ev, "timestamp") else datetime.now(IST).date()
-            real_today = datetime.now(IST).date()
-            if abs((today - real_today).days) > _MAX_PLAUSIBLE_TICK_DATE_DRIFT_DAYS:
-                # Corrupt-tick date guard (2026-08-13, market-hours risk
-                # audit): a single malformed/corrupt tick reporting an
-                # implausible date must never be trusted to trigger
-                # reset_session() -- that wipes bars, tracked strike,
-                # cooldown, and remarks for a day that hasn't actually
-                # changed. Reject the tick entirely (not just its date --
-                # its overall integrity is suspect) rather than partially
-                # trusting it for bar bucketing.
-                logger.warning(
-                    "OIFlow[%s]: REJECTED tick with implausible date %s (real date %s, symbol=%s) "
-                    "-- ignoring (possible corrupt/malformed tick).",
-                    self._underlying, today, real_today, ev.symbol,
-                )
-                continue
-            if self._today != today:
-                self.reset_session()
-                self._today = today
-            closed = self._spot_acc.on_tick(ev.timestamp, ev.ltp)
-            if closed:
-                self._on_spot_bar_close()
+            # 2026-08-23 fix: this loop had NO per-iteration exception guard
+            # around the actual tick-processing body -- an unhandled exception
+            # anywhere in it (bar accumulation, reset_session, the signal/
+            # entry pipeline this eventually calls into) would silently kill
+            # the whole task. Unlike run_system.py's top-level task barrier
+            # (which DOES trigger a supervised liquidate_all() shutdown), a
+            # per-book task like this one is invisible when it dies: no
+            # crash, no liquidation, nothing on the dashboard -- this specific
+            # client's this specific strategy's position just stops being
+            # monitored, with everything else looking completely normal.
+            # SellStraddle's own loops already had this guard; this brings
+            # OI-Flow in line with that established, safer pattern.
+            try:
+                if not isinstance(ev, IndexTick) or not self._is_own_underlying_tick(ev.symbol):
+                    continue
+                today = ev.timestamp.date() if hasattr(ev, "timestamp") else datetime.now(IST).date()
+                real_today = datetime.now(IST).date()
+                if abs((today - real_today).days) > _MAX_PLAUSIBLE_TICK_DATE_DRIFT_DAYS:
+                    # Corrupt-tick date guard (2026-08-13, market-hours risk
+                    # audit): a single malformed/corrupt tick reporting an
+                    # implausible date must never be trusted to trigger
+                    # reset_session() -- that wipes bars, tracked strike,
+                    # cooldown, and remarks for a day that hasn't actually
+                    # changed. Reject the tick entirely (not just its date --
+                    # its overall integrity is suspect) rather than partially
+                    # trusting it for bar bucketing.
+                    logger.warning(
+                        "OIFlow[%s]: REJECTED tick with implausible date %s (real date %s, symbol=%s) "
+                        "-- ignoring (possible corrupt/malformed tick).",
+                        self._underlying, today, real_today, ev.symbol,
+                    )
+                    continue
+                if self._today != today:
+                    self.reset_session()
+                    self._today = today
+                closed = self._spot_acc.on_tick(ev.timestamp, ev.ltp)
+                if closed:
+                    self._on_spot_bar_close()
+            except Exception:
+                logger.exception("OIFlow[%s]: _index_tick_loop iteration error (recovered).", self._underlying)
 
     def _is_own_underlying_tick(self, symbol: str) -> bool:
         u = self._underlying.upper()
@@ -603,50 +618,62 @@ class OIFlowStrategy(AbstractStrategyBook):
                 continue
             except asyncio.CancelledError:
                 break
-            if not isinstance(ev, OptionTick) or ev.underlying != self._underlying or not ev.ltp:
-                continue
-            self._oi_tracker.on_option_tick(ev)
+            try:
+                self._process_option_tick(ev)
+            except Exception:
+                logger.exception("OIFlow[%s]: _option_tick_loop iteration error (recovered).", self._underlying)
 
-            side = str(ev.option_type).upper()
-            has_position = self._position is not None and self._position["side"] == side
-            # Post-entry: lock onto the position's own strike, immune to
-            # wall drift. Pre-entry/flat: follow the current wall (correct
-            # while scanning for an entry).
-            if has_position:
-                target_strike = float(self._position["strike"])
-            else:
-                snap = self._latest_snap
-                wall = (snap.max_call_oi_strike if side == "CE" else snap.max_put_oi_strike) if snap else None
-                target_strike = float(wall) if wall else None
-            # 2026-08-13 fix, twin of the position-side fix above: whenever
-            # the TRACKED strike itself changes for ANY reason -- the wall
-            # drifting while flat/scanning (the common case, since it can
-            # happen many times a day), a position opening, or a position
-            # closing and reverting to (possibly a NEW) current wall --
-            # _option_acc[side]/_live_option_ltp[side] must reset. Without
-            # this, BarAccumulator has zero concept of "which instrument"
-            # it's bucketing: switching from strike A's ticks to strike B's
-            # mid-accumulation would silently mix TWO DIFFERENT option
-            # contracts' OHLC into one continuous bar series, corrupting
-            # confirm_option_price_action()'s VWAP/swing-low for every
-            # entry evaluated afterward -- not just during an open
-            # position, which is the FAR more common case since the wall
-            # can drift many times a day while flat/scanning.
-            if target_strike != self._tracked_option_strike.get(side):
-                self._option_acc[side] = BarAccumulator(1)
-                self._live_option_ltp.pop(side, None)
-                self._tracked_option_strike[side] = target_strike
-            is_target_strike = target_strike is not None and float(ev.strike) == target_strike
-            if is_target_strike:
-                self._live_option_ltp[side] = ev.ltp
-                closed = self._option_acc[side].on_tick(ev.timestamp, ev.ltp, ev.volume)
-                if closed and has_position:
-                    self._maybe_promote_s1(side)
+    def _process_option_tick(self, ev) -> None:
+        # 2026-08-23 fix: split out of _option_tick_loop so the loop itself
+        # can wrap every iteration in a try/except (same reasoning as
+        # _index_tick_loop's own fix, same turn) -- this is the ONLY tick
+        # path that ever reaches _check_exit() for an open position, so an
+        # unhandled exception silently killing this loop is a direct
+        # live-money risk, not just a missed signal.
+        if not isinstance(ev, OptionTick) or ev.underlying != self._underlying or not ev.ltp:
+            return
+        self._oi_tracker.on_option_tick(ev)
 
-            if has_position and is_target_strike:
-                self._last_position_tick_ts = datetime.now(IST)
-                self._staleness_alerted = False   # fresh data -- clear any prior alert
-                self._check_exit(ev.ltp)
+        side = str(ev.option_type).upper()
+        has_position = self._position is not None and self._position["side"] == side
+        # Post-entry: lock onto the position's own strike, immune to
+        # wall drift. Pre-entry/flat: follow the current wall (correct
+        # while scanning for an entry).
+        if has_position:
+            target_strike = float(self._position["strike"])
+        else:
+            snap = self._latest_snap
+            wall = (snap.max_call_oi_strike if side == "CE" else snap.max_put_oi_strike) if snap else None
+            target_strike = float(wall) if wall else None
+        # 2026-08-13 fix, twin of the position-side fix above: whenever
+        # the TRACKED strike itself changes for ANY reason -- the wall
+        # drifting while flat/scanning (the common case, since it can
+        # happen many times a day), a position opening, or a position
+        # closing and reverting to (possibly a NEW) current wall --
+        # _option_acc[side]/_live_option_ltp[side] must reset. Without
+        # this, BarAccumulator has zero concept of "which instrument"
+        # it's bucketing: switching from strike A's ticks to strike B's
+        # mid-accumulation would silently mix TWO DIFFERENT option
+        # contracts' OHLC into one continuous bar series, corrupting
+        # confirm_option_price_action()'s VWAP/swing-low for every
+        # entry evaluated afterward -- not just during an open
+        # position, which is the FAR more common case since the wall
+        # can drift many times a day while flat/scanning.
+        if target_strike != self._tracked_option_strike.get(side):
+            self._option_acc[side] = BarAccumulator(1)
+            self._live_option_ltp.pop(side, None)
+            self._tracked_option_strike[side] = target_strike
+        is_target_strike = target_strike is not None and float(ev.strike) == target_strike
+        if is_target_strike:
+            self._live_option_ltp[side] = ev.ltp
+            closed = self._option_acc[side].on_tick(ev.timestamp, ev.ltp, ev.volume)
+            if closed and has_position:
+                self._maybe_promote_s1(side)
+
+        if has_position and is_target_strike:
+            self._last_position_tick_ts = datetime.now(IST)
+            self._staleness_alerted = False   # fresh data -- clear any prior alert
+            self._check_exit(ev.ltp)
 
     def _check_exit(self, ltp: float) -> None:
         # Both CE and PE positions BUY the option -- long its own premium

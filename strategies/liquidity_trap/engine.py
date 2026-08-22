@@ -418,29 +418,44 @@ class LiquidityTrapStrategy(AbstractStrategyBook):
                 continue
             except asyncio.CancelledError:
                 break
-            if not isinstance(ev, IndexTick) or not self._is_own_underlying_tick(ev.symbol):
-                continue
-            today = ev.timestamp.date() if hasattr(ev, "timestamp") else datetime.now(IST).date()
-            real_today = datetime.now(IST).date()
-            if abs((today - real_today).days) > _MAX_PLAUSIBLE_TICK_DATE_DRIFT_DAYS:
-                logger.warning(
-                    "LiquidityTrap[%s]: REJECTED tick with implausible date %s (real date %s) -- ignoring.",
-                    self._underlying, today, real_today,
-                )
-                continue
-            if self._today != today:
-                self.reset_session()
-                self._today = today
+            # 2026-08-23 fix: this loop had NO per-iteration exception guard --
+            # an unhandled exception anywhere in the pipeline it calls into
+            # (_on_bar_close's Stage1-4 evaluation, _check_exit_and_scale_in)
+            # would silently kill the whole task. Unlike run_system.py's
+            # top-level task barrier (which triggers a supervised
+            # liquidate_all() shutdown), a per-book task like this one is
+            # invisible when it dies: no crash, no liquidation, nothing on
+            # the dashboard -- this specific client's position just stops
+            # being monitored (no SL/target/scale-in checks at all) with
+            # everything else looking completely normal. SellStraddle's own
+            # loops already had this guard; this brings Liquidity Trap in
+            # line with that established, safer pattern.
+            try:
+                if not isinstance(ev, IndexTick) or not self._is_own_underlying_tick(ev.symbol):
+                    continue
+                today = ev.timestamp.date() if hasattr(ev, "timestamp") else datetime.now(IST).date()
+                real_today = datetime.now(IST).date()
+                if abs((today - real_today).days) > _MAX_PLAUSIBLE_TICK_DATE_DRIFT_DAYS:
+                    logger.warning(
+                        "LiquidityTrap[%s]: REJECTED tick with implausible date %s (real date %s) -- ignoring.",
+                        self._underlying, today, real_today,
+                    )
+                    continue
+                if self._today != today:
+                    self.reset_session()
+                    self._today = today
 
-            closed_1m = self._acc_1m.on_tick(ev.timestamp, ev.ltp)
-            self._acc_confirm.on_tick(ev.timestamp, ev.ltp)
-            self._acc_ref.on_tick(ev.timestamp, ev.ltp)
-            self._acc_trend.on_tick(ev.timestamp, ev.ltp)
-            if closed_1m:
-                self._on_bar_close()
+                closed_1m = self._acc_1m.on_tick(ev.timestamp, ev.ltp)
+                self._acc_confirm.on_tick(ev.timestamp, ev.ltp)
+                self._acc_ref.on_tick(ev.timestamp, ev.ltp)
+                self._acc_trend.on_tick(ev.timestamp, ev.ltp)
+                if closed_1m:
+                    self._on_bar_close()
 
-            if self._position is not None:
-                self._check_exit_and_scale_in(ev.ltp)
+                if self._position is not None:
+                    self._check_exit_and_scale_in(ev.ltp)
+            except Exception:
+                logger.exception("LiquidityTrap[%s]: _index_tick_loop iteration error (recovered).", self._underlying)
 
     # ── pipeline (Stages 1-4): re-scan CLOSED bars on every new 1m close ────────
     # Multi-ref (2026-08-21): re-derives the FULL day's setup list fresh every
@@ -639,9 +654,12 @@ class LiquidityTrapStrategy(AbstractStrategyBook):
                 continue
             except asyncio.CancelledError:
                 break
-            if not isinstance(ev, OptionTick) or ev.underlying != self._underlying or not ev.ltp:
-                continue
-            self._live_ltp[(float(ev.strike), str(ev.option_type).upper())] = ev.ltp
+            try:
+                if not isinstance(ev, OptionTick) or ev.underlying != self._underlying or not ev.ltp:
+                    continue
+                self._live_ltp[(float(ev.strike), str(ev.option_type).upper())] = ev.ltp
+            except Exception:
+                logger.exception("LiquidityTrap[%s]: _option_tick_loop iteration error (recovered).", self._underlying)
 
     # ── Stage 6 (scale-in) + exit checks, live tick-by-tick ─────────────────────
 

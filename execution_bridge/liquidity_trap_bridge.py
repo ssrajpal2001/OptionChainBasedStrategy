@@ -120,7 +120,11 @@ class LiquidityTrapExecutionBridge:
         live_binding = None
         if db is not None and hasattr(db, "get_bindings_safe_sync"):
             try:
-                for b in db.get_bindings_safe_sync(ev.client_id):
+                # 2026-08-23 fix: same event-loop-freezing risk as straddle_bridge.py's
+                # own fix, same night -- get_bindings_safe_sync() blocks with a real
+                # time.sleep() retry on DB contention; called directly here it stalls
+                # every client's order routing, not just this one.
+                for b in await asyncio.to_thread(db.get_bindings_safe_sync, ev.client_id):
                     if b.get("binding_id") == ev.binding_id:
                         live_binding = b
                         break
