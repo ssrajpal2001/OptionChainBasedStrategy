@@ -556,6 +556,135 @@ def test_warmup_intraday_replays_history_and_locks_setup_without_entering(monkey
     asyncio.run(run())
 
 
+def test_on_fill_full_fill_after_concurrent_scale_in_is_not_misdetected_as_partial():
+    """2026-08-22 fix: the original entry's own fill can legitimately arrive
+    AFTER a scale-in add-on has already bumped pos["lots"] (real broker
+    round-trip takes time; scale-in fires independently off live ticks). A
+    fully-filled 2-lot original entry must not be treated as "partial"
+    just because pos["lots"] is now 4 by the time its fill shows up."""
+    async def run():
+        book = _make_book()
+        book._live_ltp[(79600.0, "CE")] = 150.0
+        book._resolve_expiry = lambda: date(2026, 8, 26)
+        book._try_enter(BASE + timedelta(minutes=60), entry_price=79613.0,
+                        bias="BULL", sweep_extreme=79500.0)
+        await asyncio.sleep(0.01)
+        assert book._position["lots"] == 2
+        entry_event_id = book._position["_entry_event_id"]
+        original_qty = 2 * 20 * 1   # lots_initial * lot_size * lot_multiplier
+
+        # Scale-in add-on fires and confirms BEFORE the original entry's own
+        # fill event arrives -- exactly mirrors _try_scale_in's own mutation.
+        book._position["lots"] = 4
+        book._position["add_on_done"] = True
+
+        # The ORIGINAL entry's fill now arrives, fully filled at its own
+        # originally-requested quantity.
+        fill = LiquidityTrapFillEvent(
+            action="BUY", underlying="SENSEX", option_type="CE", strike=79600,
+            fill_price=150.0, qty=original_qty, client_id="ssrajpal2001",
+            binding_id="SA5770", event_id=entry_event_id, is_add_on=False,
+            filled_qty=original_qty,
+        )
+        book._on_fill(fill)
+
+        assert book._position["lots"] == 4, (
+            "a genuinely FULL fill for the original entry must not shrink "
+            "pos['lots'] back down just because a concurrent scale-in had "
+            "already bumped it -- that would silently discard the real "
+            "add-on lots from tracked state while the broker still holds them"
+        )
+    asyncio.run(run())
+
+
+def test_on_fill_genuine_partial_fill_preserves_a_concurrent_scale_ins_lots():
+    """A REAL partial fill on the original entry (broker only filled 1 of 2
+    lots) must still reconcile down to the ORIGINAL entry's own real share,
+    while not erasing a scale-in add-on that already separately confirmed."""
+    async def run():
+        book = _make_book()
+        book._live_ltp[(79600.0, "CE")] = 150.0
+        book._resolve_expiry = lambda: date(2026, 8, 26)
+        book._try_enter(BASE + timedelta(minutes=60), entry_price=79613.0,
+                        bias="BULL", sweep_extreme=79500.0)
+        await asyncio.sleep(0.01)
+        entry_event_id = book._position["_entry_event_id"]
+        qty_unit = 20 * 1
+        original_requested = 2 * qty_unit
+
+        book._position["lots"] = 4
+        book._position["add_on_done"] = True
+
+        # Only 1 of the original 2 lots actually filled.
+        fill = LiquidityTrapFillEvent(
+            action="BUY", underlying="SENSEX", option_type="CE", strike=79600,
+            fill_price=150.0, qty=original_requested, client_id="ssrajpal2001",
+            binding_id="SA5770", event_id=entry_event_id, is_add_on=False,
+            filled_qty=1 * qty_unit,
+        )
+        book._on_fill(fill)
+
+        # 1 lot from the original's real partial fill + 2 lots from the
+        # already-confirmed scale-in add-on = 3, not the pre-fix behavior's
+        # "just the original's own share" (1) which would silently drop the
+        # add-on, nor the un-reconciled 4 which would overstate the original.
+        assert book._position["lots"] == 3
+    asyncio.run(run())
+
+
+def test_warmup_intraday_closes_a_restored_position_whose_sl_was_crossed_during_the_gap(monkeypatch):
+    """2026-08-22 fix: a position restored from persistence (real, still
+    open at the broker) whose SL was crossed by real price action DURING
+    the restart gap must be closed by replay -- not left unprotected until
+    a live tick happens to also breach the level again. Price recovers back
+    ABOVE the SL by the last replayed bar (mirrors the exact failure
+    scenario: if only the live post-warmup tick were checked, it would see
+    "safe" current price and never realize the level was already crossed)."""
+    import strategies.liquidity_trap.engine as eng_mod
+    import data_layer.historical_candles as hc_mod
+
+    class _FakeDT(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 8, 21, 10, 0, tzinfo=IST)
+
+    async def _fake_fetch(key, token):
+        return [
+            {"ts": "2026-08-21T09:15:00+05:30", "open": 100, "high": 101, "low": 99, "close": 100},
+            # dips to 89, well below sl_spot=90 -- the real SL breach
+            {"ts": "2026-08-21T09:16:00+05:30", "open": 100, "high": 100, "low": 89, "close": 95},
+            # price recovers back above 90 by the time replay ends -- proves
+            # this can't be caught by only checking the live tick that
+            # follows warmup (current price alone no longer looks unsafe)
+            {"ts": "2026-08-21T09:17:00+05:30", "open": 95, "high": 105, "low": 95, "close": 104},
+        ]
+
+    monkeypatch.setattr(eng_mod, "datetime", _FakeDT)
+    monkeypatch.setattr(hc_mod, "fetch_upstox_intraday_1m", _fake_fetch)
+
+    async def run():
+        book = _make_book()
+        book._feeder_token = "FAKE_TOKEN"
+        book._position = dict(
+            side="CE", direction=1, strike=24500, entry_price=120.0,
+            entry_spot=24500.0, sl_spot=90.0, target_spot=130.0,
+            lots=2, qty_unit=book._lot_size * book._lot_multiplier, add_on_done=False,
+            zone_bars_since_entry=[], entry_ts=BASE, expiry=date(2026, 8, 27),
+            _entry_event_id="preexisting_restored_position",
+        )
+        await book._warmup_intraday()
+        await asyncio.sleep(0)   # let the create_task'd _square_off actually run
+        assert book._position["_closing"] is True, (
+            "an SL breach that genuinely happened during replay must close the "
+            "restored position, even though price had recovered by the last "
+            "replayed bar and the book is otherwise flat-looking afterward"
+        )
+        sells = [e for t, e in book._bus.published if getattr(e, "action", None) == "SELL"]
+        assert len(sells) == 1
+        assert sells[0].reason == "sl_hit"
+    asyncio.run(run())
+
+
 def test_warmup_intraday_skips_gracefully_without_feeder_token(monkeypatch):
     import strategies.liquidity_trap.engine as eng_mod
 

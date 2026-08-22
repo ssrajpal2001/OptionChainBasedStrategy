@@ -357,6 +357,32 @@ class LiquidityTrapStrategy(AbstractStrategyBook):
                     self._acc_trend.on_tick(ts, px)
                     if closed_1m:
                         self._on_bar_close()
+                    # 2026-08-22 fix: a position restored from persistence in
+                    # start() (self._restore_position(), called before this
+                    # warmup task even runs) is a REAL, still-open broker
+                    # position -- unlike a stale Stage4 CHoCH (correctly never
+                    # chased into a live entry during replay, see this
+                    # method's own docstring), an SL/target level crossed on
+                    # the REAL underlying's REAL price action earlier today
+                    # is a REAL risk-control breach that already happened,
+                    # not a signal that goes stale. Before this fix, replay
+                    # only ever fed _on_bar_close() (new-setup discovery) --
+                    # never re-checked an already-open position's own SL/
+                    # target against the replayed price path at all. A
+                    # restart after price had crossed SL/target and then
+                    # drifted back away from that level by the time live
+                    # ticks resumed would leave that position completely
+                    # unprotected for the rest of the session (live checks
+                    # only ever compare the CURRENT tick against the level,
+                    # never "was this level crossed at any point since
+                    # entry"). Deliberately NOT gated by self._warming_up --
+                    # that flag only suppresses NEW entries off stale
+                    # signals; an already-open real position's own exit
+                    # check must run regardless, exactly like the live
+                    # per-tick check it's reusing verbatim (no
+                    # reimplementation), so a genuinely-breached SL/target
+                    # gets closed for real instead of riding to EOD.
+                    self._check_exit_and_scale_in(px)
                 replayed += 1
             active = sum(1 for s in self._setups if not s.dead)
             self._clog.info(
@@ -813,15 +839,36 @@ class LiquidityTrapStrategy(AbstractStrategyBook):
                     self._position = None
                     self._persist_position()
                     return
-                filled_qty = fill.filled_qty or (self._position["lots"] * self._position["qty_unit"])
-                requested = self._position["lots"] * self._position["qty_unit"]
+                # 2026-08-22 fix: `requested` must be THIS fill's own originally-
+                # requested quantity (fill.qty, echoed back verbatim from the
+                # order this specific fill answers -- see LiquidityTrapFillEvent's
+                # own docstring: "qty: the REQUESTED quantity"), NOT re-derived
+                # from the CURRENT self._position["lots"]. A scale-in add-on can
+                # legitimately bump pos["lots"] (_try_scale_in) BEFORE this
+                # original entry's own fill event arrives (real broker round-trip
+                # takes time; scale-in fires off live ticks independently). Using
+                # the current (already-inflated) lots as "requested" made a
+                # genuinely FULL fill for the original 2-lot entry look partial
+                # against the post-scale-in 4-lot total, wrongly shrinking
+                # pos["lots"] back down and silently discarding the scale-in
+                # add-on from tracked state while the broker still held the full
+                # quantity -- software position size diverging from the real one.
+                filled_qty = fill.filled_qty or fill.qty
+                requested = fill.qty
                 if 0 < filled_qty < requested:
                     logger.critical(
                         "LiquidityTrap[%s]: ENTRY %s%d PARTIAL FILL (event_id=%s): requested %d, filled %d.",
                         self._underlying, self._position["side"], self._position["strike"],
                         fill.event_id, requested, filled_qty,
                     )
-                    self._position["lots"] = max(1, filled_qty // self._position["qty_unit"])
+                    # A genuine partial fill on the ORIGINAL entry must not
+                    # discard a scale-in add-on that already happened in the
+                    # meantime (pos["add_on_done"]) -- add its lots back on
+                    # top of the original fill's own reconciled lots, instead
+                    # of overwriting the total with just the original's share.
+                    original_lots = max(1, filled_qty // self._position["qty_unit"])
+                    addon_lots = self._lots_initial if self._position.get("add_on_done") else 0
+                    self._position["lots"] = original_lots + addon_lots
                     self._persist_position()
                 return
             # add-on fill
