@@ -304,3 +304,41 @@ async def test_square_off_is_a_noop_if_no_open_position(tmp_path, monkeypatch):
     await strat._square_off("eod")
 
     assert bus.published == []
+
+
+# ── day-rollover (2026-08-22 CRITICAL fix) ───────────────────────────────────
+# reset_session() had zero live call sites anywhere in engine.py before this
+# fix -- self._day_done, once set True by _eod_loop at 15:15, was NEVER reset
+# back to False except in __init__ or reset_session() itself (unreachable
+# live). Every candle for every trading day after the first was silently
+# dropped by _on_candle's own `... or self._day_done: return` gate, forever,
+# for the remaining lifetime of the process.
+
+def test_on_candle_processes_a_new_day_after_prior_day_done(tmp_path, monkeypatch):
+    from data_layer.base_feeder import CandleEvent
+    strat = _make_strategy(tmp_path, monkeypatch)
+    strat._htf_loaded = True   # skip the real REST warmup for this test
+
+    day1 = datetime(2026, 8, 20, 9, 20, tzinfo=None)
+    ev1 = CandleEvent(symbol="NSE_INDEX|Nifty 50", timeframe=1, open=100, high=101,
+                       low=99, close=100.5, volume=0, timestamp=day1)
+    strat._on_candle(ev1)
+    assert strat._today == day1.date()
+    assert strat._last_spot == 100.5
+
+    # Simulate _eod_loop having fired for day 1.
+    strat._day_done = True
+
+    day2 = datetime(2026, 8, 21, 9, 20, tzinfo=None)
+    ev2 = CandleEvent(symbol="NSE_INDEX|Nifty 50", timeframe=1, open=110, high=111,
+                       low=109, close=110.5, volume=0, timestamp=day2)
+    strat._on_candle(ev2)
+
+    assert strat._today == day2.date(), "a genuinely new day's candle must update self._today"
+    assert strat._day_done is False, "reset_session() must have fired and cleared day_done"
+    assert strat._last_spot == 110.5, (
+        "day 2's candle must actually be PROCESSED, not silently dropped by "
+        "the stale self._day_done==True left over from day 1 -- this is the "
+        "exact bug: without reset_session() ever firing, this candle (and "
+        "every one after it) would be silently ignored forever"
+    )

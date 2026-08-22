@@ -266,6 +266,10 @@ class FVGStrategy(AbstractStrategyBook, PositionStoreMixin):
         self._day_done = False
         self._htf_loaded = False
         self._warming_up = False
+        # 2026-08-22 fix: see reset_session()'s new caller in _on_candle below --
+        # this field genuinely did not exist before; reset_session() was dead
+        # code with zero live call sites anywhere in this file.
+        self._today: Optional[date] = None
 
         # Live option premium book: {(strike, option_type): last_ltp}. Updated
         # from every OPTION_TICK for this underlying regardless of whether a
@@ -455,13 +459,24 @@ class FVGStrategy(AbstractStrategyBook, PositionStoreMixin):
     # ── startup warmup ───────────────────────────────────────────────────────
 
     async def _startup_load(self) -> None:
+        # CRITICAL (2026-08-22, same pattern as every other strategy's mid-day
+        # warmup in this codebase): self._today must be set to TODAY before
+        # _on_candle's own "if self._today != today: reset_session()" check
+        # can ever run against a live candle -- otherwise the first live
+        # candle (self._today still None) would trigger reset_session() and
+        # wipe out everything this method just warmed up (self._fvgs,
+        # self._known_fvg_ts, PDH/PDL) with zero log trace. Set unconditionally
+        # in the finally-equivalent paths below (both the no-token early
+        # return and the real warmup path), matching _htf_loaded's own
+        # always-set-on-every-exit-path discipline.
+        today = datetime.now(IST).date()
         if not self._feeder_token:
             logger.warning("FVGStrategy[%s]: no feeder token — cannot warm history; idle.",
                             self._underlying)
+            self._today = today
             self._htf_loaded = True
             return
         try:
-            today = datetime.now(IST).date()
             key = _upstox_key_for(self._underlying)
             start = today - timedelta(days=_HIST_WARMUP_DAYS)
             bars_1m = await asyncio.to_thread(_fetch_1m_bars, key, start, today, self._feeder_token)
@@ -477,9 +492,11 @@ class FVGStrategy(AbstractStrategyBook, PositionStoreMixin):
                 sum(1 for f in self._fvgs if f["high_liquidity"]),
             )
             await self._warmup_intraday(today)
+            self._today = today
             self._htf_loaded = True
         except Exception:
             logger.exception("FVGStrategy[%s]: startup load failed.", self._underlying)
+            self._today = today
             self._htf_loaded = True
 
     def _rebuild_fvg_pool(self) -> None:
@@ -660,6 +677,22 @@ class FVGStrategy(AbstractStrategyBook, PositionStoreMixin):
         )
         if not is_spot:
             return
+        # 2026-08-22 CRITICAL FIX: reset_session() had zero live call sites in
+        # this file -- self._day_done, once set True by _eod_loop at 15:15,
+        # was NEVER reset back to False anywhere except __init__ or
+        # reset_session() itself (unreachable live). Every candle for every
+        # day after the first was silently dropped here, forever, for the
+        # remaining lifetime of the process -- not just a stale FVG pool, but
+        # zero new bars/FVGs/entries from day 2 onward until someone manually
+        # restarted the deployment. Every other strategy in this codebase
+        # (bear_only_book, sr_book, liquidity_sweep, liquidity_trap, oi_flow,
+        # sell_straddle, v4_cascade) already carries this exact
+        # "if self._today != today: reset_session()" check in its own tick
+        # loop; FVG never had one.
+        today = ev.timestamp.date()
+        if self._today != today:
+            self.reset_session()
+            self._today = today
         if ev.timestamp.time() < _SESSION_OPEN or self._day_done:
             return
 
