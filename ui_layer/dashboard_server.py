@@ -343,6 +343,13 @@ try:
     class _BrokerModeSchema(_PydanticBase):
         mode: str  # "paper" | "live"
 
+    class _ManualConfirmEntrySchema(_PydanticBase):
+        # 2026-08-23, direct user spec: client-supplied real fill prices when
+        # the broker's own entry confirmation was aborted/timed out -- see
+        # strategies/sell_straddle/entries.py's manual_confirm_entry().
+        ce_ltp: float
+        pe_ltp: float
+
     class _BindingIPSchema(_PydanticBase):
         source_ip:    str = ""   # LOCAL/private IP the bot binds order egress to
         whitelist_ip: str = ""   # PUBLIC IP the client whitelists in their broker
@@ -2289,6 +2296,68 @@ class DashboardServer:
                 return {"ok": True, "deploy_id": deploy_id, "underlying": underlying, "series": []}
             return {"ok": True, "deploy_id": deploy_id, "underlying": underlying,
                     "series": strat.get_premium_series()}
+
+        # ── CLIENT — manual entry-price confirmation (2026-08-23) ──────────────
+        # "Entry price should come from the broker which is connected to the
+        # client. If broker doesn't send the data we can manually enter the
+        # price in UI and click save..." -- see strategies/sell_straddle/
+        # entries.py's manual_confirm_entry()/discard_aborted_entry() for the
+        # full rationale. deploy_id = {client}_{binding}_{strategy}_{underlying},
+        # same convention as premium_series above. Unlike that read-only
+        # endpoint, these MUTATE money-affecting state, so the deploy_id's own
+        # client segment is explicitly checked against the authenticated
+        # user -- one client must never be able to confirm/discard another
+        # client's pending entry by guessing/passing their deploy_id.
+
+        def _ss_book_for_own_deploy(deploy_id: str, cid: str):
+            parts = deploy_id.split("_")
+            if len(parts) < 3 or parts[0] != cid:
+                raise HTTPException(403, "deploy_id does not belong to the authenticated client.")
+            bid, underlying = parts[1], parts[-1]
+            return _srv._find_ss_book(cid, bid, underlying)
+
+        @app.get("/api/client/strategy/{deploy_id}/sell_straddle/pending_manual_entry", tags=["Client"])
+        async def api_client_pending_manual_entry(
+            deploy_id: str, user: dict = Depends(_require_client),
+        ):
+            cid = user.get("client_id", "")
+            strat = _ss_book_for_own_deploy(deploy_id, cid)
+            pending = getattr(strat, "_last_aborted_entry", None) if strat is not None else None
+            if pending is None:
+                return {"ok": True, "pending": None}
+            return {"ok": True, "pending": {
+                "ce_strike": pending.get("ce_strike"),
+                "pe_strike": pending.get("pe_strike"),
+                "expiry_date": pending["expiry_date"].isoformat() if pending.get("expiry_date") else None,
+                "aborted_at": pending["aborted_at"].isoformat() if pending.get("aborted_at") else None,
+                "reason": pending.get("reason", ""),
+            }}
+
+        @app.post("/api/client/strategy/{deploy_id}/sell_straddle/manual_confirm_entry", tags=["Client"])
+        async def api_client_manual_confirm_entry(
+            deploy_id: str, body: _ManualConfirmEntrySchema, user: dict = Depends(_require_client),
+        ):
+            cid = user.get("client_id", "")
+            strat = _ss_book_for_own_deploy(deploy_id, cid)
+            if strat is None or not hasattr(strat, "manual_confirm_entry"):
+                raise HTTPException(404, "No live sell_straddle book for this deployment.")
+            ok, msg = await strat.manual_confirm_entry(body.ce_ltp, body.pe_ltp)
+            if not ok:
+                raise HTTPException(400, msg)
+            return {"ok": True, "message": msg}
+
+        @app.post("/api/client/strategy/{deploy_id}/sell_straddle/discard_aborted_entry", tags=["Client"])
+        async def api_client_discard_aborted_entry(
+            deploy_id: str, user: dict = Depends(_require_client),
+        ):
+            cid = user.get("client_id", "")
+            strat = _ss_book_for_own_deploy(deploy_id, cid)
+            if strat is None or not hasattr(strat, "discard_aborted_entry"):
+                raise HTTPException(404, "No live sell_straddle book for this deployment.")
+            ok, msg = await strat.discard_aborted_entry()
+            if not ok:
+                raise HTTPException(400, msg)
+            return {"ok": True, "message": msg}
 
         # ── ADMIN — V4 Cascade: live trap-zone status + active-trade distances ──
         @app.get("/api/admin/strategy/{deploy_id}/v4_trap_status", tags=["Admin"])
