@@ -424,6 +424,7 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
             asyncio.create_task(self._option_loop(), name=f"ss_{_tag}_opt"),
             asyncio.create_task(self._fill_loop(), name=f"ss_{_tag}_fill"),
             asyncio.create_task(self._hedge_fill_loop(), name=f"ss_{_tag}_hedge_fill"),
+            asyncio.create_task(self._eod_backstop_loop(), name=f"ss_{_tag}_eod_backstop"),
         ]
         asyncio.create_task(self._seed_pool())
         self._tasks.append(asyncio.create_task(self._pool_engine_persist_loop(), name=f"ss_{_tag}_pool_persist"))
@@ -925,6 +926,60 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         finally:
             self._bus.unsubscribe(Topic.INDEX_TICK, q)
             self._loop_queues.pop("tick", None)
+
+    _EOD_BACKSTOP_INTERVAL_SEC = 5.0
+
+    async def _eod_backstop_loop(self) -> None:
+        """2026-08-23 fix: SellStraddle had NO standalone EOD task -- unlike
+        OI-Flow/Liquidity Trap, which both run _eod_loop as its own
+        independent task specifically so EOD squareoff survives even if the
+        main tick loop stops producing new work. self._check_exits() (the
+        FULL exit ladder: EOD -> Day% -> ITMgate -> DayLow -> LTPdecay ->
+        Ratio -> ScalableTSL -> exit_rules -> VWAPrise) was ONLY ever invoked
+        from _tick_loop's own "a genuine IndexTick arrived" branch -- on a
+        1s queue-get timeout it just `continue`s, calling nothing. This isn't
+        only a "the task crashed" risk (that loop is already exception-
+        guarded per-iteration): if Topic.INDEX_TICK simply stops being
+        published for this underlying -- a stale/zombie feed, exactly the
+        class of gap this session's own feeder-resilience work
+        (DualFeeder._staleness_watchdog) was built to catch, but from a
+        DIFFERENT angle: detecting the FEED is dead vs. protecting THIS
+        POSITION regardless of why nothing is arriving -- _tick_loop stays
+        alive and healthy with simply nothing to process, and EOD/Day%/TSL
+        all silently stop being evaluated for as long as the drought lasts.
+        A position could ride straight through 15:15 with zero force-exit.
+
+        This loop is a pure backstop, not a replacement: it calls the SAME
+        self._check_exits() the tick path already calls (no reimplementation
+        of the exit ladder), using whatever self._spot / leg LTPs are
+        currently known -- fresh if ticks are flowing normally, last-known
+        if they've stopped, exactly the same "last known price" fallback
+        philosophy OI-Flow/Liquidity Trap's own _eod_loop already uses.
+        Concurrent calls to _check_exits() (this loop AND _tick_loop firing
+        around the same moment) are already safe without any new guard here:
+        _close_position() sets pos.status="closing" SYNCHRONOUSLY before its
+        first await (the 2026-08-06 confirm-model redesign's own reentrancy
+        guard, see exits.py), so whichever caller reaches that check first
+        wins and every other concurrent caller sees status != "open" and
+        returns -- this loop relies on that existing guarantee rather than
+        adding a second one."""
+        while self._running:
+            try:
+                await asyncio.sleep(self._EOD_BACKSTOP_INTERVAL_SEC)
+            except asyncio.CancelledError:
+                break
+            await self._eod_backstop_check_once()
+
+    async def _eod_backstop_check_once(self) -> None:
+        """One backstop pass, split out of _eod_backstop_loop's own sleep
+        loop so it's directly unit-testable without needing to wait through
+        real 5s intervals."""
+        try:
+            if self._position and self._position.status == "open":
+                await self._check_exits()
+        except Exception:
+            logger.exception("SellStraddle[%s]: _eod_backstop_loop iteration error (recovered).",
+                              self._underlying)
 
     async def _fill_loop(self) -> None:
         from execution_bridge.straddle_bridge import StraddleFillEvent
