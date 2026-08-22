@@ -320,6 +320,57 @@ def _load_registry_from_db(registry) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Graceful shutdown on SIGTERM/SIGINT
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _register_graceful_shutdown_signals(shutdown_event: asyncio.Event) -> None:
+    """2026-08-23 CRITICAL fix: before this, NOTHING in this file ever
+    registered a SIGTERM/SIGINT handler (confirmed: grep -n "signal[.]" on
+    this file returned nothing). _run_live's own graceful shutdown sequence
+    -- which calls each strategy manager's stop_async() -> liquidate_all()
+    (strategies/core/book_manager.py), a real emergency square-off of every
+    open position -- was ONLY reachable via `shutdown_event` being set from
+    inside the app itself (the admin console's shutdown callback, or one of
+    the ~20 top-level tasks in _run_live's own FIRST_COMPLETED barrier
+    crashing). `pm2 restart` sends SIGTERM; with no handler, Python's
+    default disposition just terminates the process outright -- skipping
+    the liquidation safety net on literally every routine deploy restart,
+    not just an unexpected crash. Same for a plain `kill <pid>` or Ctrl+C
+    (SIGINT) in a foreground terminal.
+
+    loop.add_signal_handler is the asyncio-safe way to do this (unlike raw
+    signal.signal(), which can interrupt arbitrary bytecode and isn't safe
+    for scheduling an async callback) -- but it's POSIX-only
+    (NotImplementedError on Windows), so this degrades gracefully there:
+    production (EC2/pm2, Linux) gets full protection; a Windows dev machine
+    keeps today's behavior (Ctrl+C still works via the default
+    KeyboardInterrupt path, just without the extra liquidation attempt)."""
+    logger = logging.getLogger(__name__)
+
+    def _on_terminate_signal(sig_name: str) -> None:
+        logger.critical(
+            "Received %s (e.g. pm2 restart/stop, or kill) -- triggering the SAME graceful "
+            "shutdown + emergency liquidation path a normal admin-console shutdown uses, "
+            "instead of terminating outright.", sig_name,
+        )
+        shutdown_event.set()
+
+    try:
+        import signal as _signal
+        loop = asyncio.get_running_loop()
+        for sig in (_signal.SIGTERM, _signal.SIGINT):
+            loop.add_signal_handler(sig, _on_terminate_signal, sig.name)
+        logger.info("SIGTERM/SIGINT handlers registered -- restarts/kills now trigger graceful "
+                    "liquidation before the process exits.")
+    except NotImplementedError:
+        logger.warning("Signal handlers not supported on this platform (Windows) -- a SIGTERM/kill "
+                        "will terminate immediately without attempting graceful liquidation.")
+    except Exception as exc:
+        logger.warning("Could not register SIGTERM/SIGINT handlers: %s -- falling back to default "
+                        "(immediate-terminate) signal behavior.", exc)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Live / Paper async runner
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -605,6 +656,8 @@ async def _run_live(
     async def _shutdown() -> None:
         logger.info("Shutdown requested.")
         shutdown_event.set()
+
+    _register_graceful_shutdown_signals(shutdown_event)
 
     admin = AdminConsole(
         bus, registry,
