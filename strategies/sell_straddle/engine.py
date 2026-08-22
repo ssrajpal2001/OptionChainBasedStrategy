@@ -158,6 +158,28 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         self._delta_chain = None  # set via set_delta_chain_manager() for crypto
         self._entry_expiry_date: Optional[date] = None  # effective expiry for new entries
         self._entry_expiry_tokens: list = []  # window tokens subscribed for _entry_expiry_date
+        # 2026-08-23, direct user spec: "if ltp is less than threshold then jump to
+        # next week expiry -- applicable for anchor selection part... if we have
+        # entered next expiry, that expiry will be used for the complete trading
+        # day till EOD." Once True, _effective_entry_expiry() stops recomputing
+        # from scratch and just holds self._entry_expiry_date fixed for the rest
+        # of the day -- see that method's own updated docstring.
+        self._expiry_shifted_low_anchor_ltp: bool = False
+
+        # 2026-08-23, direct user spec: "entry price should come from the broker
+        # which is connected to the client. If broker doesn't send the data we
+        # can manually enter the price in UI and click save and then application
+        # will move depending on the price which is entered." When a full 2-leg
+        # ENTRY's broker fill confirmation is aborted/times out (the existing
+        # _on_fill ENTRY-abort branch, which discards the optimistic position by
+        # design), the strikes/expiry/qty that were ALREADY decided are retained
+        # here separately from self._position so the client can later supply the
+        # real fill price(s) they see on their OWN broker terminal and have the
+        # app adopt the trade as genuinely open, instead of it staying silently
+        # discarded while a real position may be sitting open and unmonitored at
+        # the broker. See entries.py's manual_confirm_entry()/
+        # discard_aborted_entry(). None whenever there is nothing pending.
+        self._last_aborted_entry: Optional[dict] = None
 
         self._prem_closes: deque = deque(maxlen=_BUF)
         self._prem_volumes: deque = deque(maxlen=_BUF)
@@ -621,7 +643,20 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         """Return the expiry to use for NEW entries.
         On the current active expiry's date we shift to the next weekly expiry.
         On all other days we stay on the current active expiry.
-        For Delta crypto (BTC/ETH) the active daily expiry is computed directly."""
+        For Delta crypto (BTC/ETH) the active daily expiry is computed directly.
+
+        2026-08-23, direct user spec: once a low-anchor-LTP shift to next
+        week has fired today (self._expiry_shifted_low_anchor_ltp,
+        set by _maybe_shift_expiry_for_low_anchor_ltp in entries.py), that
+        choice is STICKY for the rest of the trading day -- this method is
+        called from several places (start(), the periodic crypto-rollover
+        check inside _tick_loop, reset_session()) that would otherwise
+        recompute from scratch and silently flip back to current-week the
+        next time any of them runs. Checked first, before even the crypto
+        branch, so it's a single, unconditional guard every caller benefits
+        from without needing its own awareness of the sticky state."""
+        if self._expiry_shifted_low_anchor_ltp and self._entry_expiry_date is not None:
+            return self._entry_expiry_date
         if self._is_crypto:
             from data_layer.universal_option_mapper import UniversalOptionMapper
             return UniversalOptionMapper.active_daily_expiry()
@@ -762,6 +797,7 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
     def reset_session(self) -> None:
         self._trades_today = 0
         self._position = None
+        self._last_aborted_entry = None
         self._sl_cooldown_until = None
         self._market_open_dt = None
         self._primed = False
@@ -785,6 +821,10 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         self._last_entry_bucket_r = ""
         self._strike_prem.clear()
         self._prev_atp_closed.clear()
+        # Reset the low-anchor-LTP expiry-shift sticky flag BEFORE recomputing --
+        # a fresh trading day starts back on the normal current-week expiry,
+        # never inheriting yesterday's shift.
+        self._expiry_shifted_low_anchor_ltp = False
         # Recompute effective entry expiry for the new session/day.
         self._entry_expiry_date = self._effective_entry_expiry()
         try:
@@ -1104,6 +1144,24 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                     if self._position is not None:
                         self._initial_net_credit = max(
                             0.0, self._initial_net_credit - float(self._position.net_credit or 0.0))
+                        # 2026-08-23, direct user spec: retain the strikes/expiry this
+                        # attempt had already decided on (before discarding the position
+                        # below) so the client can later manually confirm the trade with
+                        # the real fill price(s) they see on their own broker terminal --
+                        # see entries.py's manual_confirm_entry(). Only ever set here, for
+                        # a full 2-leg abort (the single-leg roll-reopen case above already
+                        # returned via _abort_roll_reopen and never reaches this branch).
+                        self._last_aborted_entry = {
+                            "ce_strike": self._position.ce_leg.strike,
+                            "pe_strike": self._position.pe_leg.strike,
+                            "atm_at_entry": self._position.atm_at_entry,
+                            "entry_spot": self._position.entry_spot,
+                            "expiry_date": self._position.expiry_date,
+                            "aborted_at": datetime.now(IST),
+                            "reason": _reason,
+                            "client_id": getattr(fill, "client_id", "") or self._client_id,
+                            "binding_id": getattr(fill, "binding_id", "") or self._binding_id,
+                        }
                     self._position = None
                     self._trades_today = max(0, self._trades_today - 1)
                     self._order_pending = False

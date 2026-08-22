@@ -547,6 +547,56 @@ def select_balanced_pair_at(
     return result
 
 
+def anchor_fails_floor(
+    strike_prem: Dict[Key, dict],
+    atm: int,
+    spot: float,
+    ltp_target: float,
+    theta_target: float = 0.0,
+    anchor_otm_steps: int = 0,
+    step: float = 0.0,
+) -> bool:
+    """2026-08-23, user spec: True if the ANCHOR leg (side with lower time
+    value at `atm` -- same anchor-selection rule select_balanced_pair_at
+    already uses) would fail the existing dual floor (ltp_target/
+    theta_target) -- the SAME threshold that function already rejects a
+    pair on, not a new one. Deliberately a small, standalone, additive
+    function rather than refactoring select_balanced_pair_at to expose its
+    internal rejection reason -- zero risk of changing that already-proven,
+    live-money selection function's own behavior. Also True (fails) if
+    either leg has no live quote yet -- never guess "passes" from missing
+    data. Used by the caller to decide whether to shift the entry expiry
+    to next week (see SellStraddleStrategy._maybe_shift_expiry_for_low_
+    anchor_ltp in entries.py) -- this function only diagnoses, it never
+    mutates anything itself."""
+    ce_atm = strike_prem.get((atm, "CE"))
+    pe_atm = strike_prem.get((atm, "PE"))
+    if not ce_atm or not pe_atm:
+        return True
+    ce_ltp = ce_atm.get("ltp", 0.0)
+    pe_ltp = pe_atm.get("ltp", 0.0)
+    if ce_ltp <= 0 or pe_ltp <= 0:
+        return True
+
+    ce_tv = strip_intrinsic(ce_ltp, "CE", atm, spot)
+    pe_tv = strip_intrinsic(pe_ltp, "PE", atm, spot)
+    if ce_tv < pe_tv:
+        anchor_side, anchor_strike, anchor_ltp = "CE", atm, ce_ltp
+    else:
+        anchor_side, anchor_strike, anchor_ltp = "PE", atm, pe_ltp
+
+    if anchor_otm_steps > 0 and step > 0:
+        _shift = anchor_otm_steps * step
+        shifted_strike = int(atm + _shift) if anchor_side == "CE" else int(atm - _shift)
+        shifted_leg = strike_prem.get((shifted_strike, anchor_side))
+        shifted_ltp = shifted_leg.get("ltp", 0.0) if shifted_leg else 0.0
+        if not shifted_leg or shifted_ltp <= 0:
+            return True
+        anchor_strike, anchor_ltp = shifted_strike, shifted_ltp
+
+    return not leg_passes_dual_floor(anchor_side, anchor_strike, anchor_ltp, spot, ltp_target, theta_target)
+
+
 def reentry_block_reason(strike_prem, spot, step, offset, ltp_target, rule_eval,
                          theta_target: float = 0.0, variable_strikes: bool = False,
                          balance_ratio: float = 1.0):

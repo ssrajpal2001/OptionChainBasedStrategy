@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timedelta
-from typing import List
+from typing import List, Tuple
 
 from config.global_config import IST, Topic
 from data_layer.runtime_config import RuntimeConfig
@@ -299,6 +299,62 @@ class EntryMixin:
         if due_reentry:
             await self._eval_ruleset(now, "entry_rules_reentry", use_beginning_sel=False)
 
+    async def _maybe_shift_expiry_for_low_anchor_ltp(self, ltp_target: float, theta_target: float) -> bool:
+        """2026-08-23, direct user spec: "if ltp is less than threshold then
+        jump to next week expiry -- applicable for anchor selection part...
+        if we have entered next expiry, that expiry will be used for the
+        complete trading day till EOD." The threshold is the SAME
+        ltp_target/theta_target the anchor floor check already rejects a
+        pair on -- not a new one.
+
+        Returns True the one cycle a shift actually happens -- the caller
+        should skip its own selection attempt that cycle, since the new
+        expiry's strikes have no live premium data yet (self._strike_prem
+        is cleared below; _option_loop's own _entry_exp_ok filter already
+        refuses to accept ticks for any expiry other than
+        self._entry_expiry_date, so stale current-week prices could
+        otherwise linger under the same (strike, side) keys and be
+        misread as next-week's real prices -- same strike NUMBERS exist
+        on both weekly contracts, just at different real premiums)."""
+        if self._is_crypto or self._expiry_shifted_low_anchor_ltp:
+            return False
+        step = self._cfg.exchange.strike_steps.get(self._underlying, 50.0) if self._cfg else 50.0
+        atm = int(round(self._spot / step) * step) if self._spot > 0 and step > 0 else 0
+        if atm <= 0:
+            return False
+        from strategies.sell_straddle.selection import anchor_fails_floor
+        if not anchor_fails_floor(self._strike_prem, atm, self._spot, ltp_target, theta_target):
+            return False
+
+        from data_layer.instrument_registry import REGISTRY
+        today = datetime.now(IST).date()
+        current = REGISTRY.get_active_expiry(self._underlying, today)
+        # Only meaningful while still genuinely on the current week's expiry --
+        # if some other reason (e.g. the existing expiry-day shift) already
+        # moved us off it, there's nothing further for this trigger to do.
+        if not current or self._entry_expiry_date != current:
+            return False
+        next_exps = [e for e in REGISTRY.all_expiries(self._underlying) if e > current]
+        if not next_exps:
+            return False
+        next_expiry = next_exps[0]
+
+        logger.info(
+            "SellStraddle[%s]: anchor LTP below floor (ltp≥%.0f theta≥%.0f) at ATM=%d on current "
+            "expiry %s -- shifting to next expiry %s for the REST OF TODAY (user spec: sticky "
+            "once shifted).",
+            self._underlying, ltp_target, theta_target, atm, current.isoformat(), next_expiry.isoformat(),
+        )
+        self._clog.info(
+            "EXPIRY-SHIFT low anchor LTP @ATM=%d on %s -> %s (sticky for today)",
+            atm, current.isoformat(), next_expiry.isoformat(),
+        )
+        self._entry_expiry_date = next_expiry
+        self._expiry_shifted_low_anchor_ltp = True
+        self._strike_prem.clear()
+        await self._subscribe_expiry_window(next_expiry)
+        return True
+
     async def _eval_ruleset(self, now: datetime, rule_key: str, use_beginning_sel: bool) -> None:
         ss = RuntimeConfig.index_section(self._underlying, "sell_straddle")
         rules = ss.get(rule_key, [])
@@ -314,6 +370,8 @@ class EntryMixin:
         offset = int(max(int(ss.get("pool_otm_depth", 0) or 0), int(ss.get("pool_itm_depth", 0) or 0)) or ss.get("v_slope_pool_offset") or ss.get("reentry_offset") or 4)
         ltp_target = self._ltp_target if self._ltp_target > 0 else 50.0
         theta_target = self._theta_target
+        if await self._maybe_shift_expiry_for_low_anchor_ltp(ltp_target, theta_target):
+            return
         variable_strikes = bool(ss.get("variable_strikes", False))
         balance_ratio = float(ss.get("balance_ratio", getattr(self, "_balance_ratio", 1.0)))
 
@@ -656,3 +714,123 @@ class EntryMixin:
             expiry=expiry_date,
         )
         await self._emit_order(order_ev)
+
+    _MANUAL_CONFIRM_MAX_STALENESS = timedelta(hours=2)
+
+    async def manual_confirm_entry(self, ce_ltp: float, pe_ltp: float) -> Tuple[bool, str]:
+        """2026-08-23, direct user spec: "entry price should come from the
+        broker which is connected to the client. If broker doesn't send the
+        data we can manually enter the price in UI and click save and then
+        application will move depending on the price which is entered...
+        client can update entry rate of both legs and save and that value
+        changes inside the app for that client and exit condition will be
+        checked accordingly."
+
+        Fires when a full 2-leg ENTRY's broker fill confirmation was
+        aborted/timed out -- _on_fill's existing ENTRY-abort branch already
+        discards the optimistic position (unchanged, still the automatic
+        default), but now ALSO retains the strikes/expiry it had already
+        decided on in self._last_aborted_entry. The client can check their
+        OWN broker terminal, see the trade genuinely went through, and
+        supply the real fill price(s) here -- this recreates the position
+        from the RETAINED strikes/expiry + the manually-supplied prices and
+        resumes normal exit monitoring on it. Deliberately does NOT dispatch
+        a new broker order (StraddleOrderEvent/_emit_order) -- the real
+        trade already happened at the broker; this only informs the app of
+        its outcome, mirroring the "detection + human confirms, never
+        auto-remediate" philosophy already established for broker-position
+        reconciliation. Bypasses self._stop_for_day on purpose: a manual
+        confirm isn't a NEW entry attempt, it's confirming one that already
+        happened, even if repeated automatic attempts around it failed and
+        tripped that guard."""
+        if self._position is not None and self._position.status != "closed":
+            return False, "book already has an open/closing position -- cannot manually confirm on top of it"
+        pending = self._last_aborted_entry
+        if pending is None:
+            return False, "no aborted entry is currently pending manual confirmation"
+        if ce_ltp <= 0 or pe_ltp <= 0:
+            return False, "both CE and PE entry prices must be greater than zero"
+        age = datetime.now(IST) - pending["aborted_at"]
+        if age > self._MANUAL_CONFIRM_MAX_STALENESS:
+            self._last_aborted_entry = None
+            return False, (
+                f"the pending aborted entry is {age} old (more than "
+                f"{self._MANUAL_CONFIRM_MAX_STALENESS} old) -- too stale to confirm safely, discarded"
+            )
+
+        from strategies.sell_straddle.dataclasses import StraddleLeg, StraddlePosition
+        from strategies.theta_calc import combined_time_value as _ctv
+
+        now = datetime.now(IST)
+        ce_strike, pe_strike = pending["ce_strike"], pending["pe_strike"]
+        expiry_date = pending["expiry_date"]
+
+        self._event_counter += 1
+        event_id = f"{self._underlying}_MANUALENTRY_{self._event_counter}"
+
+        self._position = StraddlePosition(
+            underlying=self._underlying,
+            atm_at_entry=pending["atm_at_entry"],
+            entry_spot=pending["entry_spot"],
+            ce_leg=StraddleLeg("CE", ce_strike, ce_ltp, ce_ltp, open_time=now, open_reason="manual_confirm"),
+            pe_leg=StraddleLeg("PE", pe_strike, pe_ltp, pe_ltp, open_time=now, open_reason="manual_confirm"),
+            net_credit=ce_ltp + pe_ltp,
+            open_time=now,
+            status="open",
+            session_min_vwap=float("inf"),
+            entry_indicators=self._pair_indicators(ce_strike, pe_strike) or dict(self._ind),
+            lot_size=self._lot_size * self._lot_multiplier,
+            expiry_date=expiry_date,
+        )
+        self._position.entry_time_value = _ctv(ce_strike, pe_strike, self._spot, ce_ltp, pe_ltp)
+
+        self._pin_position_legs(self._position)
+        self._persist()
+        asyncio.create_task(self._seed_exec_legs(int(ce_strike), int(pe_strike)))
+        self._trades_today += 1
+        _trade_credit = ce_ltp + pe_ltp
+        self._initial_net_credit += _trade_credit
+        _new_etv = float(getattr(self._position, "entry_time_value", 0.0) or 0.0) or _trade_credit
+        if _new_etv > self._initial_entry_time_value:
+            self._initial_entry_time_value = _new_etv
+
+        _cid = getattr(self, "_client_id", "") or "-"
+        _bid = getattr(self, "_binding_id", "") or "-"
+        logger.critical(
+            "SellStraddle[%s|%s|%s]: MANUALLY CONFIRMED entry — CE%d=%.2f PE%d=%.2f credit=%.2f "
+            "(client-supplied prices; original broker confirmation was aborted: %s) event_id=%s",
+            self._underlying, _cid, _bid, ce_strike, ce_ltp, pe_strike, pe_ltp, ce_ltp + pe_ltp,
+            pending.get("reason", "?"), event_id,
+        )
+        self._clog.info(
+            "MANUAL-CONFIRM ENTERED — CE%d=%.2f PE%d=%.2f credit=%.2f (client-supplied, "
+            "original abort reason: %s) event_id=%s",
+            ce_strike, ce_ltp, pe_strike, pe_ltp, ce_ltp + pe_ltp, pending.get("reason", "?"), event_id,
+        )
+        audit_entry_exec(
+            client_id=_cid, binding_id=_bid, underlying=self._underlying, ts=now,
+            ce_strike=float(ce_strike), pe_strike=float(pe_strike),
+            ce_ltp=float(ce_ltp), pe_ltp=float(pe_ltp), credit=float(ce_ltp + pe_ltp),
+            expiry_date=expiry_date.isoformat() if expiry_date else None,
+            rule_key="manual_confirm", reason="client-supplied fill price after broker confirmation aborted",
+        )
+
+        self._last_aborted_entry = None
+        return True, f"confirmed CE{ce_strike}={ce_ltp:.2f} PE{pe_strike}={pe_ltp:.2f}"
+
+    async def discard_aborted_entry(self) -> Tuple[bool, str]:
+        """The client-facing counterpart to manual_confirm_entry(): "no, that
+        attempt genuinely did not go through" -- clears the retained pending
+        record without creating any position. The automatic abort path
+        already leaves the book flat regardless, so this is purely
+        dismissing the prompt/record, not an additional safety action."""
+        if self._last_aborted_entry is None:
+            return False, "nothing is currently pending manual confirmation"
+        pending = self._last_aborted_entry
+        self._last_aborted_entry = None
+        self._clog.info(
+            "MANUAL-CONFIRM DISCARDED — client confirmed the CE%d/PE%d attempt (aborted: %s) "
+            "did not actually happen at the broker.",
+            pending["ce_strike"], pending["pe_strike"], pending.get("reason", "?"),
+        )
+        return True, "discarded"
