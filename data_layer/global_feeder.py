@@ -175,7 +175,19 @@ class DedupBuffer:
         # contract (the price flip-flop, e.g. 711 vs 365). None → legacy active-active.
         self._primary: Optional[str] = None
         self._stale_sec: float = 3.0
-        self._last_primary_ts: float = 0.0
+        # 2026-08-23 fix: PER-SYMBOL, not a single global timestamp. The old
+        # single self._last_primary_ts got refreshed by ANY symbol ticking
+        # from the primary provider -- so if the primary silently dropped
+        # just ONE strike/index (a real, plausible failure: a subscription
+        # quietly lost, a specific contract's feed stalling) while every
+        # OTHER symbol on that same connection kept ticking fine, the
+        # primary looked "healthy" globally and the secondary's real ticks
+        # for that one dead symbol were still rejected -- defeating the
+        # entire purpose of having a backup feed for exactly this scenario.
+        # Now each symbol's own primary-side freshness is tracked
+        # independently, so failover engages per-symbol, not all-or-nothing.
+        self._last_primary_ts: Dict[str, float] = {}
+        self._primary_set_ts: float = 0.0   # boot-time reference for never-yet-seen symbols
 
     def set_primary(self, provider: Optional[str], stale_sec: float = 3.0) -> None:
         self._primary = (provider or "").lower() or None
@@ -183,17 +195,27 @@ class DedupBuffer:
         # Treat the primary as "just ticked" at startup so the secondary is NOT used
         # in the boot window before the primary's first tick (which would capture a
         # stale secondary price at entry). The secondary only takes over after the
-        # primary actually goes stale_sec without a tick.
-        self._last_primary_ts = time.monotonic()
+        # primary actually goes stale_sec without a tick. Reset the per-symbol map --
+        # a fresh boot/reconnect shouldn't inherit staleness verdicts from before.
+        self._primary_set_ts = time.monotonic()
+        self._last_primary_ts = {}
 
     def accept(self, symbol: str, ltp: float, provider: Optional[str] = None) -> bool:
         now = time.monotonic()
-        # Active-passive gate
+        # Active-passive gate — evaluated PER SYMBOL now (see __init__'s own
+        # comment on why a global timestamp silently defeated single-strike
+        # failover).
         if self._primary is not None and provider is not None:
             if provider.lower() == self._primary:
-                self._last_primary_ts = now
-            elif (now - self._last_primary_ts) < self._stale_sec:
-                return False   # secondary dropped while primary is healthy
+                self._last_primary_ts[symbol] = now
+            else:
+                # A symbol the primary has never ticked yet falls back to the
+                # boot-time reference (preserves the original boot-window
+                # guard); once the primary has ticked THIS symbol at least
+                # once, only that symbol's own freshness matters.
+                last_primary_for_symbol = self._last_primary_ts.get(symbol, self._primary_set_ts)
+                if (now - last_primary_for_symbol) < self._stale_sec:
+                    return False   # secondary dropped while THIS symbol's primary feed is healthy
         entry = self._last.get(symbol)
         if entry is None:
             self._last[symbol] = (now, ltp)
@@ -203,6 +225,20 @@ class DedupBuffer:
             self._last[symbol] = (now, ltp)
             return True
         return False
+
+    def seconds_since_last_tick(self, symbol: str) -> Optional[float]:
+        """None if this symbol has never had a genuinely-accepted tick yet
+        (never seen, or still filtered out) -- a real staleness watchdog
+        must never read that as "0 seconds ago", only as "no data at all
+        yet". self._last is already the true per-symbol last-accepted-tick
+        timestamp (updated by accept() from EITHER provider, active or
+        standby, whichever one is actually delivering) -- exactly what a
+        "is this symbol's feed alive at all" check needs, independent of
+        which provider is currently primary."""
+        entry = self._last.get(symbol)
+        if entry is None:
+            return None
+        return time.monotonic() - entry[0]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1214,6 +1250,8 @@ class DualFeeder:
         self._latency: Dict[str, float] = {}
         self._tasks: List[asyncio.Task] = []
         self._feeders: Dict[str, BaseFeeder] = {}
+        self._staleness_boot_ts: float = 0.0
+        self._staleness_alerted: set = set()
 
     _FEEDER_CLS: Dict[str, type] = {
         "upstox":  UpstoxFeeder,
@@ -1276,6 +1314,80 @@ class DualFeeder:
                 logger.info("DualFeeder: %s stream task started.", provider)
             else:
                 logger.warning("DualFeeder: %s failed to connect — stream not started.", provider)
+
+        # 2026-08-23 fix: this is the actual production dual-broker path, and
+        # it never had ANY staleness detection at all -- GlobalFeeder's own
+        # heartbeat/_reconnect only exist on the single-provider code path
+        # (_start_single_internal), never here. DualFeeder only reconnects a
+        # provider when its stream cleanly disconnects or throws; a "connected
+        # but silent" WebSocket (broker-side throttling, a subscription
+        # quietly dropped, a stale session that doesn't error) was completely
+        # invisible. Watches each monitored underlying's own last-accepted-tick
+        # age (DedupBuffer.seconds_since_last_tick, which reflects whichever
+        # provider is ACTUALLY delivering, not just the configured primary) --
+        # not connection state, actual data flow.
+        watchdog_task = asyncio.create_task(self._staleness_watchdog(), name="dual_feeder_staleness_watchdog")
+        self._tasks.append(watchdog_task)
+
+    _STALENESS_CHECK_INTERVAL_SEC = 15.0
+    _STALENESS_THRESHOLD_SEC = 30.0
+    _STALENESS_BOOT_GRACE_SEC = 45.0   # no symbol has ticked yet right after connect -- not stale, just starting up
+
+    async def _staleness_watchdog(self) -> None:
+        """Per-underlying: alerts (SysEvent.FEEDER_DOWN, symbol-scoped message)
+        when a monitored index's own feed has produced no accepted tick from
+        EITHER provider in _STALENESS_THRESHOLD_SEC, during market hours only
+        (no ticks are legitimately expected outside 09:15-15:30, so silence
+        there is not a fault). Publishes a matching FEEDER_RESTORED once a
+        fresh tick arrives again, and never re-alerts for a symbol already
+        flagged stale (avoids spamming the dashboard every 15s during a real
+        outage)."""
+        self._staleness_boot_ts = time.monotonic()
+        self._staleness_alerted: set = set()
+        while self._running:
+            try:
+                await asyncio.sleep(self._STALENESS_CHECK_INTERVAL_SEC)
+            except asyncio.CancelledError:
+                break
+            await self._check_staleness_once()
+
+    async def _check_staleness_once(self) -> None:
+        """One staleness-check pass, split out of _staleness_watchdog's own
+        sleep loop so it's directly unit-testable without needing to fake
+        asyncio.sleep or wait through real 15s intervals."""
+        if time.monotonic() - self._staleness_boot_ts < self._STALENESS_BOOT_GRACE_SEC:
+            return
+        now_t = datetime.now(IST).time()
+        market_open = getattr(self._cfg.exchange, "market_open", None)
+        market_close = getattr(self._cfg.exchange, "market_close", None)
+        if market_open and market_close and not (market_open <= now_t <= market_close):
+            return
+        for underlying in list(getattr(self._cfg, "monitored_indices", []) or []):
+            age = self._dedup.seconds_since_last_tick(underlying)
+            is_stale = age is None or age > self._STALENESS_THRESHOLD_SEC
+            if is_stale and underlying not in self._staleness_alerted:
+                self._staleness_alerted.add(underlying)
+                age_desc = f"{age:.0f}s" if age is not None else "no data yet"
+                logger.critical(
+                    "DualFeeder: %s feed STALE -- no accepted tick in %s from either provider.",
+                    underlying, age_desc,
+                )
+                try:
+                    await self._bus.publish(Topic.SYSTEM_EVENT, SystemEvent(
+                        SysEvent.FEEDER_DOWN,
+                        f"{underlying} feed stale — no tick in {age_desc} from either provider.",
+                    ))
+                except Exception:
+                    pass
+            elif not is_stale and underlying in self._staleness_alerted:
+                self._staleness_alerted.discard(underlying)
+                logger.info("DualFeeder: %s feed RESTORED (fresh tick received).", underlying)
+                try:
+                    await self._bus.publish(Topic.SYSTEM_EVENT, SystemEvent(
+                        SysEvent.FEEDER_RESTORED, f"{underlying} feed restored.",
+                    ))
+                except Exception:
+                    pass
 
     async def stop(self) -> None:
         self._running = False
