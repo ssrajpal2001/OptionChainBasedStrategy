@@ -230,6 +230,11 @@ class D1TrapOptionBook(AbstractStrategyBook):
         self._day_done = False
         self._d1_fetched_today = False   # guard against re-fetching D1 bar same day
         self._warming_up = False         # True while replaying intraday history at startup
+        # 2026-08-22 fix: reset_session() had zero live call sites anywhere in
+        # this file (same class of bug independently found and fixed in
+        # strategies/fvg/engine.py the same day) -- see _on_candle's new
+        # day-check and _startup_load's new self._today assignment below.
+        self._today: Optional[date] = None
 
         # Candle symbol filter — index vs equity
         if self._positional:
@@ -286,15 +291,23 @@ class D1TrapOptionBook(AbstractStrategyBook):
     # ── HTF zone loading ──────────────────────────────────────────────────────
 
     async def _startup_load(self) -> None:
+        # CRITICAL (2026-08-22, same pattern as every other strategy's mid-day
+        # warmup in this codebase): self._today must be set to TODAY on every
+        # exit path of this method, BEFORE the first live candle can trigger
+        # _on_candle's own "if self._today != today: reset_session()" check --
+        # otherwise that first live candle (self._today still None) would
+        # itself fire reset_session() and wipe out everything just warmed up
+        # (monitors, zone state) with zero log trace.
+        today = datetime.now(IST).date()
         if not self._feeder_token:
             logger.warning(
                 "TrapBook[%s]: no feeder token — HTF zones cannot be loaded; strategy idle.",
                 self._underlying,
             )
+            self._today = today
             self._htf_loaded = True
             return
         try:
-            today = datetime.now(IST).date()
             if self._htf_mins == 0:
                 # D1 mode — fetch daily bars
                 key = self._upstox_key_override or _upstox_key_for(self._underlying)
@@ -319,9 +332,11 @@ class D1TrapOptionBook(AbstractStrategyBook):
             )
             # Replay today's intraday bars so zone states reflect current market
             await self._warmup_intraday(today)
+            self._today = today
             self._htf_loaded = True
         except Exception:
             logger.exception("TrapBook[%s]: startup load failed.", self._underlying)
+            self._today = today
             self._htf_loaded = True
 
     async def _warmup_intraday(self, today: date) -> None:
@@ -592,6 +607,21 @@ class D1TrapOptionBook(AbstractStrategyBook):
         )
         if not is_spot:
             return
+
+        # 2026-08-22 CRITICAL FIX: reset_session() had zero live call sites --
+        # self._day_done, once set True by _eod_loop at 15:15 (non-positional/
+        # d1_trap_index only -- positional/d1_trap_fno never runs _eod_loop,
+        # so it was never actually exposed to this bug), was never reset back
+        # to False. Every candle for every day after the first would be
+        # silently dropped by the `not self._positional and self._day_done`
+        # gate below, forever. Applied uniformly to both variants for
+        # consistency -- harmless no-op timing for positional, since
+        # reset_session() already deliberately preserves self._position and
+        # HTF zone monitors across days for that case.
+        today = ev.timestamp.date()
+        if self._today != today:
+            self.reset_session()
+            self._today = today
 
         now_t = ev.timestamp.time()
         if now_t < _SESSION_OPEN:
