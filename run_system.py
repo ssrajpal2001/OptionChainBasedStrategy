@@ -371,6 +371,149 @@ def _register_graceful_shutdown_signals(shutdown_event: asyncio.Event) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Broker position reconciliation (2026-08-23)
+# ─────────────────────────────────────────────────────────────────────────────
+# Cross-checks each live strategy book's OWN believed position against the
+# broker's real, live position book. Built after an overnight audit found
+# that if a position's persisted state is ever corrupted/lost, every
+# strategy silently treats itself as flat with ZERO cross-check against
+# what the broker actually shows -- see strategies/core/broker_
+# reconciliation.py's own module docstring for the full rationale
+# (detection + loud alerting only, deliberately never auto-remediation).
+#
+# Lives here (orchestration layer), not inside each strategy engine,
+# because it needs BOTH the ExecutionRouter's real broker instances AND
+# each strategy's book manager -- no strategy engine holds a router
+# reference today (only the execution bridges do), and threading a new
+# dependency into 3 different strategy constructors is a much larger,
+# riskier change than reading each book's already-public state from here.
+
+async def _reconcile_sell_straddle_book(book, router, bus) -> None:
+    from strategies.core.broker_reconciliation import ExpectedLeg, reconcile_and_alert
+    broker = (getattr(router, "_brokers", None) or {}).get(book._client_id, {}).get(book._binding_id)
+    pos = getattr(book, "_position", None)
+    legs = []
+    if pos is not None and getattr(pos, "status", None) == "open":
+        ce_leg, pe_leg = getattr(pos, "ce_leg", None), getattr(pos, "pe_leg", None)
+        if ce_leg is not None and ce_leg.symbol:
+            legs.append(ExpectedLeg(ce_leg.symbol, f"CE {ce_leg.strike:.0f}"))
+        if pe_leg is not None and pe_leg.symbol:
+            legs.append(ExpectedLeg(pe_leg.symbol, f"PE {pe_leg.strike:.0f}"))
+        if not legs:
+            # Symbols aren't populated until the entry fill actually confirms
+            # (StraddleLeg.symbol is set from fill.ce_symbol/pe_symbol) -- an
+            # optimistic just-dispatched entry has nothing to check yet, not
+            # a mismatch. Skip this cycle rather than risk a false alarm.
+            return
+    await reconcile_and_alert(
+        bus, broker, book._underlying, legs, "SellStraddle",
+        book._client_id, book._binding_id, clog=getattr(book, "_clog", None),
+    )
+
+
+async def _reconcile_single_leg_book(book, router, bus, strategy_label: str) -> None:
+    """OI-Flow and Liquidity Trap both hold at most one side (CE or PE) at a
+    time, tracked as a plain dict rather than SellStraddle's own
+    StraddleLeg objects with a symbol already recorded post-fill -- the
+    expected broker symbol has to be derived here instead, via the SAME
+    REGISTRY.get_broker_symbol() every execution bridge already uses for
+    real order placement (not re-implemented, just called directly)."""
+    from datetime import datetime as _dt
+    from config.global_config import IST as _IST
+    from data_layer.instrument_registry import REGISTRY as _REGISTRY
+    from strategies.core.broker_reconciliation import ExpectedLeg, reconcile_and_alert
+
+    broker = (getattr(router, "_brokers", None) or {}).get(book._client_id, {}).get(book._binding_id)
+    pos = getattr(book, "_position", None)
+    legs = []
+    if pos is not None:
+        try:
+            expiry = pos.get("expiry") or _REGISTRY.get_active_expiry_strict(
+                book._underlying, getattr(book, "_today", None) or _dt.now(_IST).date())
+            _binding = getattr(broker, "_binding", None)
+            provider = _binding.provider if _binding is not None else getattr(broker, "provider", "mock")
+            symbol = (
+                _REGISTRY.get_broker_symbol(book._underlying, expiry, int(pos["strike"]), pos["side"], provider)
+                if expiry else ""
+            )
+            if symbol:
+                legs.append(ExpectedLeg(symbol, f"{pos['side']} {float(pos['strike']):.0f}"))
+        except Exception:
+            # Can't confidently derive the expected symbol this cycle (e.g.
+            # expiry resolution failed) -- skip rather than risk a false
+            # "missing" alert built on a wrong symbol guess.
+            return
+    await reconcile_and_alert(
+        bus, broker, book._underlying, legs, strategy_label,
+        book._client_id, book._binding_id, clog=getattr(book, "_clog", None),
+    )
+
+
+_RECONCILIATION_INITIAL_DELAY_SEC = 60.0    # let books fully spawn/restore/warm up first
+_RECONCILIATION_INTERVAL_SEC = 300.0        # 5 min thereafter
+
+
+async def _broker_reconciliation_pass(managers: dict, router, bus) -> None:
+    """One reconciliation pass across every live strategy's every book,
+    split out of _broker_reconciliation_loop's own sleep loop so it's
+    directly unit-testable without needing to wait through real 60s/5min
+    intervals. A manager whose own .books property raises (or any other
+    per-manager failure) must not stop the OTHER managers' books from
+    being checked in the same pass."""
+    logger = logging.getLogger(__name__)
+    for name, reconciler, label in (
+        ("sell_straddle", _reconcile_sell_straddle_book, "SellStraddle"),
+        ("oi_flow", _reconcile_single_leg_book, "OI-Flow"),
+        ("liquidity_trap", _reconcile_single_leg_book, "Liquidity Trap"),
+    ):
+        manager = managers.get(name)
+        if manager is None:
+            continue
+        try:
+            books = list(getattr(manager, "books", []))
+        except Exception:
+            logger.exception("Broker reconciliation: could not list %s books.", label)
+            continue
+        for book in books:
+            try:
+                if reconciler is _reconcile_sell_straddle_book:
+                    await reconciler(book, router, bus)
+                else:
+                    await reconciler(book, router, bus, label)
+            except Exception:
+                logger.exception("Broker reconciliation error for %s book %s/%s.",
+                                  label, getattr(book, "_client_id", "?"), getattr(book, "_binding_id", "?"))
+
+
+async def _broker_reconciliation_loop(managers: dict, router, bus) -> None:
+    """Deliberately defensive beyond _broker_reconciliation_pass's own
+    per-manager/per-book try/excepts: this task sits in _run_live's own
+    FIRST_COMPLETED task barrier (same as every other top-level task,
+    including _memory_watchdog), where ANY unhandled exception triggers a
+    full graceful shutdown WITH an emergency liquidate_all() across every
+    client's every position (see strategies/core/book_manager.py). A bug
+    in this brand-new feature must never itself be what forces that -- the
+    entire point of this feature is to flag problems for a human, not
+    cause a system-wide event on its own. The try/except around each pass
+    below is a second, redundant safety net on top of _pass's own; both
+    would have to somehow fail to reach the barrier at all."""
+    logger = logging.getLogger(__name__)
+    try:
+        await asyncio.sleep(_RECONCILIATION_INITIAL_DELAY_SEC)
+    except asyncio.CancelledError:
+        return
+    while True:
+        try:
+            await _broker_reconciliation_pass(managers, router, bus)
+        except Exception:
+            logger.exception("Broker reconciliation pass failed (recovered).")
+        try:
+            await asyncio.sleep(_RECONCILIATION_INTERVAL_SEC)
+        except asyncio.CancelledError:
+            break
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Live / Paper async runner
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -749,6 +892,7 @@ async def _run_live(
         asyncio.create_task(gap_handler.run(),          name="gap_handler"),
         asyncio.create_task(shutdown_event.wait(),      name="shutdown_sentinel"),
         asyncio.create_task(_memory_watchdog(),         name="memory_watchdog"),
+        asyncio.create_task(_broker_reconciliation_loop(managers, router, bus), name="broker_reconciliation"),
     ]
 
     done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)

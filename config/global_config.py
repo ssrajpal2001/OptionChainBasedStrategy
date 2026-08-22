@@ -247,6 +247,9 @@ class SysEvent:
     GAP_OPEN        = "GAP_OPEN"        # >1% drift detected at market open
     POSITION_CLOSED = "POSITION_CLOSED" # Explicit close notification from position manager
     BROKER_UNAVAILABLE = "BROKER_UNAVAILABLE"  # live/paper order could not resolve a broker instance
+    POSITION_MISMATCH = "POSITION_MISMATCH"  # 2026-08-23: a strategy book's own believed
+    # position disagrees with what the broker's real position book shows -- see
+    # strategies/core/broker_reconciliation.py for the full detection logic/rationale.
 
 
 # ─────────────────────────────────────────────────────────────────────────────

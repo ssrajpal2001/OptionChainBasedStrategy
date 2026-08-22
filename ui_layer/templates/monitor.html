@@ -1349,8 +1349,12 @@ document.addEventListener('alpine:init', () => {
         // prominent, hard-to-miss banner strategy_alert already gets, shown
         // to every connected session (not client_id-filtered like
         // strategy_alert -- a dead feed affects everyone on it).
-        if (msg.code === 'FEEDER_DOWN') {
-          const id = 'feeder_' + Date.now() + Math.random();
+        if (msg.code === 'FEEDER_DOWN' || msg.code === 'POSITION_MISMATCH') {
+          // POSITION_MISMATCH (2026-08-23): a strategy book's own believed
+          // position disagrees with the broker's real position book -- see
+          // strategies/core/broker_reconciliation.py. At LEAST as urgent as
+          // a feed outage, same banner treatment.
+          const id = (msg.code === 'POSITION_MISMATCH' ? 'posmismatch_' : 'feeder_') + Date.now() + Math.random();
           this.strategyAlerts.push({ id, severity: 'critical', underlying: '', msg: msg.msg || 'Data feed down', ts: msg.ts || '' });
           if (this.strategyAlerts.length > 5) this.strategyAlerts.shift();
           setTimeout(() => { this.strategyAlerts = this.strategyAlerts.filter(a => a.id !== id); }, 30000);
@@ -1509,7 +1513,7 @@ document.addEventListener('alpine:init', () => {
       // new per-symbol staleness watchdog, one specific underlying's feed
       // going silent) is exactly the kind of thing that must be visually
       // impossible to miss.
-      if (['KILL_SWITCH','DISCONNECTED','FEEDER_DOWN'].includes(evt.code)) return 'var(--t-red)';
+      if (['KILL_SWITCH','DISCONNECTED','FEEDER_DOWN','POSITION_MISMATCH'].includes(evt.code)) return 'var(--t-red)';
       if (evt.code === 'GAP_OPEN')                       return 'var(--t-amber)';
       if (['CONNECTED','FEEDER_RESTORED'].includes(evt.code)) return 'var(--t-cyan)';
       return 'var(--t-muted)';
