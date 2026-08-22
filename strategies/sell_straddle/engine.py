@@ -1031,6 +1031,24 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                         "SellStraddle[%s]: ENTRY ABORTED (%s) — discarding optimistic position. [%s/%s]",
                         self._underlying, _reason, getattr(fill, "client_id", ""), getattr(fill, "binding_id", ""),
                     )
+                    # 2026-08-22 fix: entries.py adds this position's own credit
+                    # (ce_ltp+pe_ltp, == position.net_credit at construction) to
+                    # _initial_net_credit OPTIMISTICALLY, before the order's real
+                    # outcome is known -- this abort branch nulled self._position
+                    # on a rejection/failure but never reversed that add. Left
+                    # unrolled-back, _initial_net_credit (the day%-guardrail's
+                    # denominator, _day_pct() in exits.py) stays permanently
+                    # inflated by a phantom credit that was never actually
+                    # collected, silently weakening day_loss_sl_pct/
+                    # day_profit_target_pct for the rest of the session (and
+                    # across restarts, since it's persisted). Reverse the exact
+                    # amount this specific optimistic position added -- sum
+                    # arithmetic is order-independent, so this is safe even if
+                    # other real entries added to the same running total before
+                    # or after this one aborted.
+                    if self._position is not None:
+                        self._initial_net_credit = max(
+                            0.0, self._initial_net_credit - float(self._position.net_credit or 0.0))
                     self._position = None
                     self._trades_today = max(0, self._trades_today - 1)
                     self._order_pending = False
