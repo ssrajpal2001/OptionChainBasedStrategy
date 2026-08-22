@@ -28,7 +28,7 @@ import asyncio
 import logging
 import os
 from datetime import datetime
-from typing import Dict
+from typing import Dict, Optional, Tuple
 
 from config.global_config import IST, Topic, order_exchange
 from data_layer.base_feeder import EventBus
@@ -86,6 +86,13 @@ class LiquidityTrapExecutionBridge:
         self._trade_log = _LiquidityTrapTradeLogger(log_dir)
         self._running = False
         self._q = bus.subscribe(Topic.LIQUIDITY_TRAP_ORDER_REQUEST)
+        # 2026-08-23 fix: per-(client,binding) concurrency, ported from
+        # straddle_bridge.py's own 2026-06-12 head-of-line-blocking fix.
+        # Tracks the latest in-flight task per key so same-key events still
+        # process strictly in order (an entry then its own exit never race),
+        # while DIFFERENT clients'/bindings' orders run fully concurrently
+        # instead of queueing behind whichever one happens to be slow.
+        self._key_tasks: Dict[Tuple[str, str], "asyncio.Task"] = {}
 
     async def run(self) -> None:
         self._running = True
@@ -97,12 +104,39 @@ class LiquidityTrapExecutionBridge:
                 continue
             except asyncio.CancelledError:
                 break
+            if not isinstance(ev, LiquidityTrapOrderEvent):
+                continue
+            key = (ev.client_id or "", ev.binding_id or "")
+            prev_task = self._key_tasks.get(key)
+            task = asyncio.create_task(self._handle_chained(ev, prev_task, key))
+            self._key_tasks[key] = task
+
+    async def _handle_chained(self, ev: LiquidityTrapOrderEvent, prev_task: Optional["asyncio.Task"],
+                               key: Tuple[str, str]) -> None:
+        """Run _handle(ev) after any prior in-flight order for this SAME
+        (client,binding) has finished (preserves per-client ordering), while
+        different keys' tasks run concurrently with no wait on each other at
+        all -- a slow/hung broker call for one client must never delay
+        another client's order routing behind it in the same queue. Same
+        shape as straddle_bridge.py's own _handle_chained()."""
+        if prev_task is not None and not prev_task.done():
             try:
-                if not isinstance(ev, LiquidityTrapOrderEvent):
-                    continue
-                await self._handle(ev)
+                await prev_task
             except Exception:
-                logger.exception("LiquidityTrapExecutionBridge: _handle error.")
+                pass  # the prior order's own failure was already logged where it happened
+        try:
+            await self._handle(ev)
+        except Exception:
+            # One bad order must NOT kill the bridge (which would silently
+            # stop ALL future routing, for every client). Log and keep serving.
+            logger.exception("LiquidityTrapExecutionBridge: _handle error for %s %s.",
+                              ev.action, ev.underlying)
+        finally:
+            # Only clear the slot if we're still the latest task registered
+            # for this key (avoid a late-finishing older task wiping a
+            # newer one's entry).
+            if self._key_tasks.get(key) is asyncio.current_task():
+                self._key_tasks.pop(key, None)
 
     def stop(self) -> None:
         self._running = False

@@ -564,6 +564,7 @@ def test_on_fill_full_fill_after_concurrent_scale_in_is_not_misdetected_as_parti
     just because pos["lots"] is now 4 by the time its fill shows up."""
     async def run():
         book = _make_book()
+        book._squareoff_time = dtime(23, 59)   # _try_enter checks REAL datetime.now(IST), not entry_ts
         book._live_ltp[(79600.0, "CE")] = 150.0
         book._resolve_expiry = lambda: date(2026, 8, 26)
         book._try_enter(BASE + timedelta(minutes=60), entry_price=79613.0,
@@ -603,6 +604,7 @@ def test_on_fill_genuine_partial_fill_preserves_a_concurrent_scale_ins_lots():
     while not erasing a scale-in add-on that already separately confirmed."""
     async def run():
         book = _make_book()
+        book._squareoff_time = dtime(23, 59)   # _try_enter checks REAL datetime.now(IST), not entry_ts
         book._live_ltp[(79600.0, "CE")] = 150.0
         book._resolve_expiry = lambda: date(2026, 8, 26)
         book._try_enter(BASE + timedelta(minutes=60), entry_price=79613.0,
