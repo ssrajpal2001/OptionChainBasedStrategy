@@ -1,12 +1,18 @@
-"""Regression tests for the 2026-08-20 EOD hedge-and-carry feature (user spec).
+"""Regression tests for the 2026-08-20 EOD hedge-and-carry feature (user spec),
+plus the 2026-08-24 correction (user spec): the hedge-build trigger uses
+OVERALL cumulative P&L (not per-leg), a hedged position closes on cumulative
+PROFIT across all four legs checked every tick (not just EOD/T-1), and
+reset_session() must not lose a standing hedge across a day boundary.
 
-Covers: find_hedge_strike (pure), the T-1-from-expiry / both-legs-in-loss
-checks, StraddlePosition hedge-field persistence round-trip, and the full
-EOD decision (_eod_close_or_hedge) — hedge trigger, T-1 override, degenerate
-same-strike-at-construction fallback, and the ongoing same-strike collision
-guard. `_dispatch_hedge_order` is stubbed directly (same pattern
-test_itm_pair_gate.py uses for `_emit_order`) so these tests don't need to
-drive the real bus/bridge machinery.
+Covers: find_hedge_strike (pure), _cumulative_hedge_pnl, T-1-from-expiry,
+StraddlePosition hedge-field persistence round-trip (incl. hedge_unrealized_pnl),
+the full EOD decision (_eod_close_or_hedge) — hedge trigger, T-1 override,
+degenerate same-strike-at-construction fallback, the ongoing same-strike
+collision guard, the new tick-by-tick _check_hedge_cumulative_profit_close,
+and reset_session's day-boundary hedge-preservation guard.
+`_dispatch_hedge_order` is stubbed directly (same pattern test_itm_pair_gate.py
+uses for `_emit_order`) so these tests don't need to drive the real bus/bridge
+machinery.
 """
 import asyncio
 import datetime
@@ -95,17 +101,49 @@ def _fill(action: str, side: str, strike: int, price: float) -> SimpleNamespace:
     )
 
 
-# ── _both_legs_in_loss / _is_t1_from_expiry ─────────────────────────────────
+# ── _cumulative_hedge_pnl / _is_t1_from_expiry ──────────────────────────────
+# 2026-08-24 user spec correction: the hedge-build trigger is the OVERALL
+# cumulative P&L (booked + running sold legs), not "both legs individually
+# in loss" -- CE +50 / PE -80 (net -30) now qualifies, where the old per-leg
+# check would have skipped it since CE alone was "in profit".
 
-def test_both_legs_in_loss_true_when_both_above_entry():
+def test_cumulative_hedge_pnl_negative_when_both_legs_in_loss():
+    s = _make()   # ce_leg entry=100 ltp=130 (-30), pe_leg entry=100 ltp=120 (-20)
+    assert s._cumulative_hedge_pnl(s._position) == -50.0
+
+
+def test_cumulative_hedge_pnl_still_negative_with_one_leg_profitable():
+    """The example from the correction: CE +50, PE -80, net -30 overall --
+    must still qualify for a hedge even though CE alone is profitable."""
     s = _make()
-    assert s._both_legs_in_loss(s._position) is True
+    s._position.ce_leg.entry_price, s._position.ce_leg.ltp = 100.0, 50.0    # CE +50
+    s._position.pe_leg.entry_price, s._position.pe_leg.ltp = 100.0, 180.0   # PE -80
+    s._position.net_credit = 200.0
+    assert s._cumulative_hedge_pnl(s._position) == -30.0
 
 
-def test_both_legs_in_loss_false_when_one_leg_profitable():
+def test_cumulative_hedge_pnl_positive_when_net_profitable():
     s = _make()
-    s._position.pe_leg.ltp = 50.0   # now profitable (entry 100 -> ltp 50)
-    assert s._both_legs_in_loss(s._position) is False
+    s._position.ce_leg.ltp = 40.0   # CE +60
+    s._position.pe_leg.ltp = 30.0   # PE +70
+    assert s._cumulative_hedge_pnl(s._position) == 130.0
+
+
+def test_cumulative_hedge_pnl_includes_booked_session_pnl():
+    s = _make()
+    s._session_realized_pnl_pts = 45.0
+    assert s._cumulative_hedge_pnl(s._position) == -50.0 + 45.0
+
+
+def test_cumulative_hedge_pnl_include_hedge_nets_in_hedge_legs():
+    s = _make()
+    s._position.hedge_ce_leg = StraddleLeg("CE", 24500, 60.0, 90.0)   # bought 60, now 90: +30
+    s._position.hedge_pe_leg = StraddleLeg("PE", 23500, 55.0, 40.0)   # bought 55, now 40: -15
+    # sold legs net -50 (as in test_cumulative_hedge_pnl_negative_when_both_legs_in_loss)
+    # + hedge legs net +15 (=+30-15) -> total -35
+    assert s._cumulative_hedge_pnl(s._position, include_hedge=True) == -35.0
+    # include_hedge=False must NOT be affected by the hedge legs
+    assert s._cumulative_hedge_pnl(s._position, include_hedge=False) == -50.0
 
 
 def test_is_t1_from_expiry_true_when_expiry_is_tomorrow():
@@ -373,3 +411,143 @@ def test_no_collision_when_strikes_differ():
         assert closed == []
         assert s._position.status == "open"
     asyncio.run(run())
+
+
+# ── _check_hedge_cumulative_profit_close (2026-08-24, tick-by-tick) ─────────
+
+def _hedged(s, ce_hedge_ltp=90.0, pe_hedge_ltp=40.0):
+    """Attach a standing hedge to s._position: bought CE@60 (now ce_hedge_ltp),
+    bought PE@55 (now pe_hedge_ltp)."""
+    s._position.hedge_ce_leg = StraddleLeg("CE", 24500, 60.0, ce_hedge_ltp)
+    s._position.hedge_pe_leg = StraddleLeg("PE", 23500, 55.0, pe_hedge_ltp)
+    s._position.is_hedged_positional = True
+    return s._position
+
+
+def test_hedge_cumulative_profit_close_fires_and_closes_all_four_legs():
+    async def run():
+        s = _make()   # sold legs net -50 (ce -30, pe -20)
+        pos = _hedged(s, ce_hedge_ltp=200.0, pe_hedge_ltp=40.0)
+        # hedge: CE 60->200 (+140), PE 55->40 (-15) => hedge net +125
+        # total = -50 (sold) + 0 (booked) + 125 (hedge) = +75 -> should fire
+        hedge_calls = _stub_dispatch(s, {
+            ("SELL", "CE", 24500): _fill("SELL", "CE", 24500, 200.0),
+            ("SELL", "PE", 23500): _fill("SELL", "PE", 23500, 40.0),
+        })
+        closed = []
+        async def _fake_close(reason):
+            closed.append(reason)
+            s._position.status = "closed"
+        s._close_position = _fake_close
+        cooldowns = []
+        s._apply_sl_cooldown = lambda rule_key="entry_rules_reentry": cooldowns.append(rule_key)
+
+        fired = await s._check_hedge_cumulative_profit_close(pos, datetime.datetime.now(IST))
+
+        assert fired is True
+        assert ("SELL", "CE", 24500) in hedge_calls
+        assert ("SELL", "PE", 23500) in hedge_calls
+        assert pos.hedge_ce_leg is None and pos.hedge_pe_leg is None
+        assert closed == ["hedge_cumulative_profit"]
+        # Next entry must use BEGINNING rules, not re-entry -- the whole point
+        # of "start fresh" (user spec).
+        assert cooldowns == ["entry_rules_beginning"]
+    asyncio.run(run())
+
+
+def test_hedge_cumulative_profit_close_does_not_fire_when_still_negative():
+    async def run():
+        s = _make()   # sold legs net -50
+        pos = _hedged(s, ce_hedge_ltp=61.0, pe_hedge_ltp=56.0)
+        # hedge: CE 60->61 (+1), PE 55->56 (+1) => hedge net +2
+        # total = -50 + 0 + 2 = -48 -> must NOT fire
+        hedge_calls = _stub_dispatch(s, {})
+        closed = []
+        s._close_position = lambda reason: closed.append(reason)
+
+        fired = await s._check_hedge_cumulative_profit_close(pos, datetime.datetime.now(IST))
+
+        assert fired is False
+        assert hedge_calls == []
+        assert closed == []
+        assert pos.is_hedged_positional is True
+    asyncio.run(run())
+
+
+def test_hedge_cumulative_profit_close_includes_booked_session_pnl():
+    async def run():
+        s = _make()   # sold legs net -50
+        s._session_realized_pnl_pts = 60.0   # booked earlier today
+        pos = _hedged(s, ce_hedge_ltp=61.0, pe_hedge_ltp=56.0)   # hedge net +2
+        # total = -50 + 60 + 2 = +12 -> should fire purely because of the booked P&L
+        hedge_calls = _stub_dispatch(s, {
+            ("SELL", "CE", 24500): _fill("SELL", "CE", 24500, 61.0),
+            ("SELL", "PE", 23500): _fill("SELL", "PE", 23500, 56.0),
+        })
+        closed = []
+        async def _fake_close(reason):
+            closed.append(reason)
+            s._position.status = "closed"
+        s._close_position = _fake_close
+        s._apply_sl_cooldown = lambda rule_key="entry_rules_reentry": None
+
+        fired = await s._check_hedge_cumulative_profit_close(pos, datetime.datetime.now(IST))
+
+        assert fired is True
+        assert closed == ["hedge_cumulative_profit"]
+    asyncio.run(run())
+
+
+def test_check_exits_hedge_profit_close_runs_before_other_exit_checks():
+    """Wired into _check_exits ahead of the same-strike-collision guard and
+    every normal sold-leg exit -- while hedged and cumulatively profitable,
+    it must fire even if other exit thresholds would also technically match."""
+    async def run():
+        s = _make()
+        s._force_exit = datetime.time(23, 59)
+        s._ltp_decay_enabled = False
+        s._tsl_enabled = False
+        s._vwap_rise_enabled = False
+        s._exit_rules = []
+        s._day_profit_target_pct = 0.0
+        s._day_loss_sl_pct = 0.0
+        s._ratio_threshold = 999.0
+        s._itm_pair_gate_enabled = False
+        s._day_low_exit_enabled = False
+
+        pos = _hedged(s, ce_hedge_ltp=200.0, pe_hedge_ltp=40.0)   # hedge net +125, total +75
+        _stub_dispatch(s, {
+            ("SELL", "CE", 24500): _fill("SELL", "CE", 24500, 200.0),
+            ("SELL", "PE", 23500): _fill("SELL", "PE", 23500, 40.0),
+        })
+        closed = []
+        async def _fake_close(reason):
+            closed.append(reason)
+            s._position.status = "closed"
+        s._close_position = _fake_close
+        s._apply_sl_cooldown = lambda rule_key="entry_rules_reentry": None
+
+        await s._check_exits()
+
+        assert closed == ["hedge_cumulative_profit"]
+    asyncio.run(run())
+
+
+# ── reset_session(): standing hedge survives a day-boundary transition ─────
+
+def test_reset_session_preserves_position_when_hedged():
+    s = _make()
+    _hedged(s)
+    s._trades_today = 3
+    s.reset_session()
+    assert s._position is not None
+    assert s._position.is_hedged_positional is True
+    assert s._position.hedge_ce_leg is not None
+    # Per-day counters still reset normally -- only the position itself is preserved.
+    assert s._trades_today == 0
+
+
+def test_reset_session_still_clears_position_when_not_hedged():
+    s = _make()   # is_hedged_positional defaults False
+    s.reset_session()
+    assert s._position is None

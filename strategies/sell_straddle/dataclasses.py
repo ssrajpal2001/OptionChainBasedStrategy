@@ -144,6 +144,18 @@ class StraddlePosition:
     def unrealized_pnl(self) -> float:
         return self.net_credit - self.current_value
 
+    @property
+    def hedge_unrealized_pnl(self) -> float:
+        """Running P&L on the BOUGHT hedge legs (long -- opposite sign
+        convention from the sold legs' unrealized_pnl, which is a short
+        position). 0.0 for any leg not currently built."""
+        pnl = 0.0
+        if self.hedge_ce_leg is not None:
+            pnl += self.hedge_ce_leg.ltp - self.hedge_ce_leg.entry_price
+        if self.hedge_pe_leg is not None:
+            pnl += self.hedge_pe_leg.ltp - self.hedge_pe_leg.entry_price
+        return pnl
+
     def current_time_value(self, spot: float) -> float:
         """Live combined option time value (extrinsic) at the given spot — for theta-based exit."""
         from strategies.theta_calc import combined_time_value

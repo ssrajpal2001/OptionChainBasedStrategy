@@ -661,16 +661,22 @@ class RollingMixin:
         )
         await self._close_position("itm_roll_protection_exit_all")
 
-    def _apply_sl_cooldown(self) -> None:
-        """Block re-entry until the next boundary of the max re-entry timeframe.
-        This makes the cooldown dynamic: if an exit happens mid-candle, re-entry is
-        allowed only after that candle/tf closes.
+    def _apply_sl_cooldown(self, rule_key: str = "entry_rules_reentry") -> None:
+        """Block re-entry until the next boundary of the max timeframe among
+        `rule_key`'s rules. This makes the cooldown dynamic: if an exit happens
+        mid-candle, re-entry is allowed only after that candle/tf closes.
         Additionally honours `sl_cooldown_minutes` from config so crude/MCX can rest
-        longer between failed rolls without changing the indicator timeframe."""
+        longer between failed rolls without changing the indicator timeframe.
+
+        `rule_key` defaults to entry_rules_reentry (every existing caller — a
+        failed roll/SL on an already-running day). The hedge-cumulative-profit
+        close (2026-08-24, user spec) passes entry_rules_beginning instead,
+        since that close is meant to start the next attempt completely fresh,
+        not as a same-day re-entry."""
         from data_layer.runtime_config import RuntimeConfig
         now = datetime.now(IST)
         ss = RuntimeConfig.index_section(self._underlying, "sell_straddle")
-        rules = ss.get("entry_rules_reentry", [])
+        rules = ss.get(rule_key, [])
         max_tf = max((int(r.get("tf", 1)) for r in rules), default=1)
         boundary = self._next_boundary(now, max_tf)
         fixed_minutes = float(getattr(self, "_sl_cooldown_minutes", 0.0) or 0.0)
@@ -680,6 +686,6 @@ class RollingMixin:
                 boundary = fixed_boundary
         self._sl_cooldown_until = boundary
         logger.info(
-            "SellStraddle[%s]: re-entry cooldown dynamic — max_tf=%d min, fixed=%.0f min, no re-entry until %s.",
-            self._underlying, max_tf, fixed_minutes, boundary.strftime("%H:%M:%S"),
+            "SellStraddle[%s]: re-entry cooldown dynamic (%s) — max_tf=%d min, fixed=%.0f min, no re-entry until %s.",
+            self._underlying, rule_key, max_tf, fixed_minutes, boundary.strftime("%H:%M:%S"),
         )

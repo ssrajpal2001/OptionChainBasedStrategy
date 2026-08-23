@@ -467,11 +467,20 @@ class ExitMixin:
             return False
         return (pos.expiry_date - now.date()).days <= 1
 
-    def _both_legs_in_loss(self, pos: "StraddlePosition") -> bool:
-        """Any loss at all on BOTH legs -- no threshold (user spec: 'any loss')."""
-        ce_pnl = float(getattr(pos.ce_leg, "entry_price", 0.0) or 0.0) - float(getattr(pos.ce_leg, "ltp", 0.0) or 0.0)
-        pe_pnl = float(getattr(pos.pe_leg, "entry_price", 0.0) or 0.0) - float(getattr(pos.pe_leg, "ltp", 0.0) or 0.0)
-        return ce_pnl < 0 and pe_pnl < 0
+    def _cumulative_hedge_pnl(self, pos: "StraddlePosition", include_hedge: bool = False) -> float:
+        """2026-08-24, user spec correction: the hedge decision is driven by
+        the OVERALL cumulative P&L -- today's already-booked P&L plus the
+        running P&L on the sold legs -- NOT by requiring each leg to
+        individually be in loss. CE +50 / PE -80 (net -30) now qualifies,
+        where the old per-leg check would have skipped it since CE alone was
+        "in profit". `include_hedge=True` additionally nets in the hedge
+        legs' own running P&L (0.0 for any not yet built) -- used for the
+        tick-by-tick close-the-hedge check, not the build trigger (no hedge
+        legs exist yet at that point, so it would be a no-op either way)."""
+        total = self._session_realized_pnl_pts + pos.unrealized_pnl
+        if include_hedge:
+            total += pos.hedge_unrealized_pnl
+        return total
 
     async def _dispatch_hedge_order(
         self, action: str, side: str, strike: int, price: float, entry_price: float,
@@ -635,8 +644,10 @@ class ExitMixin:
           2. Already hedged (carried from a prior day), not T-1 -- do nothing, let it
              keep running (ongoing sold-leg exit/rollover logic already applies every
              tick regardless of this EOD pass).
-          3. Not yet hedged, both legs in loss, feature enabled -- try to build the
-             hedge instead of closing.
+          3. Not yet hedged, cumulative P&L (booked + running sold legs) is
+             negative, feature enabled -- try to build the hedge instead of
+             closing. (2026-08-24, user spec correction: this is now the
+             OVERALL cumulative figure, not "both legs individually in loss".)
           4. Otherwise -- normal EOD close, exactly as before this feature existed.
         """
         if self._is_t1_from_expiry(pos, now):
@@ -650,10 +661,13 @@ class ExitMixin:
             return
 
         if pos.is_hedged_positional:
-            # Carried from a prior day, not yet T-1 -- leave it running.
+            # Carried from a prior day, not yet T-1 -- the tick-by-tick
+            # cumulative-profit check (_check_hedge_cumulative_profit_close,
+            # called every tick from _check_exits) is what closes this early;
+            # nothing further to do here at EOD specifically.
             return
 
-        if getattr(self, "_hedge_carry_enabled", False) and self._both_legs_in_loss(pos):
+        if getattr(self, "_hedge_carry_enabled", False) and self._cumulative_hedge_pnl(pos) < 0:
             hedged = await self._try_build_hedge(pos, now)
             if hedged:
                 self._stop_for_day = True
@@ -663,6 +677,41 @@ class ExitMixin:
         logger.info("SellStraddle[%s]: EOD SQUAREOFF — time=%s", self._underlying, now.strftime("%H:%M"))
         await self._close_position("eod_squareoff")
         self._stop_for_day = True
+
+    async def _check_hedge_cumulative_profit_close(self, pos: "StraddlePosition", now: datetime) -> bool:
+        """2026-08-24, user spec: while a hedge is standing, check EVERY TICK
+        (not just at EOD) whether the combined economics -- both sold legs'
+        running P&L, both hedge legs' running P&L, plus whatever's already
+        booked today -- have turned net positive. The instant they do, close
+        all four legs (hedge first, then sold -- same order as the existing
+        T-1-from-expiry path) and start a cooldown before the next entry
+        attempt, rather than waiting for T-1-from-expiry. The next entry uses
+        entry_rules_beginning (a genuine fresh start, not a same-day
+        re-entry) -- already true by construction once flat again
+        (_trades_today resets on the calendar-day boundary independently of
+        this feature), the cooldown just delays that next attempt until
+        entry_rules_beginning's own max timeframe has elapsed.
+
+        Returns True if this fired (caller should stop evaluating any other
+        exit for this position this tick -- it's closing)."""
+        total_pnl = self._cumulative_hedge_pnl(pos, include_hedge=True)
+        if total_pnl <= 0:
+            return False
+        logger.info(
+            "SellStraddle[%s]: HEDGE CUMULATIVE PROFIT — total=%.2f pts "
+            "(booked=%.2f sold=%.2f hedge=%.2f) — closing all 4 legs, starting fresh.",
+            self._underlying, total_pnl, self._session_realized_pnl_pts,
+            pos.unrealized_pnl, pos.hedge_unrealized_pnl,
+        )
+        self._clog.info(
+            "HEDGE CUMULATIVE PROFIT total=%.2f (booked=%.2f sold=%.2f hedge=%.2f) — "
+            "closing all 4 legs", total_pnl, self._session_realized_pnl_pts,
+            pos.unrealized_pnl, pos.hedge_unrealized_pnl,
+        )
+        await self._close_hedge_legs(pos, "hedge_cumulative_profit")
+        await self._close_position("hedge_cumulative_profit")
+        self._apply_sl_cooldown(rule_key="entry_rules_beginning")
+        return True
 
     async def _check_exits(self) -> None:
         pos = self._position
@@ -814,7 +863,19 @@ class ExitMixin:
             else:
                 return
 
-        # 1b. HEDGE SAME-STRIKE COLLISION GUARD (2026-08-20, user spec): a standing
+        # 1b. HEDGE CUMULATIVE PROFIT CLOSE (2026-08-24, user spec): while a hedge
+        # is standing, checked every tick (not just EOD) -- see
+        # _check_hedge_cumulative_profit_close's own docstring for the full
+        # mechanic. Placed ahead of every other exit type since a hedged
+        # position is in an entirely different risk regime (carry, not
+        # intraday roll/TSL/ratio management) -- if this doesn't fire, the
+        # existing stash-and-carry behavior for the sold legs' own normal
+        # exits (ratio_exit, ltp_decay, TSL, etc.) is unchanged below.
+        if pos.is_hedged_positional:
+            if await self._check_hedge_cumulative_profit_close(pos, now):
+                return
+
+        # 1c. HEDGE SAME-STRIKE COLLISION GUARD (2026-08-20, user spec): a standing
         # hedge leg from a prior EOD hedge-and-carry can end up sharing the exact
         # same strike as a FRESH sold leg taken after a later rollover/re-entry --
         # the market moved enough that the normal pair-selection logic, run

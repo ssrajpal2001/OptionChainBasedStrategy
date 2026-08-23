@@ -795,8 +795,24 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         self._unsubscribe_all()
 
     def reset_session(self) -> None:
+        # 2026-08-24 fix: a standing EOD hedge-and-carry position must survive
+        # the day-boundary transition even when the process keeps running
+        # continuously (no restart) -- previously this unconditionally nulled
+        # self._position, silently losing track of a real carried position
+        # (both sold and hedge legs still genuinely open at the broker) the
+        # moment the first candle of the next trading day arrived. The
+        # restore-from-persistence path in start() already handled this
+        # correctly, but only runs on an actual process restart, not on a
+        # live day-boundary tick while already running. Every OTHER per-day
+        # counter below still resets normally (today's own fresh bookkeeping)
+        # -- entries.py's _maybe_try_entry already refuses any new entry
+        # while self._position is non-None/not-closed, so preserving it here
+        # can never race with a fresh beginning/re-entry attempt.
+        _carried_hedge = (self._position
+                           if self._position is not None and self._position.is_hedged_positional
+                           else None)
         self._trades_today = 0
-        self._position = None
+        self._position = _carried_hedge
         self._last_aborted_entry = None
         self._sl_cooldown_until = None
         self._market_open_dt = None
