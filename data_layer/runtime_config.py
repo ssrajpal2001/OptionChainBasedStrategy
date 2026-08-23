@@ -42,8 +42,16 @@ _SS_INDEX_DEFAULT: Dict[str, Any] = {
     # Set trail_lock_pct = 0 to disable. Values are percentages (divided by 100 in strategy).
     "trail_lock_pct":        20.0,
     "trail_floor_pct":       10.0,
-    "pool_itm_depth":        4,
-    "pool_otm_depth":        4,
+    # 2026-08-24, user spec: widened from 4 to 5 -- both the BEGINNING/re-entry
+    # partner-search radius (select_balanced_pair_at's `offset` -- see
+    # strategies/sell_straddle/entries.py's _eval_ruleset, which derives it as
+    # max(pool_itm_depth, pool_otm_depth)) and the live-quote subscription
+    # window (pool_strike_set) read these same two keys. NIFTY and SENSEX
+    # already carry an explicit 5/5 override in the per-index config; this
+    # changes the DEFAULT so any other index or a brand-new deployment
+    # inherits 5/5 too, instead of needing a manual override to match.
+    "pool_itm_depth":        5,
+    "pool_otm_depth":        5,
     "roll_max_itm_steps":    5,
     "itm_pair_gate_enabled": True,
     "itm_pair_gate_profit_inr": 500.0,
