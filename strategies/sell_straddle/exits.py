@@ -638,36 +638,45 @@ class ExitMixin:
         self._persist()
 
     async def _eod_close_or_hedge(self, pos: "StraddlePosition", now: datetime) -> None:
-        """The EOD decision, in priority order (2026-08-20, user spec):
-          1. T-1-from-expiry always forces a full, normal close -- sold legs AND any
-             standing hedge legs from a prior day -- regardless of profit/loss.
-          2. Already hedged (carried from a prior day), not T-1 -- do nothing, let it
-             keep running (ongoing sold-leg exit/rollover logic already applies every
-             tick regardless of this EOD pass).
-          3. Not yet hedged, cumulative P&L (booked + running sold legs) is
-             negative, feature enabled -- try to build the hedge instead of
-             closing. (2026-08-24, user spec correction: this is now the
-             OVERALL cumulative figure, not "both legs individually in loss".)
-          4. Otherwise -- normal EOD close, exactly as before this feature existed.
+        """The EOD decision, in priority order (2026-08-20, user spec; T-1
+        handling corrected 2026-08-24 per direct user spec):
+          1. Already hedged (carried from a prior day) -- if T-1 on ITS OWN
+             sold legs' expiry, ROLL to next week's expiry instead of
+             stopping the carry (NSE cash-settles the current week's
+             contracts at expiry regardless of what this code does, so
+             "carry through expiry" has to mean rolling onto fresh
+             contracts, not literally holding the same ones past
+             settlement). Otherwise leave it running -- the tick-by-tick
+             cumulative-profit check (_check_hedge_cumulative_profit_close)
+             is what closes it early.
+          2. Not yet hedged, cumulative P&L (booked + running sold legs) is
+             negative, feature enabled -- hedge, regardless of how close to
+             expiry (T-1, T-2, or any other day -- user spec: this decision
+             no longer special-cases proximity to expiry). If it's T-1,
+             don't build a hedge against a contract expiring tomorrow --
+             roll straight onto next week's expiry instead.
+          3. Otherwise -- normal EOD close, exactly as before this feature existed.
         """
-        if self._is_t1_from_expiry(pos, now):
-            if pos.is_hedged_positional:
-                logger.info("SellStraddle[%s]: T-1-FROM-EXPIRY — closing hedge legs before sold legs.",
-                            self._underlying)
-                await self._close_hedge_legs(pos, "t1_expiry_close")
-            logger.info("SellStraddle[%s]: EOD SQUAREOFF — time=%s", self._underlying, now.strftime("%H:%M"))
-            await self._close_position("eod_squareoff")
-            self._stop_for_day = True
-            return
-
         if pos.is_hedged_positional:
-            # Carried from a prior day, not yet T-1 -- the tick-by-tick
-            # cumulative-profit check (_check_hedge_cumulative_profit_close,
-            # called every tick from _check_exits) is what closes this early;
-            # nothing further to do here at EOD specifically.
+            if self._is_t1_from_expiry(pos, now):
+                logger.info(
+                    "SellStraddle[%s]: HEDGE ROLL (T-1) — carried hedge's own sold legs "
+                    "expire tomorrow, rolling to next week instead of stopping the carry.",
+                    self._underlying,
+                )
+                await self._start_hedge_roll(pos, now, "t1_hedge_roll")
+            # else: leave running -- tick-by-tick profit-close handles it.
             return
 
         if getattr(self, "_hedge_carry_enabled", False) and self._cumulative_hedge_pnl(pos) < 0:
+            if self._is_t1_from_expiry(pos, now):
+                logger.info(
+                    "SellStraddle[%s]: HEDGE ROLL (T-1) — cumulative loss at EOD on the "
+                    "expiring week, rolling straight to next week instead of hedging a "
+                    "contract that expires tomorrow.", self._underlying,
+                )
+                await self._start_hedge_roll(pos, now, "t1_new_hedge_roll")
+                return
             hedged = await self._try_build_hedge(pos, now)
             if hedged:
                 self._stop_for_day = True
@@ -677,6 +686,92 @@ class ExitMixin:
         logger.info("SellStraddle[%s]: EOD SQUAREOFF — time=%s", self._underlying, now.strftime("%H:%M"))
         await self._close_position("eod_squareoff")
         self._stop_for_day = True
+
+    async def _start_hedge_roll(self, pos: "StraddlePosition", now: datetime, reason: str) -> None:
+        """2026-08-24, user spec: roll a hedge (or hedge-candidate) position onto
+        next week's expiry instead of stopping the carry at T-1. Closes whatever
+        legs are currently open -- hedge legs for real (never stashed: they're on
+        the SAME expiring contract as the sold legs, so carrying them onto a
+        next-week sold pair would mismatch expiries between the hedge and what
+        it's meant to protect), then the sold legs -- subscribes to next week's
+        expiry, and marks a pending roll. _try_complete_hedge_roll (checked every
+        tick from the entry loop) opens the fresh sold pair + fresh hedge once
+        next week's ATM strikes have live data."""
+        if pos.hedge_ce_leg is not None or pos.hedge_pe_leg is not None:
+            await self._close_hedge_legs(pos, reason)
+        await self._close_position(reason)
+
+        from data_layer.instrument_registry import REGISTRY
+        later_expiries = sorted(e for e in REGISTRY.all_expiries(self._underlying) if e > pos.expiry_date)
+        if not later_expiries:
+            logger.critical(
+                "SellStraddle[%s]: HEDGE ROLL — no next expiry found in registry past %s, "
+                "cannot roll. Position closed, NOT re-hedged -- needs manual review.",
+                self._underlying, pos.expiry_date.isoformat() if pos.expiry_date else "?",
+            )
+            self._clog.critical("HEDGE ROLL — no next expiry available, closed with no roll")
+            return
+        next_expiry = later_expiries[0]
+
+        self._hedge_roll_pending = True
+        self._hedge_roll_reason = reason
+        self._entry_expiry_date = next_expiry
+        # Reuse the low-anchor-LTP feature's sticky guard so no periodic
+        # _effective_entry_expiry() recompute elsewhere can overwrite this
+        # back to the current (expiring) week before the roll completes.
+        self._expiry_shifted_low_anchor_ltp = True
+        self._strike_prem.clear()
+        await self._subscribe_expiry_window(next_expiry)
+        logger.info(
+            "SellStraddle[%s]: HEDGE ROLL (%s) — rolling to next expiry %s, waiting for "
+            "live ATM data before opening the fresh sold pair + hedge.",
+            self._underlying, reason, next_expiry.isoformat(),
+        )
+        self._clog.info("HEDGE ROLL (%s) — rolling to %s, waiting for live ATM data",
+                        reason, next_expiry.isoformat())
+
+    async def _try_complete_hedge_roll(self, now: datetime) -> None:
+        """Checked every tick from the entry loop while a roll is pending
+        (see _start_hedge_roll). Opens the fresh sold pair the instant next
+        week's ATM strikes have live LTPs, then immediately builds a fresh
+        hedge against it -- both legitimately new, on the new expiry, not
+        carried from the old (already-closed-for-real) ones."""
+        if not self._hedge_roll_pending:
+            return
+        step = self._cfg.exchange.strike_steps.get(self._underlying, 50.0) if self._cfg else 50.0
+        if self._spot <= 0 or step <= 0:
+            return
+        atm = int(round(self._spot / step) * step)
+        ce_ltp = float(self._strike_prem.get((atm, "CE"), {}).get("ltp", 0.0) or 0.0)
+        pe_ltp = float(self._strike_prem.get((atm, "PE"), {}).get("ltp", 0.0) or 0.0)
+        if ce_ltp <= 0 or pe_ltp <= 0:
+            return   # still waiting for live ticks on next week's ATM strikes
+
+        reason = self._hedge_roll_reason
+        self._hedge_roll_pending = False
+        self._hedge_roll_reason = ""
+        await self._open_position(now, atm, atm, ce_ltp, pe_ltp, "entry_rules_beginning",
+                                  reason, expiry_date=self._entry_expiry_date)
+        if self._position is None or self._position.status != "open":
+            logger.critical(
+                "SellStraddle[%s]: HEDGE ROLL — fresh sold pair failed to open on %s -- "
+                "roll incomplete, no position, needs manual review.",
+                self._underlying, self._entry_expiry_date.isoformat() if self._entry_expiry_date else "?",
+            )
+            self._clog.critical("HEDGE ROLL — fresh sold pair failed to open, roll incomplete")
+            return
+
+        hedged = await self._try_build_hedge(self._position, now)
+        if not hedged:
+            logger.critical(
+                "SellStraddle[%s]: HEDGE ROLL — fresh sold pair CE%d/PE%d opened on %s but "
+                "no valid hedge strike found -- position is UNHEDGED, needs manual review.",
+                self._underlying, atm, atm, self._entry_expiry_date.isoformat(),
+            )
+            self._clog.critical(
+                "HEDGE ROLL — fresh pair CE%d/PE%d opened but hedge build failed -- UNHEDGED",
+                atm, atm,
+            )
 
     async def _check_hedge_cumulative_profit_close(self, pos: "StraddlePosition", now: datetime) -> bool:
         """2026-08-24, user spec: while a hedge is standing, check EVERY TICK

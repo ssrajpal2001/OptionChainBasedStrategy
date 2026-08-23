@@ -190,6 +190,13 @@ class EntryMixin:
         # call site can never dispatch a fresh entry while a close is still in flight.
         if self._position and self._position.status != "closed":
             return
+        # 2026-08-24 user spec: a pending T-1 hedge roll (old legs already
+        # closed for real, waiting on next week's ATM strikes to have live
+        # data) takes priority over normal entry-rule evaluation -- it's not
+        # a rule-conditioned entry, it opens as soon as data is available.
+        if getattr(self, "_hedge_roll_pending", False):
+            await self._try_complete_hedge_roll(now)
+            return
         ss = RuntimeConfig.index_section(self._underlying, "sell_straddle")
         workflow = ss.get("entry_workflow_mode", "hybrid")
         is_beginning = (self._trades_today == 0)

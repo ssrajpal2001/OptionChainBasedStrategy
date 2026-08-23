@@ -1,27 +1,47 @@
 """Regression tests for the 2026-08-20 EOD hedge-and-carry feature (user spec),
-plus the 2026-08-24 correction (user spec): the hedge-build trigger uses
-OVERALL cumulative P&L (not per-leg), a hedged position closes on cumulative
-PROFIT across all four legs checked every tick (not just EOD/T-1), and
-reset_session() must not lose a standing hedge across a day boundary.
+the 2026-08-24 correction (user spec: cumulative P&L trigger, tick-by-tick
+profit close, reset_session day-boundary fix), and the SAME-DAY follow-up
+correction (user spec): T-1-from-expiry no longer force-closes a hedge or
+blocks building one -- it ROLLS the position to next week's expiry instead,
+since NSE cash-settles the current week's contracts at expiry regardless of
+what this code does.
 
 Covers: find_hedge_strike (pure), _cumulative_hedge_pnl, T-1-from-expiry,
 StraddlePosition hedge-field persistence round-trip (incl. hedge_unrealized_pnl),
-the full EOD decision (_eod_close_or_hedge) — hedge trigger, T-1 override,
-degenerate same-strike-at-construction fallback, the ongoing same-strike
-collision guard, the new tick-by-tick _check_hedge_cumulative_profit_close,
-and reset_session's day-boundary hedge-preservation guard.
-`_dispatch_hedge_order` is stubbed directly (same pattern test_itm_pair_gate.py
-uses for `_emit_order`) so these tests don't need to drive the real bus/bridge
-machinery.
+the full EOD decision (_eod_close_or_hedge) — hedge trigger, T-1-triggers-roll
+(not close), degenerate same-strike-at-construction fallback, the ongoing
+same-strike collision guard, the tick-by-tick _check_hedge_cumulative_profit_close,
+_start_hedge_roll / _try_complete_hedge_roll, and reset_session's day-boundary
+hedge-preservation guard. `_dispatch_hedge_order` is stubbed directly (same
+pattern test_itm_pair_gate.py uses for `_emit_order`) so these tests don't need
+to drive the real bus/bridge machinery.
 """
 import asyncio
 import datetime
 from types import SimpleNamespace
 
+import pytest
+
 from data_layer.base_feeder import EventBus
+from data_layer.instrument_registry import REGISTRY
 from config.global_config import IST, GlobalConfig
 from strategies.sell_straddle import SellStraddleStrategy, StraddlePosition, StraddleLeg
 from strategies.sell_straddle.selection import find_hedge_strike
+
+
+@pytest.fixture(autouse=True)
+def _restore_registry_expiries():
+    """REGISTRY is a process-wide singleton -- tests here overwrite
+    REGISTRY._expiries["NIFTY"] to control what _start_hedge_roll finds as
+    the "next expiry". Restore afterward so this file can't leak state into
+    other test files running later in the same session (a real bug found and
+    fixed earlier this session in a different test file)."""
+    original = REGISTRY._expiries.get("NIFTY")
+    yield
+    if original is None:
+        REGISTRY._expiries.pop("NIFTY", None)
+    else:
+        REGISTRY._expiries["NIFTY"] = original
 
 
 # ── find_hedge_strike (pure) ─────────────────────────────────────────────────
@@ -283,30 +303,74 @@ def test_eod_degenerate_same_strike_at_construction_falls_back_to_close():
     asyncio.run(run())
 
 
-def test_eod_t1_from_expiry_forces_normal_close_even_if_both_legs_in_loss():
+def _seed_next_expiry(pos_expiry: datetime.date, weeks_out: int = 1):
+    """Give REGISTRY a later expiry than pos_expiry so _start_hedge_roll has
+    somewhere to roll onto."""
+    REGISTRY._expiries["NIFTY"] = [pos_expiry, pos_expiry + datetime.timedelta(days=7 * weeks_out)]
+
+
+def test_eod_t1_from_expiry_rolls_instead_of_closing_when_cumulative_negative():
+    """2026-08-24 correction: T-1 no longer forces a plain close -- it rolls
+    to next week's expiry, same as any other day's hedge trigger would, just
+    onto fresh (non-expiring) contracts instead of the current dying ones."""
     async def run():
-        s = _make(expiry_offset_days=1)   # T-1
+        s = _make(expiry_offset_days=1)   # T-1, sold legs net -50 (cumulative < 0)
         s._hedge_carry_enabled = True
+        _seed_next_expiry(s._position.expiry_date)
         closed = []
         async def _fake_close(reason):
             closed.append(reason)
             s._position.status = "closed"
         s._close_position = _fake_close
-        calls = _stub_dispatch(s, {})   # hedge must never even be attempted
+        calls = _stub_dispatch(s, {})   # no hedge legs stood yet -- nothing to dispatch here
+
+        await s._eod_close_or_hedge(s._position, datetime.datetime.now(IST))
+
+        assert closed == ["t1_new_hedge_roll"]
+        assert calls == []
+        assert s._hedge_roll_pending is True
+        assert s._hedge_roll_reason == "t1_new_hedge_roll"
+        assert s._entry_expiry_date == s._position.expiry_date + datetime.timedelta(days=7)
+        assert s._expiry_shifted_low_anchor_ltp is True
+        assert s._strike_prem == {}
+    asyncio.run(run())
+
+
+def test_eod_t1_no_roll_when_cumulative_not_negative():
+    """T-1 with a normal (non-hedge-candidate) position still just closes
+    plainly -- the roll only replaces the OLD "always force-close" behavior
+    for the specific case that would otherwise have been hedged."""
+    async def run():
+        s = _make(expiry_offset_days=1)   # T-1
+        s._hedge_carry_enabled = True
+        s._position.ce_leg.ltp = 40.0   # CE +60
+        s._position.pe_leg.ltp = 30.0   # PE +70 -- cumulative +130, not negative
+        closed = []
+        async def _fake_close(reason):
+            closed.append(reason)
+            s._position.status = "closed"
+        s._close_position = _fake_close
+        calls = _stub_dispatch(s, {})
 
         await s._eod_close_or_hedge(s._position, datetime.datetime.now(IST))
 
         assert closed == ["eod_squareoff"]
         assert calls == []
+        assert s._hedge_roll_pending is False
     asyncio.run(run())
 
 
-def test_eod_t1_from_expiry_closes_standing_hedge_legs_first():
+def test_eod_t1_already_hedged_rolls_closing_old_hedge_legs_for_real():
+    """A hedge carried from an earlier day, reaching T-1 on its own sold
+    legs' expiry: the standing hedge legs are closed for real (never
+    stashed -- they're on the same expiring contract as the sold legs, so
+    carrying them onto a next-week sold pair would mismatch expiries)."""
     async def run():
         s = _make(expiry_offset_days=1)   # T-1
         s._position.hedge_ce_leg = StraddleLeg("CE", 24500, 60.0, 40.0)
         s._position.hedge_pe_leg = StraddleLeg("PE", 23500, 55.0, 35.0)
         s._position.is_hedged_positional = True
+        _seed_next_expiry(s._position.expiry_date)
         closed = []
         async def _fake_close(reason):
             closed.append(reason)
@@ -323,7 +387,29 @@ def test_eod_t1_from_expiry_closes_standing_hedge_legs_first():
         assert ("SELL", "PE", 23500) in calls
         assert s._position.hedge_ce_leg is None
         assert s._position.hedge_pe_leg is None
-        assert closed == ["eod_squareoff"]
+        assert closed == ["t1_hedge_roll"]
+        assert s._hedge_roll_pending is True
+        assert s._hedge_roll_reason == "t1_hedge_roll"
+    asyncio.run(run())
+
+
+def test_eod_t1_roll_logs_critical_and_gives_up_when_no_next_expiry():
+    """REGISTRY has no expiry past the current one -- the roll can't happen.
+    Position is still closed (never left dangling), but no roll is pending."""
+    async def run():
+        s = _make(expiry_offset_days=1)
+        s._hedge_carry_enabled = True
+        REGISTRY._expiries["NIFTY"] = [s._position.expiry_date]   # nothing later
+        closed = []
+        async def _fake_close(reason):
+            closed.append(reason)
+            s._position.status = "closed"
+        s._close_position = _fake_close
+
+        await s._eod_close_or_hedge(s._position, datetime.datetime.now(IST))
+
+        assert closed == ["t1_new_hedge_roll"]
+        assert s._hedge_roll_pending is False
     asyncio.run(run())
 
 
@@ -551,3 +637,107 @@ def test_reset_session_still_clears_position_when_not_hedged():
     s = _make()   # is_hedged_positional defaults False
     s.reset_session()
     assert s._position is None
+
+
+# ── _start_hedge_roll / _try_complete_hedge_roll ────────────────────────────
+
+def _auto_confirm_entries(s):
+    """Auto-confirm any ENTRY order dispatched via _emit_order, through the
+    real _on_fill path -- same pattern test_itm_pair_gate.py uses for EXIT
+    fills. Needed because _try_complete_hedge_roll opens the fresh sold pair
+    via the real _open_position -> _emit_order path."""
+    from execution_bridge.straddle_bridge import StraddleFillEvent
+
+    def _confirm(ev):
+        if ev.action == "ENTRY":
+            s._on_fill(StraddleFillEvent(
+                action="ENTRY", underlying=ev.underlying, atm=ev.atm,
+                ce_strike=ev.ce_strike, pe_strike=ev.pe_strike,
+                ce_fill=ev.ce_ltp, pe_fill=ev.pe_ltp,
+                client_id="C", binding_id="B", event_id=ev.event_id,
+            ))
+    async def _emit(ev):
+        _confirm(ev)
+    s._emit_order = _emit
+
+
+def test_try_complete_hedge_roll_waits_for_live_atm_data():
+    async def run():
+        s = _make()
+        s._hedge_roll_pending = True
+        s._hedge_roll_reason = "t1_new_hedge_roll"
+        s._entry_expiry_date = datetime.date.today() + datetime.timedelta(days=8)
+        s._strike_prem = {}   # nothing quoted yet for the new expiry's ATM
+
+        await s._try_complete_hedge_roll(datetime.datetime.now(IST))
+
+        assert s._hedge_roll_pending is True   # still waiting
+    asyncio.run(run())
+
+
+def test_try_complete_hedge_roll_opens_fresh_pair_and_hedge_once_data_arrives():
+    async def run():
+        s = _make()
+        _auto_confirm_entries(s)
+        s._hedge_roll_pending = True
+        s._hedge_roll_reason = "t1_new_hedge_roll"
+        next_expiry = datetime.date.today() + datetime.timedelta(days=8)
+        s._entry_expiry_date = next_expiry
+        # ATM (spot=24000, step=50) = 24000. Both live now.
+        s._strike_prem = {
+            (24000, "CE"): {"ltp": 120.0},
+            (24000, "PE"): {"ltp": 110.0},
+            (24500, "CE"): {"ltp": 55.0},   # <=50% of 120, hedge candidate
+            (23500, "PE"): {"ltp": 50.0},   # <=50% of 110, hedge candidate
+        }
+        hedge_calls = _stub_dispatch(s, {
+            ("BUY", "CE", 24500): _fill("BUY", "CE", 24500, 55.0),
+            ("BUY", "PE", 23500): _fill("BUY", "PE", 23500, 50.0),
+        })
+
+        await s._try_complete_hedge_roll(datetime.datetime.now(IST))
+
+        assert s._hedge_roll_pending is False
+        assert s._position is not None
+        assert s._position.status == "open"
+        assert s._position.ce_leg.strike == 24000
+        assert s._position.pe_leg.strike == 24000
+        assert s._position.expiry_date == next_expiry
+        assert s._position.is_hedged_positional is True
+        assert s._position.hedge_ce_leg.strike == 24500
+        assert s._position.hedge_pe_leg.strike == 23500
+        assert ("BUY", "CE", 24500) in hedge_calls
+        assert ("BUY", "PE", 23500) in hedge_calls
+    asyncio.run(run())
+
+
+def test_try_complete_hedge_roll_noop_when_not_pending():
+    async def run():
+        s = _make()
+        s._hedge_roll_pending = False
+        called = []
+        s._open_position = lambda *a, **k: called.append(1)
+
+        await s._try_complete_hedge_roll(datetime.datetime.now(IST))
+
+        assert called == []
+    asyncio.run(run())
+
+
+def test_maybe_try_entry_routes_to_hedge_roll_completion_when_pending():
+    """Wired into the real entry loop -- a pending roll takes priority over
+    normal entry-rule evaluation."""
+    async def run():
+        s = _make()
+        s._position = None   # roll already closed the old position
+        s._hedge_roll_pending = True
+        called = []
+        async def _fake_complete(now):
+            called.append(now)
+        s._try_complete_hedge_roll = _fake_complete
+        s._any_active_terminal = lambda: True
+
+        await s._maybe_try_entry(datetime.datetime.now(IST))
+
+        assert len(called) == 1
+    asyncio.run(run())

@@ -123,6 +123,24 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         # fresh position and re-check the same-strike-collision guard.
         self._pending_hedge_ce_leg = None
         self._pending_hedge_pe_leg = None
+        # 2026-08-24 user spec: T-1-from-expiry no longer force-closes a hedge
+        # candidate/standing hedge -- it ROLLS to next week's expiry instead
+        # (the exchange settles the current week's contracts at expiry
+        # regardless of what this code does, so "carry through expiry" has
+        # to mean rolling onto fresh contracts, not literally holding the
+        # same ones past their own settlement). _start_hedge_roll closes
+        # whatever's currently open and sets these; _try_complete_hedge_roll
+        # (checked every tick from the entry loop) opens the fresh sold pair
+        # + fresh hedge once next week's ATM strikes have live data. NOTE: if
+        # the process restarts in the narrow window while this is pending
+        # (old legs already closed for real, new ones not opened yet), the
+        # roll is simply abandoned on restart rather than persisted/resumed
+        # -- accepted as a low-probability, low-severity gap (nothing is
+        # left unprotected, since the old position was already genuinely
+        # closed; worst case is just a missed roll that quarter's normal EOD
+        # logic would reconsider the next day).
+        self._hedge_roll_pending: bool = False
+        self._hedge_roll_reason: str = ""
         self._roll_in_progress: bool = False
         self._last_roll_attempt: Dict[str, datetime] = {}
         self._last_exit_rules_bucket: str = ""
@@ -813,6 +831,11 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                            else None)
         self._trades_today = 0
         self._position = _carried_hedge
+        # A pending expiry roll (old legs already closed, new ones not opened
+        # yet) does not carry across a day boundary -- abandon it rather than
+        # risk opening a stale-expiry pair after a genuinely new day starts.
+        self._hedge_roll_pending = False
+        self._hedge_roll_reason = ""
         self._last_aborted_entry = None
         self._sl_cooldown_until = None
         self._market_open_dt = None
