@@ -664,6 +664,10 @@ class ExitMixin:
                     "expire tomorrow, rolling to next week instead of stopping the carry.",
                     self._underlying,
                 )
+                self._clog.info(
+                    "HEDGE ROLL (T-1) — carried hedge's own sold legs expire tomorrow, "
+                    "rolling to next week instead of stopping the carry."
+                )
                 await self._start_hedge_roll(pos, now, "t1_hedge_roll")
             # else: leave running -- tick-by-tick profit-close handles it.
             return
@@ -674,6 +678,10 @@ class ExitMixin:
                     "SellStraddle[%s]: HEDGE ROLL (T-1) — cumulative loss at EOD on the "
                     "expiring week, rolling straight to next week instead of hedging a "
                     "contract that expires tomorrow.", self._underlying,
+                )
+                self._clog.info(
+                    "HEDGE ROLL (T-1) — cumulative loss at EOD on the expiring week, rolling "
+                    "straight to next week instead of hedging a contract that expires tomorrow."
                 )
                 await self._start_hedge_roll(pos, now, "t1_new_hedge_roll")
                 return
