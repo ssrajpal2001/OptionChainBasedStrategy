@@ -101,9 +101,45 @@ class StrategyBookManager:
             except Exception as exc:
                 logger.exception("%s.kill_switch_loop error: %s", self.__class__.__name__, exc)
 
+    async def _binding_trading_mode(self, client_id: str, binding_id: str) -> str:
+        """Best-effort lookup of a binding's trading_mode. Defaults to "live"
+        on ANY failure or missing binding -- fail toward MORE protection
+        (always liquidate), never silently skip a real position because a
+        lookup happened to fail."""
+        if self._db is None or not hasattr(self._db, "get_bindings_safe_sync"):
+            return "live"
+        try:
+            bindings = await asyncio.to_thread(self._db.get_bindings_safe_sync, client_id)
+            for b in bindings or []:
+                if b.get("binding_id") == binding_id:
+                    return str(b.get("trading_mode") or "live")
+        except Exception:
+            pass
+        return "live"
+
     async def liquidate_all(self, scope: str = "FIRM_WIDE") -> None:
         """Emergency liquidation of every managed book. Positions are market-closed
         and books are stopped. Safe to call multiple times.
+
+        2026-08-24: scope="system_shutdown" (the ONLY caller is stop_async(),
+        which is itself only reached via a genuine graceful shutdown -- a
+        SIGTERM/SIGINT from `pm2 restart`/`pm2 stop`/a plain kill, or the
+        admin console's own shutdown button, see run_system.py's
+        _register_graceful_shutdown_signals) now SKIPS the real close for any
+        binding in paper/paper_route mode. Confirmed live 2026-08-24: forcing
+        a real close on every routine restart was disrupting same-day paper
+        testing for zero real safety benefit -- a paper/paper_route
+        "position" is local simulated bookkeeping, no real broker exposure is
+        left unmanaged by NOT closing it (a paper_route order is expected to
+        be broker-rejected anyway; nothing real is actually held). The
+        book's own tasks are still stopped/cancelled normally either way --
+        only the real-close call itself is skipped. A genuine kill-switch
+        (scope="FIRM_WIDE", a deliberate explicit emergency action, not an
+        incidental restart) is UNCHANGED -- it still closes everything
+        regardless of trading_mode, on purpose. The moment a binding flips to
+        live trading_mode, the exact same restart goes back to protecting it
+        exactly as the 2026-08-23 fix originally intended -- nothing about
+        real live-capital safety changes.
 
         Note on the spawn-race this class otherwise guards against via
         self._stopping: this method does NOT need that tracking. It never pops
@@ -128,8 +164,24 @@ class StrategyBookManager:
         # the iteration while we are liquidating.
         books_snapshot = list(self._books.items())
         _reason = "kill_switch" if scope == "FIRM_WIDE" else scope
+
+        skip_flags: Dict[Key, bool] = {}
+        if scope == "system_shutdown":
+            for key, _book in books_snapshot:
+                client_id, binding_id = key[0], key[1]
+                mode = await self._binding_trading_mode(client_id, binding_id)
+                skip_close = mode in ("paper", "paper_route")
+                skip_flags[key] = skip_close
+                if skip_close:
+                    logger.warning(
+                        "%s: %s is trading_mode=%s -- skipping real close on graceful shutdown "
+                        "(no real broker exposure to protect), book still stops normally.",
+                        self.__class__.__name__, key, mode,
+                    )
+
         results = await asyncio.gather(
-            *[self._liquidate_book(book, key, reason=_reason) for key, book in books_snapshot],
+            *[self._liquidate_book(book, key, reason=_reason, skip_close=skip_flags.get(key, False))
+              for key, book in books_snapshot],
             return_exceptions=True,
         )
         for key, res in zip([k for k, _ in books_snapshot], results):
@@ -137,9 +189,15 @@ class StrategyBookManager:
                 logger.error("%s: liquidation failed for %s: %s", self.__class__.__name__, key, res)
         logger.warning("%s: liquidation complete.", self.__class__.__name__)
 
-    async def _liquidate_book(self, book: Any, key: Key, reason: str = "kill_switch") -> None:
-        """Close any open position on ``book`` with the given reason and stop its tasks."""
-        if hasattr(book, "liquidate"):
+    async def _liquidate_book(self, book: Any, key: Key, reason: str = "kill_switch",
+                               skip_close: bool = False) -> None:
+        """Close any open position on ``book`` with the given reason and stop its tasks.
+        skip_close=True (see liquidate_all's own docstring) skips ONLY the
+        real book.liquidate() close call -- the book is still stopped normally."""
+        if skip_close:
+            logger.info("%s: %s -- skip_close=True, not calling book.liquidate().",
+                        self.__class__.__name__, key)
+        elif hasattr(book, "liquidate"):
             try:
                 await book.liquidate(reason)
             except Exception as exc:
