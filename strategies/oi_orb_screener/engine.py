@@ -51,12 +51,13 @@ _EOD_TIME_DEFAULT = dtime(15, 15)
 _EOD_POLL_SEC = 10.0
 _ENTRY_LTP_WAIT_TIMEOUT_SEC = 5.0
 _UNDERLYING_SENTINEL = "SCREENER"
-# 2026-08-24, confirmed live: a fresh NSESession's first request burst can
-# hit a short-lived Akamai throttle (not a persistent IP block -- see
-# _run_today_pipeline's own comment). Retry a handful of times, well spaced
-# out, before giving up on the whole trading day.
-_BUILD_SHORTLIST_MAX_ATTEMPTS = 4
-_BUILD_SHORTLIST_RETRY_SEC = 45.0
+# 2026-08-24, confirmed live: an aggressive retry pattern here (many
+# attempts, short spacing, each doing its own internal re-warm) can make
+# an Akamai throttle WORSE rather than let it clear -- confirmed on EC2,
+# see screener.py's NSESession docstring for the full incident. Kept
+# deliberately light: few attempts, spaced minutes apart, not seconds.
+_BUILD_SHORTLIST_MAX_ATTEMPTS = 3
+_BUILD_SHORTLIST_RETRY_SEC = 180.0
 
 
 def _make_strategy_logger(client_id: str, binding_id: str) -> logging.Logger:
@@ -187,14 +188,14 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             return
 
         self._nse = await asyncio.to_thread(screener.NSESession)
-        # 2026-08-24, confirmed live: a fresh NSESession's first burst of
-        # requests can hit a short-lived Akamai throttle (NOT a persistent
-        # IP block -- a manual retry moments later, from the same EC2 box,
-        # returned clean real data). Without a retry here, that single
-        # transient failure silently kills the WHOLE trading day, since
-        # _daily_loop only calls this once per calendar day. Retry a few
-        # times, spaced out, re-warming the session each time, before
-        # actually giving up for today.
+        # 2026-08-24, confirmed live: without ANY retry, a single transient
+        # NSE/Akamai hiccup silently kills the WHOLE trading day, since
+        # _daily_loop only calls this once per calendar day -- worth
+        # retrying a FEW times. But also confirmed live the same day: a
+        # heavier retry pattern (many attempts, short spacing) can make an
+        # Akamai throttle WORSE, not better -- kept deliberately light
+        # (few attempts, minutes apart, see _BUILD_SHORTLIST_* constants
+        # and screener.py's NSESession docstring for the full incident).
         shortlist = None
         nifty_pchange = 0.0
         last_exc: Optional[Exception] = None

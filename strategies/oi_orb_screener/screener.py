@@ -93,7 +93,19 @@ OI_SPURT_URL = "https://www.nseindia.com/api/live-analysis-oi-spurts-underlyings
 
 class NSESession:
     """Cookie warm-up + retry -- same pattern as the Colab script's own
-    NSESession, confirmed working live 2026-08-24."""
+    NSESession, confirmed working live 2026-08-24.
+
+    2026-08-24 (later same day): confirmed on EC2 that hitting all three
+    warm-up pages, PLUS re-warming (all three again) on every internal
+    get_json() retry, PLUS this engine's own outer build_shortlist retry
+    loop on top of that, adds up to a lot of automated-looking traffic to
+    NSE in a short window -- and a live comparison showed a minimal
+    homepage-only warm-up succeeding while this heavier pattern kept
+    failing from the same IP. Akamai's bot-management tends to escalate
+    throttling the more a flagged pattern repeats, so a heavier retry
+    pattern can make things WORSE, not better. Trimmed to a single
+    homepage hit -- matches what was actually confirmed to work standalone,
+    and cuts per-attempt request volume by 2/3."""
 
     def __init__(self) -> None:
         self.s = requests.Session()
@@ -103,12 +115,10 @@ class NSESession:
     def _warm(self) -> None:
         try:
             self.s.get("https://www.nseindia.com", timeout=10)
-            self.s.get("https://www.nseindia.com/market-data/oi-spurts", timeout=10)
-            self.s.get("https://www.nseindia.com/market-data/live-equity-market", timeout=10)
         except Exception:
             pass  # best-effort -- retried on first real 401/403 in get_json()
 
-    def get_json(self, url, params=None, retries: int = 3):
+    def get_json(self, url, params=None, retries: int = 2):
         for attempt in range(retries):
             try:
                 r = self.s.get(url, params=params, timeout=10)
