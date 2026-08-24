@@ -123,6 +123,17 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._regime: Optional[str] = None
         self._already_fired: set = set()
         self._entry_window_done_logged = False
+        # "50% rejection rule" state (screener.check_rejection_pattern) --
+        # running post-ORB extreme per symbol, and the set of (symbol, side)
+        # pairs already marked rejected for today (never re-evaluated even
+        # on a later legitimate breakout).
+        self._peak_since_orb: Dict[str, float] = {}
+        self._trough_since_orb: Dict[str, float] = {}
+        self._rejected: set = set()
+        # 8-SMA exit state: last minute-bar key seen per symbol with an open
+        # position, so the exit check runs once per COMPLETED candle, not
+        # once per poll (which could still be mid-candle).
+        self._last_sma_check_key: Dict[str, str] = {}
 
         # ── contract/feed/position state, keyed by stock symbol ────────
         self._pending_contracts: Dict[str, "stock_resolve.ResolvedContract"] = {}
@@ -149,6 +160,10 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._regime = None
         self._already_fired = set()
         self._entry_window_done_logged = False
+        self._peak_since_orb = {}
+        self._trough_since_orb = {}
+        self._rejected = set()
+        self._last_sma_check_key = {}
         self._clog.info("OiOrb[%s/%s]: session reset for new trading day.",
                          self._client_id, self._binding_id)
 
@@ -267,6 +282,31 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                     continue
                 ltp = float(live.loc[sym, "lastPrice"])
                 self._bars.on_quote(sym, ltp, now)
+                # "50% rejection rule" tracking -- only meaningful once the
+                # ORB level actually exists to measure a push beyond.
+                orb_lvl = self._orb_frozen.get(sym)
+                if orb_lvl is not None:
+                    orb_high, orb_low = orb_lvl
+                    self._peak_since_orb[sym] = max(self._peak_since_orb.get(sym, ltp), ltp)
+                    self._trough_since_orb[sym] = min(self._trough_since_orb.get(sym, ltp), ltp)
+                    if (sym, "CALL") not in self._rejected and screener.check_rejection_pattern(
+                            self._peak_since_orb[sym], orb_high, ltp, "CALL",
+                            cfg["REJECTION_MIN_RISE_PCT"], cfg["REJECTION_RETRACE_FRACTION"]):
+                        self._rejected.add((sym, "CALL"))
+                        self._clog.info("OiOrb[%s/%s]: %s CALL marked REJECTED (50%% rejection rule) -- "
+                                         "peak=%.2f orb_high=%.2f current=%.2f",
+                                         self._client_id, self._binding_id, sym,
+                                         self._peak_since_orb[sym], orb_high, ltp)
+                    if (sym, "PUT") not in self._rejected and screener.check_rejection_pattern(
+                            self._trough_since_orb[sym], orb_low, ltp, "PUT",
+                            cfg["REJECTION_MIN_RISE_PCT"], cfg["REJECTION_RETRACE_FRACTION"]):
+                        self._rejected.add((sym, "PUT"))
+                        self._clog.info("OiOrb[%s/%s]: %s PUT marked REJECTED (50%% rejection rule) -- "
+                                         "trough=%.2f orb_low=%.2f current=%.2f",
+                                         self._client_id, self._binding_id, sym,
+                                         self._trough_since_orb[sym], orb_low, ltp)
+
+            await self._check_sma_exits(now, live)
 
             if self._regime is None and (now_key >= cfg["ORB_END"] or cfg.get("IGNORE_TIME_WINDOWS")):
                 try:
@@ -295,6 +335,11 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                     prev_close = self._prev_close_map.get(sym, 0.0)
                     sig = screener.evaluate_breakout(sym, ltp, prev_close, orb_high, orb_low,
                                                       self._regime, self._already_fired, cfg, now=now)
+                    if sig is not None and (sig.symbol, sig.side) in self._rejected:
+                        self._clog.info("OiOrb[%s/%s]: %s %s breakout fired but skipped -- "
+                                         "already REJECTED (50%% rejection rule) earlier today.",
+                                         self._client_id, self._binding_id, sig.symbol, sig.side)
+                        sig = None
                     if sig is not None:
                         self._clog.info("OiOrb[%s/%s]: SIGNAL %s BUY %s trigger=%.2f ORB=%.2f-%.2f reason=%s",
                                          self._client_id, self._binding_id, sig.symbol, sig.side,
@@ -311,16 +356,25 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             await asyncio.sleep(cfg["POLL_SECONDS"])
 
     async def _wait_until_actionable(self, cfg) -> bool:
+        """2026-08-24, direct user spec: "it should scan for stocks after
+        9.25am only... application will start at 9.25.05am" -- waits for
+        SCAN_START (default 09:25, matching the new 09:15-09:25 ORB window),
+        not the old "any time after 09:10" gate. Since the whole pipeline
+        now never starts before the ORB window has already closed, live
+        polling can never build real 09:15-09:25 bars itself -- the Yahoo
+        backfill is the ONLY source of them, every day (see screener.py's
+        ORB_END docstring)."""
         if cfg.get("IGNORE_TIME_WINDOWS"):
             return True
+        scan_start = cfg.get("SCAN_START", "09:25")
         while self._running:
             now = datetime.now(IST)
             now_key = now.strftime("%H:%M")
             if now_key >= cfg["ENTRY_WINDOW_END"]:
                 return False
-            if now_key >= "09:10":
+            if now_key >= scan_start:
                 return True
-            await asyncio.sleep(60)
+            await asyncio.sleep(15)
         return False
 
     # ── signal → contract resolution → order ────────────────────────────
@@ -339,7 +393,13 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                                 self._client_id, self._binding_id, sig.symbol)
             return
 
-        contract = await stock_resolve.resolve_contract_async(sig.symbol, sig.trigger_price, opt_type)
+        # 2026-08-24, direct user spec: strike is 2% OTM (above spot for a
+        # CALL, below spot for a PUT), not ATM -- resolve_contract rounds
+        # whatever raw price it's given to the nearest valid strike step.
+        otm_frac = self._screener_cfg.get("STRIKE_OTM_PCT", 2.0) / 100.0
+        raw_strike = sig.trigger_price * (1 + otm_frac if opt_type == "CE" else 1 - otm_frac)
+
+        contract = await stock_resolve.resolve_contract_async(sig.symbol, raw_strike, opt_type)
         if contract is None:
             self._clog.warning("OiOrb[%s/%s]: could not resolve option contract for %s %s -- skipping entry.",
                                 self._client_id, self._binding_id, sig.symbol, opt_type)
@@ -510,6 +570,37 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._clog.info("OiOrb[%s/%s]: closing %s qty=%d @ %.2f reason=%s",
                          self._client_id, self._binding_id, symbol, pos["qty"], exit_price, reason)
         await self._bus.publish(Topic.OI_ORB_ORDER_REQUEST, order_ev)
+
+    async def _check_sma_exits(self, now: datetime, live) -> None:
+        """2026-08-24, direct user spec: exit an open position on
+        SMA_EXIT_CONSEC_CLOSES consecutive candle closes on the wrong side
+        of an SMA_PERIOD SMA of the UNDERLYING STOCK's own closes (not the
+        option premium). Runs once per COMPLETED 1-min candle per symbol
+        (guarded by _last_sma_check_key), not once per poll -- checking a
+        still-forming bar's partial close would be checking against a
+        number that hasn't actually closed yet."""
+        if not self._positions:
+            return
+        cfg = self._screener_cfg
+        current_key = now.strftime("%H:%M")
+        for symbol, pos in list(self._positions.items()):
+            if symbol in self._eod_closing:
+                continue
+            if self._last_sma_check_key.get(symbol) == current_key:
+                continue  # already checked this minute
+            self._last_sma_check_key[symbol] = current_key
+            closes = self._bars.closes(symbol, before=current_key)
+            side = "CALL" if pos["contract"].option_type == "CE" else "PUT"
+            if screener.check_sma_exit(closes, cfg["SMA_PERIOD"], cfg["SMA_EXIT_CONSEC_CLOSES"], side):
+                self._eod_closing.add(symbol)
+                sma = screener.compute_sma(closes, cfg["SMA_PERIOD"])
+                self._clog.info(
+                    "OiOrb[%s/%s]: %s SMA EXIT -- last %d closes %s %d-SMA=%.2f (closes=%s)",
+                    self._client_id, self._binding_id, symbol, cfg["SMA_EXIT_CONSEC_CLOSES"],
+                    "below" if side == "CALL" else "above", cfg["SMA_PERIOD"], sma,
+                    closes[-cfg["SMA_EXIT_CONSEC_CLOSES"]:],
+                )
+                await self._emit_close(symbol, pos, "sma_exit")
 
     async def _eod_loop(self) -> None:
         while self._running:

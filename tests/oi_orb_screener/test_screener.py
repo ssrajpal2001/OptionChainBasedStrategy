@@ -214,3 +214,108 @@ def test_build_shortlist_empty_when_nothing_passes(monkeypatch):
     cfg = _cfg()
     shortlist, nifty_pchange = screener.build_shortlist(nse=None, cfg=cfg)
     assert shortlist.empty
+
+
+# ── MinuteBars.closes() ────────────────────────────────────────────────────
+
+def test_minute_bars_closes_ordered_and_filtered():
+    bars = screener.MinuteBars()
+    ts = lambda hm: datetime.strptime(f"2026-08-24 {hm}:00", "%Y-%m-%d %H:%M:%S")
+    for hm, price in [("09:25", 100.0), ("09:26", 101.0), ("09:27", 99.0), ("09:28", 102.0)]:
+        bars.on_quote("VMM", price, ts(hm))
+    assert bars.closes("VMM") == [100.0, 101.0, 99.0, 102.0]
+    assert bars.closes("VMM", after="09:26") == [99.0, 102.0]
+    assert bars.closes("VMM", before="09:27") == [100.0, 101.0]
+    assert bars.closes("VMM", after="09:25", before="09:28") == [101.0, 99.0]
+
+
+def test_minute_bars_closes_empty_for_unknown_symbol():
+    bars = screener.MinuteBars()
+    assert bars.closes("UNKNOWN") == []
+
+
+# ── compute_sma ─────────────────────────────────────────────────────────────
+
+def test_compute_sma_basic():
+    assert screener.compute_sma([1.0, 2.0, 3.0, 4.0], 4) == pytest.approx(2.5)
+
+
+def test_compute_sma_uses_only_last_period_closes():
+    # 8-period SMA over 10 closes -- must use only the LAST 8, not all 10.
+    closes = [100.0] * 2 + [10.0] * 8   # first two would badly skew the average if included
+    assert screener.compute_sma(closes, 8) == pytest.approx(10.0)
+
+
+def test_compute_sma_none_when_insufficient_data():
+    assert screener.compute_sma([1.0, 2.0], 8) is None
+
+
+# ── check_rejection_pattern ("50% rejection rule") ──────────────────────────
+
+def test_rejection_call_side_fires_on_deep_retrace():
+    # orb_high=100. Peak pushed to 103 (+3%, past the 2% min-rise). Current
+    # price has given back 60% of that 3-point move (>= the 50% fraction).
+    fired = screener.check_rejection_pattern(
+        extreme_since_orb=103.0, orb_level=100.0, current_ltp=101.2,
+        side="CALL", min_rise_pct=2.0, retrace_fraction=0.5)
+    assert fired is True
+
+
+def test_rejection_call_side_does_not_fire_below_min_rise():
+    # Peak only reached 100.5 above orb_high=100 -- a 0.5% push, below the
+    # 2% minimum -- must not fire regardless of any later retrace.
+    fired = screener.check_rejection_pattern(
+        extreme_since_orb=100.5, orb_level=100.0, current_ltp=100.0,
+        side="CALL", min_rise_pct=2.0, retrace_fraction=0.5)
+    assert fired is False
+
+
+def test_rejection_call_side_does_not_fire_on_shallow_retrace():
+    # Peak at 103 (+3%, clears the min-rise), but current price has only
+    # given back 20% of the move -- below the 50% retrace_fraction.
+    fired = screener.check_rejection_pattern(
+        extreme_since_orb=103.0, orb_level=100.0, current_ltp=102.4,
+        side="CALL", min_rise_pct=2.0, retrace_fraction=0.5)
+    assert fired is False
+
+
+def test_rejection_put_side_fires_symmetrically():
+    # orb_low=100. Trough pushed to 97 (-3%). Price has since recovered 60%
+    # of that 3-point drop.
+    fired = screener.check_rejection_pattern(
+        extreme_since_orb=97.0, orb_level=100.0, current_ltp=98.8,
+        side="PUT", min_rise_pct=2.0, retrace_fraction=0.5)
+    assert fired is True
+
+
+def test_rejection_call_side_no_move_beyond_orb_level():
+    # extreme_since_orb never actually exceeded orb_level -- nothing to
+    # reject against.
+    fired = screener.check_rejection_pattern(
+        extreme_since_orb=99.0, orb_level=100.0, current_ltp=99.0,
+        side="CALL", min_rise_pct=2.0, retrace_fraction=0.5)
+    assert fired is False
+
+
+# ── check_sma_exit ──────────────────────────────────────────────────────────
+
+def test_sma_exit_call_side_fires_on_two_consecutive_closes_below():
+    # 8-SMA of the first 8 closes (all 100) = 100. Last 2 closes (95, 94)
+    # are both below it.
+    closes = [100.0] * 8 + [95.0, 94.0]
+    assert screener.check_sma_exit(closes, sma_period=8, consec_closes=2, side="CALL") is True
+
+
+def test_sma_exit_call_side_does_not_fire_on_only_one_close_below():
+    closes = [100.0] * 8 + [105.0, 94.0]   # only the LAST close is below the SMA
+    assert screener.check_sma_exit(closes, sma_period=8, consec_closes=2, side="CALL") is False
+
+
+def test_sma_exit_put_side_fires_on_two_consecutive_closes_above():
+    closes = [100.0] * 8 + [105.0, 106.0]
+    assert screener.check_sma_exit(closes, sma_period=8, consec_closes=2, side="PUT") is True
+
+
+def test_sma_exit_none_when_insufficient_closes():
+    closes = [100.0] * 5   # fewer than sma_period + consec_closes - 1
+    assert screener.check_sma_exit(closes, sma_period=8, consec_closes=2, side="CALL") is False

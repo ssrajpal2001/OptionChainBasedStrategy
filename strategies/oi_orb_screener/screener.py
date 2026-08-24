@@ -33,6 +33,7 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Optional
 
 import pandas as pd
 import requests
@@ -55,12 +56,49 @@ CONFIG = {
     "NIFTY_BEARISH_PCT": -0.3,
     "TOP_N_PER_SIDE": 5,
     "ORB_START": "09:15",
-    "ORB_END": "09:30",
-    "ENTRY_WINDOW_START": "09:30",
+    # 2026-08-24, direct user spec: opening range is 09:15-09:25 (10 min),
+    # not the earlier 09:15-09:30 guess -- and the whole scan/shortlist/ORB
+    # pipeline now deliberately WAITS until this time to start at all (see
+    # SCAN_START below), rather than starting any time after 09:10 and
+    # possibly catching a partial live-polled range. This also means the
+    # Yahoo backfill (screener.backfill_orb_from_yahoo) is no longer just a
+    # "late start" fallback -- it is now the ONLY source of real 09:15-09:25
+    # bars, every single day, since live polling never starts before the
+    # range has already closed.
+    "ORB_END": "09:25",
+    # Scanning/shortlist-build/ORB-freeze all wait until this exact time,
+    # per direct user spec ("scan for stocks after 9:25am only... will
+    # start at 9.25.05am") -- NOT the same as ENTRY_WINDOW_END's old
+    # "already too late, do nothing" cutoff. See engine.py's
+    # _wait_until_actionable.
+    "SCAN_START": "09:25",
+    "ENTRY_WINDOW_START": "09:25",
     "ENTRY_WINDOW_END": "10:30",
     "SCORE_WEIGHTS": {"price": 0.25, "oi_spurt": 0.25, "rel_strength": 0.25, "volume": 0.25},
     "POLL_SECONDS": 20,
     "MAX_MONITOR_MINUTES": 90,
+    # 2026-08-24, direct user spec, "50% rejection rule": if price rises at
+    # least this % above the ORB high (for a CALL-side candidate; symmetric
+    # below the ORB low for PUT-side) and then retraces REJECTION_RETRACE_
+    # FRACTION of that specific up/down-move before ever cleanly breaking
+    # the range, the setup is marked rejected for the rest of the day --
+    # even a later real breakout of the range is skipped. Interpretation
+    # choice, not fully specified in the source spec (see
+    # screener.check_rejection_pattern's own docstring for the exact
+    # definition chosen) -- confirm this matches intent before trusting it.
+    "REJECTION_MIN_RISE_PCT": 2.0,
+    "REJECTION_RETRACE_FRACTION": 0.5,
+    # 2026-08-24, direct user spec, exit rule: 8-period SMA on the
+    # UNDERLYING STOCK's own 1-min closes (not the option premium -- same
+    # deliberate spot-based-exit precedent as Liquidity Sweep/Liquidity
+    # Trap in this codebase), exit on SMA_EXIT_CONSEC_CLOSES consecutive
+    # candle closes on the wrong side of it.
+    "SMA_PERIOD": 8,
+    "SMA_EXIT_CONSEC_CLOSES": 2,
+    # 2026-08-24, direct user spec: strike is 2% OTM (above spot for a
+    # CALL, below spot for a PUT), not ATM -- see resolve_strike_step_for_
+    # price's caller in engine.py for where this is actually applied.
+    "STRIKE_OTM_PCT": 2.0,
     # Live default (unlike the 2026-08-24 one-off Colab comparison run, which
     # temporarily set this False for calibration only) -- the real regime
     # table stays enforced. strategy_params can still override per-deployment.
@@ -315,6 +353,89 @@ class MinuteBars:
         highs = [self.bars[symbol][k]["h"] for k in keys]
         lows = [self.bars[symbol][k]["l"] for k in keys]
         return max(highs), min(lows)
+
+    def closes(self, symbol: str, after: str = "", before: str = "") -> list:
+        """Ordered list of CLOSE prices for symbol, oldest first, optionally
+        restricted to bars with a time-key strictly after `after` (e.g. the
+        ORB end, so pre-range bars never pollute an SMA meant to describe
+        only the post-range trend) and/or strictly before `before` (e.g.
+        the CURRENT, still-forming minute, so an in-progress bar's partial
+        close is never misread as a completed candle's real close)."""
+        keys = sorted(k for k in self.bars.get(symbol, {})
+                       if (not after or k > after) and (not before or k < before))
+        return [self.bars[symbol][k]["c"] for k in keys]
+
+
+def compute_sma(closes: list, period: int) -> Optional[float]:
+    """Simple moving average of the LAST `period` closes. None if fewer
+    than `period` closes exist yet -- never guess a partial-window SMA."""
+    if len(closes) < period:
+        return None
+    window = closes[-period:]
+    return sum(window) / period
+
+
+def check_rejection_pattern(extreme_since_orb: float, orb_level: float, current_ltp: float,
+                             side: str, min_rise_pct: float, retrace_fraction: float) -> bool:
+    """2026-08-24, direct user spec ("50% rejection rule"): "If the stock
+    rises (e.g., by 2%), then retraces 50% of that move before breaking the
+    9:25 AM high, do not enter the trade." This is an interpretation choice
+    -- the source description does not pin down the exact reference point
+    for the initial "rise" -- chosen here as: how far price has pushed
+    beyond the ORB level itself (orb_high for CALL, orb_low for PUT), as a
+    %% of that orb_level. If that push reaches min_rise_pct and price has
+    since given back retrace_fraction (default 50%%) of the move from
+    orb_level to its post-ORB extreme, the setup counts as rejected --
+    caller is responsible for remembering this (a stock, once rejected,
+    should not be re-evaluated later even if it goes on to legitimately
+    break the range -- see engine.py's own _rejected set).
+
+    side: "CALL" (watching orb_level as a HIGH, extreme_since_orb is the
+    running post-ORB MAX) or "PUT" (orb_level is a LOW, extreme_since_orb
+    is the running post-ORB MIN)."""
+    if side == "CALL":
+        move = extreme_since_orb - orb_level
+        if move <= 0 or orb_level <= 0:
+            return False
+        rise_pct = move / orb_level * 100.0
+        if rise_pct < min_rise_pct:
+            return False
+        retrace_level = extreme_since_orb - retrace_fraction * move
+        return current_ltp <= retrace_level
+    else:  # PUT
+        move = orb_level - extreme_since_orb
+        if move <= 0 or orb_level <= 0:
+            return False
+        fall_pct = move / orb_level * 100.0
+        if fall_pct < min_rise_pct:
+            return False
+        retrace_level = extreme_since_orb + retrace_fraction * move
+        return current_ltp >= retrace_level
+
+
+def check_sma_exit(closes: list, sma_period: int, consec_closes: int, side: str) -> bool:
+    """2026-08-24, direct user spec: exit when `consec_closes` (default 2)
+    consecutive candle CLOSES land on the wrong side of an `sma_period`
+    (default 8) SMA of the underlying STOCK's own closes (not the option
+    premium). side="CALL" (bought on a gainer) exits when closes are BELOW
+    the SMA; side="PUT" (bought on a loser) exits when closes are ABOVE it.
+
+    Simplification, documented per this codebase's own "explain the
+    non-obvious" convention: checks the last `consec_closes` closes against
+    ONE current SMA value (computed from the most recent `sma_period`
+    closes), not a separately-recomputed rolling SMA per historical bar.
+    An 8-period SMA moves slowly enough that this is a very close
+    approximation of the fully-rolling version in practice, at a fraction
+    of the complexity -- revisit if real forward data shows it matters."""
+    if len(closes) < sma_period + consec_closes - 1:
+        return False
+    sma = compute_sma(closes, sma_period)
+    if sma is None:
+        return False
+    last_n = closes[-consec_closes:]
+    if side == "CALL":
+        return all(c < sma for c in last_n)
+    return all(c > sma for c in last_n)
 
 
 @dataclass
