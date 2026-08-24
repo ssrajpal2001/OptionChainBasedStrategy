@@ -3962,7 +3962,7 @@ class DashboardServer:
                 "sell_straddle", "v4_cascade", "fno_positional", "hourly_breakout",
                 "d1_trap_option", "d1_trap_index", "d1_trap_fno", "d1_trap_bear_only",
                 "d1_trap_sr", "d1_trap_fno_sr",
-                "fvg", "oi_flow", "liquidity_sweep", "liquidity_trap",
+                "fvg", "oi_flow", "liquidity_sweep", "liquidity_trap", "oi_orb_screener",
             }
             if body.strategy_name not in allowed_strategies:
                 return {"ok": False, "error": f"Unknown strategy '{body.strategy_name}'."}
