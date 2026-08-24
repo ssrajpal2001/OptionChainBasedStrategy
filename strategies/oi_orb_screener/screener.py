@@ -371,19 +371,31 @@ def evaluate_breakout(symbol, ltp, prev_close, orb_high, orb_low, regime,
 
 
 def backfill_orb_from_yahoo(bars: MinuteBars, symbols, cfg=CONFIG) -> None:
-    """Best-effort only, mirrors the Colab original -- never required."""
+    """Best-effort only, mirrors the Colab original -- never required for
+    the live 09:15-09:30 window itself (real polling covers that), but it
+    IS the only source of real 09:15-09:30 bars when the book starts later
+    than that (including ignore_time_windows test runs). 2026-08-24: this
+    used to fail (or simply find nothing) completely silently -- exactly
+    the same silent-failure pattern that hid the NSESession Brotli bug for
+    hours. Always log the outcome now, success or failure, so an empty
+    ORB never again looks identical to "nothing went wrong"."""
     try:
         import yfinance as yf
     except ImportError:
+        logger.warning("backfill_orb_from_yahoo: yfinance not installed -- "
+                        "no ORB backfill possible, ORB will only have live-polled bars.")
         return
     try:
         tickers = [s + ".NS" for s in symbols]
         df = yf.download(tickers, period="1d", interval="1m", progress=False, group_by="ticker")
+        filled = 0
         for sym, ticker in zip(symbols, tickers):
             try:
                 sub = df[ticker] if len(tickers) > 1 else df
-            except Exception:
+            except Exception as exc:
+                logger.warning("backfill_orb_from_yahoo: no data for %s (%s): %r", sym, ticker, exc)
                 continue
+            sym_filled = 0
             for ts, row in sub.iterrows():
                 ts_ist = ts.tz_convert(IST) if ts.tzinfo else ts.tz_localize(IST)
                 key = ts_ist.strftime("%H:%M")
@@ -397,5 +409,13 @@ def backfill_orb_from_yahoo(bars: MinuteBars, symbols, cfg=CONFIG) -> None:
                     "o": float(row["Open"]), "h": float(row["High"]),
                     "l": float(row["Low"]), "c": float(row["Close"]),
                 }
-    except Exception:
-        pass
+                sym_filled += 1
+            filled += sym_filled
+            if sym_filled == 0:
+                logger.warning("backfill_orb_from_yahoo: %s (%s) returned data but 0 bars "
+                                "landed in the %s-%s window.", sym, ticker,
+                                cfg["ORB_START"], cfg["ORB_END"])
+        logger.info("backfill_orb_from_yahoo: filled %d total ORB bars across %d symbols.",
+                     filled, len(symbols))
+    except Exception as exc:
+        logger.warning("backfill_orb_from_yahoo: failed entirely: %r", exc)
