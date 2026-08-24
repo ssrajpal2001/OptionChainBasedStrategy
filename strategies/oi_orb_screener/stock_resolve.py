@@ -231,3 +231,46 @@ async def resolve_contract_async(stock_symbol: str, raw_strike: float, option_ty
 
 async def resolve_lot_async(stock_symbol: str) -> int:
     return await asyncio.to_thread(resolve_lot, stock_symbol)
+
+
+def resolve_contract_exact(stock_symbol: str, expiry, strike: int, option_type: str,
+                            providers: "list[str]" = ("upstox", "zerodha", "fyers", "angelone", "dhan"),
+                            ) -> Optional[ResolvedContract]:
+    """Same as resolve_contract() but for an ALREADY-KNOWN exact strike/expiry
+    -- used only to restore a position from strategies/oi_orb_screener/
+    store.py after a restart. Deliberately skips the raw-price-to-strike
+    rounding entirely rather than re-deriving the strike a second time from
+    a raw trigger price: the exact strike that was genuinely traded is
+    already known and stored, so re-deriving it risks resolving a DIFFERENT
+    strike if the OTM%/rounding logic ever changes between the original
+    entry and the restart -- strictly more risk than re-using the ground
+    truth for no benefit."""
+    sym = stock_symbol.upper()
+    if not REGISTRY.is_loaded(sym):
+        REGISTRY.load_sync(sym)
+
+    if isinstance(expiry, str):
+        expiry = date.fromisoformat(expiry)
+
+    upstox_key = REGISTRY.get_upstox_key(sym, expiry, strike, option_type)
+    if not upstox_key:
+        logger.warning("stock_resolve: restore -- no upstox_key resolved for %s %s%d exp=%s.",
+                        sym, option_type, strike, expiry)
+        return None
+
+    broker_symbols = {}
+    for provider in providers:
+        try:
+            broker_symbols[provider] = REGISTRY.get_broker_symbol(sym, expiry, strike, option_type, provider)
+        except Exception:
+            broker_symbols[provider] = ""
+
+    return ResolvedContract(
+        underlying=sym, expiry=expiry, strike=strike, option_type=option_type,
+        upstox_key=upstox_key, broker_symbols=broker_symbols,
+    )
+
+
+async def resolve_contract_exact_async(stock_symbol: str, expiry, strike: int,
+                                        option_type: str) -> Optional[ResolvedContract]:
+    return await asyncio.to_thread(resolve_contract_exact, stock_symbol, expiry, strike, option_type)

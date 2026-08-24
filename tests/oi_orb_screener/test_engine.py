@@ -19,9 +19,22 @@ import pytest
 
 from config.global_config import Topic
 from data_layer.base_feeder import OptionTick
-from strategies.oi_orb_screener import screener, stock_resolve
+from strategies.oi_orb_screener import screener, stock_resolve, store
 from strategies.oi_orb_screener.engine import OiOrbScreenerStrategy
 from strategies.oi_orb_screener.events import OiOrbFillEvent
+
+
+@pytest.fixture(autouse=True)
+def _isolated_store_db(tmp_path, monkeypatch):
+    """Every test in this file that touches the book's real logic (fills,
+    signal evaluation, the daily pipeline) now also writes to
+    strategies/oi_orb_screener/store.py -- point it at an isolated tmp_path
+    file so the whole suite never touches the real data/oi_orb_screener.db,
+    matching the existing _TEST_CLIENT_ID/_TEST_BINDING_ID discipline this
+    file already uses for logs (see the comment above those constants)."""
+    monkeypatch.setattr(store, "_DB_PATH", str(tmp_path / "oi_orb_test.db"))
+    monkeypatch.setattr(store, "_initialized", False)
+    yield
 
 
 class _FakeGlobalFeeder:
@@ -139,7 +152,7 @@ async def test_on_fill_confirms_entry_and_tracks_position():
         "symbol": "SIEMENS", "contract": contract, "qty": 300, "entry_price": 105.0, "reason": "orb_high_breakout",
     }
 
-    book._on_fill(OiOrbFillEvent(
+    await book._on_fill(OiOrbFillEvent(
         action="BUY", underlying="SIEMENS", option_type="CE", strike=4050, fill_price=106.2,
         qty=300, client_id=_TEST_CLIENT_ID, binding_id=_TEST_BINDING_ID, event_id="EVT1", paper_mode=True,
     ))
@@ -150,7 +163,8 @@ async def test_on_fill_confirms_entry_and_tracks_position():
     assert "EVT1" not in book._pending_fills
 
 
-def test_on_fill_entry_aborted_discards_pending():
+@pytest.mark.asyncio
+async def test_on_fill_entry_aborted_discards_pending():
     bus = _FakeBus()
     book = _make_book(bus)
     contract = _contract("SIEMENS", 4050, "CE")
@@ -159,7 +173,7 @@ def test_on_fill_entry_aborted_discards_pending():
         "symbol": "SIEMENS", "contract": contract, "qty": 300, "entry_price": 105.0, "reason": "orb_high_breakout",
     }
 
-    book._on_fill(OiOrbFillEvent(
+    await book._on_fill(OiOrbFillEvent(
         action="BUY", underlying="SIEMENS", option_type="CE", strike=4050, fill_price=0.0,
         qty=300, client_id=_TEST_CLIENT_ID, binding_id=_TEST_BINDING_ID, event_id="EVT1",
         entry_aborted=True,
@@ -169,7 +183,8 @@ def test_on_fill_entry_aborted_discards_pending():
     assert "SIEMENS" not in book._pending_contracts
 
 
-def test_multiple_concurrent_positions_tracked_independently():
+@pytest.mark.asyncio
+async def test_multiple_concurrent_positions_tracked_independently():
     """Per direct user instruction 2026-08-24: one position PER shortlisted
     stock, not capped to 1 -- two different stocks filling must both end
     up tracked, independently, in the same book."""
@@ -182,7 +197,7 @@ def test_multiple_concurrent_positions_tracked_independently():
         book._pending_contracts[sym] = contract
         book._pending_fills[eid] = {"symbol": sym, "contract": contract, "qty": 100 * (i + 1),
                                      "entry_price": 10.0 + i, "reason": "orb_high_breakout"}
-        book._on_fill(OiOrbFillEvent(
+        await book._on_fill(OiOrbFillEvent(
             action="BUY", underlying=sym, option_type="CE", strike=strike, fill_price=10.0 + i,
             qty=100 * (i + 1), client_id=_TEST_CLIENT_ID, binding_id=_TEST_BINDING_ID, event_id=eid,
         ))
@@ -376,3 +391,126 @@ async def test_shortlist_pchange_exposed_via_monitoring_state(monkeypatch):
     state = book.monitoring_state()
     assert state["shortlist_pchange"] == {"VMM": 9.28, "DIXON": -2.04}
     assert set(state["shortlist"]) == {"VMM", "DIXON"}
+
+
+# ── restore-on-restart (2026-08-24 real incident: DIXON PE14500 entered,
+# then a pm2 restart at ~14:40 silently lost all memory it existed) ────────
+
+@pytest.mark.asyncio
+async def test_restore_from_db_reopens_position_and_resubscribes_feed(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._today = date(2026, 8, 24)
+
+    store.open_position(_TEST_CLIENT_ID, _TEST_BINDING_ID, "DIXON", "PE", 14500,
+                         "2026-08-25", 50, 118.80, "orb_low_breakdown", True, "EVT1",
+                         trade_date="2026-08-24")
+
+    contract = _contract("DIXON", 14500, "PE")
+    monkeypatch.setattr(stock_resolve, "resolve_contract_exact_async", _async_return(contract))
+
+    await book._restore_from_db()
+
+    assert "DIXON" in book._positions
+    assert book._positions["DIXON"]["qty"] == 50
+    assert book._positions["DIXON"]["entry_price"] == 118.80
+    assert book._positions["DIXON"]["paper_mode"] is True
+    assert contract.upstox_key in bus._global_feeder.subscribed_tokens
+
+
+@pytest.mark.asyncio
+async def test_restore_from_db_restores_already_fired_and_rejected_sets(monkeypatch):
+    """The other real half of the 2026-08-24 incident: DIXON PUT re-signaled
+    a second time the same day after the restart, because the in-memory
+    _already_fired/_rejected sets were wiped along with everything else.
+    Only harmless that day because contract resolution happened to fail on
+    the retry -- must not rely on that luck going forward."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._today = date(2026, 8, 24)
+
+    store.log_signal_event(_TEST_CLIENT_ID, _TEST_BINDING_ID, "DIXON", "signal_fired",
+                            side="PUT", trade_date="2026-08-24")
+    store.log_signal_event(_TEST_CLIENT_ID, _TEST_BINDING_ID, "VMM", "rejection_rule_triggered",
+                            side="CALL", trade_date="2026-08-24")
+
+    await book._restore_from_db()
+
+    assert ("DIXON", "PUT") in book._already_fired
+    assert ("VMM", "CALL") in book._rejected
+
+
+@pytest.mark.asyncio
+async def test_restore_from_db_with_nothing_stored_is_a_safe_noop():
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._today = date(2026, 8, 24)
+
+    await book._restore_from_db()
+
+    assert book._positions == {}
+    assert book._already_fired == set()
+    assert book._rejected == set()
+
+
+@pytest.mark.asyncio
+async def test_restore_from_db_logs_critical_when_contract_cannot_be_re_resolved(monkeypatch):
+    """A restored position whose contract can no longer be resolved (e.g.
+    the registry can't produce an upstox_key any more) must not silently
+    vanish -- it stays in the DB as still-open (so a human can reconcile
+    against the broker) and the failure is logged at CRITICAL, not just
+    dropped."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._today = date(2026, 8, 24)
+
+    store.open_position(_TEST_CLIENT_ID, _TEST_BINDING_ID, "DIXON", "PE", 14500,
+                         "2026-08-25", 50, 118.80, "orb_low_breakdown", True, "EVT1",
+                         trade_date="2026-08-24")
+    monkeypatch.setattr(stock_resolve, "resolve_contract_exact_async", _async_return(None))
+
+    await book._restore_from_db()
+
+    assert "DIXON" not in book._positions
+    # the DB row itself is untouched (still open) -- restore failure never closes it
+    still_open = store.load_open_positions(_TEST_CLIENT_ID, _TEST_BINDING_ID, trade_date="2026-08-24")
+    assert len(still_open) == 1
+
+
+@pytest.mark.asyncio
+async def test_on_fill_persists_position_open_and_close_to_db():
+    """End-to-end: a confirmed BUY fill writes an open row, and the
+    matching SELL fill closes it with the real exit reason (threaded
+    through _pending_closes, since OiOrbFillEvent itself carries no reason
+    field) and computed P&L."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    contract = _contract("DIXON", 14500, "PE")
+
+    book._pending_contracts["DIXON"] = contract
+    book._pending_fills["EVT1"] = {
+        "symbol": "DIXON", "contract": contract, "qty": 50,
+        "entry_price": 118.80, "reason": "orb_low_breakdown",
+    }
+    await book._on_fill(OiOrbFillEvent(
+        action="BUY", underlying="DIXON", option_type="PE", strike=14500, fill_price=118.80,
+        qty=50, client_id=_TEST_CLIENT_ID, binding_id=_TEST_BINDING_ID, event_id="EVT1", paper_mode=True,
+    ))
+
+    open_rows = store.load_open_positions(_TEST_CLIENT_ID, _TEST_BINDING_ID)
+    assert len(open_rows) == 1 and open_rows[0]["symbol"] == "DIXON"
+
+    book._pending_closes["EVT2"] = "sma_exit"
+    await book._on_fill(OiOrbFillEvent(
+        action="SELL", underlying="DIXON", option_type="PE", strike=14500, fill_price=95.30,
+        qty=50, client_id=_TEST_CLIENT_ID, binding_id=_TEST_BINDING_ID, event_id="EVT2",
+    ))
+
+    assert store.load_open_positions(_TEST_CLIENT_ID, _TEST_BINDING_ID) == []
+    import sqlite3
+    con = sqlite3.connect(store._DB_PATH)
+    con.row_factory = sqlite3.Row
+    row = dict(con.execute("SELECT * FROM positions WHERE symbol='DIXON'").fetchone())
+    con.close()
+    assert row["exit_reason"] == "sma_exit"
+    assert row["pnl"] == round((95.30 - 118.80) * 50, 2)

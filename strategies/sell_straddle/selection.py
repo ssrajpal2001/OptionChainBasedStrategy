@@ -420,12 +420,15 @@ def select_balanced_pair_at(
          RE-ENTRY keeps anchor_otm_steps=0.
       4. Anchor must pass the dual floor (raw LTP >= ltp_target, time value >= theta_target)
          at its (possibly shifted) strike.
-      5. Partner = scan the other side over atm +/- offset for a strike whose raw LTP is
+      5. Partner = scan the other side over anchor_strike +/- offset (the anchor's OWN,
+         possibly-OTM-shifted strike -- 2026-08-24 user spec: "we need to pair with the
+         OTM just selected", not the pre-shift ATM) for a strike whose raw LTP is
          <= anchor_time_value * balance_ratio and passes the dual floor. If rule_pass is
          supplied, the combined (ce_strike, pe_strike) pair must also pass it. Pick the
          HIGHEST such LTP (closest to anchor time value from below). The partner may be
-         ITM or OTM. (Unchanged by anchor_otm_steps -- still scans around the original
-         `atm`, not the shifted anchor strike.)
+         ITM or OTM. When anchor_otm_steps=0, anchor_strike == atm, so this is byte-
+         identical to the original ATM-centred window (RE-ENTRY's own behaviour, which
+         always calls with anchor_otm_steps=0, is completely unchanged).
 
     Returns (ce_strike, pe_strike, ce_ltp, pe_ltp) or None.
     """
@@ -496,7 +499,10 @@ def select_balanced_pair_at(
             strike_prem, partner_side, spot, offset=max(1, int(offset))
         )
     else:
-        partner_strikes = [int(atm + i * step) for i in range(-offset, offset + 1)]
+        # Centred on anchor_strike (the anchor's own, possibly-OTM-shifted strike), not
+        # the pre-shift `atm` -- see the docstring's step 5. When anchor_otm_steps=0,
+        # anchor_strike == atm, so this line is a no-op for RE-ENTRY.
+        partner_strikes = [int(anchor_strike + i * step) for i in range(-offset, offset + 1)]
 
     best = None  # (ltp, strike)
     for s in partner_strikes:

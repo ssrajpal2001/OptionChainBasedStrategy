@@ -50,3 +50,46 @@ def test_select_balanced_pair_at_anchors_at_explicit_non_rounded_strike():
 def test_select_balanced_pair_at_returns_none_when_no_quotes_at_atm():
     cache = _cache()
     assert select_balanced_pair_at(cache, atm=99999, spot=24512.90, step=50, offset=4, ltp_target=50.0) is None
+
+
+def test_partner_window_centers_on_shifted_anchor_not_pre_shift_atm():
+    """2026-08-24, direct user spec ("we need to pair with the OTM just
+    selected"): once the anchor shifts anchor_otm_steps further OTM, the
+    PARTNER search window must center on that SHIFTED anchor strike, not the
+    pre-shift atm. This cache only quotes a valid partner leg (PE24600) that
+    is OUTSIDE offset=1 of atm=24500 but INSIDE offset=1 of the shifted CE
+    anchor (24550 = atm+step) -- so this only succeeds if the partner window
+    genuinely re-centered on the shifted anchor, not the original atm."""
+    cache = {
+        (24500, "CE"): {"ltp": 150.0, "atp": 148.0},
+        (24500, "PE"): {"ltp": 200.0, "atp": 198.0},
+        (24550, "CE"): {"ltp": 120.0, "atp": 118.0},   # shifted anchor strike (atm+step)
+        (24600, "PE"): {"ltp": 80.0, "atp": 78.0},     # only reachable from the shifted anchor
+    }
+    result = select_balanced_pair_at(
+        cache, atm=24500, spot=24500.0, step=50, offset=1, ltp_target=50.0,
+        anchor_otm_steps=1,
+    )
+    assert result is not None
+    ce_strike, pe_strike, ce_ltp, pe_ltp = result
+    assert ce_strike == 24550   # the shifted anchor (CE has lower TV at raw ATM)
+    assert pe_strike == 24600   # only reachable once the partner window re-centers
+
+
+def test_partner_window_unchanged_for_reentry_anchor_otm_steps_zero():
+    """RE-ENTRY always calls with anchor_otm_steps=0, where anchor_strike ==
+    atm -- the fix above must be a complete no-op for that path. Same cache
+    as the previous test, but WITHOUT the OTM shift: PE24600 must NOT be
+    reachable (outside atm=24500 +/- offset=1), matching the original,
+    unshifted behaviour exactly."""
+    cache = {
+        (24500, "CE"): {"ltp": 150.0, "atp": 148.0},
+        (24500, "PE"): {"ltp": 200.0, "atp": 198.0},
+        (24550, "CE"): {"ltp": 120.0, "atp": 118.0},
+        (24600, "PE"): {"ltp": 80.0, "atp": 78.0},
+    }
+    result = select_balanced_pair_at(
+        cache, atm=24500, spot=24500.0, step=50, offset=1, ltp_target=50.0,
+        anchor_otm_steps=0,
+    )
+    assert result is None  # no partner reachable within the un-shifted window

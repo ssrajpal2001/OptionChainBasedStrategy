@@ -1234,7 +1234,8 @@ same subscription is what fulfills the "track the LTP" requirement afterward.
 
 **Files**: `screener.py` (pure pipeline logic — NSESession, shortlist build, ORB
 bars, regime, `evaluate_breakout`), `stock_resolve.py` (contract/lot/step
-resolution), `events.py`, `engine.py` (`OiOrbScreenerStrategy` — one book per
+resolution), `store.py` (SQLite persistence + audit trail, see below),
+`events.py`, `engine.py` (`OiOrbScreenerStrategy` — one book per
 client/binding, `_daily_loop`/`_run_today_pipeline` mirrors the Colab script's
 `run_screener_and_monitor()` adapted to a non-blocking asyncio loop with day-
 rollover instead of a single run-then-exit script), `book_manager.py`.
@@ -1280,6 +1281,50 @@ an afternoon deploy) without waiting for the next morning. **Must be turned
 back to `False`** (or simply left unset) once connectivity is confirmed — real
 trading days should always run under the genuine ORB/regime timing this
 strategy was actually designed around.
+
+**SQLite persistence + full decision audit trail (`strategies/oi_orb_screener/
+store.py`, added 2026-08-24, same day as the pass above), built for two
+reasons:**
+
+1. **Real incident, position tracking lost on restart.** First live day:
+   DIXON PE14500 entered 13:51 (paper_route, simulated fill — SA5770 has zero
+   margin, confirmed via a real Zerodha order-book export the same day, so no
+   real capital was ever at risk). A pm2 restart at ~14:40 (uptime matched the
+   log's fresh mid-day pipeline re-run to the minute; `pm2 describe` showed
+   `restarts: 0` because a stop+fresh-start resets that counter, unlike
+   `pm2 restart`) silently erased the position — `self._positions` was pure
+   in-memory with **zero persistence**, unlike every other strategy in this
+   codebase. No close, no warning; the dashboard correctly showed nothing
+   afterward because the backend genuinely held nothing. The SAME restart also
+   let DIXON PUT re-signal a second time that day, since `_already_fired`/
+   `_rejected` were wiped too — only harmless because contract resolution
+   happened to fail on the retry.
+2. **The user is running this strategy a full month in pure paper mode**
+   before any live-capital decision, specifically to review, day by day, why
+   a stock was (or wasn't) traded — not achievable from JSONL/log-grepping
+   alone at that volume.
+
+`data/oi_orb_screener.db` (own dedicated file, not `data/clients.db` — keeps
+the zero-shared-infrastructure mandate) has four tables: `scans` (one row per
+client/binding/day — NIFTY pChange, regime, fetch outcome), `shortlist`
+(one row per shortlisted symbol per day, with its ORB levels once frozen),
+`signal_events` (the full "why" trail — every `signal_fired`,
+`signal_skipped_rejected`, `signal_skipped_duplicate`, `lot_resolve_failed`,
+`contract_resolve_failed`, `entry_ltp_timeout`, `rejection_rule_triggered`,
+`sma_exit_triggered`, `entry_aborted`, `exit_failed`), and `positions` (full
+open/closed lifecycle with P&L — the persistence half). `OiOrbScreenerStrategy.
+_restore_from_db()` runs once, on this book's very first `_daily_loop`
+iteration (i.e. every process start/restart), right after `reset_session()`
+and BEFORE `_run_today_pipeline()` re-evaluates today's signals — re-resolves
+each restored position's contract (`stock_resolve.resolve_contract_exact_
+async`, exact strike/expiry, no re-rounding) and re-subscribes its option
+feed, and restores `_already_fired`/`_rejected` from `signal_events` so a
+restart can no longer duplicate-signal a symbol that already fired earlier
+that day. A row still open from a PREVIOUS trading date is never resurrected
+(same MIS same-day-only discipline as `data_layer/position_store.py` — a
+broker's own EOD squareoff already flattened it in reality). Tests:
+`tests/oi_orb_screener/test_store.py`, plus the restore-specific tests in
+`tests/oi_orb_screener/test_engine.py`.
 
 ---
 

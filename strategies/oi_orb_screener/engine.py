@@ -29,6 +29,20 @@ non-blocking asyncio book):
      BEFORE placing the order (so entry_price is a real live LTP, not a
      guess), then emit a BUY OiOrbOrderEvent.
   6. EOD square-off loop closes every open position at squareoff_time.
+
+Persistence + audit trail (added 2026-08-24, same day as the pass above,
+after a real incident): strategies/oi_orb_screener/store.py is a dedicated
+SQLite DB (data/oi_orb_screener.db) that (a) persists every open position so
+a restart no longer silently loses it -- restored on this book's very first
+_daily_loop iteration, before _run_today_pipeline() re-evaluates today's
+signals (see _restore_from_db()) -- and (b) logs the full "why" trail every
+day: every scan outcome, every shortlisted stock, every ORB level, every
+fired/rejected/skipped signal and every entry-path failure reason, plus the
+closed-trade P&L. Built because this strategy is running a full month in
+paper mode before any live-capital decision -- the evaluation needs SQL-
+queryable history, not just a JSONL/log grep. See store.py's own module
+docstring for the real incident (DIXON PE14500, 2026-08-24) that motivated
+the position-persistence half of this.
 """
 from __future__ import annotations
 
@@ -43,6 +57,7 @@ from data_layer.base_feeder import OptionTick
 from strategies.core.base_book import AbstractStrategyBook
 from strategies.oi_orb_screener import screener
 from strategies.oi_orb_screener import stock_resolve
+from strategies.oi_orb_screener import store
 from strategies.oi_orb_screener.events import OiOrbOrderEvent, OiOrbFillEvent
 
 logger = logging.getLogger(__name__)
@@ -138,6 +153,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         # ── contract/feed/position state, keyed by stock symbol ────────
         self._pending_contracts: Dict[str, "stock_resolve.ResolvedContract"] = {}
         self._pending_fills: Dict[str, dict] = {}   # event_id -> context
+        self._pending_closes: Dict[str, str] = {}   # event_id -> exit reason (OiOrbFillEvent carries no reason field)
         self._positions: Dict[str, dict] = {}        # stock symbol -> position dict
         self._live_option_ltp: Dict[str, float] = {}
         self._option_key_subscribed: Dict[str, str] = {}
@@ -190,12 +206,61 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 self.reset_session()
                 self._today = now.date()
                 try:
+                    await self._restore_from_db()
+                except Exception:
+                    self._clog.exception("OiOrb[%s/%s]: restore-from-DB failed (recovered, "
+                                          "starting flat with no already-fired/rejected memory).",
+                                          self._client_id, self._binding_id)
+                try:
                     await self._run_today_pipeline()
                 except Exception:
                     self._clog.exception("OiOrb[%s/%s]: today's pipeline crashed (recovered, "
                                           "will retry next day-rollover check).",
                                           self._client_id, self._binding_id)
             await asyncio.sleep(30)
+
+    async def _restore_from_db(self) -> None:
+        """Restore open positions + today's already-fired/rejected signal
+        state from the DB -- called once, right after reset_session() on
+        this book's first _daily_loop iteration (i.e. every process
+        start/restart), BEFORE _run_today_pipeline() re-evaluates today's
+        signals. Without this, a mid-day restart both silently lost every
+        open position (real 2026-08-24 incident: DIXON PE14500, entered
+        13:51, restart ~14:40, position never closed, just forgotten) AND
+        could re-fire (and potentially duplicate-enter) a signal that had
+        already fired before the restart, since reset_session() always
+        starts _already_fired/_rejected empty (same incident: DIXON PUT
+        re-signaled at 14:40:32, only harmless because contract resolution
+        happened to fail on the retry)."""
+        td = self._today.isoformat() if self._today else None
+        rows = await asyncio.to_thread(store.load_open_positions, self._client_id, self._binding_id, td)
+        for r in rows:
+            contract = await stock_resolve.resolve_contract_exact_async(
+                r["symbol"], r["expiry"], r["strike"], r["option_type"])
+            if contract is None:
+                self._clog.critical(
+                    "OiOrb[%s/%s]: RESTORE FAILED for %s %s%d -- could not re-resolve the "
+                    "contract. This position is still marked open in the DB and may still be "
+                    "open at the broker, but this process cannot track it (no SMA-exit/EOD-close "
+                    "will fire for it) until manually reconciled.",
+                    self._client_id, self._binding_id, r["symbol"], r["option_type"], r["strike"])
+                continue
+            self._positions[r["symbol"]] = {
+                "contract": contract, "qty": r["qty"], "entry_price": r["entry_price"],
+                "paper_mode": bool(r["paper_mode"]), "opened_at": datetime.fromisoformat(r["entry_ts"]),
+            }
+            self._ensure_option_feed(r["symbol"], contract)
+            self._clog.info("OiOrb[%s/%s]: RESTORED open position %s %s%d qty=%d @ %.2f from DB.",
+                             self._client_id, self._binding_id, r["symbol"],
+                             contract.option_type, contract.strike, r["qty"], r["entry_price"])
+
+        already_fired = await asyncio.to_thread(store.load_already_fired, self._client_id, self._binding_id, td)
+        rejected = await asyncio.to_thread(store.load_rejected, self._client_id, self._binding_id, td)
+        self._already_fired |= already_fired
+        self._rejected |= rejected
+        if already_fired or rejected:
+            self._clog.info("OiOrb[%s/%s]: restored %d already-fired + %d rejected signal(s) from DB.",
+                             self._client_id, self._binding_id, len(already_fired), len(rejected))
 
     async def _run_today_pipeline(self) -> None:
         cfg = self._screener_cfg
@@ -236,11 +301,15 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 "OiOrb[%s/%s]: build_shortlist failed after %d attempts, giving up for today: %s",
                 self._client_id, self._binding_id, _BUILD_SHORTLIST_MAX_ATTEMPTS, last_exc,
             )
+            await asyncio.to_thread(store.record_scan, self._client_id, self._binding_id,
+                                     nifty_pchange, "fetch_failed", str(last_exc))
             return
 
         if shortlist is None or shortlist.empty:
             self._clog.info("OiOrb[%s/%s]: no candidates passed the filters today (NIFTY pChange %+.2f%%).",
                              self._client_id, self._binding_id, nifty_pchange)
+            await asyncio.to_thread(store.record_scan, self._client_id, self._binding_id,
+                                     nifty_pchange, "no_candidates")
             return
 
         self._shortlist_symbols = shortlist["symbol"].tolist()
@@ -258,6 +327,21 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                          self._client_id, self._binding_id, len(self._shortlist_symbols),
                          ", ".join(f"{s}({self._shortlist_pchange.get(s, 0):+.2f}%)"
                                    for s in self._shortlist_symbols))
+
+        await asyncio.to_thread(store.record_scan, self._client_id, self._binding_id, nifty_pchange, "ok")
+        sl_indexed = shortlist.set_index("symbol")
+        shortlist_rows = []
+        for sym in self._shortlist_symbols:
+            row = sl_indexed.loc[sym] if sym in sl_indexed.index else None
+            shortlist_rows.append({
+                "symbol": sym,
+                "price_change_pct": self._shortlist_pchange.get(sym),
+                "oi_spurt_pct": (float(row["oi_spurt_pct"])
+                                 if row is not None and "oi_spurt_pct" in shortlist.columns else None),
+                "score": float(row["score"]) if row is not None and "score" in shortlist.columns else None,
+                "side_bias": "bullish" if self._shortlist_pchange.get(sym, 0) > 0 else "bearish",
+            })
+        await asyncio.to_thread(store.record_shortlist, self._client_id, self._binding_id, shortlist_rows)
 
         await asyncio.to_thread(screener.backfill_orb_from_yahoo, self._bars, self._shortlist_symbols, cfg)
 
@@ -297,6 +381,11 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                                          "peak=%.2f orb_high=%.2f current=%.2f",
                                          self._client_id, self._binding_id, sym,
                                          self._peak_since_orb[sym], orb_high, ltp)
+                        await asyncio.to_thread(
+                            store.log_signal_event, self._client_id, self._binding_id, sym,
+                            "rejection_rule_triggered", side="CALL",
+                            detail=f"peak={self._peak_since_orb[sym]:.2f} orb_high={orb_high:.2f} current={ltp:.2f}",
+                            trigger_price=ltp, orb_high=orb_high, orb_low=orb_low)
                     if (sym, "PUT") not in self._rejected and screener.check_rejection_pattern(
                             self._trough_since_orb[sym], orb_low, ltp, "PUT",
                             cfg["REJECTION_MIN_RISE_PCT"], cfg["REJECTION_RETRACE_FRACTION"]):
@@ -305,6 +394,11 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                                          "trough=%.2f orb_low=%.2f current=%.2f",
                                          self._client_id, self._binding_id, sym,
                                          self._trough_since_orb[sym], orb_low, ltp)
+                        await asyncio.to_thread(
+                            store.log_signal_event, self._client_id, self._binding_id, sym,
+                            "rejection_rule_triggered", side="PUT",
+                            detail=f"trough={self._trough_since_orb[sym]:.2f} orb_low={orb_low:.2f} current={ltp:.2f}",
+                            trigger_price=ltp, orb_high=orb_high, orb_low=orb_low)
 
             await self._check_sma_exits(now, live)
 
@@ -316,10 +410,13 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                                         self._client_id, self._binding_id, exc)
                     nifty_pchange_now = 0.0
                 self._regime = screener.classify_nifty_regime(nifty_pchange_now, cfg)
+                await asyncio.to_thread(store.update_scan_regime, self._client_id, self._binding_id, self._regime)
                 for sym in self._shortlist_symbols:
                     h, l = self._bars.orb(sym, cfg["ORB_START"], cfg["ORB_END"])
                     if h is not None:
                         self._orb_frozen[sym] = (h, l)
+                        await asyncio.to_thread(store.update_orb_levels, self._client_id, self._binding_id,
+                                                 sym, h, l)
                 self._clog.info("OiOrb[%s/%s]: ORB frozen. NIFTY regime=%s (pChange %+.2f%%). Levels: %s",
                                  self._client_id, self._binding_id, self._regime.upper(), nifty_pchange_now,
                                  {s: v for s, v in self._orb_frozen.items()})
@@ -339,11 +436,19 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                         self._clog.info("OiOrb[%s/%s]: %s %s breakout fired but skipped -- "
                                          "already REJECTED (50%% rejection rule) earlier today.",
                                          self._client_id, self._binding_id, sig.symbol, sig.side)
+                        await asyncio.to_thread(
+                            store.log_signal_event, self._client_id, self._binding_id, sig.symbol,
+                            "signal_skipped_rejected", side=sig.side, detail=sig.reason,
+                            trigger_price=sig.trigger_price, orb_high=sig.orb_high, orb_low=sig.orb_low)
                         sig = None
                     if sig is not None:
                         self._clog.info("OiOrb[%s/%s]: SIGNAL %s BUY %s trigger=%.2f ORB=%.2f-%.2f reason=%s",
                                          self._client_id, self._binding_id, sig.symbol, sig.side,
                                          sig.trigger_price, sig.orb_low, sig.orb_high, sig.reason)
+                        await asyncio.to_thread(
+                            store.log_signal_event, self._client_id, self._binding_id, sig.symbol,
+                            "signal_fired", side=sig.side, detail=sig.reason,
+                            trigger_price=sig.trigger_price, orb_high=sig.orb_high, orb_low=sig.orb_low)
                         asyncio.create_task(self._handle_signal(sig))
             elif (not cfg.get("IGNORE_TIME_WINDOWS") and now_key >= cfg["ENTRY_WINDOW_END"]
                   and not self._entry_window_done_logged):
@@ -383,6 +488,10 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         if sig.symbol in self._positions or sig.symbol in self._pending_contracts:
             self._clog.info("OiOrb[%s/%s]: %s already has an open/pending position -- skipping duplicate signal.",
                              self._client_id, self._binding_id, sig.symbol)
+            await asyncio.to_thread(
+                store.log_signal_event, self._client_id, self._binding_id, sig.symbol,
+                "signal_skipped_duplicate", side=sig.side, trigger_price=sig.trigger_price,
+                orb_high=sig.orb_high, orb_low=sig.orb_low)
             return
 
         opt_type = "CE" if sig.side == "CALL" else "PE"
@@ -391,6 +500,10 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         if lot <= 0:
             self._clog.warning("OiOrb[%s/%s]: could not resolve lot size for %s -- skipping entry.",
                                 self._client_id, self._binding_id, sig.symbol)
+            await asyncio.to_thread(
+                store.log_signal_event, self._client_id, self._binding_id, sig.symbol,
+                "lot_resolve_failed", side=sig.side, trigger_price=sig.trigger_price,
+                orb_high=sig.orb_high, orb_low=sig.orb_low)
             return
 
         # 2026-08-24, direct user spec: strike is 2% OTM (above spot for a
@@ -403,6 +516,10 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         if contract is None:
             self._clog.warning("OiOrb[%s/%s]: could not resolve option contract for %s %s -- skipping entry.",
                                 self._client_id, self._binding_id, sig.symbol, opt_type)
+            await asyncio.to_thread(
+                store.log_signal_event, self._client_id, self._binding_id, sig.symbol,
+                "contract_resolve_failed", side=sig.side, trigger_price=sig.trigger_price,
+                orb_high=sig.orb_high, orb_low=sig.orb_low)
             return
 
         self._pending_contracts[sig.symbol] = contract
@@ -417,6 +534,11 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 _ENTRY_LTP_WAIT_TIMEOUT_SEC,
             )
             self._pending_contracts.pop(sig.symbol, None)
+            await asyncio.to_thread(
+                store.log_signal_event, self._client_id, self._binding_id, sig.symbol,
+                "entry_ltp_timeout", side=sig.side,
+                detail=f"{opt_type}{contract.strike}", trigger_price=sig.trigger_price,
+                orb_high=sig.orb_high, orb_low=sig.orb_low)
             return
 
         qty = lot * self._lot_multiplier
@@ -507,12 +629,12 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             if ev.client_id != self._client_id or ev.binding_id != self._binding_id:
                 continue
             try:
-                self._on_fill(ev)
+                await self._on_fill(ev)
             except Exception:
                 self._clog.exception("OiOrb[%s/%s]: _on_fill error (recovered).",
                                       self._client_id, self._binding_id)
 
-    def _on_fill(self, fill: OiOrbFillEvent) -> None:
+    async def _on_fill(self, fill: OiOrbFillEvent) -> None:
         eid = getattr(fill, "event_id", "")
         if fill.action == "BUY":
             pending = self._pending_fills.pop(eid, None)
@@ -523,17 +645,26 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 self._pending_contracts.pop(symbol, None)
                 self._clog.critical("OiOrb[%s/%s]: ENTRY ABORTED for %s (event_id=%s) -- discarding.",
                                      self._client_id, self._binding_id, symbol, eid)
+                await asyncio.to_thread(
+                    store.log_signal_event, self._client_id, self._binding_id, symbol,
+                    "entry_aborted", detail=eid)
                 return
             contract = self._pending_contracts.pop(symbol, pending["contract"])
+            entry_price = float(fill.fill_price or pending["entry_price"])
+            paper_mode = bool(getattr(fill, "paper_mode", True))
             self._positions[symbol] = {
                 "contract": contract, "qty": pending["qty"],
-                "entry_price": float(fill.fill_price or pending["entry_price"]),
-                "paper_mode": bool(getattr(fill, "paper_mode", True)),
+                "entry_price": entry_price,
+                "paper_mode": paper_mode,
                 "opened_at": datetime.now(IST),
             }
             self._clog.info("OiOrb[%s/%s]: ENTRY CONFIRMED %s %s%d qty=%d @ %.2f (paper_mode=%s)",
                              self._client_id, self._binding_id, symbol, contract.option_type,
                              contract.strike, pending["qty"], fill.fill_price, fill.paper_mode)
+            await asyncio.to_thread(
+                store.open_position, self._client_id, self._binding_id, symbol,
+                contract.option_type, contract.strike, contract.expiry.isoformat(),
+                pending["qty"], entry_price, pending.get("reason", ""), paper_mode, eid)
             return
 
         if fill.action == "SELL":
@@ -542,17 +673,26 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             pos = self._positions.pop(symbol, None)
             if getattr(fill, "exit_failed", False):
                 # Leave the position untouched so the next EOD cycle retries the close --
-                # same confirm-then-finalize discipline every strategy here follows.
+                # same confirm-then-finalize discipline every strategy here follows. Keep
+                # _pending_closes[eid] too -- the retry re-emits with a NEW event_id via
+                # _emit_close, so this stale one is simply abandoned, not consumed.
                 if pos is not None:
                     self._positions[symbol] = pos
                 self._clog.critical("OiOrb[%s/%s]: EXIT FAILED for %s (event_id=%s) -- will retry.",
                                      self._client_id, self._binding_id, symbol, eid)
+                await asyncio.to_thread(
+                    store.log_signal_event, self._client_id, self._binding_id, symbol,
+                    "exit_failed", detail=eid)
                 return
+            exit_reason = self._pending_closes.pop(eid, "")
             if pos is not None:
                 pnl = round((fill.fill_price - pos["entry_price"]) * pos["qty"], 2)
                 self._clog.info("OiOrb[%s/%s]: EXIT CONFIRMED %s qty=%d @ %.2f (entry %.2f) P&L=%.2f",
                                  self._client_id, self._binding_id, symbol, pos["qty"],
                                  fill.fill_price, pos["entry_price"], pnl)
+                await asyncio.to_thread(
+                    store.close_position, self._client_id, self._binding_id, symbol,
+                    fill.fill_price, exit_reason, pnl)
 
     # ── EOD square-off (the ONLY exit logic this pass) ──────────────────
 
@@ -567,6 +707,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             exit_price=exit_price, reason=reason, event_id=event_id,
             product_type=self._product_type, strategy=self._strategy_name,
         )
+        self._pending_closes[event_id] = reason
         self._clog.info("OiOrb[%s/%s]: closing %s qty=%d @ %.2f reason=%s",
                          self._client_id, self._binding_id, symbol, pos["qty"], exit_price, reason)
         await self._bus.publish(Topic.OI_ORB_ORDER_REQUEST, order_ev)
@@ -600,6 +741,10 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                     "below" if side == "CALL" else "above", cfg["SMA_PERIOD"], sma,
                     closes[-cfg["SMA_EXIT_CONSEC_CLOSES"]:],
                 )
+                await asyncio.to_thread(
+                    store.log_signal_event, self._client_id, self._binding_id, symbol,
+                    "sma_exit_triggered", side=side,
+                    detail=f"{cfg['SMA_PERIOD']}-SMA={sma:.2f} closes={closes[-cfg['SMA_EXIT_CONSEC_CLOSES']:]}")
                 await self._emit_close(symbol, pos, "sma_exit")
 
     async def _eod_loop(self) -> None:
