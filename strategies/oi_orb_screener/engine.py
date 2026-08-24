@@ -51,6 +51,12 @@ _EOD_TIME_DEFAULT = dtime(15, 15)
 _EOD_POLL_SEC = 10.0
 _ENTRY_LTP_WAIT_TIMEOUT_SEC = 5.0
 _UNDERLYING_SENTINEL = "SCREENER"
+# 2026-08-24, confirmed live: a fresh NSESession's first request burst can
+# hit a short-lived Akamai throttle (not a persistent IP block -- see
+# _run_today_pipeline's own comment). Retry a handful of times, well spaced
+# out, before giving up on the whole trading day.
+_BUILD_SHORTLIST_MAX_ATTEMPTS = 4
+_BUILD_SHORTLIST_RETRY_SEC = 45.0
 
 
 def _make_strategy_logger(client_id: str, binding_id: str) -> logging.Logger:
@@ -181,11 +187,37 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             return
 
         self._nse = await asyncio.to_thread(screener.NSESession)
-        try:
-            shortlist, nifty_pchange = await asyncio.to_thread(
-                screener.build_shortlist, self._nse, cfg)
-        except Exception as exc:
-            self._clog.error("OiOrb[%s/%s]: build_shortlist failed: %s", self._client_id, self._binding_id, exc)
+        # 2026-08-24, confirmed live: a fresh NSESession's first burst of
+        # requests can hit a short-lived Akamai throttle (NOT a persistent
+        # IP block -- a manual retry moments later, from the same EC2 box,
+        # returned clean real data). Without a retry here, that single
+        # transient failure silently kills the WHOLE trading day, since
+        # _daily_loop only calls this once per calendar day. Retry a few
+        # times, spaced out, re-warming the session each time, before
+        # actually giving up for today.
+        shortlist = None
+        nifty_pchange = 0.0
+        last_exc: Optional[Exception] = None
+        for attempt in range(1, _BUILD_SHORTLIST_MAX_ATTEMPTS + 1):
+            try:
+                shortlist, nifty_pchange = await asyncio.to_thread(
+                    screener.build_shortlist, self._nse, cfg)
+                last_exc = None
+                break
+            except Exception as exc:
+                last_exc = exc
+                self._clog.warning(
+                    "OiOrb[%s/%s]: build_shortlist attempt %d/%d failed: %s",
+                    self._client_id, self._binding_id, attempt, _BUILD_SHORTLIST_MAX_ATTEMPTS, exc,
+                )
+                if attempt < _BUILD_SHORTLIST_MAX_ATTEMPTS:
+                    await asyncio.sleep(_BUILD_SHORTLIST_RETRY_SEC)
+                    self._nse = await asyncio.to_thread(screener.NSESession)  # fresh session/cookies
+        if last_exc is not None:
+            self._clog.error(
+                "OiOrb[%s/%s]: build_shortlist failed after %d attempts, giving up for today: %s",
+                self._client_id, self._binding_id, _BUILD_SHORTLIST_MAX_ATTEMPTS, last_exc,
+            )
             return
 
         if shortlist is None or shortlist.empty:

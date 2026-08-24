@@ -238,3 +238,64 @@ def _async_return(value):
     async def _f(*a, **kw):
         return value
     return _f
+
+
+class _FakeNSESession:
+    """No-op stand-in for screener.NSESession -- real construction does
+    real network warm-up GETs, which these tests must never trigger."""
+    def __init__(self) -> None:
+        pass
+
+
+@pytest.mark.asyncio
+async def test_run_today_pipeline_retries_build_shortlist_on_transient_failure(monkeypatch):
+    """2026-08-24, confirmed live on EC2: a fresh NSESession's first request
+    burst can hit a short-lived Akamai throttle that clears moments later.
+    Without a retry, that single transient failure silently kills the whole
+    trading day (the daily pipeline only runs once per calendar day)."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._screener_cfg["IGNORE_TIME_WINDOWS"] = True
+    book._running = True
+
+    monkeypatch.setattr(screener, "NSESession", _FakeNSESession)
+    monkeypatch.setattr(asyncio, "sleep", _async_return(None))
+
+    calls = {"n": 0}
+    monkeypatch.setattr(screener, "build_shortlist",
+                         lambda nse, cfg: _flaky_build_shortlist_sync(nse, cfg, calls))
+
+    await book._run_today_pipeline()
+
+    assert calls["n"] == 3   # 2 failures + 1 success, never hit the max-attempts cap
+
+
+def _flaky_build_shortlist_sync(nse, cfg, calls):
+    calls["n"] += 1
+    if calls["n"] < 3:
+        raise RuntimeError("transient NSE throttle")
+    import pandas as pd
+    return pd.DataFrame(), 0.0
+
+
+@pytest.mark.asyncio
+async def test_run_today_pipeline_gives_up_after_max_attempts(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._screener_cfg["IGNORE_TIME_WINDOWS"] = True
+    book._running = True
+
+    monkeypatch.setattr(screener, "NSESession", _FakeNSESession)
+    monkeypatch.setattr(asyncio, "sleep", _async_return(None))
+
+    calls = {"n": 0}
+    def _always_fails(nse, cfg):
+        calls["n"] += 1
+        raise RuntimeError("persistent NSE block")
+    monkeypatch.setattr(screener, "build_shortlist", _always_fails)
+
+    await book._run_today_pipeline()
+
+    from strategies.oi_orb_screener.engine import _BUILD_SHORTLIST_MAX_ATTEMPTS
+    assert calls["n"] == _BUILD_SHORTLIST_MAX_ATTEMPTS
+    assert book._shortlist_symbols == []
