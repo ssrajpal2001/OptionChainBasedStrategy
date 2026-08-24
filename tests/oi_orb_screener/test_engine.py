@@ -299,3 +299,43 @@ async def test_run_today_pipeline_gives_up_after_max_attempts(monkeypatch):
     from strategies.oi_orb_screener.engine import _BUILD_SHORTLIST_MAX_ATTEMPTS
     assert calls["n"] == _BUILD_SHORTLIST_MAX_ATTEMPTS
     assert book._shortlist_symbols == []
+
+
+@pytest.mark.asyncio
+async def test_shortlist_pchange_exposed_via_monitoring_state(monkeypatch):
+    """2026-08-24: the dashboard panel used to show every shortlisted stock
+    as just "ORB pending" with zero directional signal, even though the
+    shortlist itself already knows bullish vs bearish (that's how it got
+    split in the first place). monitoring_state() must expose pChange per
+    symbol so the UI can show CALL-bias vs PUT-bias before any ORB level
+    exists."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._screener_cfg["IGNORE_TIME_WINDOWS"] = True
+    book._running = True
+
+    monkeypatch.setattr(screener, "NSESession", _FakeNSESession)
+    monkeypatch.setattr(asyncio, "sleep", _async_return(None))
+    monkeypatch.setattr(screener, "backfill_orb_from_yahoo", lambda bars, syms, cfg: None)
+
+    import pandas as pd
+    fake_shortlist = pd.DataFrame([
+        {"symbol": "VMM", "pChange": 9.28, "previousClose": 103.43},
+        {"symbol": "DIXON", "pChange": -2.04, "previousClose": 14700.0},
+    ])
+    monkeypatch.setattr(screener, "build_shortlist", lambda nse, cfg: (fake_shortlist, 0.11))
+
+    def _stop_after_shortlist(nse):
+        # Only care about the shortlist-building portion of the pipeline --
+        # stop the book so the monitor while-loop exits on its next check
+        # instead of spinning (asyncio.sleep is mocked to return instantly).
+        book._running = False
+        raise RuntimeError("stop test here")
+    monkeypatch.setattr(screener, "fetch_fno_price_universe", _stop_after_shortlist)
+
+    await book._run_today_pipeline()
+
+    assert book._shortlist_pchange == {"VMM": 9.28, "DIXON": -2.04}
+    state = book.monitoring_state()
+    assert state["shortlist_pchange"] == {"VMM": 9.28, "DIXON": -2.04}
+    assert set(state["shortlist"]) == {"VMM", "DIXON"}

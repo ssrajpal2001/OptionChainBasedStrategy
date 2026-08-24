@@ -8428,8 +8428,12 @@ function amoTest() {
                           <template x-if="(_bk.shortlist||[]).length===0">
                             <div class="text-center py-1" style="color:var(--t-dim)">No shortlist yet — scanning</div>
                           </template>
-                          <template x-for="sym in (_bk.shortlist||[]).slice(0,8)" :key="sym">
+                          <template x-for="sym in (_bk.shortlist||[]).slice(0,8)" :key="sym"
+                                    x-data="{ get _pc(){ return (_bk.shortlist_pchange||{})[sym]; } }">
                             <div class="flex items-center justify-between mb-1">
+                              <span class="px-1.5 py-0.5 rounded font-bold"
+                                    :style="_pc>0?'background:rgba(16,185,129,0.15);color:var(--t-green)':'background:rgba(239,68,68,0.15);color:var(--t-red)'"
+                                    x-text="(_pc>0?'▲ CALL':'▼ PUT')+' '+(_pc!=null?(_pc>0?'+':'')+_pc.toFixed(1)+'%':'')"></span>
                               <span style="color:var(--t-text)" x-text="sym"></span>
                               <span style="color:var(--t-muted)"
                                     x-text="(_bk.orb_frozen && _bk.orb_frozen[sym]) ? ('ORB '+fmt(_bk.orb_frozen[sym][1])+'–'+fmt(_bk.orb_frozen[sym][0])) : 'ORB pending'"></span>

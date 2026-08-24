@@ -116,6 +116,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._today: Optional[date] = None
         self._nse: Optional["screener.NSESession"] = None
         self._shortlist_symbols: list = []
+        self._shortlist_pchange: dict = {}
         self._prev_close_map: dict = {}
         self._bars = screener.MinuteBars()
         self._orb_frozen: dict = {}
@@ -141,6 +142,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         its own day's square-off while the process keeps running."""
         self._nse = None
         self._shortlist_symbols = []
+        self._shortlist_pchange = {}
         self._prev_close_map = {}
         self._bars = screener.MinuteBars()
         self._orb_frozen = {}
@@ -229,9 +231,18 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._shortlist_symbols = shortlist["symbol"].tolist()
         self._prev_close_map = (shortlist.set_index("symbol")["previousClose"].to_dict()
                                  if "previousClose" in shortlist.columns else {})
+        # pChange sign tells you which side of the regime table each stock is
+        # even before any ORB level exists -- bullish (pChange>0) watches for
+        # a CALL on ORB-high breakout, bearish (pChange<0) watches for a PUT
+        # on ORB-low breakdown. Surfaced in monitoring_state() so the
+        # dashboard panel isn't just "ORB pending" with zero directional
+        # signal while ORB levels are still empty/pending.
+        self._shortlist_pchange = (shortlist.set_index("symbol")["pChange"].to_dict()
+                                    if "pChange" in shortlist.columns else {})
         self._clog.info("OiOrb[%s/%s]: shortlist ready (%d): %s",
                          self._client_id, self._binding_id, len(self._shortlist_symbols),
-                         ", ".join(self._shortlist_symbols))
+                         ", ".join(f"{s}({self._shortlist_pchange.get(s, 0):+.2f}%)"
+                                   for s in self._shortlist_symbols))
 
         await asyncio.to_thread(screener.backfill_orb_from_yahoo, self._bars, self._shortlist_symbols, cfg)
 
@@ -529,6 +540,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             "binding_id": self._binding_id,
             "today": self._today.isoformat() if self._today else None,
             "shortlist": self._shortlist_symbols,
+            "shortlist_pchange": self._shortlist_pchange,
             "regime": self._regime,
             "orb_frozen": self._orb_frozen,
             "positions": {
