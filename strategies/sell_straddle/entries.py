@@ -306,13 +306,29 @@ class EntryMixin:
         if due_reentry:
             await self._eval_ruleset(now, "entry_rules_reentry", use_beginning_sel=False)
 
-    async def _maybe_shift_expiry_for_low_anchor_ltp(self, ltp_target: float, theta_target: float) -> bool:
+    async def _maybe_shift_expiry_for_low_anchor_ltp(self, ltp_target: float, theta_target: float,
+                                                       use_beginning_sel: bool = False) -> bool:
         """2026-08-23, direct user spec: "if ltp is less than threshold then
         jump to next week expiry -- applicable for anchor selection part...
         if we have entered next expiry, that expiry will be used for the
         complete trading day till EOD." The threshold is the SAME
         ltp_target/theta_target the anchor floor check already rejects a
         pair on -- not a new one.
+
+        2026-08-24 CRITICAL fix, confirmed live: this call to anchor_fails_
+        floor() never passed anchor_otm_steps/step, so it silently defaulted
+        to 0/0.0 -- meaning it always re-checked the RAW ATM strike's LTP,
+        never the actual 1-OTM-shifted strike select_balanced_pair_at (the
+        REAL entry-selection function, called with anchor_otm_steps=1 for
+        BEGINNING -- see _select_beginning_pair below) would genuinely trade
+        as the anchor. A pair could pass this gate at raw ATM's LTP while
+        the real 1-OTM anchor leg that actually gets sold was already below
+        the floor, with the next-week-expiry-shift safety net never firing
+        for exactly the case it exists to catch. RE-ENTRY still correctly
+        uses anchor_otm_steps=0 (it never shifts the anchor at all -- see
+        the anchor_otm_steps=1 comment in _select_beginning_pair), so
+        use_beginning_sel selects the right value here, matching whichever
+        selection path the caller is actually about to run.
 
         Returns True the one cycle a shift actually happens -- the caller
         should skip its own selection attempt that cycle, since the new
@@ -330,7 +346,9 @@ class EntryMixin:
         if atm <= 0:
             return False
         from strategies.sell_straddle.selection import anchor_fails_floor
-        if not anchor_fails_floor(self._strike_prem, atm, self._spot, ltp_target, theta_target):
+        anchor_otm_steps = 1 if use_beginning_sel else 0
+        if not anchor_fails_floor(self._strike_prem, atm, self._spot, ltp_target, theta_target,
+                                   anchor_otm_steps=anchor_otm_steps, step=step):
             return False
 
         from data_layer.instrument_registry import REGISTRY
@@ -377,7 +395,7 @@ class EntryMixin:
         offset = int(max(int(ss.get("pool_otm_depth", 0) or 0), int(ss.get("pool_itm_depth", 0) or 0)) or ss.get("v_slope_pool_offset") or ss.get("reentry_offset") or 4)
         ltp_target = self._ltp_target if self._ltp_target > 0 else 50.0
         theta_target = self._theta_target
-        if await self._maybe_shift_expiry_for_low_anchor_ltp(ltp_target, theta_target):
+        if await self._maybe_shift_expiry_for_low_anchor_ltp(ltp_target, theta_target, use_beginning_sel):
             return
         variable_strikes = bool(ss.get("variable_strikes", False))
         balance_ratio = float(ss.get("balance_ratio", getattr(self, "_balance_ratio", 1.0)))
