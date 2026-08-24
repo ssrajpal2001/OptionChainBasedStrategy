@@ -28,6 +28,7 @@ adapted to asyncio).
 """
 from __future__ import annotations
 
+import logging
 import time
 from collections import defaultdict
 from dataclasses import dataclass
@@ -42,6 +43,8 @@ try:
 except ImportError:
     import pytz
     IST = pytz.timezone("Asia/Kolkata")
+
+logger = logging.getLogger(__name__)
 
 
 CONFIG = {
@@ -80,7 +83,18 @@ NSE_HEADERS = {
                     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"),
     "Accept": "*/*",
     "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
+    # 2026-08-24: the REAL bug behind every "blocked/rate-limited" failure on
+    # EC2 today, confirmed by comparison with a one-off diagnostic that never
+    # set this header. Advertising "br" (Brotli) here means NSE may respond
+    # with Brotli-compressed data -- decoding it needs the optional `brotli`/
+    # `brotlicffi` package, not bundled with `requests` by default and
+    # apparently not installed in this environment. The failed decode raised
+    # an exception that get_json()'s broad `except Exception: pass` silently
+    # swallowed, so every attempt looked identical to a real block/throttle
+    # with zero diagnostic signal. data_layer/instrument_registry.py (already
+    # proven, live-production code) already deliberately avoids "br" for
+    # exactly this reason ("Accept-Encoding": "gzip") -- matching that here.
+    "Accept-Encoding": "gzip, deflate",
     "Connection": "keep-alive",
     "Referer": "https://www.nseindia.com/market-data/live-equity-market",
 }
@@ -95,17 +109,24 @@ class NSESession:
     """Cookie warm-up + retry -- same pattern as the Colab script's own
     NSESession, confirmed working live 2026-08-24.
 
-    2026-08-24 (later same day): confirmed on EC2 that hitting all three
-    warm-up pages, PLUS re-warming (all three again) on every internal
-    get_json() retry, PLUS this engine's own outer build_shortlist retry
-    loop on top of that, adds up to a lot of automated-looking traffic to
-    NSE in a short window -- and a live comparison showed a minimal
-    homepage-only warm-up succeeding while this heavier pattern kept
-    failing from the same IP. Akamai's bot-management tends to escalate
-    throttling the more a flagged pattern repeats, so a heavier retry
-    pattern can make things WORSE, not better. Trimmed to a single
-    homepage hit -- matches what was actually confirmed to work standalone,
-    and cuts per-attempt request volume by 2/3."""
+    2026-08-24 (later same day) -- ROOT CAUSE FOUND, supersedes an earlier
+    wrong diagnosis: every "blocked/rate-limited IP" failure on EC2 today
+    was actually NSE_HEADERS advertising "br" (Brotli) in Accept-Encoding.
+    Decoding a Brotli response needs the optional `brotli`/`brotlicffi`
+    package, not installed in this environment -- the failed decode raised
+    an exception that get_json()'s broad `except Exception: pass` silently
+    swallowed, so every attempt looked identical to a real IP block with
+    zero diagnostic signal (a live side-by-side comparison against a
+    one-off diagnostic script that never set this header, and consistently
+    succeeded, is what exposed it). Fixed by dropping "br" from
+    Accept-Encoding, matching data_layer/instrument_registry.py's own
+    already-proven, live-production pattern ("Accept-Encoding": "gzip").
+    The warm-up trim (single homepage hit instead of three pages) and the
+    lighter outer retry loop (engine.py's _BUILD_SHORTLIST_* constants),
+    added earlier the same day chasing what looked like an escalating
+    Akamai throttle, turned out not to be the real fix -- left in place
+    anyway since sending less automated-looking traffic per attempt is
+    still reasonable, but the header fix above is what actually mattered."""
 
     def __init__(self) -> None:
         self.s = requests.Session()
@@ -115,8 +136,12 @@ class NSESession:
     def _warm(self) -> None:
         try:
             self.s.get("https://www.nseindia.com", timeout=10)
-        except Exception:
-            pass  # best-effort -- retried on first real 401/403 in get_json()
+        except Exception as exc:
+            # best-effort -- retried on first real 401/403 in get_json() --
+            # but 2026-08-24 confirmed a silently-swallowed exception here is
+            # exactly what hid the real Brotli-decode bug for hours, looking
+            # identical to a genuine IP block. Never let that happen again.
+            logger.warning("NSESession._warm() failed (non-fatal, retried later): %r", exc)
 
     def get_json(self, url, params=None, retries: int = 2):
         for attempt in range(retries):
@@ -124,10 +149,17 @@ class NSESession:
                 r = self.s.get(url, params=params, timeout=10)
                 if r.status_code == 200:
                     return r.json()
+                logger.warning("NSESession.get_json(%s) attempt %d/%d: HTTP %d",
+                                url, attempt + 1, retries, r.status_code)
                 if r.status_code in (401, 403):
                     self._warm()
-            except Exception:
-                pass
+            except Exception as exc:
+                # 2026-08-24: this used to be `except Exception: pass` -- a
+                # real Brotli-decode exception fired on EVERY attempt for
+                # hours, invisible, making it look exactly like NSE blocking
+                # the IP. Always log the real exception now.
+                logger.warning("NSESession.get_json(%s) attempt %d/%d raised: %r",
+                                url, attempt + 1, retries, exc)
             time.sleep(1.5 * (attempt + 1))
         return None
 
