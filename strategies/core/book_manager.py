@@ -105,16 +105,37 @@ class StrategyBookManager:
         """Best-effort lookup of a binding's trading_mode. Defaults to "live"
         on ANY failure or missing binding -- fail toward MORE protection
         (always liquidate), never silently skip a real position because a
-        lookup happened to fail."""
-        if self._db is None or not hasattr(self._db, "get_bindings_safe_sync"):
+        lookup happened to fail.
+
+        2026-08-24: confirmed live this DID default to "live" (real close
+        still fired) for a genuinely paper_route binding at least once --
+        root cause not yet identified. Every branch now logs explicitly so
+        the next occurrence shows exactly which path was taken, instead of
+        defaulting silently the way the earlier NSESession/backfill bugs
+        did for hours before anyone could tell what was actually happening."""
+        if self._db is None:
+            logger.warning("%s: _binding_trading_mode(%s/%s): self._db is None -- defaulting to live.",
+                            self.__class__.__name__, client_id, binding_id)
+            return "live"
+        if not hasattr(self._db, "get_bindings_safe_sync"):
+            logger.warning("%s: _binding_trading_mode(%s/%s): self._db has no get_bindings_safe_sync "
+                            "(type=%s) -- defaulting to live.",
+                            self.__class__.__name__, client_id, binding_id, type(self._db).__name__)
             return "live"
         try:
             bindings = await asyncio.to_thread(self._db.get_bindings_safe_sync, client_id)
+            ids_seen = [b.get("binding_id") for b in (bindings or [])]
             for b in bindings or []:
                 if b.get("binding_id") == binding_id:
-                    return str(b.get("trading_mode") or "live")
-        except Exception:
-            pass
+                    mode = str(b.get("trading_mode") or "live")
+                    logger.info("%s: _binding_trading_mode(%s/%s) = %r.",
+                                self.__class__.__name__, client_id, binding_id, mode)
+                    return mode
+            logger.warning("%s: _binding_trading_mode(%s/%s): binding_id not found among %r -- "
+                            "defaulting to live.", self.__class__.__name__, client_id, binding_id, ids_seen)
+        except Exception as exc:
+            logger.warning("%s: _binding_trading_mode(%s/%s): lookup raised %r -- defaulting to live.",
+                            self.__class__.__name__, client_id, binding_id, exc)
         return "live"
 
     async def liquidate_all(self, scope: str = "FIRM_WIDE") -> None:
@@ -176,6 +197,12 @@ class StrategyBookManager:
                     logger.warning(
                         "%s: %s is trading_mode=%s -- skipping real close on graceful shutdown "
                         "(no real broker exposure to protect), book still stops normally.",
+                        self.__class__.__name__, key, mode,
+                    )
+                else:
+                    logger.warning(
+                        "%s: %s resolved trading_mode=%s (not paper/paper_route) -- "
+                        "WILL perform a real close on graceful shutdown.",
                         self.__class__.__name__, key, mode,
                     )
 
