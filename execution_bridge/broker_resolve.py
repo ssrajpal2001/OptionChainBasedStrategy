@@ -36,6 +36,7 @@ async def resolve_broker_or_alert(
     context: str = "",
     attempts: int = 3,
     delay_sec: float = 1.0,
+    client_db=None,
 ) -> Optional[object]:
     for attempt in range(attempts):
         broker = (router._brokers or {}).get(client_id, {}).get(binding_id)
@@ -44,6 +45,10 @@ async def resolve_broker_or_alert(
         if attempt < attempts - 1:
             await asyncio.sleep(delay_sec)
 
+    message = (
+        f"{strategy}: broker unavailable for {client_id}/{binding_id} — "
+        f"live order NOT sent ({context})"
+    )
     logger.critical(
         "%s: broker unavailable for %s/%s after %d attempt(s) — refusing to fake a live "
         "fill (%s). No order was sent to the broker.",
@@ -53,14 +58,20 @@ async def resolve_broker_or_alert(
         try:
             await bus.publish(Topic.SYSTEM_EVENT, {
                 "event": SysEvent.BROKER_UNAVAILABLE,
-                "message": (
-                    f"{strategy}: broker unavailable for {client_id}/{binding_id} — "
-                    f"live order NOT sent ({context})"
-                ),
+                "message": message,
                 "client_id": client_id,
                 "binding_id": binding_id,
                 "strategy": strategy,
             })
         except Exception:
             logger.exception("%s: failed to publish BROKER_UNAVAILABLE system event", strategy)
+    db = client_db or getattr(router, "_client_db", None) or getattr(router, "_db", None)
+    if db is not None:
+        try:
+            await db.record_client_event(
+                client_id=client_id, binding_id=binding_id, strategy_name=strategy,
+                severity="CRITICAL", source="broker", message=message,
+            )
+        except Exception:
+            logger.exception("%s: failed to persist client_event for broker-unavailable", strategy)
     return None

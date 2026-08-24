@@ -615,6 +615,7 @@ document.addEventListener('alpine:init', () => {
     oiWindow:     0,    // strikes ±ATM for the OI panel (0 = all pool strikes)
     oiWindowMsg:  '',
     events:       [],
+    adminEvents:  [],   // GET /api/admin/events — persisted broker/strategy error feed, admin-only
     istTime:      '--:--:--',
 
     /* ── Admin controls ─────────────────────────────────────────────── */
@@ -1240,7 +1241,7 @@ document.addEventListener('alpine:init', () => {
           if (this.screen === 'admin') { this.loadClientProfiles(); }
         }
       });
-      setInterval(() => { if (this.screen === 'admin') { this.loadTelemetry(); this.loadFeederStatus(); this.loadAuthAlerts(); } }, 10000);
+      setInterval(() => { if (this.screen === 'admin') { this.loadTelemetry(); this.loadFeederStatus(); this.loadAuthAlerts(); this.loadAdminEvents(); } }, 10000);
       setInterval(() => { if (this.screen === 'admin') this.loadIvMatrix(); }, 5000);
       setInterval(() => { if (this.screen === 'admin' && this.adminTab === 'dashboard') { this.loadStrategyRegistry(); } }, 5000);
       setInterval(() => { if (this.screen === 'admin' && this.adminTab === 'strategies') { this.loadStrategyRegistry(); } }, 5000);
@@ -1266,7 +1267,7 @@ document.addEventListener('alpine:init', () => {
       this.loadRedirectBase();
       this.loadAuthAlerts();
       this.loadRms();
-      setTimeout(() => { this.loadTelemetry(); this.loadIvMatrix(); }, 800);
+      setTimeout(() => { this.loadTelemetry(); this.loadIvMatrix(); this.loadAdminEvents(); }, 800);
       setTimeout(() => { this.loadStrategyRegistry(); }, 1200);
       setTimeout(() => { this.loadIndexConfig(this.adminSelectedIndex); }, 1500);
     },
@@ -1870,6 +1871,16 @@ document.addEventListener('alpine:init', () => {
       try {
         const r = await this._fetch('/api/admin/telemetry');
         if (r && r.ok) { const d = await r.json(); this.telemetry = d; }
+      } catch {}
+    },
+
+    /* ── Live per-client error/health feed (persisted, admin-only, polled — */
+    /* deliberately NOT sourced from the WS 'sys' broadcast, which currently */
+    /* reaches every connected client, not just admin) ─────────────────────*/
+    async loadAdminEvents() {
+      try {
+        const r = await this._fetch('/api/admin/events?limit=50');
+        if (r && r.ok) { const d = await r.json(); this.adminEvents = d.events || []; }
       } catch {}
     },
 
@@ -3859,6 +3870,34 @@ function amoTest() {
           </div>
         </div>
       </template>
+    </div>
+
+    <!-- Live Alerts — per-client broker/strategy error feed, admin-only, persisted -->
+    <div class="t-card rounded fade-up-2">
+      <div class="flex items-center justify-between px-4 py-2.5 border-b shrink-0" style="border-color:var(--t-border)">
+        <div class="sec-label">Live Alerts</div>
+        <span class="font-mono text-xs" style="color:var(--t-muted)" x-text="adminEvents.length + ' recent'"></span>
+      </div>
+      <div x-show="adminEvents.length === 0" class="font-mono text-xs py-5 px-4 text-center leading-relaxed" style="color:var(--t-muted)">
+        No broker/strategy errors recorded.
+      </div>
+      <div style="max-height:320px; overflow-y:auto">
+        <template x-for="ev in adminEvents" :key="ev.id">
+          <div class="flex items-start justify-between px-4 py-2 border-b last:border-b-0 gap-3" style="border-color:rgba(var(--t-border),0.5)">
+            <div class="min-w-0">
+              <div class="font-mono text-xs leading-tight" style="color:var(--t-bright)"
+                   x-text="ev.client_id + (ev.binding_id ? ' / ' + ev.binding_id : '') + (ev.strategy_name ? ' · ' + ev.strategy_name : '')"></div>
+              <div class="font-ui text-xs mt-0.5" style="color:var(--t-muted)" x-text="ev.message"></div>
+            </div>
+            <div class="flex flex-col items-end gap-1 shrink-0">
+              <span class="font-mono text-xs px-1.5 py-0.5 rounded"
+                    :style="`background:${ev.severity==='CRITICAL'?'rgba(var(--t-red-rgb),0.12)':'rgba(var(--t-amber-rgb),0.12)'};color:${ev.severity==='CRITICAL'?'var(--t-red)':'var(--t-amber)'}`"
+                    x-text="ev.severity"></span>
+              <span class="font-mono text-xs" style="color:var(--t-dim)" x-text="(ev.ts||'').slice(11,19)"></span>
+            </div>
+          </div>
+        </template>
+      </div>
     </div>
 
     <!-- Open Positions -->

@@ -1121,6 +1121,17 @@ class DashboardServer:
         async def api_broker_status(_: dict = Depends(_require_admin)):
             return {"ts": datetime.now(IST).isoformat(), "brokers": _srv._broker_summary()}
 
+        @app.get("/api/admin/events", tags=["Admin"])
+        async def api_admin_events(
+            client_id: str = "", limit: int = 50, _: dict = Depends(_require_admin),
+        ):
+            db = _srv._client_db
+            if db is None:
+                return {"events": []}
+            limit = max(1, min(limit, 500))
+            events = await asyncio.to_thread(db.get_client_events_sync, client_id, limit)
+            return {"events": events}
+
         # ── ADMIN — client lifecycle management ───────────────────────────────
 
         @app.post("/api/halt/{client_id}", tags=["Admin"])

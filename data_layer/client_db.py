@@ -219,6 +219,19 @@ CREATE TABLE IF NOT EXISTS password_resets (
     expires_at  TEXT    NOT NULL,
     used        INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS client_events (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_id      TEXT    NOT NULL,
+    binding_id     TEXT    NOT NULL DEFAULT '',
+    strategy_name  TEXT    NOT NULL DEFAULT '',
+    ts             TEXT    NOT NULL,
+    severity       TEXT    NOT NULL,   -- INFO | WARNING | CRITICAL
+    source         TEXT    NOT NULL,   -- broker | strategy
+    message        TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_client_events_client_ts ON client_events(client_id, ts);
+CREATE INDEX IF NOT EXISTS idx_client_events_ts         ON client_events(ts);
 """
 
 
@@ -943,6 +956,49 @@ class ClientDB:
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (key, value),
         )
+
+    # ── Client/broker/strategy events (admin monitoring) ──────────────────────────
+
+    async def record_client_event(
+        self,
+        client_id: str,
+        binding_id: str = "",
+        strategy_name: str = "",
+        severity: str = "WARNING",
+        source: str = "strategy",
+        message: str = "",
+    ) -> None:
+        """Persist one admin-visible event (broker or strategy error/notice)."""
+        now = datetime.now(IST).isoformat()
+        await asyncio.to_thread(
+            self._exec,
+            """INSERT INTO client_events
+               (client_id, binding_id, strategy_name, ts, severity, source, message)
+               VALUES (?,?,?,?,?,?,?)""",
+            (client_id, binding_id, strategy_name, now, severity, source, message),
+        )
+
+    def get_client_events_sync(
+        self, client_id: str = "", limit: int = 50
+    ) -> List[dict]:
+        """Most-recent-first event feed, optionally filtered to one client_id."""
+        con = sqlite3.connect(self._db_path)
+        con.row_factory = sqlite3.Row
+        try:
+            if client_id:
+                rows = con.execute(
+                    "SELECT * FROM client_events WHERE client_id = ? "
+                    "ORDER BY id DESC LIMIT ?",
+                    (client_id, limit),
+                ).fetchall()
+            else:
+                rows = con.execute(
+                    "SELECT * FROM client_events ORDER BY id DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            con.close()
 
     # ── Admin password (DB-stored, avoids server restart on change) ──────────────
 
