@@ -38,6 +38,7 @@ import asyncio
 import gzip
 import json
 import logging
+import threading
 from dataclasses import dataclass
 from datetime import date
 from typing import Optional
@@ -55,6 +56,18 @@ _UPSTOX_NSE_MASTER_URL = "https://assets.upstox.com/market-quote/instruments/exc
 # down entry latency for no benefit, since lot sizes don't change intraday).
 _lot_cache: dict = {}
 _lot_cache_loaded = False
+# 2026-08-24 CRITICAL fix, confirmed live: resolve_lot() runs via
+# asyncio.to_thread -- real OS threads, one per concurrently-firing signal.
+# _lot_cache_loaded used to be set True BEFORE the fetch even started, so
+# when multiple signals fired in the same batch (confirmed live: 5 at once
+# on a real bearish-regime day), the first thread claimed "loaded" and
+# started the slow fetch while the other threads saw loaded=True, skipped
+# fetching themselves, and read the still-EMPTY cache -- 4 of 5 stocks
+# failed lot resolution that were never actually unresolvable, just raced.
+# A real threading.Lock (not asyncio.Lock -- these are genuine OS threads
+# from the thread pool, not event-loop tasks) makes every concurrent caller
+# actually wait for the one real fetch to finish before reading the cache.
+_lot_cache_lock = threading.Lock()
 
 
 def _round_to_strike_step(price: float) -> float:
@@ -77,25 +90,25 @@ def _round_to_strike_step(price: float) -> float:
     return step
 
 
-def _load_upstox_lot_cache() -> None:
-    """Best-effort, one-shot fetch of Upstox's public NSE instrument master
-    to extract lot_size per F&O-stock underlying. Never raises -- a failure
-    here just means resolve_lot_and_step() falls through to the heuristic
-    strike step and a lot_size of 0 (caller must treat 0 as unresolvable and
-    skip the entry, never guess a lot size for real order quantity)."""
+def _load_upstox_lot_cache_locked() -> None:
+    """The actual fetch -- ONLY ever called while _lot_cache_lock is held
+    (see resolve_lot() below). Never raises -- a failure here just means
+    resolve_lot() returns 0 (caller must treat 0 as unresolvable and skip
+    the entry, never guess a lot size for real order quantity)."""
     global _lot_cache_loaded
-    _lot_cache_loaded = True
     try:
         from curl_cffi import requests as cc
     except ImportError:
         logger.warning("stock_resolve: curl_cffi not installed -- cannot fetch Upstox "
                         "instrument master for lot-size fallback.")
+        _lot_cache_loaded = True
         return
     try:
         r = cc.get(_UPSTOX_NSE_MASTER_URL, impersonate="chrome131", timeout=30)
         instruments = json.loads(gzip.decompress(r.content))
     except Exception as exc:
         logger.warning("stock_resolve: failed to fetch/parse Upstox NSE instrument master: %s", exc)
+        _lot_cache_loaded = True
         return
 
     lots: dict = {}
@@ -115,19 +128,34 @@ def _load_upstox_lot_cache() -> None:
         if underlying not in lots or ls < lots[underlying]:
             lots[underlying] = ls
     _lot_cache.update(lots)
+    _lot_cache_loaded = True
     logger.info("stock_resolve: Upstox instrument-master lot cache loaded (%d underlyings).", len(lots))
 
 
 def resolve_lot(stock_symbol: str) -> int:
     """Returns lot_size, or 0 if UNRESOLVABLE -- caller must skip the entry
     rather than guess a lot size for real order quantity. Blocking (network
-    on first miss) -- call via asyncio.to_thread() from async code."""
+    on first miss) -- call via asyncio.to_thread() from async code.
+
+    2026-08-24 CRITICAL fix, confirmed live: multiple signals firing in the
+    same batch (5 concurrent asyncio.to_thread calls, real OS threads) used
+    to race on _lot_cache_loaded -- the first thread set it True instantly
+    (before its own fetch even started) and every OTHER concurrent thread
+    read the flag as already-loaded and returned an empty cache lookup (0,
+    "unresolvable") for a stock that was never actually unresolvable, just
+    raced. The lock below makes every concurrent caller actually block
+    until the ONE real fetch (whichever thread wins the lock first) has
+    fully finished and populated the cache, instead of racing past it."""
     sym = stock_symbol.upper()
     if sym in FNO_STOCK_CONFIG:
         return fno_stock_lot(sym)
 
     if not _lot_cache_loaded:
-        _load_upstox_lot_cache()
+        with _lot_cache_lock:
+            # Re-check inside the lock -- another thread may have already
+            # completed the fetch while this one was waiting to acquire it.
+            if not _lot_cache_loaded:
+                _load_upstox_lot_cache_locked()
     return _lot_cache.get(sym, 0)
 
 

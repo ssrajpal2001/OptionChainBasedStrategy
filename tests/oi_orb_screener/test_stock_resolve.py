@@ -5,6 +5,8 @@ the screener shortlists on a given day (the fast FNO_STOCK_CONFIG path, the
 Upstox-master lot fallback, and resolve_contract's load-only-if-not-loaded
 behavior against the real InstrumentRegistry singleton).
 """
+import threading
+import time
 from datetime import date
 
 import pytest
@@ -47,11 +49,53 @@ def test_resolve_lot_fallback_triggers_one_shot_load(monkeypatch):
         stock_resolve._lot_cache_loaded = True
     monkeypatch.setattr(stock_resolve, "_lot_cache_loaded", False)
     monkeypatch.setattr(stock_resolve, "_lot_cache", {})
-    monkeypatch.setattr(stock_resolve, "_load_upstox_lot_cache", _fake_load)
+    monkeypatch.setattr(stock_resolve, "_load_upstox_lot_cache_locked", _fake_load)
 
     lot = stock_resolve.resolve_lot("MANAPPURAM")
     assert lot == 6900
     assert calls["n"] == 1
+
+
+def test_resolve_lot_concurrent_calls_do_not_race(monkeypatch):
+    """2026-08-24 CRITICAL fix, confirmed live: 5 signals firing in the same
+    batch (real OS threads via asyncio.to_thread) used to race on
+    _lot_cache_loaded -- the first thread claimed "loaded" before its own
+    fetch even started, so the other 4 threads read the still-empty cache
+    and got 0 ("could not resolve lot size") for stocks that were never
+    actually unresolvable. Drives real threading.Thread objects (not
+    asyncio -- the real bug is a thread race, not an event-loop one) at a
+    mocked SLOW fetch to force the overlap, and asserts every concurrent
+    caller gets the real resolved value, none of them 0."""
+    calls = {"n": 0}
+
+    def _slow_fake_load():
+        calls["n"] += 1
+        time.sleep(0.2)   # force genuine overlap with the other waiting threads
+        stock_resolve._lot_cache.update({
+            "BANKBARODA": 5307, "CROMPTON": 1000, "CANBK": 4875, "HAL": 150, "DIXON": 350,
+        })
+        stock_resolve._lot_cache_loaded = True
+
+    monkeypatch.setattr(stock_resolve, "_lot_cache_loaded", False)
+    monkeypatch.setattr(stock_resolve, "_lot_cache", {})
+    monkeypatch.setattr(stock_resolve, "_load_upstox_lot_cache_locked", _slow_fake_load)
+
+    symbols = ["BANKBARODA", "CROMPTON", "CANBK", "HAL", "DIXON"]
+    results: dict = {}
+
+    def _worker(sym):
+        results[sym] = stock_resolve.resolve_lot(sym)
+
+    threads = [threading.Thread(target=_worker, args=(s,)) for s in symbols]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+
+    assert calls["n"] == 1, "the slow fetch must only actually run ONCE, not once per racing thread"
+    assert results == {"BANKBARODA": 5307, "CROMPTON": 1000, "CANBK": 4875, "HAL": 150, "DIXON": 350}, (
+        "every concurrent caller must get the real resolved lot, none of them the raced 0"
+    )
 
 
 def test_resolve_strike_step_fallback_uses_price_band_heuristic():
