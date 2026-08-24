@@ -535,6 +535,23 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
     # ── monitoring (no dashboard UI wiring this pass) ───────────────────
 
     def monitoring_state(self) -> dict:
+        positions = {}
+        for sym, p in self._positions.items():
+            ltp = self._live_option_ltp.get(sym)
+            entry = p["entry_price"]
+            pnl = round((ltp - entry) * p["qty"], 2) if ltp is not None and entry else None
+            pnl_pct = round((ltp - entry) / entry * 100.0, 2) if ltp is not None and entry else None
+            opened_at = p.get("opened_at")
+            positions[sym] = {
+                "option_type": p["contract"].option_type,
+                "strike": p["contract"].strike,
+                "qty": p["qty"],
+                "entry_price": entry,
+                "live_ltp": ltp,
+                "pnl": pnl,
+                "pnl_pct": pnl_pct,
+                "opened_at": opened_at.isoformat() if hasattr(opened_at, "isoformat") else opened_at,
+            }
         return {
             "client_id": self._client_id,
             "binding_id": self._binding_id,
@@ -543,13 +560,5 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             "shortlist_pchange": self._shortlist_pchange,
             "regime": self._regime,
             "orb_frozen": self._orb_frozen,
-            "positions": {
-                sym: {
-                    "option_type": p["contract"].option_type,
-                    "strike": p["contract"].strike,
-                    "qty": p["qty"],
-                    "entry_price": p["entry_price"],
-                    "live_ltp": self._live_option_ltp.get(sym),
-                } for sym, p in self._positions.items()
-            },
+            "positions": positions,
         }

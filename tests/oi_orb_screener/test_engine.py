@@ -192,6 +192,43 @@ def test_multiple_concurrent_positions_tracked_independently():
     assert book._positions["SIEMENS"]["qty"] == 200
 
 
+def test_monitoring_state_computes_pnl_and_pct_per_position():
+    """2026-08-24, direct user request -- client-perspective UI review: the
+    panel showed entry/LTP side by side with no P&L, forcing the client to
+    do the math themselves. monitoring_state() now computes both ₹ P&L and
+    %% P&L per position, plus opened_at for a "time held" display."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    contract = _contract("MANAPPURAM", 365, "CE")
+    book._positions["MANAPPURAM"] = {
+        "contract": contract, "qty": 100, "entry_price": 10.0, "paper_mode": True,
+        "opened_at": datetime(2026, 8, 24, 13, 0, 0),
+    }
+    book._live_option_ltp["MANAPPURAM"] = 12.5
+
+    state = book.monitoring_state()
+    pos = state["positions"]["MANAPPURAM"]
+    assert pos["pnl"] == pytest.approx((12.5 - 10.0) * 100)
+    assert pos["pnl_pct"] == pytest.approx((12.5 - 10.0) / 10.0 * 100.0)
+    assert pos["opened_at"] == "2026-08-24T13:00:00"
+
+
+def test_monitoring_state_pnl_is_none_without_a_live_ltp_yet():
+    bus = _FakeBus()
+    book = _make_book(bus)
+    contract = _contract("MANAPPURAM", 365, "CE")
+    book._positions["MANAPPURAM"] = {
+        "contract": contract, "qty": 100, "entry_price": 10.0, "paper_mode": True,
+        "opened_at": datetime(2026, 8, 24, 13, 0, 0),
+    }
+    # no self._live_option_ltp entry yet
+
+    state = book.monitoring_state()
+    pos = state["positions"]["MANAPPURAM"]
+    assert pos["pnl"] is None
+    assert pos["pnl_pct"] is None
+
+
 @pytest.mark.asyncio
 async def test_eod_loop_closes_open_positions_at_squareoff_time():
     bus = _FakeBus()

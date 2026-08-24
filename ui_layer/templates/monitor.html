@@ -8412,15 +8412,32 @@ function amoTest() {
                             </span>
                           </div>
 
-                          <!-- Open positions (can be several at once) -->
+                          <!-- Open positions (can be several at once). No SL/target this pass
+                               (EOD-only exit) -- labeled explicitly rather than implying a
+                               normal managed position, since that's genuinely true here. -->
                           <template x-if="Object.keys(_bk.positions||{}).length>0">
                             <div class="mb-1.5 pb-1.5" style="border-bottom:1px solid var(--t-border)">
                               <template x-for="(p,sym) in (_bk.positions||{})" :key="sym">
-                                <div class="flex items-center justify-between mb-1">
-                                  <span style="color:var(--t-green);font-weight:600" x-text="'● '+sym+' '+p.option_type+' '+p.strike"></span>
-                                  <span style="color:var(--t-muted)" x-text="'entry '+fmt(p.entry_price)+' / LTP '+(p.live_ltp!=null?fmt(p.live_ltp):'—')"></span>
+                                <div class="mb-1.5 pb-1" :style="Object.keys(_bk.positions).indexOf(sym)<Object.keys(_bk.positions).length-1?'border-bottom:1px dashed var(--t-border)':''">
+                                  <div class="flex items-center justify-between mb-0.5">
+                                    <span class="px-1 py-0.5 rounded font-bold"
+                                          :style="p.option_type==='CE'?'background:rgba(16,185,129,0.15);color:var(--t-green)':'background:rgba(239,68,68,0.15);color:var(--t-red)'"
+                                          x-text="(p.option_type==='CE'?'▲ CALL ':'▼ PUT ')+sym+' '+p.strike"></span>
+                                    <span style="color:var(--t-dim);font-size:10px"
+                                          x-text="p.opened_at ? Math.max(0,Math.round((Date.now()-new Date(p.opened_at).getTime())/60000))+'m ago' : ''"></span>
+                                  </div>
+                                  <div class="flex justify-between">
+                                    <span style="color:var(--t-muted)">Entry / LTP · Qty</span>
+                                    <span x-text="fmt(p.entry_price)+' / '+(p.live_ltp!=null?fmt(p.live_ltp):'—')+' · '+p.qty"></span>
+                                  </div>
+                                  <div class="flex justify-between" x-show="p.pnl!=null">
+                                    <span style="color:var(--t-muted)">P&amp;L</span>
+                                    <span :style="p.pnl>=0?'color:var(--t-green)':'color:var(--t-red)'"
+                                          x-text="(p.pnl>=0?'+':'')+fmt(p.pnl)+' ('+(p.pnl_pct>=0?'+':'')+p.pnl_pct.toFixed(1)+'%)'"></span>
+                                  </div>
                                 </div>
                               </template>
+                              <div style="color:var(--t-dim);font-size:10px" class="text-right">EOD square-off only · no SL/target this pass</div>
                             </div>
                           </template>
 
