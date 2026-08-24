@@ -55,9 +55,23 @@ class _FakeBus:
             await q.put(event)
 
 
+# 2026-08-24 CRITICAL fix: this used to construct real OiOrbScreenerStrategy
+# instances with client_id="ssrajpal2001"/binding_id="SA5770" -- the real
+# production client/binding. Since the constructor opens a REAL rotating log
+# file at logs/clients/oiorb_{client}_{binding}_{date}.log (same path a live
+# run writes to), running this test suite wrote fabricated per-test fixture
+# data (fake fills, fake EOD/kill_switch closes) straight into the real log
+# the user was watching for genuine live signals -- confusing and easily
+# mistaken for real activity. Never reuse a real client_id/binding_id in a
+# test fixture that touches make_strategy_logger (or anything else that
+# opens a real file keyed by those IDs).
+_TEST_CLIENT_ID = "TESTCLIENT"
+_TEST_BINDING_ID = "TESTBINDING"
+
+
 def _make_book(bus) -> OiOrbScreenerStrategy:
     return OiOrbScreenerStrategy(
-        bus, cfg=None, client_id="ssrajpal2001", binding_id="SA5770",
+        bus, cfg=None, client_id=_TEST_CLIENT_ID, binding_id=_TEST_BINDING_ID,
         lot_multiplier=1, product_type="MIS", squareoff_time="15:15",
     )
 
@@ -127,7 +141,7 @@ async def test_on_fill_confirms_entry_and_tracks_position():
 
     book._on_fill(OiOrbFillEvent(
         action="BUY", underlying="SIEMENS", option_type="CE", strike=4050, fill_price=106.2,
-        qty=300, client_id="ssrajpal2001", binding_id="SA5770", event_id="EVT1", paper_mode=True,
+        qty=300, client_id=_TEST_CLIENT_ID, binding_id=_TEST_BINDING_ID, event_id="EVT1", paper_mode=True,
     ))
 
     assert "SIEMENS" in book._positions
@@ -147,7 +161,7 @@ def test_on_fill_entry_aborted_discards_pending():
 
     book._on_fill(OiOrbFillEvent(
         action="BUY", underlying="SIEMENS", option_type="CE", strike=4050, fill_price=0.0,
-        qty=300, client_id="ssrajpal2001", binding_id="SA5770", event_id="EVT1",
+        qty=300, client_id=_TEST_CLIENT_ID, binding_id=_TEST_BINDING_ID, event_id="EVT1",
         entry_aborted=True,
     ))
 
@@ -170,7 +184,7 @@ def test_multiple_concurrent_positions_tracked_independently():
                                      "entry_price": 10.0 + i, "reason": "orb_high_breakout"}
         book._on_fill(OiOrbFillEvent(
             action="BUY", underlying=sym, option_type="CE", strike=strike, fill_price=10.0 + i,
-            qty=100 * (i + 1), client_id="ssrajpal2001", binding_id="SA5770", event_id=eid,
+            qty=100 * (i + 1), client_id=_TEST_CLIENT_ID, binding_id=_TEST_BINDING_ID, event_id=eid,
         ))
 
     assert set(book._positions.keys()) == {"MANAPPURAM", "SIEMENS"}
