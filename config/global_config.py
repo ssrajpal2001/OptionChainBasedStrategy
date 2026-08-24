@@ -230,6 +230,14 @@ class Topic:
                                                       # strategy (same mandate as OI-Flow/Liquidity Sweep),
                                                       # own Topics, shares no runtime infra with any other
                                                       # strategy in this codebase.
+    OI_ORB_ORDER_REQUEST = "oi_orb_order_request"  # OI-Spurt + ORB screener strategy orders
+    OI_ORB_ORDER_FILL    = "oi_orb_order_fill"     # (2026-08-24) -- fully standalone strategy (same
+                                                      # mandate as OI-Flow/Liquidity Sweep/Liquidity Trap),
+                                                      # own Topics, shares no runtime infra with any other
+                                                      # strategy in this codebase. Ported from the standalone
+                                                      # Colab screener (colab/oi_orb_screener/); trades
+                                                      # individual F&O STOCKS (not NIFTY/SENSEX/BANKNIFTY),
+                                                      # a first for this codebase's live pipelines.
 
 
 # ─────────────────────────────────────────────────────────────────────────────

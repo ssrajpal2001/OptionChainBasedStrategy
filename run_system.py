@@ -694,6 +694,14 @@ async def _run_live(
         bus, router,
         log_dir=os.path.join(cfg.storage.log_dir, "trades"),
     )
+    # 2026-08-24: fully standalone bridge -- own Topics (OI_ORB_ORDER_REQUEST/
+    # FILL), shares no runtime state with any bridge above. Ported from the
+    # standalone Colab OI-Spurt+ORB screener as a connectivity/plumbing proof.
+    from execution_bridge.oi_orb_bridge import OiOrbExecutionBridge
+    oi_orb_bridge = OiOrbExecutionBridge(
+        bus, router,
+        log_dir=os.path.join(cfg.storage.log_dir, "trades"),
+    )
     # 2026-08-20: SellStraddle's EOD hedge-and-carry feature -- deliberately its own
     # standalone BUY-to-open/SELL-to-close bridge (own Topics, STRADDLE_HEDGE_ORDER_
     # REQUEST/FILL) rather than touching straddle_bridge.py above, which is hardcoded
@@ -790,6 +798,7 @@ async def _run_live(
                 oi_flow_manager=managers.get("oi_flow"),
                 liquidity_sweep_manager=managers.get("liquidity_sweep"),
                 liquidity_trap_manager=managers.get("liquidity_trap"),
+                oi_orb_manager=managers.get("oi_orb_screener"),
             )
         except ImportError as exc:
             logger.warning("Could not start dashboard (missing deps): %s", exc)
@@ -885,6 +894,7 @@ async def _run_live(
         asyncio.create_task(liquidity_sweep_bridge.run(), name="liquidity_sweep_bridge"),
         asyncio.create_task(straddle_hedge_bridge.run(), name="straddle_hedge_bridge"),
         asyncio.create_task(liquidity_trap_bridge.run(), name="liquidity_trap_bridge"),
+        asyncio.create_task(oi_orb_bridge.run(),        name="oi_orb_bridge"),
         asyncio.create_task(client_mgr.run(),           name="client_mgr"),
         asyncio.create_task(risk_mgr.run(),             name="risk_mgr"),
         asyncio.create_task(rebalancer.run(),           name="rebalancer"),
@@ -928,6 +938,7 @@ async def _run_live(
     liquidity_sweep_bridge.stop()
     straddle_hedge_bridge.stop()
     liquidity_trap_bridge.stop()
+    oi_orb_bridge.stop()
     await router.stop()
     await client_mgr.stop()
     await admin.stop()   # stops console + dashboard server + cancels dashboard task

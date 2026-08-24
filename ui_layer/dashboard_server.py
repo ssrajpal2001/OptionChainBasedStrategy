@@ -668,6 +668,7 @@ class DashboardServer:
         oi_flow_manager=None,  # OIFlowBookManager — OI-Flow Pre-Breakout books
         liquidity_sweep_manager=None,  # LiquiditySweepBookManager — Sweep+Displacement+FVG+Retest books
         liquidity_trap_manager=None,  # LiquidityTrapBookManager — 15m/5m/1m cascade + CHoCH + scale-in books
+        oi_orb_manager=None,  # OiOrbScreenerBookManager — OI-Spurt + ORB screener books (F&O stocks)
     ) -> None:
         self._bus = bus
         self._cfg = cfg
@@ -687,6 +688,7 @@ class DashboardServer:
         self._oi_flow_manager = oi_flow_manager
         self._liquidity_sweep_manager = liquidity_sweep_manager
         self._liquidity_trap_manager = liquidity_trap_manager
+        self._oi_orb_manager = oi_orb_manager
         self._fno_monitor = None          # set via set_fno_monitor()
         self._ws_bridge = WsBridge(bus, cfg=cfg)
         self._uvicorn_server = None
@@ -6040,6 +6042,7 @@ pm2 save
         self._register_fvg_routes(app)
         self._register_oi_flow_routes(app)
         self._register_liquidity_sweep_routes(app)
+        self._register_oi_orb_routes(app)
         self._register_liquidity_trap_routes(app)
         return app
 
@@ -6362,6 +6365,34 @@ pm2 save
                         getattr(b, "_underlying", "?"),
                     )
             result.sort(key=lambda r: (0 if r.get("position") else 1, r.get("underlying", "")))
+            return {"ok": True, "books": result}
+
+    def _register_oi_orb_routes(self, app) -> None:
+        _srv = self
+
+        @app.get("/api/oiorb/status")
+        async def oi_orb_status():
+            """Same shape/intent as /api/oiflow/status above, adapted for a
+            book that can hold several concurrent stock positions at once:
+            today's shortlist, ORB regime/levels, and every open position
+            (keyed by stock symbol) with its live LTP, straight from
+            OiOrbScreenerStrategy.monitoring_state() (strategies/
+            oi_orb_screener/engine.py)."""
+            if _srv._oi_orb_manager is None:
+                return {"ok": True, "books": []}
+            books = getattr(_srv._oi_orb_manager, "books", [])
+            result = []
+            for b in books:
+                if not hasattr(b, "monitoring_state"):
+                    continue
+                try:
+                    result.append(b.monitoring_state())
+                except Exception:
+                    logger.exception(
+                        "oi_orb_status: monitoring_state() raised for %s/%s -- dropped from panel.",
+                        getattr(b, "_client_id", "?"), getattr(b, "_binding_id", "?"),
+                    )
+            result.sort(key=lambda r: (0 if r.get("positions") else 1, r.get("client_id", "")))
             return {"ok": True, "books": result}
 
     def _register_liquidity_trap_routes(self, app) -> None:

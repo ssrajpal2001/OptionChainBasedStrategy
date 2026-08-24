@@ -17,6 +17,7 @@ from strategies.fvg import FVGBookManager
 from strategies.oi_flow import OIFlowBookManager
 from strategies.liquidity_sweep import LiquiditySweepBookManager
 from strategies.liquidity_trap import LiquidityTrapBookManager
+from strategies.oi_orb_screener import OiOrbScreenerBookManager
 
 
 STRATEGY_REGISTRY: Dict[str, Dict[str, Any]] = {
@@ -70,6 +71,19 @@ STRATEGY_REGISTRY: Dict[str, Dict[str, Any]] = {
     # backtest first -- scripts/liquidity_trap_backtest.py.
     "liquidity_trap": {
         "manager_class": LiquidityTrapBookManager,
+        "per_binding": True,
+    },
+    # 2026-08-24: fully standalone -- shares no runtime infra (Topics,
+    # events, bridge, book manager) with any other strategy above, same
+    # mandate as oi_flow/liquidity_sweep/liquidity_trap. See
+    # strategies/oi_orb_screener/__init__.py. Ported from the standalone
+    # Colab screener (colab/oi_orb_screener/) as a connectivity/plumbing
+    # proof (real paper_route order placement + live LTP subscription) --
+    # NO SL/target/risk-cap logic this pass, EOD square-off only. First
+    # strategy in this codebase's live pipeline to trade individual F&O
+    # STOCKS (chosen dynamically each day) rather than a fixed underlying.
+    "oi_orb_screener": {
+        "manager_class": OiOrbScreenerBookManager,
         "per_binding": True,
     },
 }

@@ -2,20 +2,23 @@
 
 Complete codebase reference for Claude Code. Updated after each major phase.
 
-> **CURRENT FOCUS (2026-08-22):** This project is **ONLY** working on six strategies.
-> **Actually live-deployed and running right now: SellStraddle, OI-Flow, and Liquidity
-> Trap.** D1 Trap FnO/Index, FVG, and Liquidity Sweep are built but not part of the
-> current live rotation (see each one's own status below).
+> **CURRENT FOCUS (2026-08-24):** This project's core work is six strategies, **plus one
+> explicit exception added 2026-08-24 (see #7 below)**. **Actually live-deployed and
+> running right now: SellStraddle, OI-Flow, and Liquidity Trap.** D1 Trap FnO/Index, FVG,
+> and Liquidity Sweep are built but not part of the current live rotation (see each one's
+> own status below). OI-ORB Screener (#7) is built, tested, NOT yet deployed — see its
+> own section.
 > 1. **SellStraddle** — theta-decay option seller (mature, live in production)
 > 2. **D1 Trap FnO/Index** — zone-based option buyer (built, not in the current live rotation — see "D1 Trap FnO / Index" section below)
 > 3. **FVG (Fair Value Gap)** — Smart Money Concepts option buyer (new 2026-08-01/03, built for paper trading, not in the current live rotation; see "FVG Strategy" section below)
 > 4. **OI-Flow Pre-Breakout** — OI-divergence option buyer (new 2026-08-12, built as a **fully standalone 4th strategy pipeline** — own package, own Topics, own execution bridge, own book manager; shares zero runtime infrastructure with strategies 1-3. **Live-deployed** — see "OI-Flow Pre-Breakout Strategy" section below.)
 > 5. **Liquidity Sweep** — SMC/ICT sweep+displacement+FVG+retest option buyer (new 2026-08-19, built as a **fully standalone 5th strategy pipeline**, same zero-shared-infrastructure mandate as OI-Flow. Iteratively built and validated as a Pine Script indicator against real NIFTY chart data in TradingView BEFORE being ported to Python, per direct user instruction — not backtested in Python first. Not yet deployed even in paper mode — see "Liquidity Sweep Strategy" section below.)
 > 6. **Liquidity Trap** — ref-candle sweep/CHoCH option buyer (new 2026-08-20/21, built as a **fully standalone 6th strategy pipeline**, same zero-shared-infrastructure mandate. **Live-deployed** on NIFTY/SENSEX — see "Liquidity Trap Strategy" section below.)
+> 7. **OI-ORB Screener** — OI-Spurt + ORB breakout option buyer on individual F&O **STOCKS**, not an index (new 2026-08-24, built as a **fully standalone 7th strategy pipeline**, same zero-shared-infrastructure mandate. **Explicit exception to the "only six strategies" rule** — direct user instruction 2026-08-24 to port an already-working standalone Colab screener into the live app as a paper_route connectivity proof; EOD-square-off only, no SL/target yet. See "OI-ORB Screener Strategy" section below.)
 >
-> Do NOT suggest, implement, or discuss any other strategies. All new work belongs to
-> one of these six. When starting a new session, read the D1 Trap, FVG, OI-Flow,
-> Liquidity Sweep, and Liquidity Trap sections below first.
+> Do NOT suggest, implement, or discuss any other strategies beyond these seven. When
+> starting a new session, read the D1 Trap, FVG, OI-Flow, Liquidity Sweep, Liquidity
+> Trap, and OI-ORB Screener sections below first.
 
 ---
 
@@ -1165,6 +1168,118 @@ day using REST history, e.g. to sanity-check a broker-rejected order).
 alongside SellStraddle and OI-Flow (D1 Trap FnO/Index, FVG, and Liquidity
 Sweep are built but not part of the current live rotation — see each
 section above for their own status).
+
+---
+
+### OI-ORB Screener Strategy (`strategies/oi_orb_screener/`)
+
+Option **buyer** strategy trading individual F&O **STOCKS** (not an index) — a
+different composite signal from every other strategy above: NSE OI-Spurt list
+∩ F&O price-move filter → NIFTY-regime-gated Opening Range Breakout (ORB) entry.
+Ported 2026-08-24 from an already-working, independently-run **standalone Google
+Colab script** (`colab/oi_orb_screener/screener_nse_direct.py`, confirmed live
+against real NSE data the same day — see that file's own module docstring for
+the full pipeline/regime-table spec and connectivity history) into the live EC2
+app, per direct user instruction, as a **connectivity/plumbing proof**: does a
+fired signal genuinely place a real (`paper_route`) broker order and subscribe
+to that option's live LTP? Explicitly **NOT** the point of this pass to build
+SL/target/trailing/risk-cap logic — **EOD square-off is the ONLY exit** this
+pass. That comes in a follow-up before any real live capital sits behind this.
+
+**Fully standalone**, same zero-shared-runtime mandate as OI-Flow/Liquidity
+Sweep/Liquidity Trap — own package (`strategies/oi_orb_screener/`), own
+order/fill events, own Topics (`Topic.OI_ORB_ORDER_REQUEST`/`OI_ORB_ORDER_FILL`),
+own execution bridge (`execution_bridge/oi_orb_bridge.py`, modeled directly on
+`oi_flow_bridge.py`'s paper_route contract), own book manager.
+
+**First strategy in this codebase's live pipeline to trade a dynamically-chosen
+underlying** — every other strategy's underlying is fixed at deployment time
+(NIFTY/SENSEX/BANKNIFTY, or a stock list from D1 Trap FnO's WATCHLIST sentinel).
+Here, `screener.build_shortlist()` picks a fresh set of F&O stocks every trading
+day, so one book (per client/binding) can hold several concurrent positions —
+one per shortlisted stock, keyed by stock symbol, not capped to 1 (direct user
+answer, 2026-08-24). The deployment row itself stores the sentinel underlying
+`"SCREENER"` (mirrors D1 Trap FnO's own `WATCHLIST` sentinel precedent) —
+**`strategies.core.gate.can_trade()` is therefore gated on that sentinel, not
+the real stock symbol**, inside `oi_orb_bridge.py` (`_GATE_UNDERLYING =
+"SCREENER"`) — gating on the real per-order `underlying` would never match the
+one real deployment row and would silently block every entry; found and fixed
+before this ever ran for real, via the bridge's own test suite.
+
+**Mechanic** (`strategies/oi_orb_screener/screener.py`, a faithful synchronous
+port of the Colab script's pure logic — every NSE HTTP call wrapped in
+`asyncio.to_thread()` at the call sites in `engine.py`, never on the event
+loop): NSE OI-Spurt list (`avgInOI` field) ∩ F&O price-move filter (`NextApi/
+apiClient/marketWatchApi?functionName=getIndicesData&symbol=SECURITIES+IN+F%26O`
+— the correct, DevTools-confirmed endpoint; an earlier `equity-stock-indices`
+guess was confirmed dead 2026-08-24, see the Colab script's own module
+docstring for the full incident) → classify bullish/bearish/neutral off NIFTY's
+own 09:15→09:30 move → 15-min Opening Range per shortlisted stock → 09:30–10:30
+IST entry window, regime table gates which ORB breakout side is tradeable
+(Bullish day: ORB-High→CALL, ORB-Low→PUT | Bearish day: ORB-High ignored,
+ORB-Low→PUT | Neutral day: no trade). `REGISTRY.load_sync(stock)` (called only
+if not already loaded — this is the first book in this codebase to call it
+itself, since its underlyings aren't known at deployment time; confirmed via
+direct code inspection to work for arbitrary NSE F&O stocks even without an
+access_token, via the master-JSON fallback) resolves the real expiry/strike
+contract (`strategies/oi_orb_screener/stock_resolve.py`) — lot size/strike step
+come from the curated `FNO_STOCK_CONFIG` fast path first, else a small
+independent Upstox-instrument-master lot lookup + the same price-band strike-
+step heuristic the Colab script already carries (flagged there as unverified
+against a real broker chain — fine for a `paper_route` pass, not real capital).
+The option feed is subscribed **before** the order is placed (unlike every
+other strategy here, which subscribes only after a fill) — `engine.py` waits up
+to 5s for a real live tick so `entry_price` is a genuine LTP, not a guess; that
+same subscription is what fulfills the "track the LTP" requirement afterward.
+
+**Files**: `screener.py` (pure pipeline logic — NSESession, shortlist build, ORB
+bars, regime, `evaluate_breakout`), `stock_resolve.py` (contract/lot/step
+resolution), `events.py`, `engine.py` (`OiOrbScreenerStrategy` — one book per
+client/binding, `_daily_loop`/`_run_today_pipeline` mirrors the Colab script's
+`run_screener_and_monitor()` adapted to a non-blocking asyncio loop with day-
+rollover instead of a single run-then-exit script), `book_manager.py`.
+Execution: `execution_bridge/oi_orb_bridge.py`.
+
+**Strategy name in DB**: `oi_orb_screener`. Run with `--strategies
+oi_orb_screener`. No dashboard deploy form this pass (matches how OI-Flow/
+Liquidity Sweep both first shipped) — seed one `strategy_deployments` row via
+`scripts/seed_oi_orb_screener_deployment.py`, run **on the EC2 server itself**
+after `git pull` (`data/*.db` is gitignored — this repo's local dev copy of
+`data/clients.db` is a separate file from EC2's real one, confirmed via direct
+inspection during this build; a row inserted locally never reaches production).
+
+**Status (2026-08-24)**: built, unit-tested (`tests/oi_orb_screener/`,
+`tests/execution/test_oi_orb_bridge.py`), registered, wired into
+`run_system.py`. **Not yet deployed** — awaiting the EC2-side deployment-row
+seed + a `pm2 restart` (the same restart the user plans to also start
+`sell_straddle` in, per direct instruction not to restart the process
+repeatedly in one day). First live check: client `ssrajpal2001`, binding
+`SA5770` (Zerodha, already `trading_mode='paper_route'`). Before any further
+scale-up or SL/target work: confirm from real logs that (1) a signal actually
+resolves a contract and places a real paper_route order, and (2) the option's
+live LTP ticks are genuinely arriving — the exact two things this pass exists
+to prove.
+
+**Dashboard UI (2026-08-24)**: now selectable in the ADD STRATEGY deploy form
+(`monitor.html`) — underlying is a fixed, disabled `SCREENER` selector (the
+screener itself picks real stocks daily, not a per-deployment choice), same
+pattern as FnO Positional's `FNO_STOCKS` sentinel. A live panel on the
+deployment card (`GET /api/oiorb/status` → `OiOrbScreenerStrategy.
+monitoring_state()`) shows today's shortlist, NIFTY regime, frozen ORB levels
+per stock, and every currently OPEN position with its live LTP — this book can
+show several open positions at once (one per shortlisted stock), unlike every
+other strategy's single-position panel.
+
+**Temporary connectivity-test toggle (`strategy_params.ignore_time_windows`,
+default `False`)**: bypasses the real 09:10 start-gate, the 09:30 ORB-freeze
+time, and the 09:30–10:30 entry window entirely — ORB freezes immediately off
+whatever bars exist (the Yahoo backfill still covers the real elapsed 09:15–
+09:30 session regardless of what time the book actually starts), so the whole
+pipeline can be verified end-to-end outside the real window (e.g. right after
+an afternoon deploy) without waiting for the next morning. **Must be turned
+back to `False`** (or simply left unset) once connectivity is confirmed — real
+trading days should always run under the genuine ORB/regime timing this
+strategy was actually designed around.
 
 ---
 
