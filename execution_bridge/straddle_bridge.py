@@ -875,6 +875,18 @@ class StraddleExecutionBridge:
         # → MARKET. Both legs execute CONCURRENTLY so neither sits half-on while the other is worked
         # (minimises naked-leg risk during a chase). Position is booked from the REAL fill, not LTP.
         _use_limit = (order_exchange(ev.underlying) == "DELTA")
+        # 2026-08-25: a real gurmeet/Zerodha order was observed on the broker's own order book as
+        # LIMIT instead of the expected MARKET, but the app-side log needed to correlate it had
+        # already been flushed by the time this was investigated -- no code path was found that
+        # should produce LIMIT for NIFTY (order_exchange("NIFTY")=="NFO" != "DELTA"), so the root
+        # cause is still open. This one line makes the actual per-order decision unambiguous and
+        # permanent in the log going forward, so a recurrence can be confirmed in seconds instead
+        # of lost to a routine log flush/rotation.
+        logger.info(
+            "StraddleBridge: %s %s exchange=%s -> use_limit=%s (order_type will be %s)",
+            ev.action, ev.underlying, order_exchange(ev.underlying), _use_limit,
+            "LIMIT-chase" if _use_limit else "MARKET",
+        )
 
         # An EXIT must get flat promptly → faster mid-then-market executor; ENTRY tries the mid harder.
         _ex = self._exit_executor if ev.action == "EXIT" else self._executor
