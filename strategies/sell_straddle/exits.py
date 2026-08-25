@@ -1340,13 +1340,26 @@ class ExitMixin:
                         _ce_pnl = float(pos.ce_leg.entry_price) - float(getattr(pos.ce_leg, "ltp", 0.0) or 0.0)
                         _pe_pnl = float(pos.pe_leg.entry_price) - float(getattr(pos.pe_leg, "ltp", 0.0) or 0.0)
                         _less_burning = "CE" if _ce_pnl >= _pe_pnl else "PE"
-                        self._clog.info(
-                            "SellStraddle[%s]: VWAP RISE — rise=%.2f%% curr=%.2f low=%.2f → "
-                            "single-side roll (CE pnl=%.2f PE pnl=%.2f)",
-                            self._underlying, rise_pct, curr_vwap, pos.session_min_vwap,
-                            _ce_pnl, _pe_pnl,
-                        )
-                        if not self._defer_exit("vwap_rise", now):
+                        # 2026-08-25 fix (user request, after reviewing a real log): the condition
+                        # can stay continuously true for the whole ~55s a 1-min defer window is
+                        # open (VWAP sitting >=threshold above its session low across many ticks),
+                        # and this used to log unconditionally on EVERY tick -- hundreds of
+                        # near-identical lines a fraction of a second apart, for a roll that only
+                        # ever actually executes once at the boundary. _defer_exit already tracks
+                        # this exact transition internally (_exit_pending_reason); reuse it here so
+                        # this line logs at most twice per cycle -- once on first detection, once
+                        # when it actually executes -- matching how many times a roll genuinely
+                        # happens, not how many ticks the condition was true for.
+                        _was_pending = getattr(self, "_exit_pending_reason", None) == "vwap_rise"
+                        _execute_now = self._defer_exit("vwap_rise", now)
+                        if _execute_now or not _was_pending:
+                            self._clog.info(
+                                "SellStraddle[%s]: VWAP RISE — rise=%.2f%% curr=%.2f low=%.2f → "
+                                "single-side roll (CE pnl=%.2f PE pnl=%.2f)",
+                                self._underlying, rise_pct, curr_vwap, pos.session_min_vwap,
+                                _ce_pnl, _pe_pnl,
+                            )
+                        if not _execute_now:
                             return
                         await self._single_side_roll(now, "vwap_rise_roll")
                         return
