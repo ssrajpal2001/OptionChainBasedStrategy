@@ -637,10 +637,85 @@ class ExitMixin:
             pos.is_hedged_positional = False
         self._persist()
 
+    async def _hedge_or_roll_if_eligible(self, pos: "StraddlePosition", now: datetime) -> bool:
+        """Shared hedge/roll eligibility + dispatch, factored out of
+        _eod_close_or_hedge (2026-08-25) so the SAME decision can also run
+        earlier via _maybe_prehedge (the pre-squareoff precheck) without
+        duplicating the T-1/roll/hedge branching. Only ever called on a
+        NOT-YET-hedged position (pos.is_hedged_positional is False) -- the
+        already-hedged/T-1-roll branch stays in _eod_close_or_hedge, since
+        that one is specific to a position that's already carrying a hedge
+        from a prior day. Returns True if a hedge or roll was started
+        (caller must not also close)."""
+        if not (getattr(self, "_hedge_carry_enabled", False) and self._cumulative_hedge_pnl(pos) < 0):
+            return False
+        if self._is_t1_from_expiry(pos, now):
+            logger.info(
+                "SellStraddle[%s]: HEDGE ROLL (T-1) — cumulative loss at EOD on the "
+                "expiring week, rolling straight to next week instead of hedging a "
+                "contract that expires tomorrow.", self._underlying,
+            )
+            self._clog.info(
+                "HEDGE ROLL (T-1) — cumulative loss at EOD on the expiring week, rolling "
+                "straight to next week instead of hedging a contract that expires tomorrow."
+            )
+            await self._start_hedge_roll(pos, now, "t1_new_hedge_roll")
+            return True
+        hedged = await self._try_build_hedge(pos, now)
+        if hedged:
+            self._stop_for_day = True
+            return True
+        # Hedge couldn't be built -- caller falls through to a normal close.
+        return False
+
+    _HEDGE_PRECHECK_LEAD_MIN = 1
+
+    def _hedge_precheck_time(self, now: datetime) -> bool:
+        """2026-08-25, direct user suggestion: evaluate the hedge-and-carry
+        decision _HEDGE_PRECHECK_LEAD_MIN minutes BEFORE the hard EOD
+        deadline (self._force_exit), not exactly at it. Building a hedge
+        takes up to ~30s (two sequential order-confirm waits); running that
+        decision only at the exact squareoff instant left a window where a
+        separate EOD trigger could independently close the sold legs while
+        the hedge was still mid-flight (real 2026-08-25 incident -- see
+        _check_exits' own comment). True only in the window
+        [force_exit - lead, force_exit) -- once _past_squareoff(now) is
+        itself true this returns False, so it never re-fires after the
+        real deadline has already passed."""
+        if self._is_crypto:
+            return False  # crypto force-exit/hedge semantics not in scope here
+        fe_total = self._force_exit.hour * 60 + self._force_exit.minute
+        now_total = now.hour * 60 + now.minute
+        return (fe_total - self._HEDGE_PRECHECK_LEAD_MIN) <= now_total < fe_total
+
+    async def _maybe_prehedge(self, pos: "StraddlePosition", now: datetime) -> None:
+        """Fire the hedge decision early (see _hedge_precheck_time). If a
+        hedge or roll is genuinely built here, _eod_close_or_hedge's own
+        is_hedged_positional branch at the real squareoff time will see it
+        already standing and simply leave it running -- the sold legs are
+        never touched by the real EOD close path at all. If hedging isn't
+        eligible/needed (feature off, cumulative P&L not negative, or the
+        hedge build itself fails), this is a no-op and the real squareoff
+        check later runs exactly as before."""
+        if pos.is_hedged_positional:
+            return
+        started = await self._hedge_or_roll_if_eligible(pos, now)
+        if started:
+            logger.info(
+                "SellStraddle[%s]: PRE-SQUAREOFF HEDGE — hedge/roll started %dmin ahead of "
+                "the %s deadline; real EOD squareoff will leave it carried.",
+                self._underlying, self._HEDGE_PRECHECK_LEAD_MIN, self._force_exit.strftime("%H:%M"),
+            )
+            self._clog.info(
+                "PRE-SQUAREOFF HEDGE — started %dmin ahead of %s squareoff",
+                self._HEDGE_PRECHECK_LEAD_MIN, self._force_exit.strftime("%H:%M"),
+            )
+
     async def _eod_close_or_hedge(self, pos: "StraddlePosition", now: datetime) -> None:
         """The EOD decision, in priority order (2026-08-20, user spec; T-1
         handling corrected 2026-08-24 per direct user spec):
-          1. Already hedged (carried from a prior day) -- if T-1 on ITS OWN
+          1. Already hedged (carried from a prior day, or from this same
+             session's own _maybe_prehedge precheck) -- if T-1 on ITS OWN
              sold legs' expiry, ROLL to next week's expiry instead of
              stopping the carry (NSE cash-settles the current week's
              contracts at expiry regardless of what this code does, so
@@ -650,11 +725,11 @@ class ExitMixin:
              cumulative-profit check (_check_hedge_cumulative_profit_close)
              is what closes it early.
           2. Not yet hedged, cumulative P&L (booked + running sold legs) is
-             negative, feature enabled -- hedge, regardless of how close to
-             expiry (T-1, T-2, or any other day -- user spec: this decision
-             no longer special-cases proximity to expiry). If it's T-1,
-             don't build a hedge against a contract expiring tomorrow --
-             roll straight onto next week's expiry instead.
+             negative, feature enabled -- hedge (see _hedge_or_roll_if_eligible),
+             regardless of how close to expiry (T-1, T-2, or any other day --
+             user spec: this decision no longer special-cases proximity to
+             expiry). If it's T-1, don't build a hedge against a contract
+             expiring tomorrow -- roll straight onto next week's expiry instead.
           3. Otherwise -- normal EOD close, exactly as before this feature existed.
         """
         if pos.is_hedged_positional:
@@ -672,24 +747,8 @@ class ExitMixin:
             # else: leave running -- tick-by-tick profit-close handles it.
             return
 
-        if getattr(self, "_hedge_carry_enabled", False) and self._cumulative_hedge_pnl(pos) < 0:
-            if self._is_t1_from_expiry(pos, now):
-                logger.info(
-                    "SellStraddle[%s]: HEDGE ROLL (T-1) — cumulative loss at EOD on the "
-                    "expiring week, rolling straight to next week instead of hedging a "
-                    "contract that expires tomorrow.", self._underlying,
-                )
-                self._clog.info(
-                    "HEDGE ROLL (T-1) — cumulative loss at EOD on the expiring week, rolling "
-                    "straight to next week instead of hedging a contract that expires tomorrow."
-                )
-                await self._start_hedge_roll(pos, now, "t1_new_hedge_roll")
-                return
-            hedged = await self._try_build_hedge(pos, now)
-            if hedged:
-                self._stop_for_day = True
-                return
-            # Hedge couldn't be built -- fall through to a normal close below.
+        if await self._hedge_or_roll_if_eligible(pos, now):
+            return
 
         logger.info("SellStraddle[%s]: EOD SQUAREOFF — time=%s", self._underlying, now.strftime("%H:%M"))
         await self._close_position("eod_squareoff")
@@ -896,9 +955,41 @@ class ExitMixin:
             )
 
         # 1. EOD FORCE SQUARE-OFF (2026-08-20: hedge-and-carry + T-1-from-expiry, user spec)
+        #
+        # Reentrancy guard (2026-08-25, real incident -- both sold legs closed via
+        # a SEPARATE candle-close EOD path while _try_build_hedge was still mid-flight
+        # from THIS path, orphaning the hedge leg with nothing left to protect).
+        # _tick_loop and _eod_backstop_loop are independent asyncio tasks that can
+        # both reach this point for the same still-"open" position -- pos.status
+        # only flips to "closing" once an actual close is dispatched, never while a
+        # hedge is merely being built (_try_build_hedge/_start_hedge_roll never touch
+        # pos.status), so without this flag a second task could start a duplicate
+        # hedge/close attempt on the same position while the first is still awaiting
+        # order confirmations (up to ~30s). Set synchronously, no await before it, so
+        # there's no window between the check and the set. The candle-close loop's
+        # own former direct-close copy of this check has been removed entirely --
+        # this is now the ONLY place that decides EOD hedge-or-close.
+        if getattr(self, "_eod_decision_in_progress", False):
+            return
+
+        if (not self._prehedge_attempted_today and not self._past_squareoff(now)
+                and self._hedge_precheck_time(now)):
+            self._prehedge_attempted_today = True
+            self._eod_decision_in_progress = True
+            try:
+                if self._position and self._position.status == "open":
+                    await self._maybe_prehedge(self._position, now)
+            finally:
+                self._eod_decision_in_progress = False
+            return
+
         if self._past_squareoff(now):
-            if self._position and self._position.status == "open":
-                await self._eod_close_or_hedge(self._position, now)
+            self._eod_decision_in_progress = True
+            try:
+                if self._position and self._position.status == "open":
+                    await self._eod_close_or_hedge(self._position, now)
+            finally:
+                self._eod_decision_in_progress = False
             return
 
         # A single-side roll is in flight (close fill awaited / open fill pending).

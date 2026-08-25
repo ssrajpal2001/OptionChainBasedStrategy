@@ -639,6 +639,134 @@ def test_reset_session_still_clears_position_when_not_hedged():
     assert s._position is None
 
 
+# ── 2026-08-25 real incident: dual EOD trigger race (candle-close vs tick
+# loop both independently deciding EOD, one bypassing the hedge decision
+# entirely) — pre-squareoff precheck + reentrancy guard ────────────────────
+
+def _disable_other_exits(s):
+    s._ltp_decay_enabled = False
+    s._tsl_enabled = False
+    s._vwap_rise_enabled = False
+    s._exit_rules = []
+    s._day_profit_target_pct = 0.0
+    s._day_loss_sl_pct = 0.0
+    s._ratio_threshold = 999.0
+    s._itm_pair_gate_enabled = False
+    s._day_low_exit_enabled = False
+
+
+def test_hedge_precheck_time_true_only_in_lead_window_before_force_exit():
+    s = _make()
+    s._force_exit = datetime.time(15, 20)
+    today = datetime.datetime.now(IST).date()
+    _at = lambda hh, mm: datetime.datetime.combine(today, datetime.time(hh, mm)).replace(tzinfo=IST)
+    # 1 minute before force_exit -- inside the precheck window.
+    assert s._hedge_precheck_time(_at(15, 19)) is True
+    # exactly at force_exit -- precheck window has closed (real squareoff owns this).
+    assert s._hedge_precheck_time(_at(15, 20)) is False
+    # well before -- not yet in the window.
+    assert s._hedge_precheck_time(_at(15, 0)) is False
+
+
+def test_check_exits_prehedge_builds_hedge_before_squareoff_deadline():
+    """The core fix for the 2026-08-25 incident: the hedge decision now runs
+    _HEDGE_PRECHECK_LEAD_MIN minutes BEFORE the hard squareoff deadline (here
+    simulated via _hedge_precheck_time directly, since real wall-clock time in
+    CI is not controllable), so by the time the real deadline hits, a hedge
+    (if eligible) is already standing and the real EOD close path leaves it
+    running instead of closing the sold legs out from under an in-flight
+    hedge build."""
+    async def run():
+        s = _make()
+        s._force_exit = datetime.time(23, 59)   # never past real EOD in this test
+        s._hedge_carry_enabled = True
+        _disable_other_exits(s)
+        s._hedge_precheck_time = lambda now: True
+        _stub_dispatch(s, {
+            ("BUY", "CE", 24500): _fill("BUY", "CE", 24500, 60.0),
+            ("BUY", "PE", 23500): _fill("BUY", "PE", 23500, 55.0),
+        })
+        closed = []
+        s._close_position = lambda reason: closed.append(reason) or asyncio.sleep(0)
+
+        await s._check_exits()
+
+        assert closed == []
+        assert s._position.is_hedged_positional is True
+        assert s._prehedge_attempted_today is True
+    asyncio.run(run())
+
+
+def test_check_exits_prehedge_only_fires_once_per_day():
+    async def run():
+        s = _make()
+        s._force_exit = datetime.time(23, 59)
+        s._hedge_carry_enabled = True
+        _disable_other_exits(s)
+        s._hedge_precheck_time = lambda now: True
+        s._prehedge_attempted_today = True   # already fired earlier this session
+        calls = _stub_dispatch(s, {})
+        closed = []
+        s._close_position = lambda reason: closed.append(reason) or asyncio.sleep(0)
+
+        await s._check_exits()
+
+        assert calls == []
+        assert closed == []
+        assert s._position.is_hedged_positional is False
+    asyncio.run(run())
+
+
+def test_check_exits_real_squareoff_leaves_prehedged_position_running():
+    """Once the precheck has already built the hedge, the real squareoff
+    tick (_past_squareoff true) must find is_hedged_positional already set
+    and leave it running -- never re-close the sold legs."""
+    async def run():
+        s = _make(expiry_offset_days=5)   # not T-1
+        _disable_other_exits(s)
+        _hedged(s)   # simulates a hedge already built by the precheck
+        s._prehedge_attempted_today = True
+        s._past_squareoff = lambda now: True
+        closed = []
+        s._close_position = lambda reason: closed.append(reason) or asyncio.sleep(0)
+        calls = _stub_dispatch(s, {})
+
+        await s._check_exits()
+
+        assert closed == []
+        assert calls == []
+        assert s._position.status == "open"
+        assert s._position.is_hedged_positional is True
+    asyncio.run(run())
+
+
+def test_check_exits_eod_decision_in_progress_guard_blocks_reentry():
+    """Simulates _eod_backstop_loop calling _check_exits() again for the same
+    position while a FIRST call (e.g. from _tick_loop) is still mid-hedge-build
+    -- the exact shape of the 2026-08-25 incident, just between the two
+    surviving loops instead of the now-removed candle-close duplicate. The
+    reentrancy guard must make the second call a pure no-op."""
+    async def run():
+        s = _make()
+        s._hedge_carry_enabled = True
+        _disable_other_exits(s)
+        s._past_squareoff = lambda now: True
+        s._eod_decision_in_progress = True   # simulates a first call already in flight
+        calls = _stub_dispatch(s, {
+            ("BUY", "CE", 24500): _fill("BUY", "CE", 24500, 60.0),
+            ("BUY", "PE", 23500): _fill("BUY", "PE", 23500, 55.0),
+        })
+        closed = []
+        s._close_position = lambda reason: closed.append(reason) or asyncio.sleep(0)
+
+        await s._check_exits()
+
+        assert calls == []
+        assert closed == []
+        assert s._position.status == "open"
+    asyncio.run(run())
+
+
 # ── _start_hedge_roll / _try_complete_hedge_roll ────────────────────────────
 
 def _auto_confirm_entries(s):

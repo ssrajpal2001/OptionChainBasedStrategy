@@ -153,6 +153,19 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         self._initial_net_credit: float = 0.0
         self._initial_entry_time_value: float = 0.0
         self._stop_for_day: bool = False
+        # 2026-08-25 fix (real incident -- see _eod_close_or_hedge / _check_exits):
+        # _eod_decision_in_progress is a synchronous reentrancy guard around the
+        # whole EOD hedge/close decision. _tick_loop and _eod_backstop_loop are
+        # two INDEPENDENT asyncio tasks that can both reach _check_exits() for the
+        # same still-"open" position while a hedge build (up to ~30s, two
+        # sequential order-confirm waits) from the OTHER task is still in flight --
+        # pos.status only flips to "closing" once an actual close is dispatched,
+        # never while a hedge is merely being built, so without this flag a second
+        # task could start a duplicate hedge attempt (or close) on the same
+        # position mid-build. _prehedge_attempted_today gates the new
+        # pre-squareoff hedge precheck (see _hedge_precheck_time) to once per day.
+        self._eod_decision_in_progress: bool = False
+        self._prehedge_attempted_today: bool = False
         # 2026-08-07: a live entry that reached the broker and was rejected/aborted
         # (insufficient funds, asymmetric fill, etc — entry_aborted, NOT
         # placement_failed which already stops-for-day on its own first
@@ -845,6 +858,8 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         self._initial_net_credit = 0.0
         self._initial_entry_time_value = 0.0
         self._stop_for_day = False
+        self._eod_decision_in_progress = False
+        self._prehedge_attempted_today = False
         self._consecutive_entry_rejections = 0
         self._session_min_straddle_frozen = None
         self._day_low_tracked_pair = None
@@ -1501,10 +1516,19 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
 
         self._append_chart_point(ev.timestamp)
 
-        if self._past_squareoff(now):
-            if self._position and self._position.status == "open":
-                await self._close_position("time_exit_eod")
-            return
+        # 2026-08-25 fix (real incident): this used to independently call
+        # await self._close_position("time_exit_eod") directly, right here, with
+        # zero awareness of the hedge-and-carry feature. _tick_loop (via
+        # _check_exits -> _eod_close_or_hedge) and _eod_backstop_loop already cover
+        # EOD squareoff -- ticks arrive continuously through market hours and the
+        # backstop loop re-checks every 5s independent of ticks, so this candle-close
+        # copy was pure redundant duplication, not a needed safety net. Because it
+        # called _close_position directly instead of going through
+        # _eod_close_or_hedge, it could (and on 2026-08-25 did) close the sold legs
+        # while _check_exits' own call to _try_build_hedge was still mid-flight on a
+        # DIFFERENT task, orphaning the hedge leg with no sold legs left to protect.
+        # Removed entirely rather than made hedge-aware here too -- EOD squareoff now
+        # has exactly one decision path (_check_exits), not two kept in sync by hand.
 
         for _k, _v in self._strike_prem.items():
             _a = _v.get("atp", 0.0)

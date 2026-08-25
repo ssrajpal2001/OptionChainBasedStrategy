@@ -75,8 +75,12 @@ and `timeframe == 1` (one clean base series), then `_on_candle` (sell_straddle.p
 5. **Previous-closed-ATP snapshot** (enables per-pair slope): for every leg in `_strike_prem`
    with a valid ATP, `_prev_atp_closed[leg] = atp`. Only overwrites on a valid ATP, so a missing
    tick never corrupts the next slope.
-6. **EOD force-exit**: if `now >= squareoff_time` and a position is open → `_close_position
-   ("time_exit_eod")` and return.
+6. **EOD force-exit removed here (2026-08-25 fix)**: `_on_candle` no longer makes its own EOD
+   decision — an earlier direct `_close_position("time_exit_eod")` call here raced with the
+   tick-driven `_check_exits()` path (which is hedge-aware) and, in a real live incident,
+   closed the sold legs while a hedge was still mid-build on the other path. EOD squareoff is
+   now decided in exactly one place: `_check_exits()`, reached via `_tick_loop` and the
+   `_eod_backstop_loop` 5s backstop — see exits.py's `_eod_close_or_hedge`/`_maybe_prehedge`.
 7. **Entry**: if no open position → `_try_entry(now)`.
 
 ---
