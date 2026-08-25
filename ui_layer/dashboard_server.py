@@ -3673,6 +3673,17 @@ class DashboardServer:
                    f"PE {old_pe:.2f}->{pos.pe_leg.entry_price:.2f}, "
                    f"credit {old_credit:.2f}->{pos.net_credit:.2f}")
             logger.warning("EditEntryPrice[%s/%s/%s]: %s", cid, binding_id, underlying, msg)
+            # Also log through the book's own per-underlying rotating log (logs/clients/
+            # ss_{underlying}_{client}_{binding}_{date}.log) -- the general `logger` above
+            # only reaches terminus-out.log, but every other trade-relevant event for this
+            # position already lives in the strategy's own log file, which is where an
+            # operator actually looks first.
+            _clog = getattr(book, "_clog", None)
+            if _clog is not None:
+                try:
+                    _clog.warning("EDIT ENTRY PRICE — %s", msg)
+                except Exception:
+                    pass
             if _srv._client_db is not None:
                 try:
                     await _srv._client_db.record_client_event(
