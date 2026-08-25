@@ -54,7 +54,10 @@ from typing import Dict, Optional, Set
 
 from config.global_config import IST, Topic
 from data_layer.base_feeder import OptionTick
+from data_layer.instrument_registry import REGISTRY
+from matrix_engine.option_matrix import ChainRow, ChainSnapshot, OptionMatrix
 from strategies.core.base_book import AbstractStrategyBook
+from strategies.oi_orb_screener import filters as oi_filters
 from strategies.oi_orb_screener import screener
 from strategies.oi_orb_screener import stock_resolve
 from strategies.oi_orb_screener import store
@@ -82,6 +85,54 @@ def _make_strategy_logger(client_id: str, binding_id: str) -> logging.Logger:
     from utils.logging_utils import make_strategy_logger
     date_str = datetime.now(IST).strftime("%Y%m%d")
     return make_strategy_logger(f"oiorb_{client_id}_{binding_id}_{date_str}", propagate=False)
+
+
+# 2026-08-25, direct user spec: each of the 5 additive filters gets its OWN
+# dedicated log file, so a scenario can be reviewed filter-by-filter
+# independently -- not mixed into the main oiorb_* log.
+_FILTER_NAMES = ("oi_wall", "distance_to_wall", "pcr", "volume_confirmation", "oi_roc")
+
+
+def _make_filter_logger(filter_name: str, client_id: str, binding_id: str) -> logging.Logger:
+    from utils.logging_utils import make_strategy_logger
+    date_str = datetime.now(IST).strftime("%Y%m%d")
+    return make_strategy_logger(f"oiorb_filter_{filter_name}_{client_id}_{binding_id}_{date_str}",
+                                 propagate=False)
+
+
+def _build_stock_chain(stock_symbol: str, spot: float, expiry: date, depth: int) -> Optional[OptionMatrix]:
+    """Construct an OptionMatrix chain tracker for a dynamically-chosen
+    STOCK (not an index) -- deliberately does NOT call OptionMatrix.
+    initialize(), which hardcodes cfg.exchange.strike_steps (index-only,
+    defaults to a flat 50pt step) and would generate garbage, non-existent
+    strikes for a stock trading well outside that grid (e.g. a ~Rs180
+    stock needs a ~2.5-5pt step, not 50). Uses this strategy's own already-
+    correct stock-aware step logic (stock_resolve.resolve_strike_step_for_
+    price, same function every real contract resolution in this strategy
+    already goes through) to build the rows dict directly, then hands the
+    resulting ChainSnapshot to a normal OptionMatrix instance so its
+    existing on_option_tick()/recompute()/snapshot() keep working exactly
+    as they already do for indices -- only the ATM/step/rows construction
+    is stock-aware and bespoke here."""
+    if spot <= 0 or expiry is None:
+        return None
+    step = stock_resolve.resolve_strike_step_for_price(stock_symbol, spot)
+    if step <= 0:
+        return None
+    # Match stock_resolve.resolve_contract()'s own int-cast convention exactly (strategies/
+    # oi_orb_screener/stock_resolve.py) -- real traded contracts, and therefore real incoming
+    # OptionTick.strike values, are always int-cast even for a non-integer step like 2.5.
+    # A float-keyed chain here would silently never match a single real tick.
+    atm_raw = round(spot / step) * step
+    rows = {}
+    for i in range(-depth, depth + 1):
+        strike = int(round(atm_raw + i * step))
+        rows[strike] = ChainRow(strike=strike)
+    atm = int(round(atm_raw))
+    mat = OptionMatrix(stock_symbol, None)   # cfg unused once _snap is set directly (see above)
+    mat._snap = ChainSnapshot(underlying=stock_symbol, spot=spot, atm_strike=atm,
+                               expiry=expiry, timestamp=datetime.now(IST), rows=rows)
+    return mat
 
 
 class OiOrbScreenerStrategy(AbstractStrategyBook):
@@ -118,6 +169,27 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         scan_start: str = "09:25",
         entry_window_start: str = "09:25",
         entry_window_end: str = "10:30",
+        # 2026-08-25, direct user spec: five additive, independently-
+        # toggleable filters (see filters.py's own module docstring for the
+        # real incident this addresses -- SAIL fired a CALL breakout right
+        # under a large Call-OI wall). Each *_enabled flag controls ONLY
+        # whether that filter's verdict can actually BLOCK a trade -- every
+        # filter always evaluates and logs to its own dedicated file
+        # regardless of enabled state, so all five can be compared against
+        # real outcomes before deciding which (if any) to promote to a real
+        # gate. Default OFF (log-only) until proven.
+        oi_wall_check_enabled: bool = False,
+        oi_wall_dominance_ratio: float = 1.5,
+        distance_to_wall_enabled: bool = False,
+        distance_to_wall_min_pct: float = 1.5,
+        pcr_gate_enabled: bool = False,
+        pcr_max_for_call: float = 1.2,
+        pcr_min_for_put: float = 0.8,
+        volume_confirmation_enabled: bool = False,
+        volume_confirmation_min_ratio: float = 1.5,
+        oi_roc_enabled: bool = False,
+        oi_roc_min_pct: float = 3.0,
+        oi_roc_lookback_sec: float = 300.0,
     ) -> None:
         super().__init__(bus, cfg, _UNDERLYING_SENTINEL, client_id, binding_id)
         self._strategy_name = "oi_orb_screener"
@@ -151,6 +223,25 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._screener_cfg["ENTRY_WINDOW_START"] = entry_window_start
         self._screener_cfg["ENTRY_WINDOW_END"] = entry_window_end
 
+        # ── 5 additive filters: config + one dedicated log file each ────
+        self._filters_cfg = {
+            "oi_wall_check_enabled": oi_wall_check_enabled,
+            "oi_wall_dominance_ratio": oi_wall_dominance_ratio,
+            "distance_to_wall_enabled": distance_to_wall_enabled,
+            "distance_to_wall_min_pct": distance_to_wall_min_pct,
+            "pcr_gate_enabled": pcr_gate_enabled,
+            "pcr_max_for_call": pcr_max_for_call,
+            "pcr_min_for_put": pcr_min_for_put,
+            "volume_confirmation_enabled": volume_confirmation_enabled,
+            "volume_confirmation_min_ratio": volume_confirmation_min_ratio,
+            "oi_roc_enabled": oi_roc_enabled,
+            "oi_roc_min_pct": oi_roc_min_pct,
+            "oi_roc_lookback_sec": oi_roc_lookback_sec,
+        }
+        self._flog = {
+            name: _make_filter_logger(name, client_id, binding_id) for name in _FILTER_NAMES
+        }
+
         self._clog = _make_strategy_logger(client_id, binding_id)
 
         # ── daily scan/ORB state ────────────────────────────────────────
@@ -175,6 +266,15 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         # position, so the exit check runs once per COMPLETED candle, not
         # once per poll (which could still be mid-candle).
         self._last_sma_check_key: Dict[str, str] = {}
+
+        # ── 5-filter tracking state, keyed by stock symbol ──────────────
+        self._stock_chains: Dict[str, OptionMatrix] = {}          # chain tracker (OI-wall/distance/PCR)
+        self._chain_subscribed: Dict[str, list] = {}               # upstox_keys already subscribed for this stock's chain
+        self._volume_cum_last: Dict[str, float] = {}                # last CUMULATIVE totalTradedVolume reading
+        self._volume_recent_delta: Dict[str, float] = {}            # most recent poll-to-poll delta
+        self._volume_history: Dict[str, list] = {}                  # rolling deltas, for a trailing average
+        self._oi_history: Dict[str, list] = {}                      # [(unix_ts, oi_spurt_pct), ...] for OI ROC
+        self._oi_history_last_poll_ts: float = 0.0                  # throttle: don't re-hit the OI-Spurt endpoint every cycle
 
         # ── contract/feed/position state, keyed by stock symbol ────────
         self._pending_contracts: Dict[str, "stock_resolve.ResolvedContract"] = {}
@@ -206,6 +306,13 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._trough_since_orb = {}
         self._rejected = set()
         self._last_sma_check_key = {}
+        self._stock_chains = {}
+        self._chain_subscribed = {}
+        self._volume_cum_last = {}
+        self._volume_recent_delta = {}
+        self._volume_history = {}
+        self._oi_history = {}
+        self._oi_history_last_poll_ts = 0.0
         self._clog.info("OiOrb[%s/%s]: session reset for new trading day.",
                          self._client_id, self._binding_id)
 
@@ -369,6 +476,24 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             })
         await asyncio.to_thread(store.record_shortlist, self._client_id, self._binding_id, shortlist_rows)
 
+        # 2026-08-25: build a live option-chain tracker for each shortlisted
+        # stock, regardless of whether any of the 3 chain-dependent filters
+        # (oi_wall/distance_to_wall/pcr) are currently enabled as a real
+        # gate -- all 5 filters must have real data to compare, per direct
+        # user spec ("run parallel... own log file... compare tomorrow").
+        # Best-effort per stock: a failure here must never abort the whole
+        # day's pipeline, it just leaves that stock's chain-dependent
+        # filters reporting "unavailable" (which never blocks on its own).
+        for sym in self._shortlist_symbols:
+            try:
+                row = sl_indexed.loc[sym] if sym in sl_indexed.index else None
+                spot = float(row["lastPrice"]) if row is not None and "lastPrice" in shortlist.columns else 0.0
+                await self._ensure_chain_subscription(sym, spot)
+            except Exception:
+                self._clog.exception("OiOrb[%s/%s]: chain subscription setup failed for %s "
+                                      "(chain-dependent filters will report unavailable for it).",
+                                      self._client_id, self._binding_id, sym)
+
         await asyncio.to_thread(screener.backfill_orb_from_yahoo, self._bars, self._shortlist_symbols, cfg)
 
         start_time = datetime.now(IST)
@@ -392,6 +517,26 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                     continue
                 ltp = float(live.loc[sym, "lastPrice"])
                 self._bars.on_quote(sym, ltp, now)
+
+                # Volume-confirmation filter: totalTradedVolume is a CUMULATIVE session
+                # total (same gotcha OI-Flow's own BarAccumulator already handles for
+                # option volume) -- track the poll-to-poll DELTA, not the raw number,
+                # and keep a short rolling history for a trailing average.
+                if "totalTradedVolume" in live.columns:
+                    try:
+                        cum_vol = float(live.loc[sym, "totalTradedVolume"])
+                        last_cum = self._volume_cum_last.get(sym)
+                        if last_cum is not None and cum_vol >= last_cum:
+                            delta = cum_vol - last_cum
+                            self._volume_recent_delta[sym] = delta
+                            hist = self._volume_history.setdefault(sym, [])
+                            hist.append(delta)
+                            if len(hist) > 30:
+                                del hist[:-30]
+                        self._volume_cum_last[sym] = cum_vol
+                    except Exception:
+                        pass
+
                 # "50% rejection rule" tracking -- only meaningful once the
                 # ORB level actually exists to measure a push beyond.
                 orb_lvl = self._orb_frozen.get(sym)
@@ -427,6 +572,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                             trigger_price=ltp, orb_high=orb_high, orb_low=orb_low)
 
             await self._check_sma_exits(now, live)
+            await self._maybe_poll_oi_history(now)
 
             if self._regime is None and (now_key >= cfg["ORB_END"] or cfg.get("IGNORE_TIME_WINDOWS")):
                 try:
@@ -475,7 +621,13 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                             store.log_signal_event, self._client_id, self._binding_id, sig.symbol,
                             "signal_fired", side=sig.side, detail=sig.reason,
                             trigger_price=sig.trigger_price, orb_high=sig.orb_high, orb_low=sig.orb_low)
-                        asyncio.create_task(self._handle_signal(sig))
+                        if self._evaluate_additive_filters(sig):
+                            asyncio.create_task(self._handle_signal(sig))
+                        else:
+                            self._clog.info(
+                                "OiOrb[%s/%s]: %s %s signal BLOCKED by an enabled additive filter -- "
+                                "see the individual oiorb_filter_* logs for which one and why.",
+                                self._client_id, self._binding_id, sig.symbol, sig.side)
             elif (not cfg.get("IGNORE_TIME_WINDOWS") and now_key >= cfg["ENTRY_WINDOW_END"]
                   and not self._entry_window_done_logged):
                 self._entry_window_done_logged = True
@@ -509,6 +661,73 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         return False
 
     # ── signal → contract resolution → order ────────────────────────────
+
+    def _evaluate_additive_filters(self, sig: "screener.Signal") -> bool:
+        """Evaluates all 5 additive filters (filters.py) for this fired
+        signal and logs each verdict to its OWN dedicated log file,
+        regardless of that filter's own enabled state, per direct user
+        spec ("run parallel... own log file... compare tomorrow"). Only an
+        ENABLED filter's block verdict actually stops the trade -- returns
+        True iff no enabled filter objects. entry_strike is an early
+        approximation (the raw OTM-offset target, matching _handle_signal's
+        own formula) since the real rounded contract strike isn't resolved
+        until after this point."""
+        fcfg = self._filters_cfg
+        opt_type = "CE" if sig.side == "CALL" else "PE"
+        otm_frac = self._screener_cfg.get("STRIKE_OTM_PCT", 2.0) / 100.0
+        entry_strike = sig.trigger_price * (1 + otm_frac if opt_type == "CE" else 1 - otm_frac)
+
+        snap = None
+        mat = self._stock_chains.get(sig.symbol)
+        if mat is not None:
+            try:
+                snap = mat.snapshot()
+            except Exception:
+                snap = None
+
+        verdicts = [
+            oi_filters.evaluate_oi_wall(snap, sig.side, entry_strike,
+                                         dominance_ratio=fcfg["oi_wall_dominance_ratio"]),
+            oi_filters.evaluate_distance_to_wall(snap, sig.side, entry_strike,
+                                                  min_distance_pct=fcfg["distance_to_wall_min_pct"]),
+            oi_filters.evaluate_pcr(snap.pcr if snap is not None else None, sig.side,
+                                     max_pcr_for_call=fcfg["pcr_max_for_call"],
+                                     min_pcr_for_put=fcfg["pcr_min_for_put"]),
+            oi_filters.evaluate_volume_confirmation(
+                self._volume_recent_delta.get(sig.symbol),
+                (sum(self._volume_history[sig.symbol][:-1]) / len(self._volume_history[sig.symbol][:-1])
+                 if len(self._volume_history.get(sig.symbol, [])) > 1 else None),
+                min_ratio=fcfg["volume_confirmation_min_ratio"]),
+            oi_filters.evaluate_oi_roc(self._oi_history.get(sig.symbol, []),
+                                        min_roc_pct=fcfg["oi_roc_min_pct"],
+                                        lookback_sec=fcfg["oi_roc_lookback_sec"],
+                                        now_ts=datetime.now(IST).timestamp()),
+        ]
+
+        # FilterVerdict.name ("oi_wall", "pcr", ...) does not always match its own
+        # enable-flag key verbatim (oi_wall_check_enabled, pcr_gate_enabled) -- an
+        # explicit map is safer than string concatenation, which silently produced
+        # a nonexistent config key and let a genuinely-blocking verdict never block.
+        _enable_key = {
+            "oi_wall": "oi_wall_check_enabled",
+            "distance_to_wall": "distance_to_wall_enabled",
+            "pcr": "pcr_gate_enabled",
+            "volume_confirmation": "volume_confirmation_enabled",
+            "oi_roc": "oi_roc_enabled",
+        }
+        ok = True
+        for v in verdicts:
+            enabled = bool(fcfg.get(_enable_key[v.name], False))
+            blocked = v.blocks(enabled)
+            ok = ok and not blocked
+            self._flog[v.name].info(
+                "%s %s %s trigger=%.2f entry_strike~%.2f | available=%s passed=%s enabled=%s "
+                "-> %s | %s | %s",
+                sig.symbol, sig.side, "BLOCK" if blocked else ("PASS" if v.passed else "logged-only"),
+                sig.trigger_price, entry_strike, v.available, v.passed, enabled,
+                "WOULD BLOCK" if blocked else "no block", v.reason, v.numbers,
+            )
+        return ok
 
     async def _handle_signal(self, sig: "screener.Signal") -> None:
         if sig.symbol in self._positions or sig.symbol in self._pending_contracts:
@@ -615,6 +834,83 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                          self._client_id, self._binding_id, stock_symbol,
                          contract.option_type, contract.strike, key)
 
+    async def _ensure_chain_subscription(self, stock_symbol: str, spot: float) -> None:
+        """Widen the live feed subscription from 'just the one traded
+        contract' (the pre-existing behaviour) to a small ATM ± depth range
+        of BOTH CE and PE for this shortlisted stock, and build a chain
+        tracker for it -- feeds the 3 chain-dependent filters (oi_wall/
+        distance_to_wall/pcr). Idempotent per stock symbol. Best-effort:
+        any failure leaves that stock's chain-dependent filters simply
+        reporting "unavailable" (never a block on its own -- see
+        filters.py's FilterVerdict.blocks())."""
+        if spot <= 0 or stock_symbol in self._stock_chains:
+            return
+        if not REGISTRY.is_loaded(stock_symbol):
+            REGISTRY.load_sync(stock_symbol)
+        expiry = REGISTRY.get_active_expiry(stock_symbol)
+        if expiry is None:
+            self._clog.warning("OiOrb[%s/%s]: no active expiry for %s -- chain tracking unavailable.",
+                                self._client_id, self._binding_id, stock_symbol)
+            return
+        depth = int(getattr(self._cfg, "chain_depth", 4) or 4)
+        mat = _build_stock_chain(stock_symbol, spot, expiry, depth)
+        if mat is None:
+            return
+        self._stock_chains[stock_symbol] = mat
+
+        gf = getattr(self._bus, "_global_feeder", None)
+        if gf is None or not hasattr(gf, "subscribe_tokens"):
+            self._clog.warning("OiOrb[%s/%s]: no live GlobalFeeder available -- chain for %s built "
+                                "but cannot subscribe strikes.", self._client_id, self._binding_id, stock_symbol)
+            return
+        keys = []
+        for strike in mat.snapshot().strikes():
+            for opt_type in ("CE", "PE"):
+                try:
+                    k = REGISTRY.get_upstox_key(stock_symbol, expiry, strike, opt_type)
+                except Exception:
+                    k = None
+                if k:
+                    keys.append(k)
+        if keys:
+            asyncio.create_task(gf.subscribe_tokens(keys))
+        self._chain_subscribed[stock_symbol] = keys
+        self._clog.info("OiOrb[%s/%s]: chain tracking started for %s (ATM=%.2f depth=%d, %d contracts).",
+                         self._client_id, self._binding_id, stock_symbol,
+                         mat.snapshot().atm_strike, depth, len(keys))
+
+    async def _maybe_poll_oi_history(self, now: datetime) -> None:
+        """Feeds the OI rate-of-change filter -- ADDITIVE to the existing
+        static daily OI-Spurt% shortlist filter (screener.CONFIG's
+        OI_SPURT_MIN_PCT, completely unchanged), never a replacement.
+        Throttled deliberately: fetch_oi_spurts_nse() re-fetches ALL ~214
+        F&O symbols from NSE every call, so this must NOT run every
+        POLL_SECONDS cycle (confirmed live 2026-08-24: an aggressive NSE
+        polling pattern makes an Akamai throttle worse, see screener.py's
+        NSESession docstring) -- polls at most once every max(60s,
+        lookback/3) so a lookback window gets a few real samples without
+        hammering the endpoint."""
+        lookback = float(self._filters_cfg.get("oi_roc_lookback_sec", 300.0) or 300.0)
+        interval = max(60.0, lookback / 3.0)
+        now_ts = now.timestamp()
+        if now_ts - self._oi_history_last_poll_ts < interval:
+            return
+        self._oi_history_last_poll_ts = now_ts
+        try:
+            oi_spurts = await asyncio.to_thread(screener.fetch_oi_spurts_nse, self._nse)
+        except Exception as exc:
+            self._clog.debug("OiOrb[%s/%s]: OI-ROC history poll failed (non-fatal): %s",
+                              self._client_id, self._binding_id, exc)
+            return
+        by_symbol = oi_spurts.set_index("symbol")["oi_spurt_pct"].to_dict() if "symbol" in oi_spurts.columns else {}
+        for sym in self._shortlist_symbols:
+            if sym not in by_symbol:
+                continue
+            hist = self._oi_history.setdefault(sym, [])
+            hist.append((now_ts, float(by_symbol[sym])))
+            cutoff = now_ts - lookback * 3   # keep a bit more than one lookback window
+            self._oi_history[sym] = [(t, v) for t, v in hist if t >= cutoff]
+
     async def _option_tick_loop(self) -> None:
         q = self._loop_queues.get(Topic.OPTION_TICK)
         if q is None:
@@ -626,6 +922,19 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 continue
             except asyncio.CancelledError:
                 break
+
+            # Feed the chain tracker (OI-wall/distance/PCR filters) whenever this tick
+            # matches a strike we widened the subscription for -- independent of whether
+            # there's a pending/open TRADED contract for this stock at all.
+            mat = self._stock_chains.get(tick.underlying)
+            if mat is not None:
+                try:
+                    if mat.on_option_tick(tick):
+                        mat.recompute()
+                except Exception:
+                    self._clog.exception("OiOrb[%s/%s]: chain tick update failed for %s",
+                                          self._client_id, self._binding_id, tick.underlying)
+
             contract = self._pending_contracts.get(tick.underlying) or \
                 (self._positions.get(tick.underlying) or {}).get("contract")
             if contract is None:

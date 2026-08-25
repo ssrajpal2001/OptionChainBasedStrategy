@@ -299,6 +299,23 @@ try:
         scan_start:                str   = "09:25"
         entry_window_start:        str   = "09:25"
         entry_window_end:          str   = "10:30"
+        # 2026-08-25: five additive, independently-toggleable filters (see
+        # strategies/oi_orb_screener/filters.py). Each *_enabled flag only
+        # controls whether that filter can actually block a trade -- every
+        # filter always evaluates and logs to its own dedicated file
+        # regardless of enabled state.
+        oi_wall_check_enabled:      bool  = False
+        oi_wall_dominance_ratio:    float = 1.5
+        distance_to_wall_enabled:   bool  = False
+        distance_to_wall_min_pct:   float = 1.5
+        pcr_gate_enabled:           bool  = False
+        pcr_max_for_call:           float = 1.2
+        pcr_min_for_put:            float = 0.8
+        volume_confirmation_enabled: bool  = False
+        volume_confirmation_min_ratio: float = 1.5
+        oi_roc_enabled:             bool  = False
+        oi_roc_min_pct:             float = 3.0
+        oi_roc_lookback_sec:        float = 300.0
 
     class _ResetPasswordSchema(_PydanticBase):
         token:        str

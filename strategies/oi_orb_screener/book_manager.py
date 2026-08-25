@@ -53,13 +53,37 @@ _DEFAULT_PARAMS = {
     "scan_start": "09:25",
     "entry_window_start": "09:25",
     "entry_window_end": "10:30",
+    # 2026-08-25, direct user spec: five additive, independently-toggleable
+    # filters (see strategies/oi_orb_screener/filters.py's module docstring
+    # for the real incident -- a SAIL CALL breakout fired right under a
+    # large Call-OI wall). Each *_enabled flag ONLY controls whether that
+    # filter can actually block a trade -- every filter always evaluates
+    # and logs to its own dedicated file regardless. Default OFF (log-only)
+    # until real forward telemetry earns a promotion to a real gate.
+    "oi_wall_check_enabled": False,
+    "oi_wall_dominance_ratio": 1.5,
+    "distance_to_wall_enabled": False,
+    "distance_to_wall_min_pct": 1.5,
+    "pcr_gate_enabled": False,
+    "pcr_max_for_call": 1.2,
+    "pcr_min_for_put": 0.8,
+    "volume_confirmation_enabled": False,
+    "volume_confirmation_min_ratio": 1.5,
+    "oi_roc_enabled": False,
+    "oi_roc_min_pct": 3.0,
+    "oi_roc_lookback_sec": 300.0,
 }
 _FLOAT_KEYS = ("oi_spurt_min_pct", "price_move_min_pct", "stock_move_abort_pct",
                "nifty_bullish_pct", "nifty_bearish_pct", "rejection_min_rise_pct",
-               "rejection_retrace_fraction", "strike_otm_pct")
+               "rejection_retrace_fraction", "strike_otm_pct",
+               "oi_wall_dominance_ratio", "distance_to_wall_min_pct",
+               "pcr_max_for_call", "pcr_min_for_put", "volume_confirmation_min_ratio",
+               "oi_roc_min_pct", "oi_roc_lookback_sec")
 _INT_KEYS = ("top_n_per_side", "poll_seconds", "max_monitor_minutes",
              "sma_period", "sma_exit_consec_closes")
 _STR_KEYS = ("orb_start", "orb_end", "scan_start", "entry_window_start", "entry_window_end")
+_FILTER_BOOL_KEYS = ("oi_wall_check_enabled", "distance_to_wall_enabled", "pcr_gate_enabled",
+                      "volume_confirmation_enabled", "oi_roc_enabled")
 
 
 def _parse_params(raw: str) -> dict:
@@ -102,6 +126,8 @@ class OiOrbScreenerBookManager(StrategyBookManager):
                                                              _DEFAULT_PARAMS["regime_filter_enabled"]))
             cfg["ignore_time_windows"] = bool(params.get("ignore_time_windows",
                                                            _DEFAULT_PARAMS["ignore_time_windows"]))
+            for k in _FILTER_BOOL_KEYS:
+                cfg[k] = bool(params.get(k, _DEFAULT_PARAMS[k]))
             # Key on the sentinel underlying so this fits the base class's
             # generic (client_id, binding_id, underlying) Key shape without
             # a real per-stock underlying -- the screener itself decides
@@ -136,6 +162,18 @@ class OiOrbScreenerBookManager(StrategyBookManager):
             scan_start=value["scan_start"],
             entry_window_start=value["entry_window_start"],
             entry_window_end=value["entry_window_end"],
+            oi_wall_check_enabled=value["oi_wall_check_enabled"],
+            oi_wall_dominance_ratio=value["oi_wall_dominance_ratio"],
+            distance_to_wall_enabled=value["distance_to_wall_enabled"],
+            distance_to_wall_min_pct=value["distance_to_wall_min_pct"],
+            pcr_gate_enabled=value["pcr_gate_enabled"],
+            pcr_max_for_call=value["pcr_max_for_call"],
+            pcr_min_for_put=value["pcr_min_for_put"],
+            volume_confirmation_enabled=value["volume_confirmation_enabled"],
+            volume_confirmation_min_ratio=value["volume_confirmation_min_ratio"],
+            oi_roc_enabled=value["oi_roc_enabled"],
+            oi_roc_min_pct=value["oi_roc_min_pct"],
+            oi_roc_lookback_sec=value["oi_roc_lookback_sec"],
         )
         logger.info(
             "OiOrbScreenerBookManager: spawned %s/%s (lots=%d oi_spurt>=%.1f%% price_move>=%.1f%% "
@@ -183,6 +221,13 @@ class OiOrbScreenerBookManager(StrategyBookManager):
             or book._screener_cfg["SCAN_START"] != value["scan_start"]
             or book._screener_cfg["ENTRY_WINDOW_START"] != value["entry_window_start"]
             or book._screener_cfg["ENTRY_WINDOW_END"] != value["entry_window_end"]
+            or any(book._filters_cfg[k] != value[k] for k in (
+                "oi_wall_check_enabled", "oi_wall_dominance_ratio",
+                "distance_to_wall_enabled", "distance_to_wall_min_pct",
+                "pcr_gate_enabled", "pcr_max_for_call", "pcr_min_for_put",
+                "volume_confirmation_enabled", "volume_confirmation_min_ratio",
+                "oi_roc_enabled", "oi_roc_min_pct", "oi_roc_lookback_sec",
+            ))
         )
 
     def _log_spawned(self, key: tuple, value: dict) -> None:

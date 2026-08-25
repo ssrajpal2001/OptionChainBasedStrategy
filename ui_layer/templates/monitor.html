@@ -4604,6 +4604,64 @@ function amoTest() {
                 <input class="t-input font-mono text-xs" type="number" step="1" x-model.number="oiOrbConfig.sma_exit_consec_closes"/></div>
             </div>
 
+            <!-- ── EXPERIMENTAL FILTERS (2026-08-25) ──────────────────────────
+                 All 5 always evaluate + log to their OWN dedicated file
+                 (logs/clients/oiorb_filter_{name}_{client}_{binding}_{date}.log)
+                 regardless of the toggle below -- the toggle ONLY controls
+                 whether that filter's verdict actually blocks a trade.
+                 Default OFF everywhere: compare the logs across a real
+                 session before enabling any of these as a real gate. -->
+            <div class="grid grid-cols-4 gap-2 t-card rounded p-3" style="border:1px dashed rgba(var(--t-amber-rgb),0.35)">
+              <div class="col-span-4 flex items-center justify-between">
+                <span class="sec-label" style="color:var(--t-amber)">EXPERIMENTAL FILTERS (log-only until enabled)</span>
+                <span class="text-[10px]" style="color:var(--t-muted)">Each always logs to its own file — toggle only controls whether it blocks a trade</span>
+              </div>
+
+              <div class="flex items-center gap-2">
+                <input type="checkbox" x-model="oiOrbConfig.oi_wall_check_enabled"/>
+                <div class="sec-label">OI WALL CHECK</div>
+              </div>
+              <div><div class="sec-label mb-1">DOMINANCE RATIO</div>
+                <input class="t-input font-mono text-xs" type="number" step="0.1" x-model.number="oiOrbConfig.oi_wall_dominance_ratio"/></div>
+              <div class="col-span-2 text-[10px]" style="color:var(--t-muted)">Blocks if the nearest resistance-side OI strike is ≥ this many× the average of other tracked strikes.</div>
+
+              <div class="flex items-center gap-2">
+                <input type="checkbox" x-model="oiOrbConfig.distance_to_wall_enabled"/>
+                <div class="sec-label">DISTANCE TO WALL</div>
+              </div>
+              <div><div class="sec-label mb-1">MIN DISTANCE %</div>
+                <input class="t-input font-mono text-xs" type="number" step="0.1" x-model.number="oiOrbConfig.distance_to_wall_min_pct"/></div>
+              <div class="col-span-2 text-[10px]" style="color:var(--t-muted)">Blocks if the nearest OI wall sits closer than this % to the entry strike.</div>
+
+              <div class="flex items-center gap-2">
+                <input type="checkbox" x-model="oiOrbConfig.pcr_gate_enabled"/>
+                <div class="sec-label">PCR GATE</div>
+              </div>
+              <div><div class="sec-label mb-1">MAX PCR (CALL)</div>
+                <input class="t-input font-mono text-xs" type="number" step="0.05" x-model.number="oiOrbConfig.pcr_max_for_call"/></div>
+              <div><div class="sec-label mb-1">MIN PCR (PUT)</div>
+                <input class="t-input font-mono text-xs" type="number" step="0.05" x-model.number="oiOrbConfig.pcr_min_for_put"/></div>
+              <div></div>
+
+              <div class="flex items-center gap-2">
+                <input type="checkbox" x-model="oiOrbConfig.volume_confirmation_enabled"/>
+                <div class="sec-label">VOLUME CONFIRM</div>
+              </div>
+              <div><div class="sec-label mb-1">MIN RATIO vs TRAILING AVG</div>
+                <input class="t-input font-mono text-xs" type="number" step="0.1" x-model.number="oiOrbConfig.volume_confirmation_min_ratio"/></div>
+              <div class="col-span-2 text-[10px]" style="color:var(--t-muted)">Blocks if the breakout candle's volume is below this multiple of its trailing average.</div>
+
+              <div class="flex items-center gap-2">
+                <input type="checkbox" x-model="oiOrbConfig.oi_roc_enabled"/>
+                <div class="sec-label">OI RATE-OF-CHANGE</div>
+              </div>
+              <div><div class="sec-label mb-1">MIN ROC %</div>
+                <input class="t-input font-mono text-xs" type="number" step="0.5" x-model.number="oiOrbConfig.oi_roc_min_pct"/></div>
+              <div><div class="sec-label mb-1">LOOKBACK SEC</div>
+                <input class="t-input font-mono text-xs" type="number" step="30" x-model.number="oiOrbConfig.oi_roc_lookback_sec"/></div>
+              <div class="text-[10px]" style="color:var(--t-muted)">Additive to OI-Spurt% — does not replace it.</div>
+            </div>
+
             <div class="flex items-center gap-3">
               <button class="btn-primary" style="max-width:200px" @click="saveOiOrbConfig()" :disabled="oiOrbConfigSaving">
                 <span x-show="!oiOrbConfigSaving">Save Config</span>
