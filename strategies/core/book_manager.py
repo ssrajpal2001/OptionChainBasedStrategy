@@ -101,43 +101,6 @@ class StrategyBookManager:
             except Exception as exc:
                 logger.exception("%s.kill_switch_loop error: %s", self.__class__.__name__, exc)
 
-    async def _binding_trading_mode(self, client_id: str, binding_id: str) -> str:
-        """Best-effort lookup of a binding's trading_mode. Defaults to "live"
-        on ANY failure or missing binding -- fail toward MORE protection
-        (always liquidate), never silently skip a real position because a
-        lookup happened to fail.
-
-        2026-08-24: confirmed live this DID default to "live" (real close
-        still fired) for a genuinely paper_route binding at least once --
-        root cause not yet identified. Every branch now logs explicitly so
-        the next occurrence shows exactly which path was taken, instead of
-        defaulting silently the way the earlier NSESession/backfill bugs
-        did for hours before anyone could tell what was actually happening."""
-        if self._db is None:
-            logger.warning("%s: _binding_trading_mode(%s/%s): self._db is None -- defaulting to live.",
-                            self.__class__.__name__, client_id, binding_id)
-            return "live"
-        if not hasattr(self._db, "get_bindings_safe_sync"):
-            logger.warning("%s: _binding_trading_mode(%s/%s): self._db has no get_bindings_safe_sync "
-                            "(type=%s) -- defaulting to live.",
-                            self.__class__.__name__, client_id, binding_id, type(self._db).__name__)
-            return "live"
-        try:
-            bindings = await asyncio.to_thread(self._db.get_bindings_safe_sync, client_id)
-            ids_seen = [b.get("binding_id") for b in (bindings or [])]
-            for b in bindings or []:
-                if b.get("binding_id") == binding_id:
-                    mode = str(b.get("trading_mode") or "live")
-                    logger.info("%s: _binding_trading_mode(%s/%s) = %r.",
-                                self.__class__.__name__, client_id, binding_id, mode)
-                    return mode
-            logger.warning("%s: _binding_trading_mode(%s/%s): binding_id not found among %r -- "
-                            "defaulting to live.", self.__class__.__name__, client_id, binding_id, ids_seen)
-        except Exception as exc:
-            logger.warning("%s: _binding_trading_mode(%s/%s): lookup raised %r -- defaulting to live.",
-                            self.__class__.__name__, client_id, binding_id, exc)
-        return "live"
-
     async def liquidate_all(self, scope: str = "FIRM_WIDE") -> None:
         """Emergency liquidation of every managed book. Positions are market-closed
         and books are stopped. Safe to call multiple times.
@@ -146,21 +109,38 @@ class StrategyBookManager:
         which is itself only reached via a genuine graceful shutdown -- a
         SIGTERM/SIGINT from `pm2 restart`/`pm2 stop`/a plain kill, or the
         admin console's own shutdown button, see run_system.py's
-        _register_graceful_shutdown_signals) now SKIPS the real close for any
-        binding in paper/paper_route mode. Confirmed live 2026-08-24: forcing
-        a real close on every routine restart was disrupting same-day paper
-        testing for zero real safety benefit -- a paper/paper_route
-        "position" is local simulated bookkeeping, no real broker exposure is
-        left unmanaged by NOT closing it (a paper_route order is expected to
-        be broker-rejected anyway; nothing real is actually held). The
-        book's own tasks are still stopped/cancelled normally either way --
-        only the real-close call itself is skipped. A genuine kill-switch
+        _register_graceful_shutdown_signals) originally SKIPPED the real close
+        only for paper/paper_route bindings -- forcing a real close on every
+        routine restart was disrupting same-day paper testing for zero real
+        safety benefit (a paper_route "position" is local simulated
+        bookkeeping; nothing real is left unmanaged by not closing it).
+
+        2026-08-25, direct user decision after a real incident: a genuinely
+        LIVE binding (gurmeet's NIFTY sell_straddle) was force-closed by a
+        routine pm2 restart, and the resulting forced RE-ENTRY picked a
+        materially worse strike pair (wider spread, lower credit) than the
+        position it had just been pulled out of -- an avoidable real cost.
+        scope="system_shutdown" now skips the real close for EVERY
+        trading_mode, including live. This relies on the book's own start()
+        already having a complete, previously paper/paper_route-only-proven
+        restore path (position + session + pool-engine VWAP/SLOPE/RSI/ROC --
+        see strategies/sell_straddle/engine.py's start()/_restore_session()/
+        _restore_pool_engine()) that resumes exactly where the position left
+        off, with exits deliberately HELD until fresh post-restart LTPs
+        arrive (_post_restore_warmup) so nothing acts on a stale
+        carried-over price. Traded off deliberately: a live position now
+        goes genuinely unmanaged (no SL/TSL/exit-rule evaluation running at
+        all) for the real wall-clock duration of the restart itself, versus
+        the old behavior's guaranteed clean flat exit before any gap. The
+        user weighed this explicitly and chose continuity over that brief
+        protection window -- this is a considered policy choice, not an
+        oversight.
+
+        The book's own tasks are still stopped/cancelled normally either way
+        -- only the real-close call itself is skipped. A genuine kill-switch
         (scope="FIRM_WIDE", a deliberate explicit emergency action, not an
         incidental restart) is UNCHANGED -- it still closes everything
-        regardless of trading_mode, on purpose. The moment a binding flips to
-        live trading_mode, the exact same restart goes back to protecting it
-        exactly as the 2026-08-23 fix originally intended -- nothing about
-        real live-capital safety changes.
+        regardless of trading_mode, on purpose.
 
         Note on the spawn-race this class otherwise guards against via
         self._stopping: this method does NOT need that tracking. It never pops
@@ -188,23 +168,32 @@ class StrategyBookManager:
 
         skip_flags: Dict[Key, bool] = {}
         if scope == "system_shutdown":
+            # 2026-08-25, direct user decision (real incident: gurmeet's live NIFTY
+            # straddle was force-closed by a routine pm2 restart, then the resulting
+            # RE-ENTRY picked a much wider/worse strike pair than the position it had
+            # just been forced out of -- a real, avoidable cost). Every trading_mode,
+            # including live, now skips the real close on a graceful system_shutdown
+            # restart -- the book's own start() already has a complete, previously
+            # paper/paper_route-only-proven restore path (position + session +
+            # pool-engine VWAP/SLOPE/RSI/ROC, see engine.py's start()/_restore_session()/
+            # _restore_pool_engine()) that resumes exactly where the position left off,
+            # with exits deliberately HELD until fresh post-restart LTPs arrive
+            # (_post_restore_warmup) so nothing acts on a stale carried-over price.
+            # Traded off deliberately: a live position now goes unmanaged (no SL/TSL/
+            # exit-rule evaluation) for the brief real duration of the restart itself,
+            # whereas the old behavior guaranteed a clean flat exit before any gap. The
+            # user weighed this and chose continuity over that brief protection window.
+            # A genuine kill-switch (scope="FIRM_WIDE", an explicit deliberate emergency
+            # action, not an incidental restart) is UNCHANGED -- it still closes
+            # everything regardless of trading_mode, on purpose.
             for key, _book in books_snapshot:
-                client_id, binding_id = key[0], key[1]
-                mode = await self._binding_trading_mode(client_id, binding_id)
-                skip_close = mode in ("paper", "paper_route")
-                skip_flags[key] = skip_close
-                if skip_close:
-                    logger.warning(
-                        "%s: %s is trading_mode=%s -- skipping real close on graceful shutdown "
-                        "(no real broker exposure to protect), book still stops normally.",
-                        self.__class__.__name__, key, mode,
-                    )
-                else:
-                    logger.warning(
-                        "%s: %s resolved trading_mode=%s (not paper/paper_route) -- "
-                        "WILL perform a real close on graceful shutdown.",
-                        self.__class__.__name__, key, mode,
-                    )
+                skip_flags[key] = True
+                logger.warning(
+                    "%s: %s -- skipping real close on graceful shutdown (all trading_modes, "
+                    "2026-08-25 policy), book still stops normally and restores its position "
+                    "on next start().",
+                    self.__class__.__name__, key,
+                )
 
         results = await asyncio.gather(
             *[self._liquidate_book(book, key, reason=_reason, skip_close=skip_flags.get(key, False))

@@ -354,7 +354,13 @@ def test_liquidate_all_closes_open_positions():
     assert book.stopped is True
 
 
-def test_stop_async_liquidates_open_positions():
+def test_stop_async_skips_real_close_but_still_stops_book():
+    """2026-08-25: system_shutdown (reached only via a genuine graceful
+    restart) now skips the real close for every trading_mode -- the book's
+    own start() restores the position on the next boot instead. The book
+    still stops normally either way. See
+    tests/strategies/test_liquidate_skips_paper_mode_on_shutdown.py for the
+    full regression coverage of this policy."""
     mgr = _TestBookManager()
     book = _FakeBook()
     book._position = object()
@@ -362,7 +368,7 @@ def test_stop_async_liquidates_open_positions():
 
     asyncio.run(mgr.stop_async())
 
-    assert book.liquidated == ("system_shutdown",)
+    assert book.liquidated == ()          # real close skipped
     assert book.stopped is True
     assert not mgr._books  # cleared after shutdown
 

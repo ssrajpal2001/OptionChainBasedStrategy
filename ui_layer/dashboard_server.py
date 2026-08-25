@@ -272,6 +272,10 @@ try:
         current_password: str
         new_password:     str
 
+    class _EditEntryPriceSchema(_PydanticBase):
+        ce_entry_price: Optional[float] = None
+        pe_entry_price: Optional[float] = None
+
     class _OiOrbConfigSchema(_PydanticBase):
         # Mirrors strategies/oi_orb_screener/book_manager.py's _DEFAULT_PARAMS —
         # keep both in sync if a new tunable is added.
@@ -2805,7 +2809,8 @@ class DashboardServer:
                                 "entry_price": round(ep, 2),
                                 "sell_avg": round(ep, 2), "buy_avg": 0.0,
                                 "ltp": round(_val, 2), "pnl": _pnl, "mtm": _pnl,
-                                "entry_time": _ot})
+                                "entry_time": _ot,
+                                "option_type": ot, "underlying": str(pos.underlying)})
                 return out
 
             by_broker: dict = {}
@@ -3613,6 +3618,71 @@ class DashboardServer:
                 "token_ok": True,
                 "trading_enabled": True,
             }
+
+        @app.post("/api/client/straddle/{binding_id}/{underlying}/edit_entry_price", tags=["Client"])
+        async def api_client_edit_entry_price(
+            binding_id: str, underlying: str,
+            body: _EditEntryPriceSchema,
+            user: dict = Depends(_require_client),
+        ):
+            """Client-facing correction for a live position's entry price when the
+            UI's displayed value diverges from the broker's own confirmed fill
+            (e.g. a real Zerodha fill landed below/above the strategy's own live-LTP
+            estimate at the moment of entry -- see engine.py's _on_fill for the
+            normal, automatic path this is meant to backstop when it's still wrong).
+            Recomputes net_credit and _initial_net_credit (the day%-guardrail
+            denominator) so every downstream calculation uses the corrected number,
+            not just the display. Every edit is logged to client_events (admin Live
+            Alerts panel) since this directly changes real P&L/exit-trigger math."""
+            cid = user.get("client_id", "")
+            if body.ce_entry_price is None and body.pe_entry_price is None:
+                return {"ok": False, "error": "Provide at least one of ce_entry_price/pe_entry_price."}
+            for v in (body.ce_entry_price, body.pe_entry_price):
+                if v is not None and v <= 0:
+                    return {"ok": False, "error": "Entry price must be > 0."}
+
+            book = _srv._find_ss_book(cid, binding_id, underlying.upper())
+            if book is None:
+                return {"ok": False, "error": f"No running position found for {binding_id}/{underlying}."}
+            pos = getattr(book, "_position", None)
+            if pos is None or pos.status != "open":
+                return {"ok": False, "error": "No open position to edit."}
+
+            old_ce, old_pe = pos.ce_leg.entry_price, pos.pe_leg.entry_price
+            old_credit = pos.net_credit
+            if body.ce_entry_price is not None:
+                pos.ce_leg.entry_price = body.ce_entry_price
+            if body.pe_entry_price is not None:
+                pos.pe_leg.entry_price = body.pe_entry_price
+            pos.net_credit = pos.ce_leg.entry_price + pos.pe_leg.entry_price
+            # Shift the day%-guardrail baseline by the exact same delta so a
+            # correction doesn't silently re-baseline the whole day's P&L history --
+            # same "reverse the exact amount" pattern already used for entry-abort
+            # rollback elsewhere in this engine.
+            try:
+                book._initial_net_credit = max(
+                    0.0, float(getattr(book, "_initial_net_credit", 0.0) or 0.0)
+                    + (pos.net_credit - old_credit))
+            except Exception:
+                pass
+            book._persist()
+            book.notify_position_update(pos.to_dict(), force=True)
+
+            msg = (f"Entry price manually corrected by client: "
+                   f"CE {old_ce:.2f}->{pos.ce_leg.entry_price:.2f}, "
+                   f"PE {old_pe:.2f}->{pos.pe_leg.entry_price:.2f}, "
+                   f"credit {old_credit:.2f}->{pos.net_credit:.2f}")
+            logger.warning("EditEntryPrice[%s/%s/%s]: %s", cid, binding_id, underlying, msg)
+            if _srv._client_db is not None:
+                try:
+                    await _srv._client_db.record_client_event(
+                        client_id=cid, binding_id=binding_id, strategy_name="sell_straddle",
+                        severity="WARNING", source="manual_edit", message=msg,
+                    )
+                except Exception:
+                    logger.exception("EditEntryPrice: failed to record client_event")
+
+            return {"ok": True, "message": "Entry price updated.", "position": pos.to_dict()}
 
         @app.post("/api/client/broker/{binding_id}/stop", tags=["Client"])
         async def api_client_broker_stop(

@@ -1,24 +1,20 @@
 """
-2026-08-24: regression for strategies/core/book_manager.py's
-liquidate_all(scope="system_shutdown") change.
+strategies/core/book_manager.py's liquidate_all(scope="system_shutdown") behavior.
 
-Real gap found live: the 2026-08-23 SIGTERM-handling fix made EVERY
-routine `pm2 restart`/`pm2 stop` force-close every open position across
-every strategy, including paper/paper_route bindings where there is no
-real broker exposure to protect (a paper_route "position" is local
-simulated bookkeeping; even the real order attempt is expected to be
-broker-rejected). This disrupted same-day paper testing for zero real
-safety benefit. Fix: scope="system_shutdown" (the ONLY caller is
-stop_async(), reached exclusively via a genuine graceful shutdown) now
-skips the real close for paper/paper_route bindings -- the book still
-stops normally either way, only the close call is skipped. A genuine
-kill-switch (scope="FIRM_WIDE", a deliberate explicit action) is
-UNCHANGED -- still closes everything regardless of trading_mode. Any
-binding actually in live mode is also unaffected -- real capital
-protection is fully intact.
+2026-08-24: originally skipped the real close only for paper/paper_route
+bindings on a routine pm2 restart -- forcing a real close there was
+disrupting same-day paper testing for zero real safety benefit.
+
+2026-08-25: extended to skip the real close for EVERY trading_mode, including
+live -- direct user decision after a real incident where gurmeet's live NIFTY
+straddle was force-closed by a routine restart, and the resulting forced
+re-entry picked a materially worse strike pair than the position it had just
+been pulled out of. The book's own start() already restores position/session/
+pool-engine state (previously only ever exercised for paper/paper_route) with
+exits held until fresh post-restart LTPs arrive -- see engine.py. A genuine
+kill-switch (scope="FIRM_WIDE", a deliberate explicit action) is UNCHANGED --
+still closes everything regardless of trading_mode.
 """
-import asyncio
-
 import pytest
 
 from strategies.core.book_manager import StrategyBookManager
@@ -89,44 +85,31 @@ async def test_system_shutdown_skips_real_close_for_paper_binding():
 
 
 @pytest.mark.asyncio
-async def test_system_shutdown_still_closes_live_binding():
+async def test_system_shutdown_also_skips_real_close_for_live_binding():
+    """2026-08-25: the real incident this regression guards against -- a live
+    binding used to be force-closed here, producing an unwanted forced
+    re-entry at a worse strike. Now it must be skipped exactly like paper."""
     db = _FakeDB({"c1": [{"binding_id": "b1", "trading_mode": "live"}]})
     mgr = _OneBookManager(db)
 
     await mgr.liquidate_all(scope="system_shutdown")
 
-    assert mgr.book.liquidate_called_with == "system_shutdown"
+    assert mgr.book.liquidate_called_with is None
     assert mgr.book.stop_async_called is True
 
 
 @pytest.mark.asyncio
-async def test_system_shutdown_defaults_to_live_when_binding_not_found():
-    db = _FakeDB({"c1": []})   # binding_id "b1" not in the list at all
-    mgr = _OneBookManager(db)
-
-    await mgr.liquidate_all(scope="system_shutdown")
-
-    assert mgr.book.liquidate_called_with == "system_shutdown"   # fail toward protection
-
-
-@pytest.mark.asyncio
-async def test_system_shutdown_defaults_to_live_when_db_lookup_raises():
-    db = _FakeDB({"c1": [{"binding_id": "b1", "trading_mode": "paper_route"}]})
-    db.raise_on_lookup = True
-    mgr = _OneBookManager(db)
-
-    await mgr.liquidate_all(scope="system_shutdown")
-
-    assert mgr.book.liquidate_called_with == "system_shutdown"   # fail toward protection
-
-
-@pytest.mark.asyncio
-async def test_system_shutdown_defaults_to_live_when_no_db_wired():
-    mgr = _OneBookManager(db=None)
-
-    await mgr.liquidate_all(scope="system_shutdown")
-
-    assert mgr.book.liquidate_called_with == "system_shutdown"
+async def test_system_shutdown_skips_even_when_binding_not_found_or_db_unavailable():
+    """The skip decision no longer depends on a trading_mode lookup at all --
+    confirm it's unconditional regardless of DB/binding state."""
+    for db in (
+        _FakeDB({"c1": []}),                      # binding_id not found
+        None,                                       # no DB wired at all
+    ):
+        mgr = _OneBookManager(db)
+        await mgr.liquidate_all(scope="system_shutdown")
+        assert mgr.book.liquidate_called_with is None
+        assert mgr.book.stop_async_called is True
 
 
 @pytest.mark.asyncio
