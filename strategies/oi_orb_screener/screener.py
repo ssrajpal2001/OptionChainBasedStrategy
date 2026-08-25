@@ -512,7 +512,18 @@ def backfill_orb_from_yahoo(bars: MinuteBars, symbols, cfg=CONFIG) -> None:
         filled = 0
         for sym, ticker in zip(symbols, tickers):
             try:
-                sub = df[ticker] if len(tickers) > 1 else df
+                # 2026-08-25 CRITICAL FIX, confirmed live: yf.download(..., group_by="ticker")
+                # ALWAYS returns MultiIndex columns like ('SAIL.NS', 'High'), even for a SINGLE
+                # ticker -- the old `if len(tickers) > 1 else df` assumed single-ticker downloads
+                # came back with flat columns, which is false. On a single-stock shortlist (common
+                # on quiet days), that took the `else df` branch straight into the unflattened
+                # MultiIndex frame, so row.get("High")/row.get("Low") always returned None (real
+                # column was the tuple ('SAIL.NS','High'), not 'High') -- every row then failed the
+                # pd.isna() check and got silently skipped, producing "returned data but 0 bars
+                # landed" and an empty ORB for the day's only shortlisted stock. Reproduced directly
+                # against real yfinance/NSE data before fixing: df[ticker] recovers all 10 real
+                # 09:15-09:25 bars regardless of how many tickers were requested.
+                sub = df[ticker]
             except Exception as exc:
                 logger.warning("backfill_orb_from_yahoo: no data for %s (%s): %r", sym, ticker, exc)
                 continue

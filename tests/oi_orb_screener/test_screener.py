@@ -319,3 +319,50 @@ def test_sma_exit_put_side_fires_on_two_consecutive_closes_above():
 def test_sma_exit_none_when_insufficient_closes():
     closes = [100.0] * 5   # fewer than sma_period + consec_closes - 1
     assert screener.check_sma_exit(closes, sma_period=8, consec_closes=2, side="CALL") is False
+
+
+# ── backfill_orb_from_yahoo ──────────────────────────────────────────────
+# 2026-08-25 CRITICAL FIX regression: real incident, a single-stock shortlist
+# (SAIL alone) produced an empty ORB for the day even though Yahoo genuinely
+# returned real 09:15-09:25 bars -- yf.download(..., group_by="ticker")
+# ALWAYS returns MultiIndex columns like ('SAIL.NS', 'High'), even for one
+# ticker, but the old code assumed single-ticker downloads came back flat
+# and skipped the df[ticker] indexing step, so every row's High/Low read as
+# None and got silently discarded. Shape below is copied verbatim from a
+# real yf.download(['SAIL.NS'], ..., group_by='ticker') call.
+
+def test_backfill_orb_from_yahoo_single_ticker_multiindex_columns(monkeypatch):
+    import sys
+    import types
+    from datetime import datetime as _dt
+
+    import pandas as pd
+
+    ist = screener.IST
+    idx = pd.DatetimeIndex(
+        [_dt(2026, 8, 25, 9, 15), _dt(2026, 8, 25, 9, 16), _dt(2026, 8, 25, 9, 26)],
+        tz=ist,
+    )
+    cols = pd.MultiIndex.from_tuples(
+        [("SAIL.NS", "Open"), ("SAIL.NS", "High"), ("SAIL.NS", "Low"),
+         ("SAIL.NS", "Close"), ("SAIL.NS", "Volume")],
+        names=["Ticker", "Price"],
+    )
+    data = [
+        [180.75, 182.98, 180.50, 182.84, 0],
+        [182.86, 183.10, 182.50, 182.67, 500251],
+        [183.00, 183.50, 182.90, 183.20, 100000],   # 09:26 -- outside ORB_END, must be excluded
+    ]
+    fake_df = pd.DataFrame(data, index=idx, columns=cols)
+
+    fake_yf = types.SimpleNamespace(download=lambda *a, **kw: fake_df)
+    monkeypatch.setitem(sys.modules, "yfinance", fake_yf)
+
+    bars = screener.MinuteBars()
+    screener.backfill_orb_from_yahoo(bars, ["SAIL"], screener.CONFIG)
+
+    h, l = bars.orb("SAIL", "09:15", "09:25")
+    assert h is not None and l is not None, "single-ticker MultiIndex bars must not be silently dropped"
+    assert h == pytest.approx(183.10)
+    assert l == pytest.approx(180.50)
+    assert "09:26" not in bars.bars["SAIL"]   # outside the ORB window, correctly excluded
