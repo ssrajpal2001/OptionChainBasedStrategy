@@ -105,6 +105,19 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         poll_seconds: int = 20,
         regime_filter_enabled: bool = True,
         ignore_time_windows: bool = False,
+        nifty_bullish_pct: float = 0.3,
+        nifty_bearish_pct: float = -0.3,
+        max_monitor_minutes: int = 90,
+        rejection_min_rise_pct: float = 2.0,
+        rejection_retrace_fraction: float = 0.5,
+        sma_period: int = 8,
+        sma_exit_consec_closes: int = 2,
+        strike_otm_pct: float = 2.0,
+        orb_start: str = "09:15",
+        orb_end: str = "09:25",
+        scan_start: str = "09:25",
+        entry_window_start: str = "09:25",
+        entry_window_end: str = "10:30",
     ) -> None:
         super().__init__(bus, cfg, _UNDERLYING_SENTINEL, client_id, binding_id)
         self._strategy_name = "oi_orb_screener"
@@ -124,6 +137,19 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._screener_cfg["POLL_SECONDS"] = poll_seconds
         self._screener_cfg["REGIME_FILTER_ENABLED"] = regime_filter_enabled
         self._screener_cfg["IGNORE_TIME_WINDOWS"] = ignore_time_windows
+        self._screener_cfg["NIFTY_BULLISH_PCT"] = nifty_bullish_pct
+        self._screener_cfg["NIFTY_BEARISH_PCT"] = nifty_bearish_pct
+        self._screener_cfg["MAX_MONITOR_MINUTES"] = max_monitor_minutes
+        self._screener_cfg["REJECTION_MIN_RISE_PCT"] = rejection_min_rise_pct
+        self._screener_cfg["REJECTION_RETRACE_FRACTION"] = rejection_retrace_fraction
+        self._screener_cfg["SMA_PERIOD"] = sma_period
+        self._screener_cfg["SMA_EXIT_CONSEC_CLOSES"] = sma_exit_consec_closes
+        self._screener_cfg["STRIKE_OTM_PCT"] = strike_otm_pct
+        self._screener_cfg["ORB_START"] = orb_start
+        self._screener_cfg["ORB_END"] = orb_end
+        self._screener_cfg["SCAN_START"] = scan_start
+        self._screener_cfg["ENTRY_WINDOW_START"] = entry_window_start
+        self._screener_cfg["ENTRY_WINDOW_END"] = entry_window_end
 
         self._clog = _make_strategy_logger(client_id, binding_id)
 

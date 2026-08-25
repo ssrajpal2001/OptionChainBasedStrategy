@@ -1106,6 +1106,42 @@ class ClientDB:
             logger.error("get_running_deployments_by_strategy_sync(%s): %s", strategy_name, exc)
             return []
 
+    def get_deployments_by_strategy_sync(self, strategy_name: str) -> list[dict]:
+        """ALL active deployments (running or not) for a strategy name, across every
+        client — for an admin config panel to list which (client, binding) instances
+        of a strategy exist, regardless of whether they're currently turned on."""
+        try:
+            con = sqlite3.connect(self._db_path)
+            con.row_factory = sqlite3.Row
+            rows = con.execute(
+                """
+                SELECT d.deploy_id, c.client_id, d.binding_id, d.underlying,
+                       d.lot_multiplier, d.is_running, d.product_type,
+                       COALESCE(d.strategy_params, '{}') AS strategy_params
+                FROM clients c
+                JOIN strategy_deployments d ON c.client_id = d.client_id
+                WHERE c.is_active = 1
+                  AND d.strategy_name = ?
+                  AND d.is_active = 1
+                """,
+                (strategy_name,),
+            ).fetchall()
+            con.close()
+            return [dict(r) for r in rows]
+        except Exception as exc:
+            logger.error("get_deployments_by_strategy_sync(%s): %s", strategy_name, exc)
+            return []
+
+    async def set_deployment_strategy_params(self, deploy_id: str, strategy_params: str) -> None:
+        """Admin-facing: overwrite a deployment's strategy_params JSON directly by
+        deploy_id (no client_id check — this is called from an admin-gated endpoint,
+        unlike the client-facing per-client setters elsewhere in this class)."""
+        await asyncio.to_thread(
+            self._exec,
+            "UPDATE strategy_deployments SET strategy_params=?, updated_at=? WHERE deploy_id=?",
+            (strategy_params, datetime.now(IST).isoformat(), deploy_id),
+        )
+
     # ── Boot-time bulk load ───────────────────────────────────────────────────
 
     def load_all_profiles(self) -> list:

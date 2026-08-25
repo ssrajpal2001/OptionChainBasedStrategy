@@ -756,6 +756,15 @@ document.addEventListener('alpine:init', () => {
     strategyConfigMsg: '',
     strategyConfigOk: null,
 
+    /* ── OI-ORB Screener per-deployment config (admin) ────────────────── */
+    oiOrbDeployments: [],
+    oiOrbSelectedDeployId: '',
+    oiOrbConfig: {},
+    oiOrbConfigLoading: false,
+    oiOrbConfigSaving:  false,
+    oiOrbConfigMsg: '',
+    oiOrbConfigOk: null,
+
     /* ── Per-index strategy config (rule builder) ────────────────────── */
     adminSelectedIndex: 'NIFTY',
     adminStrategyTab:   'sell_straddle',  // 'sell_straddle' | 'v4_cascade'
@@ -1244,7 +1253,7 @@ document.addEventListener('alpine:init', () => {
       setInterval(() => { if (this.screen === 'admin') { this.loadTelemetry(); this.loadFeederStatus(); this.loadAuthAlerts(); this.loadAdminEvents(); } }, 10000);
       setInterval(() => { if (this.screen === 'admin') this.loadIvMatrix(); }, 5000);
       setInterval(() => { if (this.screen === 'admin' && this.adminTab === 'dashboard') { this.loadStrategyRegistry(); } }, 5000);
-      setInterval(() => { if (this.screen === 'admin' && this.adminTab === 'strategies') { this.loadStrategyRegistry(); } }, 5000);
+      setInterval(() => { if (this.screen === 'admin' && this.adminTab === 'strategies') { this.loadStrategyRegistry(); this.loadOiOrbDeployments(); } }, 5000);
       setInterval(() => { if (this.screen === 'admin' && this.adminTab === 'clients') { this.loadClientProfiles(); this.loadPendingClients(); this.loadRiskSummary(); } }, 5000);
       setInterval(() => { if (this.screen === 'admin' && this.adminTab === 'fno_pos') this.loadFnoPositions(); }, 30000);
       setInterval(() => { if (this.screen === 'client') this.loadClientStatus(); }, 8000);
@@ -1938,6 +1947,56 @@ document.addEventListener('alpine:init', () => {
         // Form values are NOT cleared on error — user can read and correct
       }
       this.strategyConfigSaving = false;
+    },
+
+    /* ── OI-ORB Screener per-deployment config ─────────────────────────── */
+    async loadOiOrbDeployments() {
+      this.oiOrbConfigLoading = true;
+      try {
+        const r = await this._fetch('/api/admin/oiorb/deployments');
+        if (r && r.ok) {
+          const d = await r.json();
+          this.oiOrbDeployments = d.deployments || [];
+          if (!this.oiOrbSelectedDeployId && this.oiOrbDeployments.length > 0) {
+            this.selectOiOrbDeployment(this.oiOrbDeployments[0].deploy_id);
+          } else {
+            const cur = this.oiOrbDeployments.find(x => x.deploy_id === this.oiOrbSelectedDeployId);
+            if (cur) this.oiOrbConfig = { ...cur.params };
+          }
+        }
+      } catch {}
+      this.oiOrbConfigLoading = false;
+    },
+
+    selectOiOrbDeployment(deployId) {
+      this.oiOrbSelectedDeployId = deployId;
+      const dep = this.oiOrbDeployments.find(x => x.deploy_id === deployId);
+      this.oiOrbConfig = dep ? { ...dep.params } : {};
+      this.oiOrbConfigMsg = '';
+      this.oiOrbConfigOk = null;
+    },
+
+    async saveOiOrbConfig() {
+      if (!this.oiOrbSelectedDeployId) return;
+      this.oiOrbConfigSaving = true;
+      this.oiOrbConfigMsg = '';
+      this.oiOrbConfigOk = null;
+      try {
+        const r = await this._fetch(`/api/admin/oiorb/config/${this.oiOrbSelectedDeployId}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(this.oiOrbConfig),
+        });
+        if (!r) throw new Error('No response');
+        const d = await r.json();
+        this.oiOrbConfigOk = d.ok !== false;
+        this.oiOrbConfigMsg = d.message || (d.ok ? 'Saved.' : (d.error || 'Update failed.'));
+        if (d.ok) await this.loadOiOrbDeployments();
+      } catch (e) {
+        this.oiOrbConfigOk = false;
+        this.oiOrbConfigMsg = 'Network error: ' + (e.message || String(e));
+      }
+      this.oiOrbConfigSaving = false;
     },
 
     /* ── Per-index strategy config helpers ─────────────────────────────── */
@@ -4205,6 +4264,13 @@ function amoTest() {
                   : 'color:var(--t-muted);border-bottom:2px solid transparent'">
           D1 TRAP ZONES
         </button>
+        <button @click="adminStrategyTab='oi_orb_screener'; loadOiOrbDeployments()"
+                class="font-display font-bold text-xs px-4 py-2.5 transition-all"
+                :style="adminStrategyTab==='oi_orb_screener'
+                  ? 'color:var(--t-amber);background:rgba(var(--t-amber-rgb),0.08);border-bottom:2px solid var(--t-amber)'
+                  : 'color:var(--t-muted);border-bottom:2px solid transparent'">
+          OI-ORB SCREENER
+        </button>
         <div class="ml-auto flex items-center px-3">
           <span class="font-mono text-xs" style="color:var(--t-muted)" x-text="adminSelectedIndex"></span>
         </div>
@@ -4437,6 +4503,98 @@ function amoTest() {
                 </tbody>
               </table>
             </div>
+          </div>
+        </template>
+      </div>
+
+      <!-- ══ OI-ORB SCREENER per-deployment config ═════════════════════════ -->
+      <div x-show="adminStrategyTab==='oi_orb_screener'" class="p-4 flex flex-col gap-3">
+        <div x-show="oiOrbDeployments.length === 0 && !oiOrbConfigLoading" class="text-center py-4 font-mono text-xs" style="color:var(--t-muted)">
+          No OI-ORB Screener deployments found — seed one via scripts/seed_oi_orb_screener_deployment.py first.
+        </div>
+        <template x-if="oiOrbDeployments.length > 0">
+          <div class="flex flex-col gap-3">
+            <div class="flex items-center gap-2">
+              <span class="sec-label">DEPLOYMENT</span>
+              <select class="t-input font-mono text-xs" style="max-width:340px"
+                      x-model="oiOrbSelectedDeployId" @change="selectOiOrbDeployment(oiOrbSelectedDeployId)">
+                <template x-for="dep in oiOrbDeployments" :key="dep.deploy_id">
+                  <option :value="dep.deploy_id"
+                          x-text="dep.client_id+'/'+dep.binding_id+(dep.is_running?' (running)':' (stopped)')"></option>
+                </template>
+              </select>
+              <button class="t-btn font-mono text-xs px-2 py-0.5 rounded" @click="loadOiOrbDeployments()" :disabled="oiOrbConfigLoading">
+                <span x-text="oiOrbConfigLoading ? '…' : '⟳'"></span>
+              </button>
+            </div>
+
+            <div class="grid grid-cols-4 gap-2 t-card rounded p-3">
+              <div class="col-span-4 sec-label" style="color:var(--t-amber)">SHORTLIST FILTERS</div>
+              <div><div class="sec-label mb-1">OI SPURT MIN %</div>
+                <input class="t-input font-mono text-xs" type="number" step="0.1" x-model.number="oiOrbConfig.oi_spurt_min_pct"/></div>
+              <div><div class="sec-label mb-1">PRICE MOVE MIN %</div>
+                <input class="t-input font-mono text-xs" type="number" step="0.1" x-model.number="oiOrbConfig.price_move_min_pct"/></div>
+              <div><div class="sec-label mb-1">STOCK MOVE ABORT %</div>
+                <input class="t-input font-mono text-xs" type="number" step="0.1" x-model.number="oiOrbConfig.stock_move_abort_pct"/></div>
+              <div><div class="sec-label mb-1">TOP N PER SIDE</div>
+                <input class="t-input font-mono text-xs" type="number" step="1" x-model.number="oiOrbConfig.top_n_per_side"/></div>
+
+              <div class="col-span-4 sec-label mt-2" style="color:var(--t-amber)">REGIME</div>
+              <div class="flex items-center gap-2">
+                <div class="sec-label mb-1">REGIME FILTER</div>
+                <input type="checkbox" x-model="oiOrbConfig.regime_filter_enabled"/>
+              </div>
+              <div><div class="sec-label mb-1">NIFTY BULLISH %</div>
+                <input class="t-input font-mono text-xs" type="number" step="0.05" x-model.number="oiOrbConfig.nifty_bullish_pct"/></div>
+              <div><div class="sec-label mb-1">NIFTY BEARISH %</div>
+                <input class="t-input font-mono text-xs" type="number" step="0.05" x-model.number="oiOrbConfig.nifty_bearish_pct"/></div>
+
+              <div class="col-span-4 sec-label mt-2" style="color:var(--t-amber)">TIMING</div>
+              <div><div class="sec-label mb-1">ORB START</div>
+                <input class="t-input font-mono text-xs" type="text" placeholder="HH:MM" x-model="oiOrbConfig.orb_start"/></div>
+              <div><div class="sec-label mb-1">ORB END</div>
+                <input class="t-input font-mono text-xs" type="text" placeholder="HH:MM" x-model="oiOrbConfig.orb_end"/></div>
+              <div><div class="sec-label mb-1">SCAN START</div>
+                <input class="t-input font-mono text-xs" type="text" placeholder="HH:MM" x-model="oiOrbConfig.scan_start"/></div>
+              <div><div class="sec-label mb-1">POLL SECONDS</div>
+                <input class="t-input font-mono text-xs" type="number" step="1" x-model.number="oiOrbConfig.poll_seconds"/></div>
+              <div><div class="sec-label mb-1">ENTRY WINDOW START</div>
+                <input class="t-input font-mono text-xs" type="text" placeholder="HH:MM" x-model="oiOrbConfig.entry_window_start"/></div>
+              <div><div class="sec-label mb-1">ENTRY WINDOW END</div>
+                <input class="t-input font-mono text-xs" type="text" placeholder="HH:MM" x-model="oiOrbConfig.entry_window_end"/></div>
+              <div class="flex items-center gap-2">
+                <div class="sec-label mb-1">IGNORE TIME WINDOWS</div>
+                <input type="checkbox" x-model="oiOrbConfig.ignore_time_windows"/>
+              </div>
+              <div class="col-span-3 text-[10px]" style="color:var(--t-amber)" x-show="oiOrbConfig.ignore_time_windows">
+                ⚠ Connectivity-test mode — bypasses real ORB/entry-window timing. Turn OFF for real trading days.
+              </div>
+
+              <div class="col-span-4 sec-label mt-2" style="color:var(--t-amber)">EXIT RULES / STRIKE</div>
+              <div><div class="sec-label mb-1">MAX MONITOR MIN</div>
+                <input class="t-input font-mono text-xs" type="number" step="1" x-model.number="oiOrbConfig.max_monitor_minutes"/></div>
+              <div><div class="sec-label mb-1">REJECTION MIN RISE %</div>
+                <input class="t-input font-mono text-xs" type="number" step="0.1" x-model.number="oiOrbConfig.rejection_min_rise_pct"/></div>
+              <div><div class="sec-label mb-1">REJECTION RETRACE FRAC</div>
+                <input class="t-input font-mono text-xs" type="number" step="0.05" x-model.number="oiOrbConfig.rejection_retrace_fraction"/></div>
+              <div><div class="sec-label mb-1">STRIKE OTM %</div>
+                <input class="t-input font-mono text-xs" type="number" step="0.1" x-model.number="oiOrbConfig.strike_otm_pct"/></div>
+              <div><div class="sec-label mb-1">SMA PERIOD</div>
+                <input class="t-input font-mono text-xs" type="number" step="1" x-model.number="oiOrbConfig.sma_period"/></div>
+              <div><div class="sec-label mb-1">SMA EXIT CONSEC CLOSES</div>
+                <input class="t-input font-mono text-xs" type="number" step="1" x-model.number="oiOrbConfig.sma_exit_consec_closes"/></div>
+            </div>
+
+            <div class="flex items-center gap-3">
+              <button class="btn-primary" style="max-width:200px" @click="saveOiOrbConfig()" :disabled="oiOrbConfigSaving">
+                <span x-show="!oiOrbConfigSaving">Save Config</span>
+                <span x-show="oiOrbConfigSaving">Saving…</span>
+              </button>
+              <span class="text-xs" style="color:var(--t-muted)">Applies on the book's next 5s reconcile (only while flat — no open positions).</span>
+            </div>
+            <div x-show="oiOrbConfigMsg" class="text-xs font-mono px-3 py-1.5 rounded"
+                 :style="`background:${oiOrbConfigOk?'rgba(16,185,129,0.1)':'rgba(239,68,68,0.1)'};border:1px solid ${oiOrbConfigOk?'rgba(16,185,129,0.3)':'rgba(239,68,68,0.3)'};color:${oiOrbConfigOk?'var(--t-green)':'var(--t-red)'}`"
+                 x-text="oiOrbConfigMsg"></div>
           </div>
         </template>
       </div>

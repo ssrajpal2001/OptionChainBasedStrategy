@@ -272,6 +272,30 @@ try:
         current_password: str
         new_password:     str
 
+    class _OiOrbConfigSchema(_PydanticBase):
+        # Mirrors strategies/oi_orb_screener/book_manager.py's _DEFAULT_PARAMS —
+        # keep both in sync if a new tunable is added.
+        oi_spurt_min_pct:           float = 7.0
+        price_move_min_pct:        float = 2.0
+        stock_move_abort_pct:      float = 4.0
+        top_n_per_side:            int   = 5
+        poll_seconds:              int   = 20
+        regime_filter_enabled:     bool  = True
+        ignore_time_windows:       bool  = False
+        nifty_bullish_pct:         float = 0.3
+        nifty_bearish_pct:         float = -0.3
+        max_monitor_minutes:       int   = 90
+        rejection_min_rise_pct:    float = 2.0
+        rejection_retrace_fraction: float = 0.5
+        sma_period:                int   = 8
+        sma_exit_consec_closes:    int   = 2
+        strike_otm_pct:            float = 2.0
+        orb_start:                 str   = "09:15"
+        orb_end:                   str   = "09:25"
+        scan_start:                str   = "09:25"
+        entry_window_start:        str   = "09:25"
+        entry_window_end:          str   = "10:30"
+
     class _ResetPasswordSchema(_PydanticBase):
         token:        str
         new_password: str
@@ -4542,6 +4566,56 @@ pm2 save
 
             logger.info("strategy/config/update: all strategies reconfigured live.")
             return {"ok": True, "message": "Runtime configuration live-deployed to all strategies."}
+
+        # ── ADMIN — OI-ORB Screener per-deployment config ─────────────────────
+        # Unlike sell_straddle's RuntimeConfig (global, disk-persisted, hot-inject
+        # via ss.reconfigure()), OI-ORB Screener's tunables live directly on the
+        # deployment row's strategy_params JSON -- OiOrbScreenerBookManager's own
+        # 5s reconcile loop already re-spawns a book when its params change
+        # (_should_respawn), so writing here is enough; no separate live-inject
+        # call is needed the way sell_straddle needs ss.reconfigure().
+
+        @app.get("/api/admin/oiorb/deployments", tags=["Admin"])
+        async def api_oiorb_deployments(_: dict = Depends(_require_admin)):
+            from strategies.oi_orb_screener.book_manager import _DEFAULT_PARAMS
+            import json as _json
+            rows = _srv._client_db.get_deployments_by_strategy_sync("oi_orb_screener")
+            out = []
+            for r in rows:
+                try:
+                    params = _json.loads(r.get("strategy_params") or "{}")
+                except Exception:
+                    params = {}
+                merged = dict(_DEFAULT_PARAMS)
+                merged.update(params)
+                out.append({
+                    "deploy_id": r["deploy_id"], "client_id": r["client_id"],
+                    "binding_id": r["binding_id"], "is_running": bool(r.get("is_running")),
+                    "params": merged,
+                })
+            return {"deployments": out}
+
+        @app.post("/api/admin/oiorb/config/{deploy_id}", tags=["Admin"])
+        async def api_oiorb_config_update(
+            deploy_id: str,
+            body: _OiOrbConfigSchema,
+            _: dict = Depends(_require_admin),
+        ):
+            import json as _json
+            patch = body.model_dump()
+            db = _srv._client_db
+            rows = db.get_deployments_by_strategy_sync("oi_orb_screener")
+            row = next((r for r in rows if r["deploy_id"] == deploy_id), None)
+            if row is None:
+                return {"ok": False, "error": f"Deployment '{deploy_id}' not found."}
+            try:
+                existing = _json.loads(row.get("strategy_params") or "{}")
+            except Exception:
+                existing = {}
+            existing.update(patch)
+            await db.set_deployment_strategy_params(deploy_id, _json.dumps(existing))
+            logger.info("oiorb/config/update: %s -> %s", deploy_id, patch)
+            return {"ok": True, "message": "Saved. Applies on the next 5s reconcile (auto-respawn if flat)."}
 
         # ── ADMIN — per-index strategy config (rule builder) ─────────────────
 
