@@ -190,6 +190,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         oi_roc_enabled: bool = False,
         oi_roc_min_pct: float = 3.0,
         oi_roc_lookback_sec: float = 300.0,
+        chain_watch_max_stocks: int = 2,
     ) -> None:
         super().__init__(bus, cfg, _UNDERLYING_SENTINEL, client_id, binding_id)
         self._strategy_name = "oi_orb_screener"
@@ -238,6 +239,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             "oi_roc_min_pct": oi_roc_min_pct,
             "oi_roc_lookback_sec": oi_roc_lookback_sec,
         }
+        self._chain_watch_max_stocks = max(0, int(chain_watch_max_stocks))
         self._flog = {
             name: _make_filter_logger(name, client_id, binding_id) for name in _FILTER_NAMES
         }
@@ -484,7 +486,30 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         # Best-effort per stock: a failure here must never abort the whole
         # day's pipeline, it just leaves that stock's chain-dependent
         # filters reporting "unavailable" (which never blocks on its own).
-        for sym in self._shortlist_symbols:
+        #
+        # SAFETY CAP, direct user spec 2026-08-25: this app's WS feed
+        # subscription is a SINGLE SHARED budget across every strategy
+        # (~50 symbols/connection, see data_layer/global_feeder.py's
+        # _WS_SYMBOL_LIMIT -- exceeding it doesn't error, the broker
+        # SILENTLY DROPS the excess, which could starve a completely
+        # different strategy's ticks, not just this one's). Each chain is
+        # ~(2*chain_depth+1)*2 symbols -- watching every shortlisted stock
+        # unbounded could add 50-100+ new subscriptions on a busy day. Cap
+        # to the first chain_watch_max_stocks (by shortlist rank, i.e. the
+        # highest-scored candidates) until this strategy gets its own
+        # dedicated feeder connection (a separate broker account/token,
+        # mirroring the existing upstox2-for-CrudeOil precedent) -- not
+        # built yet, needs a real credential provisioned first.
+        watch_list = self._shortlist_symbols[: self._chain_watch_max_stocks]
+        if len(self._shortlist_symbols) > len(watch_list):
+            self._clog.warning(
+                "OiOrb[%s/%s]: chain_watch_max_stocks=%d -- only watching %s for the OI-wall/"
+                "distance/PCR filters, skipping %s (shared WS subscription budget, ~50/connection "
+                "cap). OI-Spurt/price-move/volume/OI-ROC filters are unaffected for the skipped ones.",
+                self._client_id, self._binding_id, self._chain_watch_max_stocks, watch_list,
+                [s for s in self._shortlist_symbols if s not in watch_list],
+            )
+        for sym in watch_list:
             try:
                 row = sl_indexed.loc[sym] if sym in sl_indexed.index else None
                 spot = float(row["lastPrice"]) if row is not None and "lastPrice" in shortlist.columns else 0.0

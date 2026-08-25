@@ -72,6 +72,14 @@ _DEFAULT_PARAMS = {
     "oi_roc_enabled": False,
     "oi_roc_min_pct": 3.0,
     "oi_roc_lookback_sec": 300.0,
+    # 2026-08-25, direct user spec: the WS feed subscription is a single
+    # SHARED budget across every strategy in this app (~50 symbols/broker
+    # connection) -- watching every shortlisted stock's full option chain
+    # unbounded could silently starve ticks for a completely different
+    # strategy. Cap chain-watching (the 3 chain-dependent filters: oi_wall/
+    # distance_to_wall/pcr) to the top N shortlisted stocks by rank until
+    # this strategy gets its own dedicated feeder connection.
+    "chain_watch_max_stocks": 2,
 }
 _FLOAT_KEYS = ("oi_spurt_min_pct", "price_move_min_pct", "stock_move_abort_pct",
                "nifty_bullish_pct", "nifty_bearish_pct", "rejection_min_rise_pct",
@@ -80,7 +88,7 @@ _FLOAT_KEYS = ("oi_spurt_min_pct", "price_move_min_pct", "stock_move_abort_pct",
                "pcr_max_for_call", "pcr_min_for_put", "volume_confirmation_min_ratio",
                "oi_roc_min_pct", "oi_roc_lookback_sec")
 _INT_KEYS = ("top_n_per_side", "poll_seconds", "max_monitor_minutes",
-             "sma_period", "sma_exit_consec_closes")
+             "sma_period", "sma_exit_consec_closes", "chain_watch_max_stocks")
 _STR_KEYS = ("orb_start", "orb_end", "scan_start", "entry_window_start", "entry_window_end")
 _FILTER_BOOL_KEYS = ("oi_wall_check_enabled", "distance_to_wall_enabled", "pcr_gate_enabled",
                       "volume_confirmation_enabled", "oi_roc_enabled")
@@ -174,6 +182,7 @@ class OiOrbScreenerBookManager(StrategyBookManager):
             oi_roc_enabled=value["oi_roc_enabled"],
             oi_roc_min_pct=value["oi_roc_min_pct"],
             oi_roc_lookback_sec=value["oi_roc_lookback_sec"],
+            chain_watch_max_stocks=value["chain_watch_max_stocks"],
         )
         logger.info(
             "OiOrbScreenerBookManager: spawned %s/%s (lots=%d oi_spurt>=%.1f%% price_move>=%.1f%% "
@@ -228,6 +237,7 @@ class OiOrbScreenerBookManager(StrategyBookManager):
                 "volume_confirmation_enabled", "volume_confirmation_min_ratio",
                 "oi_roc_enabled", "oi_roc_min_pct", "oi_roc_lookback_sec",
             ))
+            or book._chain_watch_max_stocks != value["chain_watch_max_stocks"]
         )
 
     def _log_spawned(self, key: tuple, value: dict) -> None:

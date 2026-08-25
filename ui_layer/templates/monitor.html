@@ -4617,6 +4617,12 @@ function amoTest() {
                 <span class="text-[10px]" style="color:var(--t-muted)">Each always logs to its own file — toggle only controls whether it blocks a trade</span>
               </div>
 
+              <div><div class="sec-label mb-1">CHAIN WATCH MAX STOCKS</div>
+                <input class="t-input font-mono text-xs" type="number" step="1" min="0" x-model.number="oiOrbConfig.chain_watch_max_stocks"/></div>
+              <div class="col-span-3 text-[10px]" style="color:var(--t-amber)">
+                ⚠ Shared WS feed budget (~50 symbols/broker connection, across ALL strategies). Only the top N shortlisted stocks get chain-watching (OI Wall/Distance/PCR) — the rest still get OI-Spurt/price-move/Volume/OI-ROC. Raise only once a dedicated feeder exists for this strategy.
+              </div>
+
               <div class="flex items-center gap-2">
                 <input type="checkbox" x-model="oiOrbConfig.oi_wall_check_enabled"/>
                 <div class="sec-label">OI WALL CHECK</div>

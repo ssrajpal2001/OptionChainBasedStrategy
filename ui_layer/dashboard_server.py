@@ -316,6 +316,10 @@ try:
         oi_roc_enabled:             bool  = False
         oi_roc_min_pct:             float = 3.0
         oi_roc_lookback_sec:        float = 300.0
+        # Shared WS feed subscription is capped ~50 symbols/broker connection
+        # across ALL strategies -- bound chain-watching to the top N shortlisted
+        # stocks so this can't silently starve another strategy's ticks.
+        chain_watch_max_stocks:    int   = 2
 
     class _ResetPasswordSchema(_PydanticBase):
         token:        str
