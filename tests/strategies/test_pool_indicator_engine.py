@@ -18,6 +18,49 @@ def test_pair_indicators_combined_close_and_vwap():
     assert ind["vwap"] == 51 + 41
     assert round(ind["slope"], 6) == round((51 + 41) - (50 + 40), 6)
 
+
+# 2026-08-25 CRITICAL FIX regression: real incident, a client rule referencing
+# SLOPE>SLOPE_PREV(1m) could never fire on ANY session (confirmed live, N/A for
+# over an hour of fully-warmed operation) because pair_indicators()/
+# pair_indicators_tf() never returned a "slope_prev" key at all.
+
+def test_pair_indicators_slope_prev_absent_with_only_two_bars():
+    eng = PoolIndicatorEngine(rsi_len=14, roc_len=10)
+    bars = [(50, 49, 40, 39), (51, 50, 41, 40)]
+    for i, (cl, ca, pl, pa) in enumerate(bars):
+        eng.update_tick(100, "CE", cl, ca)
+        eng.update_tick(100, "PE", pl, pa)
+        eng.commit_bar(minute=555 + i)
+    ind = eng.pair_indicators(100, 100)
+    assert "slope" in ind
+    assert "slope_prev" not in ind   # needs a 3rd bar -- must not fabricate one
+
+
+def test_pair_indicators_slope_prev_present_with_three_bars():
+    eng = PoolIndicatorEngine(rsi_len=14, roc_len=10)
+    # combined vwap per bar: 89, 91, 96, 92
+    bars = [(50, 49, 40, 40), (51, 50, 41, 41), (52, 51, 46, 45), (53, 52, 41, 40)]
+    for i, (cl, ca, pl, pa) in enumerate(bars):
+        eng.update_tick(100, "CE", cl, ca)
+        eng.update_tick(100, "PE", pl, pa)
+        eng.commit_bar(minute=555 + i)
+    ind = eng.pair_indicators(100, 100)
+    # vwaps: 89, 91, 96, 92 -> slope = 92-96=-4, slope_prev = 96-91=5
+    assert round(ind["slope"], 6) == -4.0
+    assert round(ind["slope_prev"], 6) == 5.0
+
+
+def test_pair_indicators_tf_slope_prev_present_with_three_tf_bars():
+    eng = PoolIndicatorEngine(rsi_len=14, roc_len=10)
+    bars = [(50, 49, 40, 40), (51, 50, 41, 41), (52, 51, 46, 45), (53, 52, 41, 40)]
+    for i, (cl, ca, pl, pa) in enumerate(bars):
+        eng.update_tick(100, "CE", cl, ca)
+        eng.update_tick(100, "PE", pl, pa)
+        eng.commit_bar(minute=555 + i)
+    ind = eng.pair_indicators_tf(100, 100, tf=1)   # tf<=1 delegates to pair_indicators
+    assert round(ind["slope"], 6) == -4.0
+    assert round(ind["slope_prev"], 6) == 5.0
+
 def test_pair_atp_fresh_true_when_both_recent():
     eng = PoolIndicatorEngine(rsi_len=14, roc_len=10)
     eng.update_tick(100, "CE", 50, 49)

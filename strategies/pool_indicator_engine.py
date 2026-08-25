@@ -151,6 +151,17 @@ class PoolIndicatorEngine:
             _prev = ca_live[-2] + pa_live[-2]
             ind["slope"] = _curr - _prev
             ind["vwap_prev"] = _prev   # exposed so logs can show prev->curr VWAP (verify slope)
+            # 2026-08-25 fix, real incident: SLOPE>SLOPE_PREV(1m) is a valid dynamic-exit rule
+            # (client rule-builder config) but this function never returned a "slope_prev" key at
+            # all -- the rule evaluator (strategies/core/rule_evaluator.py) always saw None for it,
+            # so that AND-condition could never pass, permanently, on any session (confirmed live:
+            # N/A for over an hour of fully-warmed operation, not a restart/warm-up artifact).
+            # slope_prev = the PRIOR candle's own slope (one bar further back than "slope" itself),
+            # i.e. is VWAP decay accelerating or decelerating -- needs one more historical point
+            # than "slope" alone, so it becomes available one candle later in the session.
+            if len(ca_live) >= 3 and len(pa_live) >= 3:
+                _prev2 = ca_live[-3] + pa_live[-3]
+                ind["slope_prev"] = _prev - _prev2
         cc, pc = self._closes.get(ce), self._closes.get(pe)
         if cc and pc:
             n = min(len(cc), len(pc))
@@ -291,6 +302,9 @@ class PoolIndicatorEngine:
         if len(vwaps) >= 2:
             ind["slope"] = vwaps[-1] - vwaps[-2]
             ind["vwap_prev"] = vwaps[-2]   # exposed so logs can show prev->curr VWAP (verify slope)
+            # 2026-08-25 fix -- same gap as pair_indicators() above, same rationale.
+            if len(vwaps) >= 3:
+                ind["slope_prev"] = vwaps[-2] - vwaps[-3]
         n = len(closes)
         if n >= self._rsi_len + 1:
             ind["rsi"] = float(_rsi(np.array(closes, dtype=np.float64)))

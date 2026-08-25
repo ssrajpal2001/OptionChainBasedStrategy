@@ -97,6 +97,7 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         self._ce_atp: float = 0.0
         self._pe_atp: float = 0.0
         self._prev_vwap_atp: Optional[float] = None
+        self._prev_slope: Optional[float] = None
         self._strike_prem: Dict[Tuple[int, str], dict] = {}
         self._prev_atp_closed: Dict[Tuple[int, str], float] = {}
         self._itm_gate_armed: bool = False

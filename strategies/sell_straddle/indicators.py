@@ -49,7 +49,13 @@ class IndicatorMixin:
                 int(self._position.ce_leg.strike), int(self._position.pe_leg.strike),
                 session_start_min=_floor_min)
             if _pe:
-                for _k in ("rsi", "roc", "slope", "vwap", "vwap_prev", "close"):
+                # 2026-08-25 fix: "slope_prev" was missing from this copy-over list even after
+                # pool_indicator_engine.py's pair_indicators() started returning it -- the value
+                # was computed correctly but silently dropped right here before it ever reached
+                # self._ind (and therefore the rule evaluator), so any rule referencing
+                # SLOPE>SLOPE_PREV still saw None. Real incident: confirmed live, N/A for over
+                # an hour of fully-warmed operation.
+                for _k in ("rsi", "roc", "slope", "slope_prev", "vwap", "vwap_prev", "close"):
                     if _k in _pe:
                         self._ind[_k] = _pe[_k]
                 self._ind["ltp"] = ltp
@@ -93,7 +99,14 @@ class IndicatorMixin:
                 self._ind["slope"] = _slope
                 self._ind["vwap_slope"] = _slope
                 self._ind["slope_curr"] = _cur_vwap
-                self._ind["slope_prev"] = _prev
+                # 2026-08-25 fix: this used to set slope_prev = _prev (the previous VWAP LEVEL,
+                # e.g. ~155) instead of the previous SLOPE (a small delta, e.g. -0.05) -- a rule
+                # comparing SLOPE>SLOPE_PREV would have compared a delta against an absolute VWAP
+                # level, never meaningfully true. slope_prev is now the actual prior candle's own
+                # slope, tracked the same way self._prev_vwap_atp already tracks the prior VWAP.
+                if self._prev_slope is not None:
+                    self._ind["slope_prev"] = self._prev_slope
+                self._prev_slope = _slope
             self._prev_vwap_atp = _cur_vwap
         if len(closes) >= 10:
             _ref = closes[-10]
