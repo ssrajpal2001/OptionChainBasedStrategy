@@ -6377,28 +6377,32 @@ pm2 save
         2026-08-06: temporarily logged at WARNING (not DEBUG) on every miss/fallback
         path -- prior investigation (2026-07-03) into "UI shows no position despite a
         real filled trade" got stuck because this was DEBUG-level and never actually
-        appeared in production logs. Revert to DEBUG once the current recurrence is
-        root-caused."""
+        appeared in production logs. That investigation concluded long ago (see the
+        2026-08-06 confirm-model redesign); this was simply never reverted, and by
+        2026-08-26 it was flooding the log on every dashboard poll for every binding
+        a client has -- including bindings that never ran sell_straddle at all (a
+        "MISS" there is completely expected, not a bug). Reverted to DEBUG per this
+        docstring's own original intent."""
         if self._straddle_manager is not None:
             b = self._straddle_manager.find(client_id, binding_id, underlying)
             if b is not None:
                 return b
-            logger.warning("_find_ss_book MISS: cid=%s bid=%s und=%s books=%s",
+            logger.debug("_find_ss_book MISS: cid=%s bid=%s und=%s books=%s",
                         client_id, binding_id, underlying,
                         list(self._straddle_manager._books.keys()))
         else:
-            logger.warning("_find_ss_book: straddle_manager is None (sell_straddle not enabled?)")
+            logger.debug("_find_ss_book: straddle_manager is None (sell_straddle not enabled?)")
         u = str(underlying).upper()
         for s in self._sell_straddles:
             if getattr(s, "_underlying", None) == u and (
                 not getattr(s, "_client_id", "") or
                 (s._client_id == client_id and s._binding_id == binding_id)
             ):
-                logger.warning("_find_ss_book: fallback scan matched cid=%s bid=%s und=%s "
+                logger.debug("_find_ss_book: fallback scan matched cid=%s bid=%s und=%s "
                                "(manager.find missed but per-underlying scan recovered it)",
                                client_id, binding_id, underlying)
                 return s
-        logger.warning("_find_ss_book: TOTAL MISS cid=%s bid=%s und=%s -- no book found via "
+        logger.debug("_find_ss_book: TOTAL MISS cid=%s bid=%s und=%s -- no book found via "
                        "manager or fallback scan, UI will show no position", client_id, binding_id, underlying)
         return None
 
