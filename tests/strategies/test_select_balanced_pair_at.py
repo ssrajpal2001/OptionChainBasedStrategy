@@ -8,7 +8,7 @@ select_balanced_pair(strike_prem, spot, ...) when atm is exactly what
 select_balanced_pair would itself compute by rounding, AND must correctly
 anchor at an arbitrary explicit strike that is NOT the rounded-nearest one.
 """
-from strategies.sell_straddle.selection import select_balanced_pair, select_balanced_pair_at
+from strategies.sell_straddle.selection import select_balanced_pair, select_balanced_pair_at, reentry_block_reason
 
 
 def _cache():
@@ -93,3 +93,45 @@ def test_partner_window_unchanged_for_reentry_anchor_otm_steps_zero():
         anchor_otm_steps=0,
     )
     assert result is None  # no partner reachable within the un-shifted window
+
+
+# ── atm_ref (2026-08-26, direct user spec: mean-of-spot-and-futures ATM) ────
+
+def test_select_balanced_pair_atm_ref_overrides_spot_for_strike_rounding():
+    """atm_ref, when given, decides which strike ATM rounds to -- spot itself
+    stays the value used for intrinsic/time-value stripping. spot=24512.90
+    would round to 24500; atm_ref=24560 rounds to 24550 instead -- this only
+    succeeds if atm_ref genuinely won the rounding decision (matches the
+    explicit-anchor result already proven in
+    test_select_balanced_pair_at_anchors_at_explicit_non_rounded_strike)."""
+    cache = _cache()
+    at_explicit = select_balanced_pair_at(cache, atm=24550, spot=24512.90, step=50, offset=4, ltp_target=50.0)
+    via_atm_ref = select_balanced_pair(
+        cache, spot=24512.90, step=50, offset=4, ltp_target=50.0, atm_ref=24560.0,
+    )
+    assert via_atm_ref is not None
+    assert via_atm_ref == at_explicit
+
+
+def test_select_balanced_pair_atm_ref_none_preserves_spot_only_behavior():
+    """Default (no atm_ref) must be byte-identical to the pre-2026-08-26
+    behavior -- every existing caller that omits it is unaffected."""
+    cache = _cache()
+    spot = 24512.90
+    without = select_balanced_pair(cache, spot=spot, step=50, offset=4, ltp_target=50.0)
+    with_none = select_balanced_pair(cache, spot=spot, step=50, offset=4, ltp_target=50.0, atm_ref=None)
+    assert without is not None
+    assert without == with_none
+
+
+def test_reentry_block_reason_atm_ref_matches_select_balanced_pair():
+    """reentry_block_reason must diagnose against the SAME atm_ref the real
+    selection call used, never disagree with it."""
+    cache = _cache()
+    diag = reentry_block_reason(
+        cache, spot=24512.90, step=50, offset=4, ltp_target=50.0,
+        rule_eval=lambda cs, ps: (True, "ok"), atm_ref=24560.0,
+    )
+    at_explicit = select_balanced_pair_at(cache, atm=24550, spot=24512.90, step=50, offset=4, ltp_target=50.0)
+    assert diag["kind"] == "passed"
+    assert (diag["ce"], diag["pe"]) == (at_explicit[0], at_explicit[1])

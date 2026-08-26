@@ -55,18 +55,17 @@ def test_anchor_fails_when_a_quoted_leg_has_zero_ltp():
     assert anchor_fails_floor(cache, atm=24500, spot=24500, ltp_target=50.0) is True
 
 
-def test_anchor_otm_shift_matches_select_balanced_pair_at_rejection():
-    """When anchor_otm_steps shifts the anchor to an unquoted strike,
-    anchor_fails_floor must agree with select_balanced_pair_at's own
-    REJECT-for-missing-shifted-quote behavior (same underlying rule,
-    verified consistent rather than assumed)."""
-    from strategies.sell_straddle.selection import select_balanced_pair_at
-    cache = _cache()   # no 24450/24600 CE quotes -- the shifted anchor strike
-    sel = select_balanced_pair_at(cache, atm=24500, spot=24512.90, step=50, offset=4,
-                                   ltp_target=50.0, anchor_otm_steps=1)
-    assert sel is None   # confirms the shifted anchor strike genuinely has no quote
+def test_anchor_fails_floor_ignores_otm_steps_2026_08_26():
+    """2026-08-26 direct user correction: anchor_fails_floor's floor decision
+    is ATM-only, always -- passing anchor_otm_steps must not change the
+    result (unlike before 2026-08-26, when it shifted which strike's LTP was
+    checked). PE ATM ltp=133.75 passes a 50 floor regardless of the steps
+    argument, even though no 24450/24600 CE quote exists at all."""
+    cache = _cache()   # no 24450/24600 CE quotes -- would-be shifted anchor strike
     assert anchor_fails_floor(cache, atm=24500, spot=24512.90, ltp_target=50.0,
-                               anchor_otm_steps=1, step=50) is True
+                               anchor_otm_steps=0, step=50) is False
+    assert anchor_fails_floor(cache, atm=24500, spot=24512.90, ltp_target=50.0,
+                               anchor_otm_steps=1, step=50) is False
 
 
 def test_anchor_side_selection_matches_select_balanced_pair_at():
@@ -136,11 +135,17 @@ def test_anchor_floor_detail_reports_zero_ltp_distinctly_from_missing_quote():
     assert detail["pe_ltp"] == 0.0
 
 
-def test_anchor_floor_detail_reports_no_quote_at_shifted_anchor():
-    cache = _cache()   # no 24450/24600 CE quotes -- the shifted anchor strike
+def test_anchor_floor_detail_ignores_otm_steps_2026_08_26():
+    """2026-08-26 direct user correction: anchor_floor_detail reports the
+    ATM reading only -- passing anchor_otm_steps must not change what's
+    reported, even though no 24450/24600 CE quote exists at all (the
+    would-be shifted anchor strike)."""
+    cache = _cache()
     detail = anchor_floor_detail(cache, atm=24500, spot=24512.90, theta_target=0.0,
                                   anchor_otm_steps=1, step=50)
-    assert detail["reason"] == "no_quote_at_shifted_anchor"
+    assert detail["reason"] == "measured"
+    assert detail["anchor_side"] == "PE"
+    assert detail["anchor_strike"] == 24500
 
 
 def test_anchor_floor_detail_measured_value_matches_what_anchor_fails_floor_rejected_on():

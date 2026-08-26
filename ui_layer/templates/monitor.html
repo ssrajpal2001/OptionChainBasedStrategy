@@ -4198,11 +4198,32 @@ function amoTest() {
                      x-text="s.entry_allowed ? '✓ OK' : '✗ NO'"></div>
               </div>
               <div class="text-center">
-                <div class="font-mono text-xs" style="color:var(--t-muted)"
-                     :title="s.spot_source==='futures' ? 'Sourced from the near-month FUTURES contract, not the real spot index (futures_atm_underlyings)' : 'Real spot index'"
-                     x-text="s.spot_source==='futures' ? 'FUT' : 'SPOT'"></div>
-                <div class="font-mono text-xs" :style="`color:${s.spot_source==='futures'?'var(--t-amber)':'var(--t-text)'}`"
+                <div class="font-mono text-xs" style="color:var(--t-muted)" title="Real spot index">SPOT</div>
+                <div class="font-mono text-xs" style="color:var(--t-text)"
                      x-text="s.spot ? fmt(s.spot) : '—'"></div>
+              </div>
+            </div>
+          </template>
+          <!-- 2026-08-26, direct user spec: futures_atm underlyings trade off the MEAN
+               of real spot and futures, not either alone -- show all three so it's
+               visible which value actually drove strike selection. -->
+          <template x-if="s.type==='sell_straddle' && s.uses_mean_atm">
+            <div class="grid grid-cols-3 gap-2 mb-2">
+              <div class="text-center">
+                <div class="font-mono text-xs" style="color:var(--t-muted)" title="Real spot index">SPOT</div>
+                <div class="font-mono text-xs" style="color:var(--t-text)"
+                     x-text="s.spot ? fmt(s.spot) : '—'"></div>
+              </div>
+              <div class="text-center">
+                <div class="font-mono text-xs" style="color:var(--t-muted)" title="Near-month futures contract">FUT</div>
+                <div class="font-mono text-xs" style="color:var(--t-text)"
+                     x-text="s.futures ? fmt(s.futures) : '—'"></div>
+              </div>
+              <div class="text-center">
+                <div class="font-mono text-xs" style="color:var(--t-amber)"
+                     title="Mean of spot and futures -- the value actually used for ATM/strike selection">MEAN</div>
+                <div class="font-mono text-xs font-bold" style="color:var(--t-amber)"
+                     x-text="s.atm_mean ? fmt(s.atm_mean) : '—'"></div>
               </div>
             </div>
           </template>

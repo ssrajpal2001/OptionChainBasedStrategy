@@ -68,13 +68,15 @@ def test_mcx_underlyings_include_crudeoil():
 
 
 # ── futures_atm_underlyings (2026-08-26, direct user spec) ─────────────────
-# Generalizes the MCX "futures is the ATM source" pattern to any configured
-# underlying (e.g. NIFTY) -- self._spot for that underlying becomes whatever
-# tick lands on its futures contract, system-wide, with zero strategy-code
-# changes (same mechanism MCX already uses live).
+# Generalizes the MCX "futures is a real-time ATM input" pattern to any
+# configured underlying (e.g. NIFTY). 2026-08-26 revision: SellStraddle now
+# wants BOTH the real spot AND the futures price simultaneously (to compute
+# their mean for ATM), not futures-instead-of-spot -- so both keys are
+# subscribed together for a futures_atm underlying.
 
-def test_upstox_uses_futures_key_for_configured_underlying(bus):
+def test_upstox_subscribes_both_spot_and_futures_key_for_configured_underlying(bus):
     from config.global_config import GlobalConfig
+    from data_layer.symbol_translator import SymbolTranslator
     cfg = GlobalConfig()
     cfg.monitored_indices = ["NIFTY"]
     cfg.futures_atm_underlyings = ["NIFTY"]
@@ -82,15 +84,15 @@ def test_upstox_uses_futures_key_for_configured_underlying(bus):
     REGISTRY._futures_upstox["NIFTY"] = "NSE_FO|999999"
     try:
         keys = u._index_instrument_keys()
-        assert keys == ["NSE_FO|999999"]
+        assert keys == [SymbolTranslator.to_upstox_index("NIFTY"), "NSE_FO|999999"]
     finally:
         REGISTRY._futures_upstox.pop("NIFTY", None)
 
 
-def test_upstox_falls_back_to_spot_when_futures_key_not_yet_resolved(bus):
+def test_upstox_subscribes_spot_only_when_futures_key_not_yet_resolved(bus):
     """Safety fallback: a startup-ordering race (REGISTRY hasn't resolved the
     futures key yet) must never leave the underlying with ZERO subscription --
-    falls back to the real spot index key for that cycle instead."""
+    subscribes to spot alone for that cycle instead of going dark."""
     from config.global_config import GlobalConfig
     from data_layer.symbol_translator import SymbolTranslator
     cfg = GlobalConfig()
@@ -114,7 +116,7 @@ def test_upstox_mcx_still_has_no_fallback_when_futures_key_missing(bus):
     assert keys == []
 
 
-def test_fyers_uses_futures_symbol_for_configured_underlying(bus):
+def test_fyers_subscribes_both_spot_and_futures_symbol_for_configured_underlying(bus):
     from config.global_config import GlobalConfig
     cfg = GlobalConfig()
     cfg.monitored_indices = ["NIFTY"]
@@ -123,12 +125,12 @@ def test_fyers_uses_futures_symbol_for_configured_underlying(bus):
     REGISTRY._futures_fyers["NIFTY"] = "NSE:NIFTY26AUGFUT"
     try:
         syms = f._index_symbols()
-        assert syms == ["NSE:NIFTY26AUGFUT"]
+        assert syms == ["NSE:NIFTY50-INDEX", "NSE:NIFTY26AUGFUT"]
     finally:
         REGISTRY._futures_fyers.pop("NIFTY", None)
 
 
-def test_fyers_falls_back_to_spot_when_futures_symbol_not_yet_resolved(bus):
+def test_fyers_subscribes_spot_only_when_futures_symbol_not_yet_resolved(bus):
     from config.global_config import GlobalConfig
     cfg = GlobalConfig()
     cfg.monitored_indices = ["NIFTY"]

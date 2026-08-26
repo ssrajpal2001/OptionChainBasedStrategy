@@ -358,11 +358,20 @@ class EntryMixin:
         if self._is_crypto or self._expiry_shifted_low_anchor_ltp:
             return False
         step = self._cfg.exchange.strike_steps.get(self._underlying, 50.0) if self._cfg else 50.0
-        atm = int(round(self._spot / step) * step) if self._spot > 0 and step > 0 else 0
+        # 2026-08-26, direct user spec: ATM for this decision is the same mean-of-
+        # spot-and-futures reference the real entry selection uses (self._atm_ref --
+        # falls back to plain self._spot for any non-futures_atm underlying).
+        _atm_src = self._atm_ref if self._atm_ref > 0 else self._spot
+        atm = int(round(_atm_src / step) * step) if _atm_src > 0 and step > 0 else 0
         if atm <= 0:
             return False
         from strategies.sell_straddle.selection import anchor_fails_floor, anchor_floor_detail
-        anchor_otm_steps = 1 if use_beginning_sel else 0
+        # 2026-08-26, direct user correction: this floor check is ALWAYS ATM-only
+        # ("otm ltp and theta will not be checked") -- anchor_otm_steps is no longer
+        # branched on use_beginning_sel here, it's always 0. select_balanced_pair_at
+        # (the real entry-selection path) independently enforces this same ATM-only
+        # rule now too -- see its own 2026-08-26 docstring update.
+        anchor_otm_steps = 0
         if not anchor_fails_floor(self._strike_prem, atm, self._spot, ltp_target, theta_target,
                                    anchor_otm_steps=anchor_otm_steps, step=step):
             return False
@@ -439,7 +448,8 @@ class EntryMixin:
             _audit_clients = self._granular_audit_clients()
             if _audit_clients:
                 try:
-                    _atm = round(self._spot / step) * step if self._spot else 0
+                    _atm_src = self._atm_ref if self._atm_ref > 0 else self._spot
+                    _atm = round(_atm_src / step) * step if _atm_src else 0
                     _crit_h = [
                         {"name": "Status", "detail": f"no open position — {concept} scan", "hit": False},
                         {"name": "Spot/ATM", "detail": f"{self._spot:.2f} / {int(_atm)}", "hit": False},
@@ -483,6 +493,7 @@ class EntryMixin:
             self._strike_prem, self._spot, reentry_step, offset, ltp_target, trace=_trace,
             entry_basis=self._entry_basis, theta_target=self._theta_target,
             variable_strikes=variable_strikes, balance_ratio=balance_ratio,
+            atm_ref=self._atm_ref,
         )
 
         for _ln in _trace:
@@ -501,6 +512,7 @@ class EntryMixin:
                     theta_target=self._theta_target,
                     variable_strikes=variable_strikes,
                     balance_ratio=balance_ratio,
+                    atm_ref=self._atm_ref,
                 )
                 if diag["kind"] == "no_pair":
                     self._clog.info(
@@ -539,7 +551,11 @@ class EntryMixin:
         like today, BEGINNING keeps retrying every eligible cycle regardless."""
         from strategies.sell_straddle.selection import select_balanced_pair_at
 
-        near = int(self._spot // step) * int(step) if self._spot > 0 and step > 0 else 0
+        # 2026-08-26, direct user spec: near/far bracket the MEAN-of-spot-and-futures
+        # reference (self._atm_ref -- falls back to plain self._spot for any underlying
+        # not in cfg.futures_atm_underlyings, so this is unchanged there).
+        _atm_src = self._atm_ref if self._atm_ref > 0 else self._spot
+        near = int(_atm_src // step) * int(step) if _atm_src > 0 and step > 0 else 0
         far = near + int(step)
 
         candidates: list = []
@@ -676,7 +692,10 @@ class EntryMixin:
         from strategies.theta_calc import combined_time_value as _ctv
 
         step = self._cfg.exchange.strike_steps.get(self._underlying, 50.0) if self._cfg else 50.0
-        atm = round(self._spot / step) * step
+        # 2026-08-26: record the SAME mean-of-spot-and-futures ATM the entry decision
+        # actually used (falls back to plain self._spot for non-futures_atm underlyings).
+        _atm_src = self._atm_ref if self._atm_ref > 0 else self._spot
+        atm = round(_atm_src / step) * step
 
         self._event_counter += 1
         event_id = f"{self._underlying}_ENTRY_{self._event_counter}"

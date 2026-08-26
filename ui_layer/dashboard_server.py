@@ -4623,6 +4623,13 @@ pm2 save
                         "booked_pnl":   round(getattr(ss, "_session_realized_pnl_pts", 0.0), 2),
                         "spot":         round(ss._spot, 2),
                         "spot_source":  "futures" if ss._underlying.upper() in _futures_atm else "spot",
+                        # 2026-08-26, direct user spec: futures_atm underlyings now track
+                        # real spot AND futures simultaneously and trade off their MEAN,
+                        # not futures alone -- UI must show all three. 0.0/False for any
+                        # underlying not in cfg.futures_atm_underlyings (unchanged there).
+                        "futures":      round(getattr(ss, "_futures_spot", 0.0), 2),
+                        "atm_mean":     round(getattr(ss, "_atm_ref", 0.0), 2),
+                        "uses_mean_atm": bool(getattr(ss, "_uses_mean_atm", False)),
                         "rsi":          round(ss._ind.get("rsi", 0.0), 1),
                         "adx":          round(ss._ind.get("adx", 0.0), 1),
                         "entry_allowed": getattr(ss, "entry_allowed", True),

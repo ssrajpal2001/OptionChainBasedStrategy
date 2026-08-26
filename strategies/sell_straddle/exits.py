@@ -808,7 +808,10 @@ class ExitMixin:
         step = self._cfg.exchange.strike_steps.get(self._underlying, 50.0) if self._cfg else 50.0
         if self._spot <= 0 or step <= 0:
             return
-        atm = int(round(self._spot / step) * step)
+        # 2026-08-26: same mean-of-spot-and-futures ATM reference every other
+        # entry/selection path now uses (falls back to plain self._spot otherwise).
+        _atm_src = self._atm_ref if self._atm_ref > 0 else self._spot
+        atm = int(round(_atm_src / step) * step)
         ce_ltp = float(self._strike_prem.get((atm, "CE"), {}).get("ltp", 0.0) or 0.0)
         pe_ltp = float(self._strike_prem.get((atm, "PE"), {}).get("ltp", 0.0) or 0.0)
         if ce_ltp <= 0 or pe_ltp <= 0:

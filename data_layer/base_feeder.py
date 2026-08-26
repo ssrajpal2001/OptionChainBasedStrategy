@@ -45,6 +45,12 @@ class IndexTick:
     close: float
     volume: int
     timestamp: datetime          # Always IST-aware
+    # 2026-08-26: "spot" (real index) or "futures" (near-month futures contract) --
+    # only meaningful for an underlying in GlobalConfig.futures_atm_underlyings,
+    # where both streams are now subscribed simultaneously so SellStraddle can
+    # track them separately and derive a mean-based ATM. Every other producer of
+    # IndexTick omits this and gets the "spot" default, unchanged behavior.
+    source: str = "spot"
 
 
 @dataclass(frozen=True)

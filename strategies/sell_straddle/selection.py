@@ -456,6 +456,7 @@ def select_balanced_pair(
     rule_pass=None,  # optional callable(ce_strike, pe_strike) -> bool
     variable_strikes: bool = False,
     balance_ratio: float = 1.0,
+    atm_ref: Optional[float] = None,
 ) -> Optional[Tuple[int, int, float, float]]:
     """
     Balanced-pair selection for RE-ENTRY (and any other single-ATM caller):
@@ -464,12 +465,20 @@ def select_balanced_pair(
 
     `variable_strikes=True`: discover ATM and candidate strikes from the actual quoted
     chain instead of assuming a fixed strike step. Used for Delta BTC/ETH daily options.
+
+    `atm_ref` (2026-08-26, direct user spec): when given, ATM is rounded from THIS value
+    instead of `spot` -- SellStraddle's mean-of-spot-and-futures reference for a
+    futures_atm underlying. `spot` itself is still passed through to
+    select_balanced_pair_at unchanged (intrinsic/time-value stripping stays on the real
+    spot, only the STRIKE the anchor is chosen at moves to the mean). None (default)
+    preserves the original spot-only behavior for every other caller.
     Returns (ce_strike, pe_strike, ce_ltp, pe_ltp) or None.
     """
+    _atm_src = atm_ref if atm_ref is not None and atm_ref > 0 else spot
     if variable_strikes:
         atm = _common_atm(strike_prem, spot)
     else:
-        atm = int(round(spot / step) * step)
+        atm = int(round(_atm_src / step) * step)
     return select_balanced_pair_at(
         strike_prem, atm, spot, step, offset, ltp_target, trace=trace,
         entry_basis=entry_basis, theta_target=theta_target, rule_pass=rule_pass,
@@ -503,17 +512,24 @@ def select_balanced_pair_at(
       1. Both sides quoted at `atm`; require both LTP > 0.
       2. Anchor SIDE = whichever side has LOWER TIME VALUE at `atm` -- this decision is
          always made from the raw ATM reading, regardless of `anchor_otm_steps` below.
-      3. If `anchor_otm_steps > 0` (2026-08-20, user spec): the anchor SIDE from step 2
-         is kept, but the anchor's own STRIKE (and the LTP/time-value used for the floor
-         check and the partner's balance target) shifts `anchor_otm_steps` strikes further
-         OTM from `atm` on that side (CE: atm + steps*step; PE: atm - steps*step) --
-         i.e. "anchor selection is correct, but for pairing use 1-OTM of the anchored
-         side" rather than pairing off the literal ATM reading. If that shifted strike
-         isn't quoted or has no live LTP, no pair is returned (same as any other missing
-         leg). Default 0 preserves the original at-ATM anchor behaviour unchanged --
-         RE-ENTRY keeps anchor_otm_steps=0.
-      4. Anchor must pass the dual floor (raw LTP >= ltp_target, time value >= theta_target)
-         at its (possibly shifted) strike.
+      3. Anchor must pass the dual floor (raw LTP >= ltp_target, time value >= theta_target)
+         AT ITS RAW ATM READING -- 2026-08-26, direct user correction of the 2026-08-24
+         change that used to check this floor at the shifted OTM strike instead: "otm ltp
+         and theta will not be checked ... note otm will not be checked for ltp and theta,
+         it will be selected directly." The floor gate is ATM-only, always -- it decides
+         whether to trade this expiry/anchor at all, never re-evaluated against the OTM
+         leg that actually gets pairedoff.
+      4. If `anchor_otm_steps > 0` (2026-08-20, user spec): the anchor SIDE from step 2
+         is kept, but the anchor's own STRIKE (and the LTP/time-value used for the
+         partner's balance target) shifts `anchor_otm_steps` strikes further OTM from
+         `atm` on that side (CE: atm + steps*step; PE: atm - steps*step) -- i.e. "anchor
+         selection is correct, but for pairing use 1-OTM of the anchored side" rather than
+         pairing off the literal ATM reading. If that shifted strike isn't quoted or has
+         no live LTP, no pair is returned (same as any other missing leg) -- this is a
+         pure data-availability check, NOT a re-application of the floor threshold (see
+         step 3 -- the floor was already decided at ATM and is never re-checked here).
+         Default 0 preserves the original at-ATM anchor behaviour unchanged -- RE-ENTRY
+         keeps anchor_otm_steps=0.
       5. Partner = scan the other side over anchor_strike +/- offset (the anchor's OWN,
          possibly-OTM-shifted strike -- 2026-08-24 user spec: "we need to pair with the
          OTM just selected", not the pre-shift ATM) for a strike whose raw LTP is
@@ -551,6 +567,17 @@ def select_balanced_pair_at(
             f"anchor_side={anchor_side} (lower time value at ATM)"
         )
 
+    # 2026-08-26, direct user correction: the dual floor is checked HERE, at the raw
+    # ATM reading, ALWAYS -- before any OTM shift below, never against the shifted
+    # strike. "otm ltp and theta will not be checked ... it will be selected directly."
+    if not leg_passes_dual_floor(anchor_side, anchor_strike, anchor_ltp, spot, ltp_target, theta_target):
+        if trace is not None:
+            trace.append(
+                f"REJECT anchor {anchor_side}{anchor_strike} ltp={anchor_ltp:.2f} "
+                f"tv={anchor_tv:.2f} fails dual floor (ltp>={ltp_target:.0f}, theta>={theta_target:.0f})"
+            )
+        return None
+
     if anchor_otm_steps > 0:
         _shift = anchor_otm_steps * step
         shifted_strike = int(atm + _shift) if anchor_side == "CE" else int(atm - _shift)
@@ -563,30 +590,23 @@ def select_balanced_pair_at(
                     f"-- no live quote"
                 )
             return None
+        # No floor re-check here by design -- the OTM leg is selected directly once
+        # the ATM anchor above has already cleared the floor.
         anchor_strike = shifted_strike
         anchor_ltp = shifted_ltp
         anchor_tv = strip_intrinsic(shifted_ltp, anchor_side, shifted_strike, spot)
         if trace is not None:
             trace.append(
                 f"ANCHOR SHIFTED {anchor_otm_steps}-OTM -> {anchor_side}@{anchor_strike} "
-                f"ltp={anchor_ltp:.2f} tv={anchor_tv:.2f}"
+                f"ltp={anchor_ltp:.2f} tv={anchor_tv:.2f} (not re-checked against floor)"
             )
 
     if trace is not None:
         trace.append(
-            f"anchor={anchor_side}@{anchor_strike} ltp={anchor_ltp:.2f} tv={anchor_tv:.2f} "
-            f"(need ltp>={ltp_target:.0f} theta>={theta_target:.0f}); partner={partner_side} "
-            f"wants same floor and ltp<={anchor_tv * balance_ratio:.2f} (ratio={balance_ratio:.2f})"
+            f"anchor={anchor_side}@{anchor_strike} ltp={anchor_ltp:.2f} tv={anchor_tv:.2f}; "
+            f"partner={partner_side} wants same floor and ltp<={anchor_tv * balance_ratio:.2f} "
+            f"(ratio={balance_ratio:.2f})"
         )
-
-    if not leg_passes_dual_floor(anchor_side, anchor_strike, anchor_ltp, spot, ltp_target, theta_target):
-        if trace is not None:
-            _tv = strip_intrinsic(anchor_ltp, anchor_side, anchor_strike, spot)
-            trace.append(
-                f"REJECT anchor {anchor_side}{anchor_strike} ltp={anchor_ltp:.2f} "
-                f"tv={_tv:.2f} fails dual floor (ltp>={ltp_target:.0f}, theta>={theta_target:.0f})"
-            )
-        return None
 
     if variable_strikes:
         partner_strikes = _strikes_around_atm(
@@ -668,7 +688,14 @@ def anchor_fails_floor(
     data. Used by the caller to decide whether to shift the entry expiry
     to next week (see SellStraddleStrategy._maybe_shift_expiry_for_low_
     anchor_ltp in entries.py) -- this function only diagnoses, it never
-    mutates anything itself."""
+    mutates anything itself.
+
+    2026-08-26, direct user correction: this floor decision is ALWAYS made at the
+    raw ATM reading, never at an OTM-shifted strike -- "otm ltp and theta will not
+    be checked". `anchor_otm_steps`/`step` are accepted for call-site symmetry with
+    select_balanced_pair_at but no longer shift what's evaluated here; the OTM leg
+    select_balanced_pair_at actually trades is selected directly once ATM clears
+    this same floor, never re-checked against it."""
     ce_atm = strike_prem.get((atm, "CE"))
     pe_atm = strike_prem.get((atm, "PE"))
     if not ce_atm or not pe_atm:
@@ -684,15 +711,6 @@ def anchor_fails_floor(
         anchor_side, anchor_strike, anchor_ltp = "CE", atm, ce_ltp
     else:
         anchor_side, anchor_strike, anchor_ltp = "PE", atm, pe_ltp
-
-    if anchor_otm_steps > 0 and step > 0:
-        _shift = anchor_otm_steps * step
-        shifted_strike = int(atm + _shift) if anchor_side == "CE" else int(atm - _shift)
-        shifted_leg = strike_prem.get((shifted_strike, anchor_side))
-        shifted_ltp = shifted_leg.get("ltp", 0.0) if shifted_leg else 0.0
-        if not shifted_leg or shifted_ltp <= 0:
-            return True
-        anchor_strike, anchor_ltp = shifted_strike, shifted_ltp
 
     return not leg_passes_dual_floor(anchor_side, anchor_strike, anchor_ltp, spot, ltp_target, theta_target)
 
@@ -712,7 +730,11 @@ def anchor_floor_detail(
     it failed to clear. Mirrors anchor_fails_floor's own logic exactly (same
     anchor-side/anchor-otm-shift steps) so the two can never disagree about
     which leg is the anchor -- this one is purely for logging, never used for
-    any real decision itself."""
+    any real decision itself.
+
+    2026-08-26, direct user correction: reports the ATM reading only, matching
+    anchor_fails_floor's own ATM-only floor decision -- `anchor_otm_steps`/`step`
+    are accepted for call-site symmetry but no longer shift what's reported here."""
     ce_atm = strike_prem.get((atm, "CE"))
     pe_atm = strike_prem.get((atm, "PE"))
     if not ce_atm or not pe_atm:
@@ -729,16 +751,6 @@ def anchor_floor_detail(
     else:
         anchor_side, anchor_strike, anchor_ltp = "PE", atm, pe_ltp
 
-    if anchor_otm_steps > 0 and step > 0:
-        _shift = anchor_otm_steps * step
-        shifted_strike = int(atm + _shift) if anchor_side == "CE" else int(atm - _shift)
-        shifted_leg = strike_prem.get((shifted_strike, anchor_side))
-        shifted_ltp = shifted_leg.get("ltp", 0.0) if shifted_leg else 0.0
-        if not shifted_leg or shifted_ltp <= 0:
-            return {"reason": "no_quote_at_shifted_anchor", "anchor_side": anchor_side,
-                    "anchor_strike": shifted_strike}
-        anchor_strike, anchor_ltp = shifted_strike, shifted_ltp
-
     anchor_tv = strip_intrinsic(anchor_ltp, anchor_side, anchor_strike, spot)
     return {
         "reason": "measured", "anchor_side": anchor_side, "anchor_strike": anchor_strike,
@@ -748,17 +760,19 @@ def anchor_floor_detail(
 
 def reentry_block_reason(strike_prem, spot, step, offset, ltp_target, rule_eval,
                          theta_target: float = 0.0, variable_strikes: bool = False,
-                         balance_ratio: float = 1.0):
+                         balance_ratio: float = 1.0, atm_ref: Optional[float] = None):
     """Diagnose why the re-entry pool produced no trade, so the log can distinguish
     'no balanced pair exists' from 'a pair exists but the gate blocked it'.
 
     rule_eval: callable(ce_strike, pe_strike) -> (passed: bool, reason: str)
+    atm_ref: see select_balanced_pair's own docstring -- must match whatever the real
+    RE-ENTRY selection call used, so this diagnostic never disagrees with it.
     Returns: {"kind": "no_pair"} | {"kind": "blocked"|"passed", ce, pe, ce_ltp, pe_ltp, reason}
     """
     pair = select_balanced_pair(strike_prem, spot, step, offset, ltp_target,
                                 theta_target=theta_target,
                                 variable_strikes=variable_strikes,
-                                balance_ratio=balance_ratio)
+                                balance_ratio=balance_ratio, atm_ref=atm_ref)
     if not pair:
         return {"kind": "no_pair"}
     ce, pe, ce_ltp, pe_ltp = pair

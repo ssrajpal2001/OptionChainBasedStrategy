@@ -313,22 +313,24 @@ class UpstoxFeeder(BaseFeeder):
                 # from before this 2026-08-26 change: no futures key yet means no
                 # subscription this cycle, same as it always has.
             elif i.upper() in _futures_atm:
+                # 2026-08-26, direct user spec revision: SellStraddle now wants BOTH
+                # the real spot AND the futures price simultaneously (to compute their
+                # mean for ATM), not futures-instead-of-spot -- so subscribe to both
+                # keys, always, for a futures_atm underlying.
+                keys.append(SymbolTranslator.to_upstox_index(i))
                 fk = REGISTRY.get_futures_upstox(i.upper())
                 if fk:
                     keys.append(fk)
                 else:
-                    # 2026-08-26 safety fallback: unlike MCX, this underlying DOES
-                    # have a real spot index key -- if the futures key hasn't been
-                    # resolved yet (a startup-ordering race against REGISTRY load),
-                    # subscribe to spot instead of silently going dark on ticks for
-                    # the whole underlying. Self-corrects on the next rebuild once
-                    # the futures key resolves (this list is rebuilt on reconnect).
+                    # Futures key not resolved yet (startup-ordering race against
+                    # REGISTRY load) -- spot alone still subscribes this cycle so
+                    # ticks aren't lost entirely; self-corrects on the next rebuild
+                    # once the futures key resolves (this list is rebuilt on
+                    # reconnect).
                     logger.warning(
                         "UpstoxFeeder: futures_atm underlying %s has no resolved "
-                        "futures key yet -- falling back to spot index key this "
-                        "cycle.", i,
+                        "futures key yet -- subscribing to spot only this cycle.", i,
                     )
-                    keys.append(SymbolTranslator.to_upstox_index(i))
             else:
                 keys.append(SymbolTranslator.to_upstox_index(i))
         return keys
@@ -727,24 +729,29 @@ class UpstoxFeeder(BaseFeeder):
                 continue
 
             # ── Index tick ──────────────────────────────────────────────────
-            internal_name = (
-                _UPSTOX_INDEX_KEY_TO_INTERNAL.get(inst_key)
-                or _mcx_upstox_fut_to_internal(inst_key)
-                or self._extra_spot_keys.get(inst_key)
-            )
+            _spot_name = _UPSTOX_INDEX_KEY_TO_INTERNAL.get(inst_key) or self._extra_spot_keys.get(inst_key)
+            _fut_name = None if _spot_name else _mcx_upstox_fut_to_internal(inst_key)
+            internal_name = _spot_name or _fut_name
             if internal_name:
+                # 2026-08-26, direct user spec: futures_atm underlyings now carry BOTH
+                # a real spot key AND a futures key at once (see _index_instrument_keys)
+                # -- tag which one this tick came from so SellStraddle can track both
+                # and compute their mean, instead of one silently overwriting the other.
+                _source = "futures" if _fut_name else "spot"
                 # Diagnostic: log the raw index value per key (throttled) so a mis-valued
                 # SENSEX/BSE index (wrong strikes) is immediately visible.
-                _dk = f"_idxlog_{internal_name}"
+                _dk = f"_idxlog_{internal_name}_{_source}"
                 if time.monotonic() - getattr(self, _dk, 0.0) > 30.0:
                     setattr(self, _dk, time.monotonic())
-                    logger.info("UpstoxFeeder: INDEX %s key=%s ltp=%.2f", internal_name, inst_key, ltp)
+                    logger.info("UpstoxFeeder: INDEX %s (%s) key=%s ltp=%.2f",
+                                internal_name, _source, inst_key, ltp)
                 tick = IndexTick(
                     symbol=internal_name,
                     ltp=ltp,
                     open=ltp, high=ltp, low=ltp, close=ltp,
                     volume=0,
                     timestamp=now,
+                    source=_source,
                 )
                 await self._publish_index(tick)
                 continue
@@ -1027,18 +1034,20 @@ class FyersFeeder(BaseFeeder):
                     syms.append(fut)
                 # MCX has no separate spot symbol to fall back to -- unchanged.
             elif i.upper() in _futures_atm:
+                # 2026-08-26, direct user spec revision: subscribe to BOTH spot and
+                # futures for a futures_atm underlying (mean-based ATM), not futures-
+                # instead-of-spot -- see UpstoxFeeder._index_instrument_keys' matching
+                # comment.
+                if i in _FYERS_INDEX_SYMBOLS:
+                    syms.append(_FYERS_INDEX_SYMBOLS[i])
                 fut = REGISTRY.get_futures_fyers(i.upper())
                 if fut:
                     syms.append(fut)
-                elif i in _FYERS_INDEX_SYMBOLS:
-                    # 2026-08-26 safety fallback -- see UpstoxFeeder._index_instrument_keys'
-                    # own comment: futures key not resolved yet (startup-ordering race),
-                    # fall back to spot rather than go dark on this underlying's ticks.
+                else:
                     logger.warning(
                         "FyersFeeder: futures_atm underlying %s has no resolved futures "
-                        "symbol yet -- falling back to spot index symbol this cycle.", i,
+                        "symbol yet -- subscribing to spot only this cycle.", i,
                     )
-                    syms.append(_FYERS_INDEX_SYMBOLS[i])
             elif i in _FYERS_INDEX_SYMBOLS:
                 syms.append(_FYERS_INDEX_SYMBOLS[i])
         return syms
@@ -1204,12 +1213,17 @@ class FyersFeeder(BaseFeeder):
             self._logged_first_tick = True
             logger.info("FyersFeeder: first TICK frame keys=%s sample=%r", list(raw.keys()), str(raw)[:400])
 
-        internal = _FYERS_TO_INTERNAL.get(symbol_fyers) or _mcx_fyers_fut_to_internal(symbol_fyers)
+        _spot_internal = _FYERS_TO_INTERNAL.get(symbol_fyers)
+        _fut_internal = None if _spot_internal else _mcx_fyers_fut_to_internal(symbol_fyers)
+        internal = _spot_internal or _fut_internal
         if internal:
-            _dk = f"_idxlog_{internal}"
+            # 2026-08-26: tag spot vs futures -- see UpstoxFeeder's matching comment.
+            _source = "futures" if _fut_internal else "spot"
+            _dk = f"_idxlog_{internal}_{_source}"
             if time.monotonic() - getattr(self, _dk, 0.0) > 30.0:
                 setattr(self, _dk, time.monotonic())
-                logger.info("FyersFeeder: INDEX %s sym=%s ltp=%.2f", internal, symbol_fyers, float(ltp))
+                logger.info("FyersFeeder: INDEX %s (%s) sym=%s ltp=%.2f",
+                            internal, _source, symbol_fyers, float(ltp))
             t0 = time.monotonic()
             tick = IndexTick(
                 symbol=internal,
@@ -1220,6 +1234,7 @@ class FyersFeeder(BaseFeeder):
                 close=float(raw.get("prev_close_price") or ltp),
                 volume=int(raw.get("vol_traded_today") or 0),
                 timestamp=datetime.now(IST),
+                source=_source,
             )
             await self._publish_index(tick)
             if hasattr(self, "_latency_dict"):

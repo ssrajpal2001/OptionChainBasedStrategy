@@ -76,18 +76,20 @@ def _healthy_strike_prem():
 
 
 def _raw_atm_passes_but_1otm_anchor_fails_strike_prem():
-    """2026-08-24 CRITICAL fix scenario, confirmed live: raw ATM PE (the
-    anchor side, lower time value) is comfortably above the floor, but the
-    REAL anchor BEGINNING selection would actually trade -- PE shifted
-    1-OTM (lower strike) to 24450 -- has an LTP well below it. Before the
-    fix, this call always checked raw ATM only (anchor_otm_steps defaulted
-    to 0 regardless of caller context) and would have found "PE@24500=55 >=
-    50 -> healthy", never noticing the real traded leg was actually too
-    cheap."""
+    """2026-08-24 -> 2026-08-26 history: an earlier version of this fix made
+    this call check the SHIFTED 1-OTM anchor's own floor instead of raw
+    ATM's, reasoning that the real traded leg (1-OTM for BEGINNING) could be
+    below floor even while raw ATM passed. Direct user correction on
+    2026-08-26: that was wrong -- "otm ltp and theta will not be checked...
+    it will be selected directly." The floor gate is ATM-only, always,
+    regardless of use_beginning_sel; the OTM leg is never re-checked against
+    it. This fixture (raw ATM PE=55 passes a 50 floor, 1-OTM PE@24450=15
+    would fail it) now exists specifically to prove NO shift happens in
+    either case -- the OTM value is irrelevant to this decision."""
     return {
         (24500, "CE"): {"ltp": 184.25, "atp": 180.0},
         (24500, "PE"): {"ltp": 55.0, "atp": 55.0},     # raw ATM -- passes a 50 floor
-        (24450, "PE"): {"ltp": 15.0, "atp": 15.0},     # real 1-OTM anchor -- fails it
+        (24450, "PE"): {"ltp": 15.0, "atp": 15.0},     # 1-OTM value -- irrelevant now
     }
 
 
@@ -167,27 +169,29 @@ def test_no_shift_when_atm_not_resolvable():
     assert shifted is False
 
 
-# ── 2026-08-24 CRITICAL fix: real 1-OTM anchor must be checked for BEGINNING ──
+# ── 2026-08-26 direct user correction: floor gate is ATM-only, always ───────
+# An earlier (2026-08-24) version of this fix checked the shifted 1-OTM
+# anchor's own floor for BEGINNING. Direct user correction: "otm ltp and
+# theta will not be checked ... it will be selected directly" -- the floor
+# decision is made at ATM only, identically for BEGINNING and RE-ENTRY.
 
-def test_beginning_shifts_when_real_1otm_anchor_fails_floor_even_if_raw_atm_passes():
-    """The exact bug, confirmed live: raw ATM anchor LTP (55) clears the
-    floor (50), but the REAL anchor BEGINNING would trade -- 1-OTM shifted
-    to PE@24450, LTP=15 -- does not. use_beginning_sel=True must check the
-    real shifted strike, not raw ATM, and fire the shift."""
+def test_beginning_does_not_shift_when_raw_atm_passes_even_if_1otm_would_fail_floor():
+    """Raw ATM anchor LTP (55) clears the floor (50) -- the fact that the
+    1-OTM strike BEGINNING actually trades (PE@24450=15) would itself fail
+    that same floor is irrelevant: the OTM leg is never checked, only ATM
+    decides whether to shift. use_beginning_sel=True must NOT shift here."""
     s = _strategy()
     s._strike_prem = _raw_atm_passes_but_1otm_anchor_fails_strike_prem()
     shifted = asyncio.run(s._maybe_shift_expiry_for_low_anchor_ltp(
         ltp_target=50.0, theta_target=0.0, use_beginning_sel=True))
-    assert shifted is True
-    assert s._entry_expiry_date == NEXT_EXPIRY
+    assert shifted is False
+    assert s._entry_expiry_date == CURRENT_EXPIRY
 
 
-def test_reentry_does_not_shift_on_the_same_data_since_reentry_never_shifts_anchor():
+def test_reentry_does_not_shift_on_the_same_data():
     """RE-ENTRY's own real selection (select_balanced_pair, anchor_otm_
-    steps=0 always) genuinely trades the raw ATM anchor, not a shifted one
-    -- so for RE-ENTRY, raw ATM passing the floor is the CORRECT thing to
-    check, and must NOT shift. Confirms the fix distinguishes beginning vs
-    re-entry rather than blindly always shifting-and-checking."""
+    steps=0 always) genuinely trades the raw ATM anchor -- raw ATM passing
+    the floor must NOT shift, same as BEGINNING now (both are ATM-only)."""
     s = _strategy()
     s._strike_prem = _raw_atm_passes_but_1otm_anchor_fails_strike_prem()
     shifted = asyncio.run(s._maybe_shift_expiry_for_low_anchor_ltp(
@@ -198,8 +202,8 @@ def test_reentry_does_not_shift_on_the_same_data_since_reentry_never_shifts_anch
 
 def test_default_use_beginning_sel_is_false_backward_compatible():
     """Every pre-existing call site/test in this file omits use_beginning_
-    sel -- must default to False (re-entry's own unshifted behavior) so
-    none of that existing, already-proven behavior silently changes."""
+    sel -- must default to False and still not shift on this healthy-ATM
+    fixture, same as every other case above."""
     s = _strategy()
     s._strike_prem = _raw_atm_passes_but_1otm_anchor_fails_strike_prem()
     shifted = asyncio.run(s._maybe_shift_expiry_for_low_anchor_ltp(ltp_target=50.0, theta_target=0.0))

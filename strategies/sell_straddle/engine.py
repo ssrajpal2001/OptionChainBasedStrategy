@@ -92,6 +92,19 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
 
         self._spot: float = 0.0
         self._spot_reject_streak: int = 0  # consecutive suspect-jump ticks ignored
+        # 2026-08-26, direct user spec revision: for a futures_atm underlying, track
+        # the real spot AND the futures price SEPARATELY (self._spot stays the real
+        # spot -- unchanged meaning), and derive self._atm_ref = round(mean(spot,
+        # futures)/step)*step as the ONLY value used to compute the `atm` strike for
+        # entry/expiry-shift selection. Everywhere else that already reads self._spot
+        # (intrinsic/time-value stripping, P&L, ITM checks) is deliberately untouched --
+        # only ATM/strike selection uses the mean now. self._futures_spot stays 0.0
+        # (and _atm_ref falls back to self._spot) for any underlying not listed in
+        # cfg.futures_atm_underlyings, so this is a complete no-op elsewhere.
+        self._futures_spot: float = 0.0
+        self._atm_ref: float = 0.0
+        _fa = {u.upper() for u in (getattr(self._cfg, "futures_atm_underlyings", None) or [])}
+        self._uses_mean_atm: bool = self._underlying.upper() in _fa
         self._ce_ltp: float = 0.0
         self._pe_ltp: float = 0.0
         self._ce_atp: float = 0.0
@@ -973,20 +986,37 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                 # anyway rather than risk getting permanently stuck on a stale
                 # value if the market genuinely gapped that far.
                 _new_spot = float(tick.ltp or 0.0)
+                # 2026-08-26: for a mean-ATM underlying, a futures-sourced tick updates
+                # self._futures_spot, never self._spot itself -- self._spot always keeps
+                # its true meaning (real index). Every other underlying only ever gets
+                # source="spot" ticks, so this is a no-op there (unchanged behavior).
+                _is_fut_tick = self._uses_mean_atm and getattr(tick, "source", "spot") == "futures"
+                _target = self._futures_spot if _is_fut_tick else self._spot
                 if _new_spot > 0:
-                    if (self._spot > 0 and self._spot_reject_streak < 5
-                            and abs(_new_spot - self._spot) / self._spot > 0.20):
+                    if (_target > 0 and self._spot_reject_streak < 5
+                            and abs(_new_spot - _target) / _target > 0.20):
                         self._spot_reject_streak += 1
                         logger.warning(
-                            "SellStraddle[%s]: SUSPECT index tick spot=%.2f vs last=%.2f "
+                            "SellStraddle[%s]: SUSPECT %s tick=%.2f vs last=%.2f "
                             "(%.1f%% jump) -- ignoring for this tick (streak=%d/5).",
-                            self._underlying, _new_spot, self._spot,
-                            abs(_new_spot - self._spot) / self._spot * 100,
+                            self._underlying, "futures" if _is_fut_tick else "spot",
+                            _new_spot, _target,
+                            abs(_new_spot - _target) / _target * 100,
                             self._spot_reject_streak,
                         )
                     else:
                         self._spot_reject_streak = 0
-                        self._spot = _new_spot
+                        if _is_fut_tick:
+                            self._futures_spot = _new_spot
+                        else:
+                            self._spot = _new_spot
+                        # mean(spot, futures), rounded per-caller -- falls back to plain
+                        # spot until both streams have ticked at least once, and is a
+                        # complete no-op (== self._spot) for non-mean-ATM underlyings.
+                        if self._uses_mean_atm and self._spot > 0 and self._futures_spot > 0:
+                            self._atm_ref = (self._spot + self._futures_spot) / 2.0
+                        else:
+                            self._atm_ref = self._spot
                 _idx_count += 1
                 try:
                     self._append_chart_point(datetime.now(IST))
@@ -1431,13 +1461,19 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                 now_ts = _time.monotonic()
                 if now_ts - _last_log_ts >= 60.0:
                     _step = self._cfg.exchange.strike_steps.get(self._underlying, 50.0) if self._cfg else 50.0
-                    _atm = int(round(self._spot / _step) * _step) if self._spot > 0 else 0
+                    _atm_src = self._atm_ref if self._atm_ref > 0 else self._spot
+                    _atm = int(round(_atm_src / _step) * _step) if _atm_src > 0 else 0
                     self._clog.info("OPT_TICKS: %d option ticks/60s  ATM=%d  CE%d=%.2f PE%d=%.2f",
                                     _tick_count, _atm, _atm, self._ce_ltp, _atm, self._pe_ltp)
                     _tick_count = 0
                     _last_log_ts = now_ts
                 step = self._cfg.exchange.strike_steps.get(self._underlying, 50.0) if self._cfg else 50.0
-                atm = round(self._spot / step) * step if self._spot > 0 else 0
+                # 2026-08-26: mean-of-spot-and-futures ATM reference for a futures_atm
+                # underlying (falls back to plain self._spot otherwise) -- this is the
+                # SAME atm used everywhere entry/expiry-shift selection reads it, so the
+                # raw-ATM CE/PE LTP tracked below (self._ce_ltp/_pe_ltp) matches it too.
+                _atm_src = self._atm_ref if self._atm_ref > 0 else self._spot
+                atm = round(_atm_src / step) * step if _atm_src > 0 else 0
 
                 # Only populate the internal strike_prem from the effective entry expiry.
                 # This prevents current-expiry ticks from polluting data on expiry day.
