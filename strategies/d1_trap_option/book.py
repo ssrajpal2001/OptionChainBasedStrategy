@@ -498,6 +498,11 @@ class D1TrapOptionBook(AbstractStrategyBook):
             try:
                 if not isinstance(ev, IndexTick):
                     continue
+                # 2026-08-26 fix: a futures_atm underlying now publishes TWO IndexTick
+                # streams for the same symbol (source="spot"/"futures") -- D1Trap's
+                # spot-chart pipeline must track REAL spot only.
+                if getattr(ev, "source", "spot") != "spot":
+                    continue
                 is_spot = (
                     ev.symbol == self._spot_symbol
                     or ev.symbol == self._underlying

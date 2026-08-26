@@ -835,6 +835,12 @@ class D1TrapBearOnlyBook(AbstractStrategyBook):
                 continue
             if not isinstance(ev, IndexTick):
                 continue
+            # 2026-08-26 fix: a futures_atm underlying now publishes TWO IndexTick
+            # streams for the same symbol (source="spot"/"futures") -- this
+            # strategy's option-premium-chart pipeline reads spot for zone/strike
+            # math and must track REAL spot only.
+            if getattr(ev, "source", "spot") != "spot":
+                continue
             # 2026-08-02 fix: this was hardcoded to NIFTY-only symbol aliases, so a
             # SENSEX (or any non-NIFTY) deployment's live-tick fallback path could
             # never fire -- only the REST _startup_open_fetch path worked for it, and

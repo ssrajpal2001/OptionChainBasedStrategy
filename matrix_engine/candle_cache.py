@@ -165,6 +165,17 @@ class CandleCache:
             except asyncio.TimeoutError:
                 continue
 
+            # 2026-08-26 fix: a futures_atm underlying (e.g. NIFTY) now publishes TWO
+            # IndexTick streams for the same symbol (source="spot"/"futures" -- see
+            # GlobalConfig.futures_atm_underlyings). CANDLE_CLOSE is shared platform
+            # infrastructure every price-action strategy (D1Trap, FVG, Liquidity
+            # Sweep/Trap, OI-Flow) depends on -- it must build candles from REAL spot
+            # only, never a futures tick mixed in, or the candle series would silently
+            # contain two different price series interleaved. Only SellStraddle itself
+            # is meant to consume the futures-sourced tick.
+            if getattr(tick, "source", "spot") != "spot":
+                continue
+
             ticks_received += 1
             if ticks_received == 1:
                 logger.info("CandleCache: first tick received — %s ltp=%.2f", tick.symbol, tick.ltp)

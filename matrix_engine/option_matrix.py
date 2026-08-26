@@ -267,6 +267,13 @@ class OptionMatrixEngine:
                 tick: IndexTick = await asyncio.wait_for(self._idx_queue.get(), timeout=1.0)
             except asyncio.TimeoutError:
                 continue
+            # 2026-08-26 fix: a futures_atm underlying (e.g. NIFTY) now publishes TWO
+            # IndexTick streams for the same symbol (source="spot"/"futures" -- see
+            # GlobalConfig.futures_atm_underlyings). The OI/PCR ChainSnapshot's own
+            # spot tracking (OI-Flow's wall/proximity/PCR gates, the dashboard OI
+            # panel) must track REAL spot only, never a futures tick mixed in.
+            if getattr(tick, "source", "spot") != "spot":
+                continue
             mat = self._matrices.get(tick.symbol)
             if mat is None:
                 continue

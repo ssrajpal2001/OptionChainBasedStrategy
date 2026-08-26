@@ -402,6 +402,13 @@ class OIFlowStrategy(AbstractStrategyBook):
             try:
                 if not isinstance(ev, IndexTick) or not self._is_own_underlying_tick(ev.symbol):
                     continue
+                # 2026-08-26 fix: a futures_atm underlying (e.g. NIFTY) now publishes
+                # TWO IndexTick streams for the same symbol (source="spot"/"futures" --
+                # see GlobalConfig.futures_atm_underlyings, a SellStraddle-only concept).
+                # OI-Flow's own spot-chart bars/OI-wall proximity logic must track REAL
+                # spot only, never a futures tick mixed in.
+                if getattr(ev, "source", "spot") != "spot":
+                    continue
                 today = ev.timestamp.date() if hasattr(ev, "timestamp") else datetime.now(IST).date()
                 real_today = datetime.now(IST).date()
                 if abs((today - real_today).days) > _MAX_PLAUSIBLE_TICK_DATE_DRIFT_DAYS:

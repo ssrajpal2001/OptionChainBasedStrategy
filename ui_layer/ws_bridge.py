@@ -177,6 +177,19 @@ class WsBridge:
                 tick: IndexTick = await asyncio.wait_for(self._tick_q.get(), timeout=1.0)
             except asyncio.TimeoutError:
                 continue
+            # 2026-08-26 fix: a futures_atm underlying (e.g. NIFTY) now publishes TWO
+            # IndexTick streams for the same symbol (source="spot" and source="futures"
+            # -- see GlobalConfig.futures_atm_underlyings / global_feeder.py). This
+            # generic dashboard broadcast (the "Market Overview" SPOT PRICE/ATM STRIKE
+            # card, and the index RSI/EMA/ADX aggregation below) is a REAL-SPOT-only
+            # display -- SellStraddle's own mean-ATM is a strategy-internal concept
+            # shown separately on its own card. Without this filter, a futures tick
+            # would silently overwrite the "spot" cache/broadcast with the futures
+            # price (confirmed live: SPOT PRICE showing ~24467 while real spot was
+            # ~24289) and corrupt the index-level RSI/EMA/ADX candle series by mixing
+            # two different price series into one.
+            if getattr(tick, "source", "spot") != "spot":
+                continue
             try:
                 self._spot_cache[tick.symbol] = tick.ltp
                 atm = self._compute_atm(tick.symbol, tick.ltp)

@@ -277,6 +277,16 @@ class StrikeRebalancer:
     # ── Tick handler ──────────────────────────────────────────────────────────
 
     async def _on_tick(self, tick: IndexTick) -> None:
+        # 2026-08-26 fix: a futures_atm underlying (e.g. NIFTY) now publishes TWO
+        # IndexTick streams for the same symbol (source="spot"/"futures" -- see
+        # GlobalConfig.futures_atm_underlyings). Strike subscription/rebalancing is
+        # SHARED platform infrastructure every strategy in the process depends on --
+        # it must always track the REAL spot ATM, never the futures price (which can
+        # sit 100+ points away), or it would see spot/futures interleaved as wild
+        # "drift" and rebalance/resubscribe strikes off the wrong anchor. Only
+        # SellStraddle itself is meant to consume the futures-sourced tick.
+        if getattr(tick, "source", "spot") != "spot":
+            return
         underlying = tick.symbol
         if underlying not in self._state:
             return

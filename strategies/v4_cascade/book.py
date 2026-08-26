@@ -396,6 +396,11 @@ class V4CascadeBook(AbstractStrategyBook):
                 continue
             if getattr(tick, "symbol", "") != self._underlying:
                 continue
+            # 2026-08-26 fix: a futures_atm underlying (e.g. NIFTY) now publishes
+            # TWO IndexTick streams for the same symbol (source="spot"/"futures") --
+            # this book's live spot tracking must track REAL spot only.
+            if getattr(tick, "source", "spot") != "spot":
+                continue
             ltp = float(getattr(tick, "ltp", 0.0) or 0.0)
             if ltp > 0:
                 self._live_spot = ltp
