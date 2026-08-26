@@ -401,6 +401,24 @@ class GlobalConfig:
     # WS subscription stays under the ~50/connection cap (SS pool only needs ≈ ±4).
     chain_depth: int = 4           # ATM ± 4 strikes (9 strikes × 2 = 18 per index)
 
+    # 2026-08-26, direct user spec: underlyings in this list get their live "index"
+    # tick sourced from the near-month FUTURES contract instead of the real spot
+    # index -- generalizes the pattern MCX commodities already use unconditionally
+    # (see UpstoxFeeder._index_instrument_keys / FyersFeeder._index_symbols, and
+    # InstrumentRegistry.get_futures_upstox/get_futures_fyers, both already live).
+    # Every consumer of self._spot downstream (ATM/strike selection, ITM/OTM
+    # classification, day-low tracking, hedge triggers, exits -- literally
+    # everything, since it's the SAME tick the whole system already treats as
+    # "spot") switches automatically for any underlying listed here -- no
+    # per-strategy code changes needed, same as MCX needed none. Empty by
+    # default: zero behavior change for anyone until an underlying is explicitly
+    # added here. NSE/BSE index options still SETTLE against real spot, not
+    # futures -- this is a deliberate, direct user choice to treat the futures
+    # price as the reference for computed P&L/ITM/exits too, not just entry
+    # anchor selection; the resulting divergence from real settlement price is
+    # a known, accepted tradeoff, not an oversight.
+    futures_atm_underlyings: List[str] = field(default_factory=list)
+
     # Candle timeframes (minutes)
     candle_timeframes: List[int] = field(default_factory=lambda: [1, 2, 5, 15, 75])
 

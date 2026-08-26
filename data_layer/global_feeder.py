@@ -291,7 +291,9 @@ class UpstoxFeeder(BaseFeeder):
     def _index_instrument_keys(self) -> List[str]:
         """
         Upstox instrument keys for monitored instruments. MCX commodities use the
-        near-month FUTURES instrument_key from the registry as the ATM source.
+        near-month FUTURES instrument_key from the registry as the ATM source --
+        2026-08-26: so does any underlying listed in cfg.futures_atm_underlyings
+        (see GlobalConfig's own docstring for that field for the full rationale).
         """
         from data_layer.symbol_translator import SymbolTranslator
         from data_layer.instrument_registry import REGISTRY, _MCX_UNDERLYINGS
@@ -300,12 +302,33 @@ class UpstoxFeeder(BaseFeeder):
             if self._cfg and hasattr(self._cfg, "monitored_indices")
             else list(_UPSTOX_INDEX_KEY_TO_INTERNAL.values())
         )
+        _futures_atm = {u.upper() for u in (getattr(self._cfg, "futures_atm_underlyings", None) or [])}
         keys: List[str] = []
         for i in indices:
             if i.upper() in _MCX_UNDERLYINGS:
                 fk = REGISTRY.get_futures_upstox(i.upper())
                 if fk:
                     keys.append(fk)
+                # MCX has no separate "spot index" key to fall back to -- unchanged
+                # from before this 2026-08-26 change: no futures key yet means no
+                # subscription this cycle, same as it always has.
+            elif i.upper() in _futures_atm:
+                fk = REGISTRY.get_futures_upstox(i.upper())
+                if fk:
+                    keys.append(fk)
+                else:
+                    # 2026-08-26 safety fallback: unlike MCX, this underlying DOES
+                    # have a real spot index key -- if the futures key hasn't been
+                    # resolved yet (a startup-ordering race against REGISTRY load),
+                    # subscribe to spot instead of silently going dark on ticks for
+                    # the whole underlying. Self-corrects on the next rebuild once
+                    # the futures key resolves (this list is rebuilt on reconnect).
+                    logger.warning(
+                        "UpstoxFeeder: futures_atm underlying %s has no resolved "
+                        "futures key yet -- falling back to spot index key this "
+                        "cycle.", i,
+                    )
+                    keys.append(SymbolTranslator.to_upstox_index(i))
             else:
                 keys.append(SymbolTranslator.to_upstox_index(i))
         return keys
@@ -782,19 +805,32 @@ _FYERS_TO_INTERNAL: Dict[str, str] = {v: k for k, v in _FYERS_INDEX_SYMBOLS.item
 
 
 def _mcx_fyers_fut_to_internal(symbol: str) -> Optional[str]:
-    """Map an MCX futures Fyers symbol (e.g. MCX:CRUDEOIL26JUNFUT) -> 'CRUDEOIL'."""
-    from data_layer.instrument_registry import REGISTRY, _MCX_UNDERLYINGS
-    for u in _MCX_UNDERLYINGS:
-        if symbol and REGISTRY.get_futures_fyers(u) == symbol:
+    """Map a futures Fyers symbol (e.g. MCX:CRUDEOIL26JUNFUT, or NSE:NIFTY...FUT
+    for any underlying in cfg.futures_atm_underlyings) back to its internal name
+    (e.g. 'CRUDEOIL', 'NIFTY'). 2026-08-26: scans every underlying REGISTRY has
+    ever resolved a futures key for, not just _MCX_UNDERLYINGS -- a futures tick
+    only ever arrives here at all if something upstream (_index_symbols) chose
+    to subscribe to it, so a broader match here is safe and needs no separate
+    cfg threading through this free function."""
+    from data_layer.instrument_registry import REGISTRY
+    if not symbol:
+        return None
+    for u, sym in REGISTRY._futures_fyers.items():
+        if sym == symbol:
             return u
     return None
 
 
 def _mcx_upstox_fut_to_internal(ikey: str) -> Optional[str]:
-    """Map an MCX futures Upstox key (e.g. MCX_FO|499095) -> 'CRUDEOIL'."""
-    from data_layer.instrument_registry import REGISTRY, _MCX_UNDERLYINGS
-    for u in _MCX_UNDERLYINGS:
-        if ikey and REGISTRY.get_futures_upstox(u) == ikey:
+    """Map a futures Upstox instrument_key (e.g. MCX_FO|499095, or NIFTY's own
+    futures key for any underlying in cfg.futures_atm_underlyings) back to its
+    internal name. See _mcx_fyers_fut_to_internal's own docstring for why this
+    scans every resolved futures key, not just MCX."""
+    from data_layer.instrument_registry import REGISTRY
+    if not ikey:
+        return None
+    for u, key in REGISTRY._futures_upstox.items():
+        if key == ikey:
             return u
     return None
 
@@ -971,7 +1007,8 @@ class FyersFeeder(BaseFeeder):
         """
         Fyers-format 'index' symbols for all monitored instruments. For MCX
         commodities (CRUDEOIL) the ATM source is the near-month FUTURES symbol
-        from the registry (e.g. MCX:CRUDEOIL26JUNFUT), not a spot index.
+        from the registry (e.g. MCX:CRUDEOIL26JUNFUT), not a spot index --
+        2026-08-26: so is any underlying listed in cfg.futures_atm_underlyings.
         """
         if not _FYERS_CARRIES_INDEX_OPTIONS:
             return []
@@ -981,12 +1018,27 @@ class FyersFeeder(BaseFeeder):
             if self._cfg and hasattr(self._cfg, "monitored_indices")
             else list(_FYERS_INDEX_SYMBOLS.keys())
         )
+        _futures_atm = {u.upper() for u in (getattr(self._cfg, "futures_atm_underlyings", None) or [])}
         syms: List[str] = []
         for i in indices:
             if i.upper() in _MCX_UNDERLYINGS:
                 fut = REGISTRY.get_futures_fyers(i.upper())
                 if fut:
                     syms.append(fut)
+                # MCX has no separate spot symbol to fall back to -- unchanged.
+            elif i.upper() in _futures_atm:
+                fut = REGISTRY.get_futures_fyers(i.upper())
+                if fut:
+                    syms.append(fut)
+                elif i in _FYERS_INDEX_SYMBOLS:
+                    # 2026-08-26 safety fallback -- see UpstoxFeeder._index_instrument_keys'
+                    # own comment: futures key not resolved yet (startup-ordering race),
+                    # fall back to spot rather than go dark on this underlying's ticks.
+                    logger.warning(
+                        "FyersFeeder: futures_atm underlying %s has no resolved futures "
+                        "symbol yet -- falling back to spot index symbol this cycle.", i,
+                    )
+                    syms.append(_FYERS_INDEX_SYMBOLS[i])
             elif i in _FYERS_INDEX_SYMBOLS:
                 syms.append(_FYERS_INDEX_SYMBOLS[i])
         return syms

@@ -129,6 +129,19 @@ def _parse_args() -> argparse.Namespace:
         help="Comma-list of strategies to RUN. Others are constructed but never started. "
              "e.g. --strategies sell_straddle (run only the sell-straddle).",
     )
+    p.add_argument(
+        "--futures-atm-underlyings",
+        default="",
+        help="2026-08-26, direct user spec: comma-list of underlyings whose live 'index' tick "
+             "(the SAME tick self._spot reads everywhere -- ATM/strike selection, ITM/OTM "
+             "classification, P&L, day-low, hedge triggers, exits) is sourced from the "
+             "near-month FUTURES contract instead of the real spot index. Generalizes the "
+             "pattern MCX commodities already use unconditionally. Empty by default -- zero "
+             "behavior change unless explicitly set, e.g. --futures-atm-underlyings NIFTY. "
+             "NSE/BSE options still SETTLE against real spot, not futures -- this is a "
+             "deliberate, accepted tradeoff, not an oversight (see GlobalConfig's own "
+             "docstring for futures_atm_underlyings).",
+    )
     return p.parse_args()
 
 
@@ -1038,6 +1051,16 @@ def main() -> None:
     cfg.storage.log_level = args.log_level
     _setup_logging(cfg.storage.log_dir, args.log_level)
     _bootstrap_dirs(cfg)
+
+    _futures_atm = [s.strip().upper() for s in str(args.futures_atm_underlyings).split(",") if s.strip()]
+    if _futures_atm:
+        cfg.futures_atm_underlyings = _futures_atm
+        logging.getLogger(__name__).warning(
+            "futures_atm_underlyings=%s -- self._spot for these underlyings (ATM/ITM/P&L/"
+            "day-low/hedge/exits, everywhere) will be sourced from the near-month FUTURES "
+            "contract, not real spot. NSE/BSE options still settle against real spot -- "
+            "this is a deliberate, direct user choice, not an oversight.", _futures_atm,
+        )
 
     logger = logging.getLogger(__name__)
     logger.info(

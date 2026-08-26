@@ -67,6 +67,94 @@ def test_mcx_underlyings_include_crudeoil():
     assert "CRUDEOIL" in _MCX_UNDERLYINGS
 
 
+# ── futures_atm_underlyings (2026-08-26, direct user spec) ─────────────────
+# Generalizes the MCX "futures is the ATM source" pattern to any configured
+# underlying (e.g. NIFTY) -- self._spot for that underlying becomes whatever
+# tick lands on its futures contract, system-wide, with zero strategy-code
+# changes (same mechanism MCX already uses live).
+
+def test_upstox_uses_futures_key_for_configured_underlying(bus):
+    from config.global_config import GlobalConfig
+    cfg = GlobalConfig()
+    cfg.monitored_indices = ["NIFTY"]
+    cfg.futures_atm_underlyings = ["NIFTY"]
+    u = UpstoxFeeder(bus, cfg=cfg)
+    REGISTRY._futures_upstox["NIFTY"] = "NSE_FO|999999"
+    try:
+        keys = u._index_instrument_keys()
+        assert keys == ["NSE_FO|999999"]
+    finally:
+        REGISTRY._futures_upstox.pop("NIFTY", None)
+
+
+def test_upstox_falls_back_to_spot_when_futures_key_not_yet_resolved(bus):
+    """Safety fallback: a startup-ordering race (REGISTRY hasn't resolved the
+    futures key yet) must never leave the underlying with ZERO subscription --
+    falls back to the real spot index key for that cycle instead."""
+    from config.global_config import GlobalConfig
+    from data_layer.symbol_translator import SymbolTranslator
+    cfg = GlobalConfig()
+    cfg.monitored_indices = ["NIFTY"]
+    cfg.futures_atm_underlyings = ["NIFTY"]
+    u = UpstoxFeeder(bus, cfg=cfg)
+    REGISTRY._futures_upstox.pop("NIFTY", None)   # ensure genuinely unresolved
+    keys = u._index_instrument_keys()
+    assert keys == [SymbolTranslator.to_upstox_index("NIFTY")]
+
+
+def test_upstox_mcx_still_has_no_fallback_when_futures_key_missing(bus):
+    """MCX behavior must stay byte-identical to before this change -- no spot
+    fallback exists for commodities (there is no plain spot index for them)."""
+    from config.global_config import GlobalConfig
+    cfg = GlobalConfig()
+    cfg.monitored_indices = ["CRUDEOIL"]
+    u = UpstoxFeeder(bus, cfg=cfg)
+    REGISTRY._futures_upstox.pop("CRUDEOIL", None)
+    keys = u._index_instrument_keys()
+    assert keys == []
+
+
+def test_fyers_uses_futures_symbol_for_configured_underlying(bus):
+    from config.global_config import GlobalConfig
+    cfg = GlobalConfig()
+    cfg.monitored_indices = ["NIFTY"]
+    cfg.futures_atm_underlyings = ["NIFTY"]
+    f = FyersFeeder(bus, cfg=cfg)
+    REGISTRY._futures_fyers["NIFTY"] = "NSE:NIFTY26AUGFUT"
+    try:
+        syms = f._index_symbols()
+        assert syms == ["NSE:NIFTY26AUGFUT"]
+    finally:
+        REGISTRY._futures_fyers.pop("NIFTY", None)
+
+
+def test_fyers_falls_back_to_spot_when_futures_symbol_not_yet_resolved(bus):
+    from config.global_config import GlobalConfig
+    cfg = GlobalConfig()
+    cfg.monitored_indices = ["NIFTY"]
+    cfg.futures_atm_underlyings = ["NIFTY"]
+    f = FyersFeeder(bus, cfg=cfg)
+    REGISTRY._futures_fyers.pop("NIFTY", None)
+    syms = f._index_symbols()
+    assert syms == ["NSE:NIFTY50-INDEX"]
+
+
+def test_futures_tick_maps_back_to_internal_underlying_for_non_mcx():
+    """The reverse-mapping helpers used to only scan _MCX_UNDERLYINGS -- a
+    NIFTY futures tick must now resolve back to 'NIFTY' too."""
+    from data_layer.global_feeder import _mcx_upstox_fut_to_internal, _mcx_fyers_fut_to_internal
+    REGISTRY._futures_upstox["NIFTY"] = "NSE_FO|999999"
+    REGISTRY._futures_fyers["NIFTY"] = "NSE:NIFTY26AUGFUT"
+    try:
+        assert _mcx_upstox_fut_to_internal("NSE_FO|999999") == "NIFTY"
+        assert _mcx_fyers_fut_to_internal("NSE:NIFTY26AUGFUT") == "NIFTY"
+        assert _mcx_upstox_fut_to_internal("NSE_FO|000000") is None
+        assert _mcx_fyers_fut_to_internal("") is None
+    finally:
+        REGISTRY._futures_upstox.pop("NIFTY", None)
+        REGISTRY._futures_fyers.pop("NIFTY", None)
+
+
 def test_upstox_subscribe_tokens_dedupes_dual_format_same_leg(bus, monkeypatch):
     """2026-07-24 real production bug: strike_rebalancer._strikes_to_tokens()
     deliberately sends BOTH a native Upstox instrument_key and a Fyers-format
