@@ -1105,8 +1105,13 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             if screener.check_sma_exit(closes, cfg["SMA_PERIOD"], cfg["SMA_EXIT_CONSEC_CLOSES"], side):
                 self._eod_closing.add(symbol)
                 sma = screener.compute_sma(closes, cfg["SMA_PERIOD"])
+                # 2026-08-26: explicitly names the timeframe/instrument in the log --
+                # this SMA is on the UNDERLYING STOCK's own 1-MIN closes (not the option
+                # premium, not any other timeframe), per a real user question about
+                # exactly what this exit was checking.
                 self._clog.info(
-                    "OiOrb[%s/%s]: %s SMA EXIT -- last %d closes %s %d-SMA=%.2f (closes=%s)",
+                    "OiOrb[%s/%s]: %s SMA EXIT -- last %d closes (1-min stock closes) %s "
+                    "%d-period SMA=%.2f (closes=%s)",
                     self._client_id, self._binding_id, symbol, cfg["SMA_EXIT_CONSEC_CLOSES"],
                     "below" if side == "CALL" else "above", cfg["SMA_PERIOD"], sma,
                     closes[-cfg["SMA_EXIT_CONSEC_CLOSES"]:],
@@ -1114,7 +1119,8 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 await asyncio.to_thread(
                     store.log_signal_event, self._client_id, self._binding_id, symbol,
                     "sma_exit_triggered", side=side,
-                    detail=f"{cfg['SMA_PERIOD']}-SMA={sma:.2f} closes={closes[-cfg['SMA_EXIT_CONSEC_CLOSES']:]}")
+                    detail=f"1-min stock closes, {cfg['SMA_PERIOD']}-period SMA={sma:.2f} "
+                           f"closes={closes[-cfg['SMA_EXIT_CONSEC_CLOSES']:]}")
                 await self._emit_close(symbol, pos, "sma_exit")
 
     async def _eod_loop(self) -> None:

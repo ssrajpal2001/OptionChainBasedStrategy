@@ -420,22 +420,34 @@ def check_sma_exit(closes: list, sma_period: int, consec_closes: int, side: str)
     premium). side="CALL" (bought on a gainer) exits when closes are BELOW
     the SMA; side="PUT" (bought on a loser) exits when closes are ABOVE it.
 
-    Simplification, documented per this codebase's own "explain the
-    non-obvious" convention: checks the last `consec_closes` closes against
-    ONE current SMA value (computed from the most recent `sma_period`
-    closes), not a separately-recomputed rolling SMA per historical bar.
-    An 8-period SMA moves slowly enough that this is a very close
-    approximation of the fully-rolling version in practice, at a fraction
-    of the complexity -- revisit if real forward data shows it matters."""
+    2026-08-26 fix (real incident): this originally checked the last
+    `consec_closes` closes against ONE current SMA value (computed from the
+    most recent `sma_period` closes) -- documented at the time as a
+    simplification "to revisit if real forward data shows it matters". It
+    did: a real VBL PE position exited on "sma_exit", but the user's own
+    chart showed the SMA still on the correct side of price at that moment.
+    Root cause -- the single "current" SMA window INCLUDES the very closes
+    being tested against it, so as price moved, the SMA was still dragging
+    toward those same recent closes rather than reflecting where the SMA
+    line actually sat at each of those historical bars on a real chart. A
+    real chart's SMA is a genuinely ROLLING value, recomputed fresh at every
+    bar from THAT bar's own trailing window -- this now matches that: each
+    of the last `consec_closes` closes is compared against the SMA as it
+    stood AT THAT BAR (its own trailing `sma_period`-close window), not a
+    single snapshot borrowed from the most recent bar."""
     if len(closes) < sma_period + consec_closes - 1:
         return False
-    sma = compute_sma(closes, sma_period)
-    if sma is None:
-        return False
-    last_n = closes[-consec_closes:]
-    if side == "CALL":
-        return all(c < sma for c in last_n)
-    return all(c > sma for c in last_n)
+    for i in range(len(closes) - consec_closes, len(closes)):
+        window = closes[i - sma_period + 1: i + 1]
+        sma_i = sum(window) / sma_period
+        c = closes[i]
+        if side == "CALL":
+            if not (c < sma_i):
+                return False
+        else:
+            if not (c > sma_i):
+                return False
+    return True
 
 
 @dataclass

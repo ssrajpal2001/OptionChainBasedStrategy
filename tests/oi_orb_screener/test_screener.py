@@ -321,6 +321,31 @@ def test_sma_exit_none_when_insufficient_closes():
     assert screener.check_sma_exit(closes, sma_period=8, consec_closes=2, side="CALL") is False
 
 
+def test_sma_exit_uses_each_bars_own_rolling_sma_not_a_single_snapshot():
+    """2026-08-26 real incident regression: a live VBL position exited on
+    sma_exit, but the user's own chart showed the SMA still on the correct
+    side of price at that moment. Root cause: the old implementation checked
+    the last N closes against a single "current" SMA snapshot (computed from
+    the most recent sma_period closes) instead of each close's own rolling
+    SMA as of that bar -- since the snapshot window includes the very closes
+    being tested, a later sharp move can retroactively change the verdict for
+    an earlier close, unlike a real chart where the SMA line's value at a
+    given bar never changes as later bars print.
+
+    closes[-2]=104.0, closes[-1]=140.0, sma_period=8:
+      - closes[-2]'s OWN rolling SMA (its trailing 8 closes, ending at
+        itself) = 100.5 -> 104.0 > 100.5 (above).
+      - closes[-1]'s OWN rolling SMA = 105.5 -> 140.0 > 105.5 (above).
+      Both genuinely above their own bar's SMA -> a PUT exit should fire.
+
+      The OLD single-snapshot method instead computed ONE SMA from the most
+      recent 8 closes (105.5, coincidentally same as closes[-1]'s own) and
+      applied it to BOTH: 104.0 > 105.5 is FALSE, so the old code would have
+      missed this genuine two-bar exit entirely."""
+    closes = [100.0] * 8 + [104.0, 140.0]
+    assert screener.check_sma_exit(closes, sma_period=8, consec_closes=2, side="PUT") is True
+
+
 # ── backfill_orb_from_yahoo ──────────────────────────────────────────────
 # 2026-08-25 CRITICAL FIX regression: real incident, a single-stock shortlist
 # (SAIL alone) produced an empty ORB for the day even though Yahoo genuinely
