@@ -166,6 +166,34 @@ class StrikeRebalancer:
     def rebalance_stats(self) -> Dict[str, int]:
         return {u: s.rebalance_count for u, s in self._state.items()}
 
+    def _effective_chain_depth(self, underlying: str) -> int:
+        """ATM window depth actually used for the WS subscription.
+
+        2026-08-26 fix (real incident): SellStraddle's own admin panel exposes
+        pool_otm_depth/pool_itm_depth -- the search radius select_balanced_pair_at
+        uses when hunting for a partner strike. Raising that from 5 to 7 in the UI
+        had ZERO effect: strikes beyond ATM+/-self._cfg.chain_depth (a separate,
+        hardcoded global default of 4) never get a live quote subscribed at all,
+        so the search loop silently found nothing past +/-4 no matter what it was
+        told to search (confirmed live: banner showed pool_offset=+/-7, but the
+        actual partner-candidate trace only ever showed strikes within ATM+/-4).
+        Now takes the max of chain_depth and whatever sell_straddle's own admin
+        panel has configured for THIS underlying, so a wider search radius
+        actually gets the WS subscription window it needs to find anything there.
+        Deliberately scoped per-underlying (reads RuntimeConfig fresh, not cached)
+        so widening NIFTY's search depth doesn't also widen SENSEX's WS footprint
+        if SENSEX was never asked to search wider -- keeps the shared ~50/connection
+        WS budget from being spent on indices that don't need it."""
+        base = int(self._cfg.chain_depth)
+        try:
+            from data_layer.runtime_config import RuntimeConfig
+            ss = RuntimeConfig.index_section(underlying, "sell_straddle")
+            otm = int(ss.get("pool_otm_depth", 0) or 0)
+            itm = int(ss.get("pool_itm_depth", 0) or 0)
+            return max(base, otm, itm)
+        except Exception:
+            return base
+
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     async def run(self) -> None:
@@ -319,7 +347,7 @@ class StrikeRebalancer:
         step: float,
         state: _UnderlyingState,
     ) -> None:
-        depth = self._cfg.chain_depth
+        depth = self._effective_chain_depth(underlying)
         if state.chain_enabled:
             window = set(_strike_window(atm, step, depth))
         else:
@@ -350,7 +378,7 @@ class StrikeRebalancer:
     ) -> None:
         """Subscribe ATM±chain_depth window for an index whose enable_chain() was called AFTER
         the initial_subscribe already fired.  Only adds strikes not already subscribed."""
-        depth = self._cfg.chain_depth
+        depth = self._effective_chain_depth(underlying)
         window = set(_strike_window(atm, step, depth))
         to_sub = window - state.active_strikes
         if not to_sub:
@@ -374,7 +402,7 @@ class StrikeRebalancer:
         step: float,
         state: _UnderlyingState,
     ) -> None:
-        depth = self._cfg.chain_depth
+        depth = self._effective_chain_depth(underlying)
         old_active = state.active_strikes           # current subscribed set
         new_window = set(_strike_window(new_atm, step, depth))
 
