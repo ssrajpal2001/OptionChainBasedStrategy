@@ -697,6 +697,55 @@ def anchor_fails_floor(
     return not leg_passes_dual_floor(anchor_side, anchor_strike, anchor_ltp, spot, ltp_target, theta_target)
 
 
+def anchor_floor_detail(
+    strike_prem: Dict[Key, dict],
+    atm: int,
+    spot: float,
+    theta_target: float = 0.0,
+    anchor_otm_steps: int = 0,
+    step: float = 0.0,
+) -> dict:
+    """2026-08-26, direct user request: diagnostic twin of anchor_fails_floor
+    that returns the ACTUAL measured anchor side/strike/ltp/theta, not just a
+    bool -- so the EXPIRY-SHIFT log line can show what was actually observed
+    (e.g. "PE24450 ltp=42.10 tv=38.50") instead of only the floor thresholds
+    it failed to clear. Mirrors anchor_fails_floor's own logic exactly (same
+    anchor-side/anchor-otm-shift steps) so the two can never disagree about
+    which leg is the anchor -- this one is purely for logging, never used for
+    any real decision itself."""
+    ce_atm = strike_prem.get((atm, "CE"))
+    pe_atm = strike_prem.get((atm, "PE"))
+    if not ce_atm or not pe_atm:
+        return {"reason": "no_quote_at_atm"}
+    ce_ltp = ce_atm.get("ltp", 0.0)
+    pe_ltp = pe_atm.get("ltp", 0.0)
+    if ce_ltp <= 0 or pe_ltp <= 0:
+        return {"reason": "zero_ltp_at_atm", "ce_ltp": ce_ltp, "pe_ltp": pe_ltp}
+
+    ce_tv = strip_intrinsic(ce_ltp, "CE", atm, spot)
+    pe_tv = strip_intrinsic(pe_ltp, "PE", atm, spot)
+    if ce_tv < pe_tv:
+        anchor_side, anchor_strike, anchor_ltp = "CE", atm, ce_ltp
+    else:
+        anchor_side, anchor_strike, anchor_ltp = "PE", atm, pe_ltp
+
+    if anchor_otm_steps > 0 and step > 0:
+        _shift = anchor_otm_steps * step
+        shifted_strike = int(atm + _shift) if anchor_side == "CE" else int(atm - _shift)
+        shifted_leg = strike_prem.get((shifted_strike, anchor_side))
+        shifted_ltp = shifted_leg.get("ltp", 0.0) if shifted_leg else 0.0
+        if not shifted_leg or shifted_ltp <= 0:
+            return {"reason": "no_quote_at_shifted_anchor", "anchor_side": anchor_side,
+                    "anchor_strike": shifted_strike}
+        anchor_strike, anchor_ltp = shifted_strike, shifted_ltp
+
+    anchor_tv = strip_intrinsic(anchor_ltp, anchor_side, anchor_strike, spot)
+    return {
+        "reason": "measured", "anchor_side": anchor_side, "anchor_strike": anchor_strike,
+        "anchor_ltp": anchor_ltp, "anchor_tv": anchor_tv,
+    }
+
+
 def reentry_block_reason(strike_prem, spot, step, offset, ltp_target, rule_eval,
                          theta_target: float = 0.0, variable_strikes: bool = False,
                          balance_ratio: float = 1.0):

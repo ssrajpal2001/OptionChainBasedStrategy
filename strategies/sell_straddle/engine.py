@@ -104,6 +104,12 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         self._ltp_target: float = 0.0
 
         self._market_open_dt: Optional[datetime] = None
+        # 2026-08-26 fix: this process/book's own start time -- see start()'s own
+        # comment for the real incident this fixes. None until start() actually
+        # runs; _is_primed treats None as "no extra restart-anchor" (falls back
+        # to the pre-fix, market-open-only anchor) rather than crashing, so a
+        # test/harness that constructs a book without calling start() is unaffected.
+        self._process_start_dt: Optional[datetime] = None
         self._primed: bool = False
         self._order_pending: bool = False
         self._roll_close_waiters: Dict[str, asyncio.Event] = {}
@@ -443,6 +449,23 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
 
     def start(self) -> None:
         self._running = True
+        # 2026-08-26 fix (real incident, direct user report): _is_primed's own
+        # anchor used to be ONLY real market-open/entry_start -- correct for a
+        # genuine morning start, but on a MID-DAY RESTART (pm2 restart, common
+        # during active development/testing and any real deploy) that anchor's
+        # own ready_at (entry_start + priming wait) had already long passed, so
+        # priming completed on the very FIRST post-restart evaluation -- with a
+        # completely FRESH, EMPTY pool/strike_prem cache that had zero actual
+        # time to accumulate real ticks. Confirmed live: at 13:29:46 the ATM
+        # anchor showed ltp=0.00 (genuinely no tick yet), and by 13:30:05 (just
+        # ~19s after restart) priming had ALREADY "completed" and the
+        # low-anchor-LTP expiry-shift fired off that same stale/absent data --
+        # a real trading-day contract shift the strategy will now stay stuck
+        # on for the rest of the day, based on nothing but restart timing.
+        # self._process_start_dt gives _is_primed a SECOND anchor -- this
+        # process's own start time -- so every restart gets its own genuine
+        # fresh wait, regardless of how far into the day it happens.
+        self._process_start_dt = datetime.now(IST)
         self._restore_session()
         self._restore_pool_engine()
         try:

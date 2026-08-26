@@ -66,6 +66,20 @@ class EntryMixin:
         the entry window even opened as part of the required warm-up -- e.g. entry_start
         09:16 still primed off 09:15+wait, one candle too early. The anchor is now
         whichever is later: real market open or this deployment's own entry_start.
+
+        2026-08-26 fix (real incident, direct user report): market-open/entry_start
+        alone is only a correct anchor for a genuine morning start. On a MID-DAY
+        RESTART, that anchor's own ready_at (entry_start + wait) has typically
+        already passed hours ago, so priming completed on the very FIRST
+        post-restart evaluation -- against a completely fresh, empty pool/
+        strike_prem cache with zero actual time to accumulate real ticks.
+        Confirmed live: ATM anchor read ltp=0.00 at restart+1s, and by restart+19s
+        priming had "completed" and the low-anchor-LTP expiry-shift fired off
+        that stale/absent data -- a sticky-for-the-day contract shift caused by
+        nothing but restart timing. self._process_start_dt (this process's own
+        start time, set unconditionally in start()) is now ALSO an anchor
+        candidate, so every restart gets its own genuine fresh wait regardless
+        of how far into the trading day it happens.
         """
         if self._primed:
             return True
@@ -85,6 +99,8 @@ class EntryMixin:
             second=0, microsecond=0,
         )
         anchor = max(self._market_open_dt, entry_start_dt)
+        if getattr(self, "_process_start_dt", None) is not None:
+            anchor = max(anchor, self._process_start_dt)
         ready_at = anchor + timedelta(minutes=wait_min)
         if now >= ready_at:
             self._primed = True
@@ -345,11 +361,28 @@ class EntryMixin:
         atm = int(round(self._spot / step) * step) if self._spot > 0 and step > 0 else 0
         if atm <= 0:
             return False
-        from strategies.sell_straddle.selection import anchor_fails_floor
+        from strategies.sell_straddle.selection import anchor_fails_floor, anchor_floor_detail
         anchor_otm_steps = 1 if use_beginning_sel else 0
         if not anchor_fails_floor(self._strike_prem, atm, self._spot, ltp_target, theta_target,
                                    anchor_otm_steps=anchor_otm_steps, step=step):
             return False
+        # 2026-08-26, direct user request: capture the ACTUAL measured anchor
+        # value (or the specific reason no value exists yet) for the log below --
+        # previously only the floor thresholds were logged, never what was
+        # actually observed, so a real shift couldn't be told apart from "no
+        # live quote yet for the current week's contract" after the fact.
+        _detail = anchor_floor_detail(self._strike_prem, atm, self._spot, theta_target,
+                                       anchor_otm_steps=anchor_otm_steps, step=step)
+        if _detail["reason"] == "measured":
+            _detail_str = (f"{_detail['anchor_side']}{_detail['anchor_strike']} "
+                            f"ltp={_detail['anchor_ltp']:.2f} tv={_detail['anchor_tv']:.2f}")
+        elif _detail["reason"] == "no_quote_at_shifted_anchor":
+            _detail_str = f"no live quote yet at shifted anchor {_detail['anchor_side']}{_detail['anchor_strike']}"
+        elif _detail["reason"] == "zero_ltp_at_atm":
+            _detail_str = (f"no live quote yet at ATM (CE ltp={_detail['ce_ltp']:.2f} "
+                            f"PE ltp={_detail['pe_ltp']:.2f})")
+        else:
+            _detail_str = "no live quote yet at ATM (neither leg has ticked)"
 
         from data_layer.instrument_registry import REGISTRY
         today = datetime.now(IST).date()
@@ -366,13 +399,15 @@ class EntryMixin:
 
         logger.info(
             "SellStraddle[%s]: anchor LTP below floor (ltp≥%.0f theta≥%.0f) at ATM=%d on current "
-            "expiry %s -- shifting to next expiry %s for the REST OF TODAY (user spec: sticky "
-            "once shifted).",
-            self._underlying, ltp_target, theta_target, atm, current.isoformat(), next_expiry.isoformat(),
+            "expiry %s -- observed: %s -- shifting to next expiry %s for the REST OF TODAY (user "
+            "spec: sticky once shifted).",
+            self._underlying, ltp_target, theta_target, atm, current.isoformat(), _detail_str,
+            next_expiry.isoformat(),
         )
         self._clog.info(
-            "EXPIRY-SHIFT low anchor LTP @ATM=%d on %s -> %s (sticky for today)",
-            atm, current.isoformat(), next_expiry.isoformat(),
+            "EXPIRY-SHIFT low anchor LTP @ATM=%d on %s (observed: %s, need ltp>=%.0f theta>=%.0f) "
+            "-> %s (sticky for today)",
+            atm, current.isoformat(), _detail_str, ltp_target, theta_target, next_expiry.isoformat(),
         )
         self._entry_expiry_date = next_expiry
         self._expiry_shifted_low_anchor_ltp = True
