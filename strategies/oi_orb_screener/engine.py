@@ -284,6 +284,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._pending_closes: Dict[str, str] = {}   # event_id -> exit reason (OiOrbFillEvent carries no reason field)
         self._positions: Dict[str, dict] = {}        # stock symbol -> position dict
         self._live_option_ltp: Dict[str, float] = {}
+        self._ltp_log_last: Dict[str, float] = {}
         self._option_key_subscribed: Dict[str, str] = {}
         self._eod_closing: Set[str] = set()
 
@@ -967,9 +968,18 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             if (tick.strike == contract.strike and tick.option_type == contract.option_type
                     and tick.expiry == contract.expiry):
                 self._live_option_ltp[tick.underlying] = tick.ltp
-                self._clog.debug("OiOrb[%s/%s]: LTP %s %s%d = %.2f",
-                                  self._client_id, self._binding_id, tick.underlying,
-                                  contract.option_type, contract.strike, tick.ltp)
+                # 2026-08-26 fix (user request): this used to log every single tick --
+                # dozens per minute per open position, flooding the per-underlying log
+                # with near-duplicate lines. Throttled to once/60s per symbol, matching
+                # the OPT_TICKS/IDX_TICKS "N ticks/60s" summary style already used
+                # elsewhere in this codebase (e.g. sell_straddle's _option_loop).
+                _now_mono = _time.monotonic()
+                _last = self._ltp_log_last.get(tick.underlying, 0.0)
+                if _now_mono - _last >= 60.0:
+                    self._ltp_log_last[tick.underlying] = _now_mono
+                    self._clog.debug("OiOrb[%s/%s]: LTP %s %s%d = %.2f",
+                                      self._client_id, self._binding_id, tick.underlying,
+                                      contract.option_type, contract.strike, tick.ltp)
 
     # ── fills ────────────────────────────────────────────────────────────
 
