@@ -237,12 +237,27 @@ class InstrumentRegistry:
         self._load_from_master_json(underlying, today, diag)
 
     def _resolve_futures_key(self, underlying: str, today: date, diag: List[str]) -> None:
-        """Populate self._futures_upstox[underlying] with the near-month index
-        futures contract, read from the (session-cached) exchange master JSON.
-        Index underlyings only load OPTIONS via the fast options API, which
-        has no futures endpoint — this is a cheap supplementary lookup against
-        the same master JSON _load_from_master_json already knows how to
-        download/cache, without redoing the (already-succeeded) option parse."""
+        """Populate self._futures_upstox[underlying] (AND, 2026-08-26,
+        self._futures_fyers[underlying]) with the near-month index futures
+        contract, read from the (session-cached) exchange master JSON. Index
+        underlyings only load OPTIONS via the fast options API, which has no
+        futures endpoint — this is a cheap supplementary lookup against the
+        same master JSON _load_from_master_json already knows how to
+        download/cache, without redoing the (already-succeeded) option parse.
+
+        2026-08-26 fix (real incident, confirmed live): this used to populate
+        ONLY self._futures_upstox, never self._futures_fyers, for ANY index
+        underlying (_load_mcx, the commodity sibling of this method, derives
+        both). get_futures_fyers() always returned "" for NIFTY as a result --
+        not a timing race that would self-correct, a PERMANENT gap. Confirmed
+        live: UpstoxFeeder correctly got the futures tick (NSE_FO|... key,
+        ltp diverging ~177pts from real spot as expected for cost-of-carry),
+        while FyersFeeder fell back to real spot every single connect, forever
+        -- a standing ~177pt mismatch between the primary and standby feed
+        that would have made self._spot jump instantly on any Fyers failover.
+        Now derives the Fyers symbol the same way _load_mcx already does for
+        commodities (yy + 3-letter month + "FUT"), with the correct NSE/BSE
+        exchange prefix."""
         if underlying.upper() in _MCX_UNDERLYINGS or underlying in self._futures_upstox:
             return
         import gzip, json
@@ -313,7 +328,17 @@ class InstrumentRegistry:
             f_exp, f_ikey = fut_candidates[0]
             self._futures_upstox[underlying] = f_ikey
             self._futures_expiry[underlying] = f_exp
-            diag.append(f"futures (near-month): upstox={f_ikey} expiry={f_exp}")
+            # 2026-08-26 fix: derive the Fyers symbol too (same yy+mon3+"FUT"
+            # convention _load_mcx already uses for commodities) -- previously
+            # never set for index underlyings at all, see this method's own
+            # updated docstring for the real incident this caused.
+            _yy = f_exp.strftime("%y")
+            _mon3 = _MONTH_ABBR_UP[f_exp.month - 1]
+            self._futures_fyers[underlying] = f"{_exch}:{underlying}{_yy}{_mon3}FUT"
+            diag.append(
+                f"futures (near-month): upstox={f_ikey} fyers={self._futures_fyers[underlying]} "
+                f"expiry={f_exp}"
+            )
         else:
             diag.append("futures key lookup: no FUT instrument matched in master JSON")
 
