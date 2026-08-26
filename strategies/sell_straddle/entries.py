@@ -234,20 +234,44 @@ class EntryMixin:
         if want_beg:
             rb = ss.get("entry_rules_beginning", [])
             mtf = max((int(r.get("tf", 1)) for r in rb), default=1)
+            _was_primed_b = self._primed
             if self._at_tf_boundary(now.minute, now.second, mtf):
                 bkt = f"{now:%Y%m%d_%H}{(now.minute // mtf) * mtf:02d}"
                 if bkt != self._last_entry_bucket_b:
                     self._last_entry_bucket_b = bkt
                     due_beg = True
+            if not due_beg and not _was_primed_b and self._is_primed(now, rb):
+                # 2026-08-26, direct user-observed inefficiency: the bucket dedup
+                # above gets consumed by the FIRST tick of a minute regardless of
+                # whether priming was actually ready yet (that's what makes the
+                # once-per-minute "PRIMING -- waiting" log not spam every tick).
+                # But if priming completes a few seconds LATER in that SAME
+                # minute, the bucket is already consumed -- confirmed live:
+                # priming ready at 14:57:07, but the 14:57:05 tick had already
+                # logged "PRIMING -- waiting" and consumed minute 57's bucket, so
+                # the first REAL evaluation didn't run until 14:58:05, a full
+                # extra minute later for no real reason. self._is_primed() is
+                # idempotent (the exact same call _eval_ruleset makes), so
+                # catching the False->True transition here and firing THIS tick
+                # instead of waiting for the next boundary is safe -- the
+                # underlying 2-live-bar SLOPE requirement itself is unchanged,
+                # only this up-to-~1-minute alignment slack on top of it is
+                # removed. Re-marks the same bucket so it still only fires once.
+                self._last_entry_bucket_b = f"{now:%Y%m%d_%H}{(now.minute // mtf) * mtf:02d}"
+                due_beg = True
         due_re = False
         if want_re:
             rr = ss.get("entry_rules_reentry", [])
             mtf = max((int(r.get("tf", 1)) for r in rr), default=1)
+            _was_primed_r = self._primed
             if self._at_tf_boundary(now.minute, now.second, mtf):
                 bkt = f"{now:%Y%m%d_%H}{(now.minute // mtf) * mtf:02d}"
                 if bkt != self._last_entry_bucket_r:
                     self._last_entry_bucket_r = bkt
                     due_re = True
+            if not due_re and not _was_primed_r and self._is_primed(now, rr):
+                self._last_entry_bucket_r = f"{now:%Y%m%d_%H}{(now.minute // mtf) * mtf:02d}"
+                due_re = True
 
         if due_beg or due_re:
             await self._try_entry(now, due_beg, due_re)
