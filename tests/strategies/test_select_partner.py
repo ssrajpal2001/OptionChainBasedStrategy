@@ -66,3 +66,71 @@ def test_partner_none_when_no_strikes():
     res = select_partner_for(_cache({(100, "CE"): 60.0}), "PE", 100, 60.0,
                              100, 5, 4, 30.0, rule_pass=lambda cs, ps: True)
     assert res is None
+
+
+# ── anchor_strike expanding-ring search (2026-08-26, direct user spec) ──────
+# "check all strikes, but take the strike 100 [i.e. one ring] diff from the
+# strike we're closing" -- rather than the old ATM-centered global-best-match
+# search. Ring 1 = anchor+/-step tried first; only widens outward if neither
+# ring-1 candidate passes every existing filter.
+
+def test_anchor_ring_picks_ring1_tiebreak_by_balanced_ratio():
+    # anchor(closing strike)=100, step=5 -> ring 1 = {95, 105}. Both pass with
+    # the SAME absolute diff from kept_ltp=60 (diff=5 each), so balanced_ratio
+    # breaks the tie: ratio95=5/115=0.0435 vs ratio105=5/125=0.04 -> 105 wins.
+    cache = _cache({(100, "CE"): 60.0, (95, "PE"): 55.0, (105, "PE"): 65.0})
+    res = select_partner_for(cache, roll_side="PE", kept_strike=100, kept_ltp=60.0,
+                             spot=100, step=5, offset=4, ltp_target=10.0,
+                             rule_pass=lambda cs, ps: True, metric="balanced_ratio",
+                             anchor_strike=100)
+    assert res == (105, 65.0)
+
+
+def test_anchor_ring_falls_back_to_other_side_of_ring1():
+    # Only PE95 is quoted at all -- PE105 has no quote in the pool -- ring 1
+    # still succeeds via the one side that IS quoted.
+    cache = _cache({(100, "CE"): 60.0, (95, "PE"): 55.0})
+    res = select_partner_for(cache, roll_side="PE", kept_strike=100, kept_ltp=60.0,
+                             spot=100, step=5, offset=4, ltp_target=10.0,
+                             rule_pass=lambda cs, ps: True, anchor_strike=100)
+    assert res == (95, 55.0)
+
+
+def test_anchor_ring_widens_to_ring2_when_ring1_fully_fails():
+    # Ring 1 (95, 105): both below ltp_target=30 -> fail dual-floor.
+    # Ring 2 (90, 110): 110 clears the floor -> ring 2 wins.
+    cache = _cache({
+        (100, "CE"): 60.0,
+        (95, "PE"): 10.0,    # ring 1, fails floor
+        (105, "PE"): 12.0,   # ring 1, fails floor
+        (90, "PE"): 8.0,     # ring 2, fails floor
+        (110, "PE"): 45.0,   # ring 2, passes
+    })
+    res = select_partner_for(cache, roll_side="PE", kept_strike=100, kept_ltp=60.0,
+                             spot=100, step=5, offset=4, ltp_target=30.0,
+                             rule_pass=lambda cs, ps: True, anchor_strike=100)
+    assert res == (110, 45.0)
+
+
+def test_anchor_ring_none_when_every_ring_exhausted():
+    cache = _cache({(100, "CE"): 60.0, (95, "PE"): 10.0, (105, "PE"): 10.0})
+    res = select_partner_for(cache, roll_side="PE", kept_strike=100, kept_ltp=60.0,
+                             spot=100, step=5, offset=2, ltp_target=30.0,
+                             rule_pass=lambda cs, ps: True, anchor_strike=100)
+    assert res is None
+
+
+def test_anchor_ring_never_considers_a_farther_ring_once_ring1_passes():
+    # Ring 1 candidate exists and passes -- a "better" (lower ratio) candidate
+    # sitting in ring 2 must NOT be picked; proximity to the closed strike
+    # wins over a marginally better balance score farther away.
+    cache = _cache({
+        (100, "CE"): 60.0,
+        (105, "PE"): 58.0,   # ring 1, passes (diff=2)
+        (110, "PE"): 60.0,   # ring 2, would be a PERFECT balance match (diff=0)
+    })
+    res = select_partner_for(cache, roll_side="PE", kept_strike=100, kept_ltp=60.0,
+                             spot=100, step=5, offset=4, ltp_target=10.0,
+                             rule_pass=lambda cs, ps: True, metric="balanced_ratio",
+                             anchor_strike=100)
+    assert res == (105, 58.0)

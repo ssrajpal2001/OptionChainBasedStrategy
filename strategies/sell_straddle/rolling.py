@@ -193,6 +193,14 @@ class RollingMixin:
             # the one being kept, the opposite of the intended behavior.
             ltp_le_kept=True,
             metric="balanced_ratio",
+            # 2026-08-26, direct user spec (real incident: the old ATM-centered global
+            # search picked whatever strike anywhere in the window best-matched the kept
+            # leg's LTP, landing 50-150+ points from the strike actually being closed with
+            # no predictable relationship to it): anchor the search on orig_strike (the
+            # strike being closed) instead of ATM, in expanding rings of `step` (100pts) --
+            # ring 1 = orig_strike +/-100 is tried FIRST; only widens to +/-200, +/-300...
+            # if neither +/-100 candidate passes every existing filter (floor/rule/skew).
+            anchor_strike=orig_strike,
         )
 
         # Always dump the full partner-search trace so it is obvious which
@@ -263,75 +271,94 @@ class RollingMixin:
         self._clog.info("SellStraddle[%s]: ROLL %s → %s%d @%.2f (good leg vs running %s%d @%.2f) [%s]",
                     self._underlying, roll_side, roll_side, new_strike, new_ltp,
                     keep_side, keep_strike, keep_ltp, reason)
+        # 2026-08-26 fix (real incident, "MAJOR" per direct user flag): the whole roll
+        # body below used to reset _roll_in_progress back to False only on specific
+        # manual return paths (the close-aborted branch, and previously not at all on
+        # a clean success). _check_exits' own _roll_in_progress guard sits ahead of
+        # almost everything else in the exit ladder (Day%/ITMgate/DayLow/LTPdecay/
+        # Ratio/ScalableTSL/exit_rules/VWAPrise -- see exits.py's own priority-order
+        # comment), so ANY unhandled exception raised anywhere in this block (a
+        # bridge/network error, a bug in the position-reset bookkeeping below, etc.)
+        # would skip every manual reset and leave the flag stuck True FOREVER --
+        # silently disabling nearly all protective exits for the rest of the
+        # session with zero visible error (the caller, _check_exits via _tick_loop,
+        # already catches and logs exceptions, so nothing would even crash loudly).
+        # Confirmed live: a completed roll left zero EXIT-EVAL/SELECT/EVAL log lines
+        # for 90+ minutes, with only the EOD force-squareoff path (ahead of this
+        # guard) still able to fire. A try/finally guarantees the reset on every
+        # possible exit from this block -- success, an aborted close, or a genuine
+        # exception -- not just the return statements we happened to write.
         self._roll_in_progress = True
-        close_ev = await self._close_leg(roll_side, reason, now)
-        if getattr(close_ev, "close_aborted", False):
-            self._clog.warning(
-                "SellStraddle[%s]: roll close leg not confirmed — aborting the open side to "
-                "avoid a naked/duplicate position. Original pair kept.",
-                self._underlying,
-            )
-            self._roll_in_progress = False
-            return False
-
-        await self._open_leg(roll_side, int(new_strike), float(new_ltp), now, f"single_side_roll_{reason}")
-        if self._position:
-            self._position.session_min_vwap = float("inf")
-            self._position.peak_profit = 0.0
-            self._position.tsl_high_lock_rs = 0.0
-            self._position.trailing_active = False
-            self._position.trail_peak_pct = 0.0
-            self._position.session_min_vwap = float("inf")
-            self._position.vwap_last_good = 0.0
-            try:
-                self._position.entry_time_value = self._position.current_time_value(self._spot)
-                if self._position.entry_time_value > self._initial_entry_time_value:
-                    self._initial_entry_time_value = self._position.entry_time_value
-            except Exception:
-                pass
-            self._clog.info(
-                "SellStraddle[%s]: ROLL complete — fresh pair CE%d/PE%d. "
-                "Exit conditions reset: min_vwap=inf, peak_profit=0, tsl_lock=0, entry_tv=%.2f. "
-                "Day%% guardrail continues on cumulative realized=%.2f.",
-                self._underlying,
-                int(self._position.ce_leg.strike), int(self._position.pe_leg.strike),
-                float(getattr(self._position, "entry_time_value", 0.0) or 0.0),
-                float(getattr(self, "_session_realized_pnl_pts", 0.0) or 0.0),
-            )
-
-        # ITM-pair-gate rollovers only: fund a protective stop on the freshly-rolled leg
-        # worth 70% of the ₹ profit just booked by closing the good leg. Scoped strictly
-        # to this reason string -- standard ltp_decay/ratio/vwap_rise/scalable-TSL rolls
-        # never touch _itm_roll_protection.
-        # Keyed by side (roll_side) -- arming/clearing this side's budget must never
-        # touch the other side's still-active budget (e.g. CE rolls again while PE's
-        # protection from an earlier rollover is still armed and running).
-        if reason == "itm_pair_gate_profit_rollover":
-            if not isinstance(getattr(self, "_itm_roll_protection", None), dict):
-                self._itm_roll_protection = {}
-            booked_pnl_rs = self._pnl_rs(float(getattr(close_ev, "realized_pnl", 0.0) or 0.0))
-            if booked_pnl_rs > 0:
-                protect_rs = 0.70 * booked_pnl_rs
-                self._itm_roll_protection[roll_side] = {
-                    "protect_rs": protect_rs,
-                    "new_side": roll_side,
-                    "new_strike": int(new_strike),
-                    "orig_strike": orig_strike,
-                    "kept_side": keep_side,
-                    "kept_strike": keep_strike,
-                }
-                self._clog.info(
-                    "SellStraddle[%s]: ITM-ROLL PROTECTION ARMED — %s%d budget=₹%.0f "
-                    "(70%% of ₹%.0f booked on closed %s%d). Other side's budget (if any) unaffected.",
-                    self._underlying, roll_side, int(new_strike), protect_rs,
-                    booked_pnl_rs, roll_side, orig_strike,
+        try:
+            close_ev = await self._close_leg(roll_side, reason, now)
+            if getattr(close_ev, "close_aborted", False):
+                self._clog.warning(
+                    "SellStraddle[%s]: roll close leg not confirmed — aborting the open side to "
+                    "avoid a naked/duplicate position. Original pair kept.",
+                    self._underlying,
                 )
-            else:
-                self._itm_roll_protection.pop(roll_side, None)
+                return False
 
-        self._persist()
-        await self._check_itm_pair_gate(now)
-        return True
+            await self._open_leg(roll_side, int(new_strike), float(new_ltp), now, f"single_side_roll_{reason}")
+            if self._position:
+                self._position.session_min_vwap = float("inf")
+                self._position.peak_profit = 0.0
+                self._position.tsl_high_lock_rs = 0.0
+                self._position.trailing_active = False
+                self._position.trail_peak_pct = 0.0
+                self._position.session_min_vwap = float("inf")
+                self._position.vwap_last_good = 0.0
+                try:
+                    self._position.entry_time_value = self._position.current_time_value(self._spot)
+                    if self._position.entry_time_value > self._initial_entry_time_value:
+                        self._initial_entry_time_value = self._position.entry_time_value
+                except Exception:
+                    pass
+                self._clog.info(
+                    "SellStraddle[%s]: ROLL complete — fresh pair CE%d/PE%d. "
+                    "Exit conditions reset: min_vwap=inf, peak_profit=0, tsl_lock=0, entry_tv=%.2f. "
+                    "Day%% guardrail continues on cumulative realized=%.2f.",
+                    self._underlying,
+                    int(self._position.ce_leg.strike), int(self._position.pe_leg.strike),
+                    float(getattr(self._position, "entry_time_value", 0.0) or 0.0),
+                    float(getattr(self, "_session_realized_pnl_pts", 0.0) or 0.0),
+                )
+
+            # ITM-pair-gate rollovers only: fund a protective stop on the freshly-rolled leg
+            # worth 70% of the ₹ profit just booked by closing the good leg. Scoped strictly
+            # to this reason string -- standard ltp_decay/ratio/vwap_rise/scalable-TSL rolls
+            # never touch _itm_roll_protection.
+            # Keyed by side (roll_side) -- arming/clearing this side's budget must never
+            # touch the other side's still-active budget (e.g. CE rolls again while PE's
+            # protection from an earlier rollover is still armed and running).
+            if reason == "itm_pair_gate_profit_rollover":
+                if not isinstance(getattr(self, "_itm_roll_protection", None), dict):
+                    self._itm_roll_protection = {}
+                booked_pnl_rs = self._pnl_rs(float(getattr(close_ev, "realized_pnl", 0.0) or 0.0))
+                if booked_pnl_rs > 0:
+                    protect_rs = 0.70 * booked_pnl_rs
+                    self._itm_roll_protection[roll_side] = {
+                        "protect_rs": protect_rs,
+                        "new_side": roll_side,
+                        "new_strike": int(new_strike),
+                        "orig_strike": orig_strike,
+                        "kept_side": keep_side,
+                        "kept_strike": keep_strike,
+                    }
+                    self._clog.info(
+                        "SellStraddle[%s]: ITM-ROLL PROTECTION ARMED — %s%d budget=₹%.0f "
+                        "(70%% of ₹%.0f booked on closed %s%d). Other side's budget (if any) unaffected.",
+                        self._underlying, roll_side, int(new_strike), protect_rs,
+                        booked_pnl_rs, roll_side, orig_strike,
+                    )
+                else:
+                    self._itm_roll_protection.pop(roll_side, None)
+
+            self._persist()
+            await self._check_itm_pair_gate(now)
+            return True
+        finally:
+            self._roll_in_progress = False
 
     async def _single_side_roll_to(self, side: str, strike: int, ltp: float, now: datetime, reason: str) -> None:
         """Partial roll: close one side and open a pre-selected candidate strike on that side."""

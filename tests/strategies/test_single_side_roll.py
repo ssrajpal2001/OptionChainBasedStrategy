@@ -8,6 +8,85 @@ from execution_bridge.straddle_bridge import StraddleFillEvent
 from strategies.sell_straddle import SellStraddleStrategy, StraddlePosition, StraddleLeg
 
 
+def test_single_side_roll_anchors_new_strike_on_the_closed_strike_not_atm():
+    """2026-08-26, direct user spec regression (real incident): the OLD ATM-centered
+    global-best search could land the new leg anywhere in the whole ATM+/-offset
+    window, with no predictable relationship to the strike actually being closed --
+    confirmed live (24550 closed -> 24500 picked, only 50pts away; a separate roll
+    the same day: 24500 closed -> 24400, 100pts away -- two different distances from
+    the SAME kind of roll). Now the search is anchored on the CLOSING strike itself
+    in expanding 100pt rings, so it must land exactly on closed_strike+/-100 whenever
+    that ring has a valid candidate -- even when a strike FARTHER from the closed
+    strike would have "balanced" better against the kept leg."""
+    async def run():
+        bus = EventBus()
+        s = SellStraddleStrategy(bus, cfg=GlobalConfig(), underlying="NIFTY")
+        s._itm_pair_gate_enabled = False
+        s._ltp_target = 0.0
+        s._theta_target = 0.0
+        s._spot = 24460.0
+        s._position = StraddlePosition(
+            underlying="NIFTY", atm_at_entry=24500, entry_spot=24500,
+            # CE is the "good"/less-loss leg -> gets rolled (roll_side=CE); PE is kept.
+            ce_leg=StraddleLeg("CE", 24550, 60.0, 10.0, open_time=datetime.datetime.now(IST)),
+            pe_leg=StraddleLeg("PE", 24450, 60.0, 90.0, open_time=datetime.datetime.now(IST)),
+            net_credit=120.0, status="open",
+        )
+        # CE24750 is a near-PERFECT balance match against the kept PE's ltp (90) --
+        # the OLD ATM-centered global-best search would have picked it over anything
+        # closer to the closing strike. CE24450 sits in ring 1 (closing strike 24550,
+        # one 100pt ring away) and is the only ring-1 candidate quoted at all (24650,
+        # ring 1's other side, has no quote) -- it must win regardless of CE24750's
+        # much better balance, because ring 2 must never even be reached once ring 1
+        # already has a passing candidate.
+        s._strike_prem = {
+            (24450, "CE"): {"ltp": 65.0, "atp": 65.0},   # ring 1 (24550-100): must win
+            (24750, "CE"): {"ltp": 90.0, "atp": 90.0},   # ring 2 -- perfect balance, must NOT win
+        }
+
+        emitted = []
+        orig_emit = s._emit_order
+
+        async def capture_emit(ev):
+            emitted.append(ev)
+            await orig_emit(ev)
+
+        s._emit_order = capture_emit
+
+        async def deliver_fills():
+            await asyncio.sleep(0.02)
+            close_ev = [o for o in emitted if o.action == "EXIT"][0]
+            s._on_fill(StraddleFillEvent(
+                action="EXIT", underlying="NIFTY", atm=24500.0,
+                ce_strike=24550.0, pe_strike=24450.0,
+                ce_fill=10.0, pe_fill=0.0,
+                client_id="C", binding_id="B",
+                event_id=close_ev.event_id, legs=["CE"],
+            ))
+            await asyncio.sleep(0.02)
+            open_ev = [o for o in emitted if o.action == "ENTRY"][0]
+            s._on_fill(StraddleFillEvent(
+                action="ENTRY", underlying="NIFTY", atm=24500.0,
+                ce_strike=open_ev.ce_strike, pe_strike=24450.0,
+                ce_fill=open_ev.ce_ltp, pe_fill=0.0,
+                client_id="C", binding_id="B",
+                event_id=open_ev.event_id, legs=["CE"],
+            ))
+
+        task = asyncio.create_task(deliver_fills())
+        # Bypass the real re-entry rules (default config needs warm pool-engine
+        # indicators this synthetic test has none of) -- isolates the anchor-ring
+        # selection logic itself, which is what this test targets.
+        with patch("strategies.sell_straddle.rolling.RuntimeConfig") as _rc:
+            _rc.index_section.return_value = {"entry_rules_reentry": []}
+            rolled = await s._single_side_roll(datetime.datetime.now(IST), "ltp_decay")
+        await task
+
+        assert rolled is True
+        assert s._position.ce_leg.strike == 24450   # ring 1, NOT the better-balanced 24650
+    asyncio.run(run())
+
+
 def test_single_side_roll_no_candidate_keeps_original_pair():
     async def run():
         bus = EventBus()

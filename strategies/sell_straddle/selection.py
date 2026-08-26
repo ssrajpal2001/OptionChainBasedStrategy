@@ -113,15 +113,107 @@ def _strikes_near_spot(
     return sorted(nearest)
 
 
+def _evaluate_roll_candidate(strike_prem, roll_side, strike, kept_strike, kept_ltp,
+                              spot, step, ltp_target, theta_target, max_itm_steps,
+                              ltp_le_kept, rule_pass, metric):
+    """One candidate's full filter chain (quote → ITM cap → dual floor → ltp_le_kept →
+    rule_pass → score), factored out of select_partner_for so both the original flat
+    scan and the 2026-08-26 anchor-ring scan share EXACTLY the same checks. Returns a
+    populated diag dict; diag["reject_reason"] is None iff the candidate passed
+    everything (diag["score"] then holds its metric score)."""
+    v = strike_prem.get((strike, roll_side))
+    diag = {
+        "event": "candidate", "roll_side": roll_side, "strike": int(strike),
+        "ltp": None, "has_quote": bool(v), "itm_pass": None, "dual_floor_pass": None,
+        "ltp_le_kept_pass": None, "rule_pass": None, "rule_reason": None,
+        "selected": False, "reject_reason": None,
+    }
+    if not v:
+        diag["reject_reason"] = "no_quote_in_pool"
+        return diag
+    ltp = float(v.get("ltp", 0.0) or 0.0)
+    diag["ltp"] = ltp
+    # Keep the re-sold leg near ATM: skip strikes deeper ITM than max_itm_steps.
+    if max_itm_steps is not None and spot > 0 and step > 0:
+        itm_pts = (spot - strike) if roll_side == "CE" else (strike - spot)  # >0 = ITM
+        diag["itm_pts"] = float(itm_pts)
+        diag["itm_limit"] = float(max_itm_steps * step)
+        if itm_pts > max_itm_steps * step:
+            diag["itm_pass"] = False
+            diag["reject_reason"] = f"too_itm ({itm_pts:.2f} > {max_itm_steps * step:.2f})"
+            return diag
+        diag["itm_pass"] = True
+    else:
+        diag["itm_pass"] = True
+    if not leg_passes_dual_floor(roll_side, strike, ltp, spot, ltp_target, theta_target):
+        diag["dual_floor_pass"] = False
+        _tv = strip_intrinsic(float(ltp), roll_side, float(strike), float(spot)) if ltp > 0 and spot > 0 else 0.0
+        diag["reject_reason"] = (
+            f"dual_floor_fail (ltp={ltp:.2f} < ltp_target={ltp_target:.2f} "
+            f"or tv={_tv:.2f} < theta_target={theta_target:.2f})"
+        )
+        return diag
+    diag["dual_floor_pass"] = True
+    # Optional: require partner premium <= kept leg premium. Disabled by default for rollover
+    # so the bot can choose the closest premium regardless of direction.
+    if ltp_le_kept and kept_ltp and ltp > float(kept_ltp):
+        diag["ltp_le_kept_pass"] = False
+        diag["reject_reason"] = f"ltp_above_kept ({ltp:.2f} > {float(kept_ltp):.2f})"
+        return diag
+    diag["ltp_le_kept_pass"] = True
+    ce_s, pe_s = (int(kept_strike), int(strike)) if roll_side == "PE" else (int(strike), int(kept_strike))
+    try:
+        _rp = rule_pass(ce_s, pe_s)
+        # Backward compat: rule_pass may return bool, (bool, reason), or (bool, reason, ind_by_tf).
+        if isinstance(_rp, tuple):
+            rp = bool(_rp[0])
+            rr = str(_rp[1]) if len(_rp) > 1 else ""
+            if len(_rp) > 2 and _rp[2] is not None:
+                diag["rule_ind_by_tf"] = _rp[2]
+        else:
+            rp, rr = bool(_rp), ""
+    except Exception as exc:
+        rp, rr = False, f"rule_eval_exception: {exc}"
+    diag["rule_pass"] = bool(rp)
+    diag["rule_reason"] = str(rr)
+    if not rp:
+        diag["reject_reason"] = f"rule_fail ({rr})"
+        return diag
+    if metric == "balanced_ratio":
+        denom = ltp + float(kept_ltp)
+        diag["score"] = abs(ltp - float(kept_ltp)) / denom if denom > 0 else 999.0
+    else:
+        diag["score"] = abs(ltp - float(kept_ltp))
+    return diag
+
+
 def select_partner_for(strike_prem, roll_side, kept_strike, kept_ltp,
                        spot, step, offset, ltp_target, rule_pass, max_itm_steps=None,
                        theta_target: float = 0.0, variable_strikes: bool = False,
                        trace: Optional[list] = None, ltp_le_kept: bool = False,
-                       metric: str = "closest_to_kept"):
-    """Rollover partner selection — keep the RUNNING leg fixed and pick the best strike on
-    `roll_side` to re-sell, BALANCED against the running leg, within ATM±offset, >= ltp_target
-    and >= theta_target, optionally with premium <= the kept leg's premium, and passing
-    rule_pass(ce_strike, pe_strike).
+                       metric: str = "closest_to_kept",
+                       anchor_strike: Optional[int] = None):
+    """Rollover partner selection — keep the RUNNING leg fixed and pick a strike on
+    `roll_side` to re-sell, >= ltp_target and >= theta_target, optionally with premium
+    <= the kept leg's premium, and passing rule_pass(ce_strike, pe_strike).
+
+    Two search modes:
+
+    - `anchor_strike=None` (default, unchanged since before 2026-08-26): candidates are
+      the flat window ATM±offset*step; a SINGLE GLOBAL BEST wins by `metric` across
+      every passing candidate in that whole window, regardless of how far from ATM it
+      sits.
+
+    - `anchor_strike=<strike>` (2026-08-26, direct user spec): candidates are searched
+      in EXPANDING RINGS of `step` around `anchor_strike` (the strike actually being
+      closed, not ATM) — ring 1 = {anchor-step, anchor+step}, ring 2 = {anchor-2*step,
+      anchor+2*step}, etc., up to `offset` rings. The FIRST ring containing at least
+      one candidate that passes every filter wins; `metric` only breaks a tie WITHIN
+      that same ring (both anchor±N passing). Rings are exhausted outward until one
+      succeeds or `offset` rings are checked with nothing passing → None. Matches the
+      user's own framing: "check all strikes, but take the strike 100 [i.e. one ring]
+      diff from the strike we're closing" — falls back to the next-closest ring rather
+      than the old free global search only when the closest ring has no valid partner.
 
     Selection metric:
       - "closest_to_kept": minimize abs(ltp - kept_ltp)
@@ -129,7 +221,9 @@ def select_partner_for(strike_prem, roll_side, kept_strike, kept_ltp,
 
     `variable_strikes=True`: for crypto chains where strike gaps are non-uniform.
     In that mode `offset` is interpreted as "number of strikes below and above ATM"
-    (i.e. the candidate window is ATM±offset from the actual quoted strikes).
+    (i.e. the candidate window is ATM±offset from the actual quoted strikes) --
+    `anchor_strike` is not supported together with `variable_strikes` (falls back to
+    the ATM-centered flat scan).
 
     `max_itm_steps` (optional): cap how deep ITM the re-sold leg may be (in strike steps) so the
     roll stays near ATM (a real straddle) instead of selling a deep-ITM strike.
@@ -137,6 +231,13 @@ def select_partner_for(strike_prem, roll_side, kept_strike, kept_ltp,
     `trace` (optional): a list to which structured diagnostic dicts are appended for every
     candidate strike considered. This makes it easy to see WHY each candidate was rejected.
     Returns (strike, ltp) or None (→ caller closes all and starts fresh)."""
+    if anchor_strike is not None and not variable_strikes:
+        return _select_partner_by_ring(
+            strike_prem, roll_side, kept_strike, kept_ltp, spot, step, offset,
+            ltp_target, rule_pass, max_itm_steps, theta_target, trace, ltp_le_kept,
+            metric, int(anchor_strike),
+        )
+
     if variable_strikes:
         candidate_strikes = _strikes_around_atm(strike_prem, roll_side, spot, offset=max(1, int(offset)))
     else:
@@ -159,106 +260,31 @@ def select_partner_for(strike_prem, roll_side, kept_strike, kept_ltp,
             "candidate_strikes": [int(s) for s in candidate_strikes],
         })
 
-    best = None  # (premium_diff, strike, ltp)
+    best = None  # (score, strike, ltp)
     reject_counts = {
-        "no_quote_in_pool": 0,
-        "too_itm": 0,
-        "dual_floor_fail": 0,
-        "ltp_above_kept": 0,
-        "rule_fail": 0,
-        "not_closest": 0,
+        "no_quote_in_pool": 0, "too_itm": 0, "dual_floor_fail": 0,
+        "ltp_above_kept": 0, "rule_fail": 0, "not_closest": 0,
     }
     for strike in candidate_strikes:
-        v = strike_prem.get((strike, roll_side))
-        diag = {
-            "event": "candidate",
-            "roll_side": roll_side,
-            "strike": int(strike),
-            "ltp": None,
-            "has_quote": bool(v),
-            "itm_pass": None,
-            "dual_floor_pass": None,
-            "ltp_le_kept_pass": None,
-            "rule_pass": None,
-            "rule_reason": None,
-            "selected": False,
-            "reject_reason": None,
-        }
-        if not v:
-            diag["reject_reason"] = "no_quote_in_pool"
-            reject_counts["no_quote_in_pool"] += 1
+        diag = _evaluate_roll_candidate(
+            strike_prem, roll_side, strike, kept_strike, kept_ltp, spot, step,
+            ltp_target, theta_target, max_itm_steps, ltp_le_kept, rule_pass, metric,
+        )
+        if diag["reject_reason"] is not None:
+            _reason_key = diag["reject_reason"].split(" ", 1)[0].split("(", 1)[0].strip()
+            _key_map = {
+                "no_quote_in_pool": "no_quote_in_pool", "too_itm": "too_itm",
+                "dual_floor_fail": "dual_floor_fail", "ltp_above_kept": "ltp_above_kept",
+                "rule_fail": "rule_fail",
+            }
+            reject_counts[_key_map.get(_reason_key, "rule_fail")] += 1
             if trace is not None:
                 trace.append(diag)
             continue
-        ltp = float(v.get("ltp", 0.0) or 0.0)
-        diag["ltp"] = ltp
-        # Keep the re-sold leg near ATM: skip strikes deeper ITM than max_itm_steps.
-        if max_itm_steps is not None and spot > 0 and step > 0:
-            itm_pts = (spot - strike) if roll_side == "CE" else (strike - spot)  # >0 = ITM
-            diag["itm_pts"] = float(itm_pts)
-            diag["itm_limit"] = float(max_itm_steps * step)
-            if itm_pts > max_itm_steps * step:
-                diag["itm_pass"] = False
-                diag["reject_reason"] = f"too_itm ({itm_pts:.2f} > {max_itm_steps * step:.2f})"
-                reject_counts["too_itm"] += 1
-                if trace is not None:
-                    trace.append(diag)
-                continue
-            diag["itm_pass"] = True
-        else:
-            diag["itm_pass"] = True
-        if not leg_passes_dual_floor(roll_side, strike, ltp, spot, ltp_target, theta_target):
-            diag["dual_floor_pass"] = False
-            _tv = strip_intrinsic(float(ltp), roll_side, float(strike), float(spot)) if ltp > 0 and spot > 0 else 0.0
-            diag["reject_reason"] = (
-                f"dual_floor_fail (ltp={ltp:.2f} < ltp_target={ltp_target:.2f} "
-                f"or tv={_tv:.2f} < theta_target={theta_target:.2f})"
-            )
-            reject_counts["dual_floor_fail"] += 1
-            if trace is not None:
-                trace.append(diag)
-            continue
-        diag["dual_floor_pass"] = True
-        # Optional: require partner premium <= kept leg premium. Disabled by default for rollover
-        # so the bot can choose the closest premium regardless of direction.
-        if ltp_le_kept and kept_ltp and ltp > float(kept_ltp):
-            diag["ltp_le_kept_pass"] = False
-            diag["reject_reason"] = f"ltp_above_kept ({ltp:.2f} > {float(kept_ltp):.2f})"
-            reject_counts["ltp_above_kept"] += 1
-            if trace is not None:
-                trace.append(diag)
-            continue
-        diag["ltp_le_kept_pass"] = True
-        ce_s, pe_s = (int(kept_strike), int(strike)) if roll_side == "PE" else (int(strike), int(kept_strike))
-        try:
-            _rp = rule_pass(ce_s, pe_s)
-            # Backward compat: rule_pass may return bool, (bool, reason), or (bool, reason, ind_by_tf).
-            if isinstance(_rp, tuple):
-                rp = bool(_rp[0])
-                rr = str(_rp[1]) if len(_rp) > 1 else ""
-                if len(_rp) > 2 and _rp[2] is not None:
-                    diag["rule_ind_by_tf"] = _rp[2]
-            else:
-                rp, rr = bool(_rp), ""
-        except Exception as exc:
-            rp, rr = False, f"rule_eval_exception: {exc}"
-        diag["rule_pass"] = bool(rp)
-        diag["rule_reason"] = str(rr)
-        if not rp:
-            diag["reject_reason"] = f"rule_fail ({rr})"
-            reject_counts["rule_fail"] += 1
-            if trace is not None:
-                trace.append(diag)
-            continue
-        if metric == "balanced_ratio":
-            denom = ltp + float(kept_ltp)
-            score = abs(ltp - float(kept_ltp)) / denom if denom > 0 else 999.0
-        else:
-            score = abs(ltp - float(kept_ltp))
+        score = diag["score"]
         if best is None or score < best[0]:
             diag["selected"] = True
-            diag["score"] = float(score)
-            best = (score, int(strike), ltp)
+            best = (score, int(strike), diag["ltp"])
         else:
             diag["reject_reason"] = f"not_best (metric={metric} score={score:.4f} > best={best[0]:.4f})"
             reject_counts["not_closest"] += 1
@@ -274,6 +300,74 @@ def select_partner_for(strike_prem, roll_side, kept_strike, kept_ltp,
             "candidates_total": len(candidate_strikes),
         })
     return (best[1], best[2]) if best else None
+
+
+def _select_partner_by_ring(strike_prem, roll_side, kept_strike, kept_ltp,
+                             spot, step, offset, ltp_target, rule_pass, max_itm_steps,
+                             theta_target, trace, ltp_le_kept, metric, anchor_strike):
+    """Expanding-ring search around anchor_strike (the strike being closed) -- see
+    select_partner_for's own docstring for the full rationale. Ring 1 = anchor±step
+    (e.g. ±100), ring 2 = anchor±2*step, etc. First ring with >=1 passing candidate
+    wins; ties within a ring broken by `metric`."""
+    if trace is not None:
+        trace.append({
+            "event": "select_partner_for_start", "roll_side": roll_side,
+            "kept_strike": int(kept_strike), "kept_ltp": float(kept_ltp or 0.0),
+            "spot": float(spot or 0.0), "step": float(step or 0.0),
+            "offset": int(offset or 0), "ltp_target": float(ltp_target or 0.0),
+            "theta_target": float(theta_target or 0.0), "max_itm_steps": max_itm_steps,
+            "variable_strikes": False, "anchor_strike": int(anchor_strike),
+            "candidate_strikes": [
+                int(anchor_strike + sign * ring * step)
+                for ring in range(1, int(offset) + 1) for sign in (-1, 1)
+            ],
+        })
+
+    reject_counts = {
+        "no_quote_in_pool": 0, "too_itm": 0, "dual_floor_fail": 0,
+        "ltp_above_kept": 0, "rule_fail": 0, "not_closest": 0,
+    }
+    total_checked = 0
+    max_ring = max(1, int(offset))
+    for ring in range(1, max_ring + 1):
+        ring_strikes = [int(anchor_strike - ring * step), int(anchor_strike + ring * step)]
+        ring_diags = []
+        for strike in ring_strikes:
+            total_checked += 1
+            diag = _evaluate_roll_candidate(
+                strike_prem, roll_side, strike, kept_strike, kept_ltp, spot, step,
+                ltp_target, theta_target, max_itm_steps, ltp_le_kept, rule_pass, metric,
+            )
+            ring_diags.append(diag)
+        passers = [d for d in ring_diags if d["reject_reason"] is None]
+        if not passers:
+            for d in ring_diags:
+                _reason_key = d["reject_reason"].split(" ", 1)[0].split("(", 1)[0].strip()
+                reject_counts[_reason_key if _reason_key in reject_counts else "rule_fail"] += 1
+            if trace is not None:
+                trace.extend(ring_diags)
+            continue
+        best_diag = min(passers, key=lambda d: d["score"])
+        best_diag["selected"] = True
+        for d in ring_diags:
+            if d is not best_diag and d["reject_reason"] is None:
+                d["reject_reason"] = f"not_best (metric={metric} score={d['score']:.4f} > best={best_diag['score']:.4f})"
+                reject_counts["not_closest"] += 1
+        if trace is not None:
+            trace.extend(ring_diags)
+            trace.append({
+                "event": "select_partner_for_end",
+                "best_strike": best_diag["strike"], "best_ltp": best_diag["ltp"],
+                "reject_counts": reject_counts, "candidates_total": total_checked,
+            })
+        return (best_diag["strike"], best_diag["ltp"])
+
+    if trace is not None:
+        trace.append({
+            "event": "select_partner_for_end", "best_strike": None, "best_ltp": None,
+            "reject_counts": reject_counts, "candidates_total": total_checked,
+        })
+    return None
 
 
 def strip_intrinsic(ltp: float, side: str, strike: float, spot: float) -> float:
