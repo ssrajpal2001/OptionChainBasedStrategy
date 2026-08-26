@@ -4197,7 +4197,11 @@ function amoTest() {
                      :style="`color:${s.entry_allowed?'var(--t-green)':'var(--t-red)'}`"
                      x-text="s.entry_allowed ? '✓ OK' : '✗ NO'"></div>
               </div>
-              <div class="text-center">
+              <!-- 2026-08-26 fix: this 4th cell only shows plain SPOT when the
+                   underlying does NOT use mean-ATM -- for a futures_atm underlying,
+                   SPOT/FUT/MEAN are shown together in the row below instead, so
+                   SPOT is never rendered twice (was reported as "overlapping"). -->
+              <div class="text-center" x-show="!s.uses_mean_atm">
                 <div class="font-mono text-xs" style="color:var(--t-muted)" title="Real spot index">SPOT</div>
                 <div class="font-mono text-xs" style="color:var(--t-text)"
                      x-text="s.spot ? fmt(s.spot) : '—'"></div>

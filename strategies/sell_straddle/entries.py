@@ -297,7 +297,13 @@ class EntryMixin:
             return
         if self._spot <= 0 or self._ce_ltp <= 0 or self._pe_ltp <= 0:
             _step = self._cfg.exchange.strike_steps.get(self._underlying, 50.0) if self._cfg else 50.0
-            _atm = int(round(self._spot / _step) * _step) if self._spot > 0 else 0
+            # 2026-08-26: same mean-of-spot-and-futures ATM reference every other
+            # entry/selection path uses (falls back to plain self._spot otherwise) --
+            # this WAIT diagnostic line was missed in the original sweep, confirmed
+            # live: it kept showing spot-only ATM=24300 while OPT_TICKS correctly
+            # showed the mean-based ATM=24350 a moment later.
+            _atm_src = self._atm_ref if self._atm_ref > 0 else self._spot
+            _atm = int(round(_atm_src / _step) * _step) if _atm_src > 0 else 0
             self._clog.info(
                 "WAIT  spot=%.2f ATM=%d CE%d_ltp=%.2f PE%d_ltp=%.2f — waiting for option ticks",
                 self._spot, _atm, _atm, self._ce_ltp, _atm, self._pe_ltp,
@@ -372,7 +378,9 @@ class EntryMixin:
         # (the real entry-selection path) independently enforces this same ATM-only
         # rule now too -- see its own 2026-08-26 docstring update.
         anchor_otm_steps = 0
-        if not anchor_fails_floor(self._strike_prem, atm, self._spot, ltp_target, theta_target,
+        # 2026-08-26, direct user confirmation: intrinsic/time-value stripping here is
+        # ALSO computed off the mean reference (_atm_src), not real spot.
+        if not anchor_fails_floor(self._strike_prem, atm, _atm_src, ltp_target, theta_target,
                                    anchor_otm_steps=anchor_otm_steps, step=step):
             return False
         # 2026-08-26, direct user request: capture the ACTUAL measured anchor
@@ -380,7 +388,7 @@ class EntryMixin:
         # previously only the floor thresholds were logged, never what was
         # actually observed, so a real shift couldn't be told apart from "no
         # live quote yet for the current week's contract" after the fact.
-        _detail = anchor_floor_detail(self._strike_prem, atm, self._spot, theta_target,
+        _detail = anchor_floor_detail(self._strike_prem, atm, _atm_src, theta_target,
                                        anchor_otm_steps=anchor_otm_steps, step=step)
         if _detail["reason"] == "measured":
             _detail_str = (f"{_detail['anchor_side']}{_detail['anchor_strike']} "
@@ -489,11 +497,17 @@ class EntryMixin:
         # the globally most-balanced LTP pair, often deep ITM on both sides (e.g.
         # CE6500/PE7300 when ATM was 6900).  The re-entry rules are evaluated AFTER the
         # pair is selected, not during selection (same as beginning).
+        # 2026-08-26, direct user confirmation: intrinsic/time-value stripping is ALSO
+        # computed off the mean reference, not real spot -- pass _atm_src (falls back
+        # to plain self._spot for a non-futures_atm underlying) as `spot`, not
+        # self._spot itself. atm_ref is now redundant with this (both equal _atm_src)
+        # but kept for explicitness/robustness.
+        _atm_src = self._atm_ref if self._atm_ref > 0 else self._spot
         sel = select_balanced_pair(
-            self._strike_prem, self._spot, reentry_step, offset, ltp_target, trace=_trace,
+            self._strike_prem, _atm_src, reentry_step, offset, ltp_target, trace=_trace,
             entry_basis=self._entry_basis, theta_target=self._theta_target,
             variable_strikes=variable_strikes, balance_ratio=balance_ratio,
-            atm_ref=self._atm_ref,
+            atm_ref=_atm_src,
         )
 
         for _ln in _trace:
@@ -507,12 +521,12 @@ class EntryMixin:
                 )
             else:
                 diag = reentry_block_reason(
-                    self._strike_prem, self._spot, reentry_step, offset, ltp_target,
+                    self._strike_prem, _atm_src, reentry_step, offset, ltp_target,
                     rule_eval=lambda cs, ps: _eval_rules(rules, self._ind_by_tf(cs, ps, rules)),
                     theta_target=self._theta_target,
                     variable_strikes=variable_strikes,
                     balance_ratio=balance_ratio,
-                    atm_ref=self._atm_ref,
+                    atm_ref=_atm_src,
                 )
                 if diag["kind"] == "no_pair":
                     self._clog.info(
@@ -564,8 +578,12 @@ class EntryMixin:
             # 2026-08-20 user spec: anchor SIDE decision stays at raw ATM, but the
             # anchor's own strike used for pairing shifts 1 step further OTM (BEGINNING
             # only -- RE-ENTRY keeps anchor_otm_steps=0/unshifted).
+            # 2026-08-26, direct user confirmation: intrinsic/time-value stripping
+            # (anchor tv, partner tv, the floor's theta check) is ALSO computed off
+            # the mean reference (_atm_src), not real spot -- "for theta we need to
+            # subtract from the mean value to get intrinsic and time value both."
             sel = select_balanced_pair_at(
-                self._strike_prem, atm, self._spot, step, offset, ltp_target, trace=_trace,
+                self._strike_prem, atm, _atm_src, step, offset, ltp_target, trace=_trace,
                 entry_basis=self._entry_basis, theta_target=theta_target,
                 variable_strikes=variable_strikes, balance_ratio=balance_ratio,
                 anchor_otm_steps=1,

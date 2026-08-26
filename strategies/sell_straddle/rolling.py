@@ -174,7 +174,11 @@ class RollingMixin:
             roll_side=roll_side,
             kept_strike=keep_strike,
             kept_ltp=keep_ltp,
-            spot=self._spot,
+            # 2026-08-26, direct user confirmation: intrinsic/time-value stripping
+            # is ALSO computed off the mean-of-spot-and-futures reference, not real
+            # spot, for consistency with entry/expiry-shift selection (self._atm_ref
+            # falls back to plain self._spot for a non-futures_atm underlying).
+            spot=(self._atm_ref if self._atm_ref > 0 else self._spot),
             step=step,
             offset=offset,
             ltp_target=ltp_target,
@@ -668,7 +672,8 @@ class RollingMixin:
                 if not (k[0] == stopped_strike and k[1] == new_side)}
         partner = select_partner_for(
             pool, roll_side=new_side, kept_strike=kept_strike, kept_ltp=kept_ltp,
-            spot=self._spot, step=step, offset=offset, ltp_target=ltp_target,
+            spot=(self._atm_ref if self._atm_ref > 0 else self._spot),
+            step=step, offset=offset, ltp_target=ltp_target,
             rule_pass=_rule_pass, max_itm_steps=max_itm, theta_target=self._theta_target,
             variable_strikes=variable_strikes, ltp_le_kept=True, metric="balanced_ratio",
         )

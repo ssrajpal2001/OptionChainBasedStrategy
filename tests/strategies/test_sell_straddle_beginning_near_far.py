@@ -187,3 +187,53 @@ def test_near_far_strikes_computed_correctly_for_spot_between_them():
         ))
 
     assert called_atms == [24500, 24550]
+
+
+# ── 2026-08-26 direct user confirmation: near/far AND intrinsic/time-value ──
+# stripping both move to the mean-of-spot-and-futures reference for a
+# futures_atm underlying -- "it should be from the mean which we calculated."
+
+def test_near_far_and_spot_arg_both_use_atm_ref_when_set():
+    """self._atm_ref (mean) must drive BOTH which strikes bracket as near/far
+    AND the `spot` argument select_balanced_pair_at strips intrinsic value
+    with -- real spot (self._spot) must not leak into either."""
+    s, opens = _strategy()
+    s._spot = 24277.0          # real spot -- must NOT be used for near/far or spot arg
+    s._atm_ref = 24363.5       # mean -- near=24350, far=24400 at step=50
+    calls = []
+
+    def _sel(strike_prem, atm, spot, step, offset, ltp_target, **kwargs):
+        calls.append((atm, spot))
+        return None
+    s._ind_by_tf = lambda ce, pe, rules: {1: {"slope": -0.5}}
+
+    with patch("strategies.sell_straddle.selection.select_balanced_pair_at", side_effect=_sel):
+        asyncio.run(s._eval_beginning_near_far(
+            datetime.now(IST), "entry_rules_beginning", _RULES,
+            step=50, offset=5, ltp_target=50.0, theta_target=20.0,
+            variable_strikes=False, balance_ratio=1.0,
+        ))
+
+    assert calls == [(24350, 24363.5), (24400, 24363.5)]
+
+
+def test_near_far_falls_back_to_spot_when_atm_ref_unset():
+    """A non-futures_atm underlying (self._atm_ref stays 0.0) must behave
+    exactly as before -- near/far and the spot arg both come from real spot."""
+    s, opens = _strategy()
+    assert s._atm_ref == 0.0
+    calls = []
+
+    def _sel(strike_prem, atm, spot, step, offset, ltp_target, **kwargs):
+        calls.append((atm, spot))
+        return None
+    s._ind_by_tf = lambda ce, pe, rules: {1: {"slope": -0.5}}
+
+    with patch("strategies.sell_straddle.selection.select_balanced_pair_at", side_effect=_sel):
+        asyncio.run(s._eval_beginning_near_far(
+            datetime.now(IST), "entry_rules_beginning", _RULES,
+            step=50, offset=5, ltp_target=50.0, theta_target=20.0,
+            variable_strikes=False, balance_ratio=1.0,
+        ))
+
+    assert calls == [(24500, 24512.0), (24550, 24512.0)]
