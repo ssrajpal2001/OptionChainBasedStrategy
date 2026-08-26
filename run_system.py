@@ -388,12 +388,42 @@ def _register_graceful_shutdown_signals(shutdown_event: asyncio.Event) -> None:
 # dependency into 3 different strategy constructors is a much larger,
 # riskier change than reading each book's already-public state from here.
 
+def _binding_trading_mode(router, client_id: str, binding_id: str) -> str:
+    """Best-effort lookup, defaults to "paper" (the DB column's own default)
+    on any failure -- never let a lookup error block reconciliation from
+    running for a genuinely live/paper binding."""
+    try:
+        db = getattr(router, "_client_db", None)
+        if db is None:
+            return "paper"
+        for b in db.get_bindings_safe_sync(client_id):
+            if b.get("binding_id") == binding_id:
+                return str(b.get("trading_mode") or "paper")
+    except Exception:
+        pass
+    return "paper"
+
+
 async def _reconcile_sell_straddle_book(book, router, bus) -> None:
     from strategies.core.broker_reconciliation import ExpectedLeg, reconcile_and_alert
     broker = (getattr(router, "_brokers", None) or {}).get(book._client_id, {}).get(book._binding_id)
     pos = getattr(book, "_position", None)
     legs = []
     if pos is not None and getattr(pos, "status", None) == "open":
+        # 2026-08-26 fix (real incident, confirmed live on SA5770): paper_route
+        # DELIBERATELY has its real broker order rejected (routing/whitelist
+        # verification only, genuinely zero funds -- see the execution
+        # bridge's own paper_route contract) while the strategy books a local
+        # SIMULATED fill regardless. That means the broker's own position
+        # book will ALWAYS show nothing for a genuinely correct, working
+        # paper_route position -- this precise reconciliation check has no
+        # way to tell that apart from a real orphaned/lost position, so it
+        # fired CRITICAL every 5 minutes for the entire life of every
+        # paper_route position. Skip the broker-side check entirely for
+        # paper_route -- there is nothing meaningful to reconcile against by
+        # design; live/paper bindings are unaffected and still checked.
+        if _binding_trading_mode(router, book._client_id, book._binding_id) == "paper_route":
+            return
         ce_leg, pe_leg = getattr(pos, "ce_leg", None), getattr(pos, "pe_leg", None)
         if ce_leg is not None and ce_leg.symbol:
             legs.append(ExpectedLeg(ce_leg.symbol, f"CE {ce_leg.strike:.0f}"))
@@ -427,6 +457,12 @@ async def _reconcile_single_leg_book(book, router, bus, strategy_label: str) -> 
     pos = getattr(book, "_position", None)
     legs = []
     if pos is not None:
+        # 2026-08-26 fix: same paper_route false-positive as
+        # _reconcile_sell_straddle_book above -- a paper_route position's
+        # real broker order is deliberately rejected while a local sim-fill
+        # is booked, so the broker will always show nothing for it by design.
+        if _binding_trading_mode(router, book._client_id, book._binding_id) == "paper_route":
+            return
         try:
             expiry = pos.get("expiry") or _REGISTRY.get_active_expiry_strict(
                 book._underlying, getattr(book, "_today", None) or _dt.now(_IST).date())
