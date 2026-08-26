@@ -4608,6 +4608,12 @@ pm2 save
                             "open_time": pos.open_time.isoformat() if pos.open_time else None,
                             "entry_time": pos.open_time.isoformat() if pos.open_time else None,
                         }
+                    # 2026-08-26, direct user spec: the "SPOT" label was misleading once
+                    # futures_atm_underlyings makes self._spot actually track the near-month
+                    # FUTURES contract instead of the real index -- surface which one this
+                    # underlying is actually on so the UI can label it correctly instead of
+                    # always saying "SPOT".
+                    _futures_atm = {u.upper() for u in (getattr(_srv._cfg, "futures_atm_underlyings", None) or [])}
                     out.append({
                         "type":         "sell_straddle",
                         "underlying":   ss._underlying,
@@ -4616,6 +4622,7 @@ pm2 save
                         "trades_today": ss.trades_today,
                         "booked_pnl":   round(getattr(ss, "_session_realized_pnl_pts", 0.0), 2),
                         "spot":         round(ss._spot, 2),
+                        "spot_source":  "futures" if ss._underlying.upper() in _futures_atm else "spot",
                         "rsi":          round(ss._ind.get("rsi", 0.0), 1),
                         "adx":          round(ss._ind.get("adx", 0.0), 1),
                         "entry_allowed": getattr(ss, "entry_allowed", True),

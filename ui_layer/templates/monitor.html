@@ -4198,8 +4198,10 @@ function amoTest() {
                      x-text="s.entry_allowed ? '✓ OK' : '✗ NO'"></div>
               </div>
               <div class="text-center">
-                <div class="font-mono text-xs" style="color:var(--t-muted)">SPOT</div>
-                <div class="font-mono text-xs" style="color:var(--t-text)"
+                <div class="font-mono text-xs" style="color:var(--t-muted)"
+                     :title="s.spot_source==='futures' ? 'Sourced from the near-month FUTURES contract, not the real spot index (futures_atm_underlyings)' : 'Real spot index'"
+                     x-text="s.spot_source==='futures' ? 'FUT' : 'SPOT'"></div>
+                <div class="font-mono text-xs" :style="`color:${s.spot_source==='futures'?'var(--t-amber)':'var(--t-text)'}`"
                      x-text="s.spot ? fmt(s.spot) : '—'"></div>
               </div>
             </div>
