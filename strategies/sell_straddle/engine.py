@@ -657,6 +657,12 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
             f"→ rollover, 70% roll-protect)",
             f"║ DAY-LOW REVERSAL EXIT: {'ON' if self._day_low_exit_enabled else 'OFF'} "
             f"(freeze@{self._day_low_freeze_time.strftime('%H:%M')}, exit on retest of frozen day-low)",
+            # 2026-08-26 fix (user request): hedge_carry_enabled was invisible in this banner --
+            # no way to tell from the log alone whether a book's EOD hedge-and-carry behavior is
+            # armed for the day without grepping config directly. precheck lead is the new
+            # 2026-08-25 pre-squareoff hedge timing (see exits.py _hedge_precheck_time).
+            f"║ HEDGE-AND-CARRY (EOD): {'ON' if getattr(self, '_hedge_carry_enabled', False) else 'OFF'} "
+            f"(precheck {getattr(self, '_HEDGE_PRECHECK_LEAD_MIN', 1)}min before squareoff)",
             f"║ SAME-DAY EXPIRY: {'ALLOWED' if getattr(self, '_same_day_expiry_enabled', False) else 'SHIFT TO NEXT'}",
             f"║ DAY: T:{self._day_profit_target_pct:.0f}% SL:{self._day_loss_sl_pct:.0f}% "
             f"BASIS:{self._day_exit_basis.upper()}",
