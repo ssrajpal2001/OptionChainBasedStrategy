@@ -17,8 +17,8 @@ from datetime import date, datetime, time as dtime
 
 import pytest
 
-from config.global_config import Topic
-from data_layer.base_feeder import OptionTick
+from config.global_config import IST, Topic
+from data_layer.base_feeder import IndexTick, OptionTick
 from strategies.oi_orb_screener import screener, stock_resolve, store
 from strategies.oi_orb_screener.engine import OiOrbScreenerStrategy
 from strategies.oi_orb_screener.events import OiOrbFillEvent
@@ -40,9 +40,13 @@ def _isolated_store_db(tmp_path, monkeypatch):
 class _FakeGlobalFeeder:
     def __init__(self) -> None:
         self.subscribed_tokens: list = []
+        self.subscribed_equity: list = []   # [(fyers_sym, underlying), ...]
 
     async def subscribe_tokens(self, tokens):
         self.subscribed_tokens.extend(tokens)
+
+    def subscribe_fno_equity(self, fyers_sym, underlying):
+        self.subscribed_equity.append((fyers_sym, underlying))
 
 
 class _FakeBus:
@@ -514,3 +518,184 @@ async def test_on_fill_persists_position_open_and_close_to_db():
     con.close()
     assert row["exit_reason"] == "sma_exit"
     assert row["pnl"] == round((95.30 - 118.80) * 50, 2)
+
+
+# ── S&R (R1/S1/R2/S2) SL tracking (2026-08-26, direct user spec, replaces
+# the removed SMA-exit) ──────────────────────────────────────────────────
+
+def test_ensure_spot_feed_subscribes_and_is_idempotent():
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._ensure_spot_feed("MANAPPURAM")
+    book._ensure_spot_feed("MANAPPURAM")   # second call must be a no-op
+    assert bus._global_feeder.subscribed_equity == [("NSE:MANAPPURAM-EQ", "MANAPPURAM")]
+
+
+def test_on_fill_buy_resets_sr_state_and_subscribes_spot_feed():
+    bus = _FakeBus()
+    book = _make_book(bus)
+    contract = _contract("MANAPPURAM", 365, "CE")
+    book._pending_fills["EVT1"] = {
+        "symbol": "MANAPPURAM", "contract": contract, "qty": 100,
+        "entry_price": 10.0, "reason": "signal",
+    }
+    # Stale state from an earlier (already-closed) run on this same symbol today --
+    # must not leak into the freshly-opened position's own S&R tracking.
+    book._sr_calc.states["MANAPPURAM"] = {"stale": True}
+    book._live_sl["MANAPPURAM"] = 999.0
+
+    asyncio.run(book._on_fill(OiOrbFillEvent(
+        action="BUY", underlying="MANAPPURAM", option_type="CE", strike=365, fill_price=10.0,
+        qty=100, client_id=_TEST_CLIENT_ID, binding_id=_TEST_BINDING_ID, event_id="EVT1",
+        paper_mode=True,
+    )))
+
+    assert "MANAPPURAM" not in book._sr_calc.states
+    assert "MANAPPURAM" not in book._live_sl
+    assert bus._global_feeder.subscribed_equity == [("NSE:MANAPPURAM-EQ", "MANAPPURAM")]
+
+
+@pytest.mark.asyncio
+async def test_sr_sl_establishes_after_two_bars_and_breaches_on_the_next_tick():
+    """Drives real 1-min bars through the actual SupportResistanceCalculator
+    (not a stand-in) for a CALL position: bar1 (09:15) high=100/low=95, bar2
+    (09:16) high=105/low=97 -- a clean breakout-high bounce -- establishes S1
+    at bar1's low (95) the moment bar2 closes. A live tick at 94 (below 95)
+    must then close the position immediately, on that tick, not waiting for
+    bar3 to close."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    contract = _contract("MANAPPURAM", 365, "CE")
+    book._positions["MANAPPURAM"] = {
+        "contract": contract, "qty": 100, "entry_price": 10.0, "paper_mode": True,
+        "opened_at": datetime(2026, 8, 26, 9, 15, 0),
+    }
+
+    await book._update_sr_and_check_sl("MANAPPURAM", 100.0, datetime(2026, 8, 26, 9, 15, 10, tzinfo=IST))
+    await book._update_sr_and_check_sl("MANAPPURAM", 95.0, datetime(2026, 8, 26, 9, 15, 40, tzinfo=IST))
+    # bar1 (09:15) closes on this next tick, which starts bar2 (09:16)
+    await book._update_sr_and_check_sl("MANAPPURAM", 102.0, datetime(2026, 8, 26, 9, 16, 10, tzinfo=IST))
+    await book._update_sr_and_check_sl("MANAPPURAM", 105.0, datetime(2026, 8, 26, 9, 16, 40, tzinfo=IST))
+    await book._update_sr_and_check_sl("MANAPPURAM", 97.0, datetime(2026, 8, 26, 9, 16, 50, tzinfo=IST))
+    # bar2 (09:16, high=105/low=97) closes on this next tick -> S1 established at 95
+    await book._update_sr_and_check_sl("MANAPPURAM", 99.0, datetime(2026, 8, 26, 9, 17, 10, tzinfo=IST))
+
+    assert book._live_sl["MANAPPURAM"] == 95.0
+    assert "MANAPPURAM" in book._positions   # not breached yet (99 > 95)
+
+    sell_events_before = [e for t, e in bus.published if t == Topic.OI_ORB_ORDER_REQUEST and e.action == "SELL"]
+    assert sell_events_before == []
+
+    # A live tick (same forming bar, no new bar close needed) breaches SL immediately.
+    await book._update_sr_and_check_sl("MANAPPURAM", 94.0, datetime(2026, 8, 26, 9, 17, 20, tzinfo=IST))
+
+    sell_events = [e for t, e in bus.published if t == Topic.OI_ORB_ORDER_REQUEST and e.action == "SELL"]
+    assert len(sell_events) == 1
+    assert sell_events[0].underlying == "MANAPPURAM"
+    assert "MANAPPURAM" in book._eod_closing
+
+
+@pytest.mark.asyncio
+async def test_sr_sl_no_close_while_sl_not_yet_established():
+    """Only ONE candle has closed so far -- the S&R tracker hasn't confirmed
+    any S1/R1 yet, so no SL exists and a big drop must NOT trigger a close
+    (the position runs on the hard risk cap alone during this window)."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    contract = _contract("MANAPPURAM", 365, "CE")
+    book._positions["MANAPPURAM"] = {
+        "contract": contract, "qty": 100, "entry_price": 10.0, "paper_mode": True,
+        "opened_at": datetime(2026, 8, 26, 9, 15, 0),
+    }
+    await book._update_sr_and_check_sl("MANAPPURAM", 100.0, datetime(2026, 8, 26, 9, 15, 10, tzinfo=IST))
+    await book._update_sr_and_check_sl("MANAPPURAM", 1.0, datetime(2026, 8, 26, 9, 15, 40, tzinfo=IST))
+
+    assert "MANAPPURAM" not in book._live_sl
+    sell_events = [e for t, e in bus.published if t == Topic.OI_ORB_ORDER_REQUEST and e.action == "SELL"]
+    assert sell_events == []
+
+
+@pytest.mark.asyncio
+async def test_monitoring_state_includes_live_spot_ltp_and_sl():
+    bus = _FakeBus()
+    book = _make_book(bus)
+    contract = _contract("MANAPPURAM", 365, "CE")
+    book._positions["MANAPPURAM"] = {
+        "contract": contract, "qty": 100, "entry_price": 10.0, "paper_mode": True,
+        "opened_at": datetime(2026, 8, 24, 13, 0, 0),
+    }
+    book._live_spot_ltp["MANAPPURAM"] = 372.5
+    book._live_sl["MANAPPURAM"] = 365.0
+
+    state = book.monitoring_state()
+    pos = state["positions"]["MANAPPURAM"]
+    assert pos["spot_ltp"] == 372.5
+    assert pos["sl"] == 365.0
+
+
+def test_monitoring_state_sl_is_none_before_establishment():
+    bus = _FakeBus()
+    book = _make_book(bus)
+    contract = _contract("MANAPPURAM", 365, "CE")
+    book._positions["MANAPPURAM"] = {
+        "contract": contract, "qty": 100, "entry_price": 10.0, "paper_mode": True,
+        "opened_at": datetime(2026, 8, 24, 13, 0, 0),
+    }
+    state = book.monitoring_state()
+    pos = state["positions"]["MANAPPURAM"]
+    assert pos["spot_ltp"] is None
+    assert pos["sl"] is None
+
+
+# ── Hard Rs/lot risk cap backstop (2026-08-26) ───────────────────────────
+
+@pytest.mark.asyncio
+async def test_hard_risk_cap_closes_when_loss_meets_the_cap():
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._lot_multiplier = 1
+    contract = _contract("MANAPPURAM", 365, "CE")
+    book._positions["MANAPPURAM"] = {
+        "contract": contract, "qty": 100, "entry_price": 30.0, "paper_mode": True,
+        "opened_at": datetime(2026, 8, 26, 9, 15, 0),
+    }
+    await book._check_hard_risk_cap("MANAPPURAM", 9.9)   # loss = (30-9.9)*100 = 2010 >= 2000
+
+    sell_events = [e for t, e in bus.published if t == Topic.OI_ORB_ORDER_REQUEST and e.action == "SELL"]
+    assert len(sell_events) == 1
+    assert sell_events[0].underlying == "MANAPPURAM"
+    assert "MANAPPURAM" in book._eod_closing
+
+
+@pytest.mark.asyncio
+async def test_hard_risk_cap_no_close_within_the_cap():
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._lot_multiplier = 1
+    contract = _contract("MANAPPURAM", 365, "CE")
+    book._positions["MANAPPURAM"] = {
+        "contract": contract, "qty": 100, "entry_price": 30.0, "paper_mode": True,
+        "opened_at": datetime(2026, 8, 26, 9, 15, 0),
+    }
+    await book._check_hard_risk_cap("MANAPPURAM", 25.0)   # loss = (30-25)*100 = 500 < 2000
+
+    sell_events = [e for t, e in bus.published if t == Topic.OI_ORB_ORDER_REQUEST and e.action == "SELL"]
+    assert sell_events == []
+    assert "MANAPPURAM" not in book._eod_closing
+
+
+@pytest.mark.asyncio
+async def test_hard_risk_cap_scales_with_lot_multiplier():
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._lot_multiplier = 2   # cap doubles to Rs4000
+    contract = _contract("MANAPPURAM", 365, "CE")
+    book._positions["MANAPPURAM"] = {
+        "contract": contract, "qty": 100, "entry_price": 30.0, "paper_mode": True,
+        "opened_at": datetime(2026, 8, 26, 9, 15, 0),
+    }
+    # loss = (30-9.9)*100 = 2010 -- would have hit a Rs2000 cap, but not a Rs4000 one.
+    await book._check_hard_risk_cap("MANAPPURAM", 9.9)
+
+    sell_events = [e for t, e in bus.published if t == Topic.OI_ORB_ORDER_REQUEST and e.action == "SELL"]
+    assert sell_events == []
