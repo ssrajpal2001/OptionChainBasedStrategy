@@ -47,6 +47,8 @@ _DEFAULT_PARAMS = {
     "rejection_retrace_fraction": 0.5,
     "sma_period": 8,
     "sma_exit_consec_closes": 2,
+    "sma_tf_min": 5,
+    "sma_seed_lookback_days": 5,
     "strike_otm_pct": 2.0,
     "orb_start": "09:15",
     "orb_end": "09:25",
@@ -88,7 +90,8 @@ _FLOAT_KEYS = ("oi_spurt_min_pct", "price_move_min_pct", "stock_move_abort_pct",
                "pcr_max_for_call", "pcr_min_for_put", "volume_confirmation_min_ratio",
                "oi_roc_min_pct", "oi_roc_lookback_sec")
 _INT_KEYS = ("top_n_per_side", "poll_seconds", "max_monitor_minutes",
-             "sma_period", "sma_exit_consec_closes", "chain_watch_max_stocks")
+             "sma_period", "sma_exit_consec_closes", "chain_watch_max_stocks",
+             "sma_tf_min", "sma_seed_lookback_days")
 _STR_KEYS = ("orb_start", "orb_end", "scan_start", "entry_window_start", "entry_window_end")
 _FILTER_BOOL_KEYS = ("oi_wall_check_enabled", "distance_to_wall_enabled", "pcr_gate_enabled",
                       "volume_confirmation_enabled", "oi_roc_enabled")
@@ -164,6 +167,8 @@ class OiOrbScreenerBookManager(StrategyBookManager):
             rejection_retrace_fraction=value["rejection_retrace_fraction"],
             sma_period=value["sma_period"],
             sma_exit_consec_closes=value["sma_exit_consec_closes"],
+            sma_tf_min=value["sma_tf_min"],
+            sma_seed_lookback_days=value["sma_seed_lookback_days"],
             strike_otm_pct=value["strike_otm_pct"],
             orb_start=value["orb_start"],
             orb_end=value["orb_end"],
@@ -224,6 +229,8 @@ class OiOrbScreenerBookManager(StrategyBookManager):
             or book._screener_cfg["REJECTION_RETRACE_FRACTION"] != value["rejection_retrace_fraction"]
             or book._screener_cfg["SMA_PERIOD"] != value["sma_period"]
             or book._screener_cfg["SMA_EXIT_CONSEC_CLOSES"] != value["sma_exit_consec_closes"]
+            or book._screener_cfg["SMA_TF_MIN"] != value["sma_tf_min"]
+            or book._screener_cfg["SMA_SEED_LOOKBACK_DAYS"] != value["sma_seed_lookback_days"]
             or book._screener_cfg["STRIKE_OTM_PCT"] != value["strike_otm_pct"]
             or book._screener_cfg["ORB_START"] != value["orb_start"]
             or book._screener_cfg["ORB_END"] != value["orb_end"]

@@ -163,6 +163,8 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         rejection_retrace_fraction: float = 0.5,
         sma_period: int = 8,
         sma_exit_consec_closes: int = 2,
+        sma_tf_min: int = 5,
+        sma_seed_lookback_days: int = 5,
         strike_otm_pct: float = 2.0,
         orb_start: str = "09:15",
         orb_end: str = "09:25",
@@ -217,6 +219,8 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._screener_cfg["REJECTION_RETRACE_FRACTION"] = rejection_retrace_fraction
         self._screener_cfg["SMA_PERIOD"] = sma_period
         self._screener_cfg["SMA_EXIT_CONSEC_CLOSES"] = sma_exit_consec_closes
+        self._screener_cfg["SMA_TF_MIN"] = sma_tf_min
+        self._screener_cfg["SMA_SEED_LOOKBACK_DAYS"] = sma_seed_lookback_days
         self._screener_cfg["STRIKE_OTM_PCT"] = strike_otm_pct
         self._screener_cfg["ORB_START"] = orb_start
         self._screener_cfg["ORB_END"] = orb_end
@@ -253,6 +257,13 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._shortlist_pchange: dict = {}
         self._prev_close_map: dict = {}
         self._bars = screener.MinuteBars()
+        # 2026-08-26: SEPARATE from self._bars -- SmaBars spans across the day
+        # boundary (previous day's tail + today's elapsed bars), deliberately
+        # NOT reset per trading day the way self._bars/_orb_frozen/etc below
+        # are, since a plain SMA is legitimately continuous across a session
+        # boundary (see SmaBars' own docstring). Pruned, not wiped, on each
+        # new-day reset (see reset_session()).
+        self._sma_bars = screener.SmaBars()
         self._orb_frozen: dict = {}
         self._regime: Optional[str] = None
         self._already_fired: set = set()
@@ -264,9 +275,9 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._peak_since_orb: Dict[str, float] = {}
         self._trough_since_orb: Dict[str, float] = {}
         self._rejected: set = set()
-        # 8-SMA exit state: last minute-bar key seen per symbol with an open
-        # position, so the exit check runs once per COMPLETED candle, not
-        # once per poll (which could still be mid-candle).
+        # 8-SMA exit state: last SMA_TF_MIN-bar key seen per symbol with an
+        # open position, so the exit check runs once per COMPLETED candle,
+        # not once per poll (which could still be mid-candle).
         self._last_sma_check_key: Dict[str, str] = {}
 
         # ── 5-filter tracking state, keyed by stock symbol ──────────────
@@ -301,6 +312,10 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._shortlist_pchange = {}
         self._prev_close_map = {}
         self._bars = screener.MinuteBars()
+        # self._sma_bars is deliberately NOT reset here (see its own docstring
+        # and __init__'s comment) -- pruned instead, so yesterday's tail stays
+        # available to seed today's SMA the instant the entry window opens.
+        self._sma_bars.prune(keep_days=self._screener_cfg["SMA_SEED_LOOKBACK_DAYS"] + 1)
         self._orb_frozen = {}
         self._regime = None
         self._already_fired = set()
@@ -521,6 +536,9 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                                       self._client_id, self._binding_id, sym)
 
         await asyncio.to_thread(screener.backfill_orb_from_yahoo, self._bars, self._shortlist_symbols, cfg)
+        await asyncio.to_thread(
+            screener.backfill_sma_bars_from_yahoo, self._sma_bars, self._shortlist_symbols,
+            cfg["SMA_TF_MIN"], cfg["SMA_SEED_LOOKBACK_DAYS"])
 
         start_time = datetime.now(IST)
         deadline = start_time + timedelta(minutes=cfg["MAX_MONITOR_MINUTES"])
@@ -543,6 +561,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                     continue
                 ltp = float(live.loc[sym, "lastPrice"])
                 self._bars.on_quote(sym, ltp, now)
+                self._sma_bars.on_quote(sym, ltp, now, cfg["SMA_TF_MIN"])
 
                 # Volume-confirmation filter: totalTradedVolume is a CUMULATIVE session
                 # total (same gotcha OI-Flow's own BarAccumulator already handles for
@@ -1086,40 +1105,50 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         """2026-08-24, direct user spec: exit an open position on
         SMA_EXIT_CONSEC_CLOSES consecutive candle closes on the wrong side
         of an SMA_PERIOD SMA of the UNDERLYING STOCK's own closes (not the
-        option premium). Runs once per COMPLETED 1-min candle per symbol
-        (guarded by _last_sma_check_key), not once per poll -- checking a
-        still-forming bar's partial close would be checking against a
-        number that hasn't actually closed yet."""
+        option premium). Runs once per COMPLETED SMA_TF_MIN-min candle per
+        symbol (guarded by _last_sma_check_key), not once per poll --
+        checking a still-forming bar's partial close would be checking
+        against a number that hasn't actually closed yet.
+
+        2026-08-26, direct user spec: moved from 1-min to SMA_TF_MIN-min
+        bars (default 5), backed by self._sma_bars (SmaBars) instead of the
+        1-min self._bars (MinuteBars, which stays 1-min for the ORB) --
+        self._sma_bars is seeded at startup with real historical closes
+        (see backfill_sma_bars_from_yahoo, called from _run_today_pipeline)
+        spanning the previous trading day's tail AND today's own elapsed
+        bars, so a full sma_period window is available from the START of
+        the entry window rather than ~40min into the day."""
         if not self._positions:
             return
         cfg = self._screener_cfg
-        current_key = now.strftime("%H:%M")
+        tf_min = cfg["SMA_TF_MIN"]
+        current_key = screener.SmaBars._bucket_key(now, tf_min)
         for symbol, pos in list(self._positions.items()):
             if symbol in self._eod_closing:
                 continue
             if self._last_sma_check_key.get(symbol) == current_key:
-                continue  # already checked this minute
+                continue  # already checked this bar
             self._last_sma_check_key[symbol] = current_key
-            closes = self._bars.closes(symbol, before=current_key)
+            closes = self._sma_bars.closes(symbol, before=now, tf_min=tf_min)
             side = "CALL" if pos["contract"].option_type == "CE" else "PUT"
             if screener.check_sma_exit(closes, cfg["SMA_PERIOD"], cfg["SMA_EXIT_CONSEC_CLOSES"], side):
                 self._eod_closing.add(symbol)
                 sma = screener.compute_sma(closes, cfg["SMA_PERIOD"])
                 # 2026-08-26: explicitly names the timeframe/instrument in the log --
-                # this SMA is on the UNDERLYING STOCK's own 1-MIN closes (not the option
-                # premium, not any other timeframe), per a real user question about
-                # exactly what this exit was checking.
+                # this SMA is on the UNDERLYING STOCK's own SMA_TF_MIN-min closes (not
+                # the option premium), per a real user question about exactly what
+                # this exit was checking.
                 self._clog.info(
-                    "OiOrb[%s/%s]: %s SMA EXIT -- last %d closes (1-min stock closes) %s "
+                    "OiOrb[%s/%s]: %s SMA EXIT -- last %d closes (%d-min stock closes) %s "
                     "%d-period SMA=%.2f (closes=%s)",
                     self._client_id, self._binding_id, symbol, cfg["SMA_EXIT_CONSEC_CLOSES"],
-                    "below" if side == "CALL" else "above", cfg["SMA_PERIOD"], sma,
+                    tf_min, "below" if side == "CALL" else "above", cfg["SMA_PERIOD"], sma,
                     closes[-cfg["SMA_EXIT_CONSEC_CLOSES"]:],
                 )
                 await asyncio.to_thread(
                     store.log_signal_event, self._client_id, self._binding_id, symbol,
                     "sma_exit_triggered", side=side,
-                    detail=f"1-min stock closes, {cfg['SMA_PERIOD']}-period SMA={sma:.2f} "
+                    detail=f"{tf_min}-min stock closes, {cfg['SMA_PERIOD']}-period SMA={sma:.2f} "
                            f"closes={closes[-cfg['SMA_EXIT_CONSEC_CLOSES']:]}")
                 await self._emit_close(symbol, pos, "sma_exit")
 

@@ -293,6 +293,8 @@ try:
         rejection_retrace_fraction: float = 0.5
         sma_period:                int   = 8
         sma_exit_consec_closes:    int   = 2
+        sma_tf_min:                int   = 5
+        sma_seed_lookback_days:    int   = 5
         strike_otm_pct:            float = 2.0
         orb_start:                 str   = "09:15"
         orb_end:                   str   = "09:25"

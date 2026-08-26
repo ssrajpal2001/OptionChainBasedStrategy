@@ -391,3 +391,101 @@ def test_backfill_orb_from_yahoo_single_ticker_multiindex_columns(monkeypatch):
     assert h == pytest.approx(183.10)
     assert l == pytest.approx(180.50)
     assert "09:26" not in bars.bars["SAIL"]   # outside the ORB window, correctly excluded
+
+
+# ── SmaBars (2026-08-26: moved SMA exit from 1-min to a configurable
+# tf_min, backed by real historical seeding across the day boundary) ───────
+
+def test_smabars_bucket_key_floors_to_tf_min():
+    from datetime import datetime as _dt
+    ts = _dt(2026, 8, 26, 9, 27)
+    assert screener.SmaBars._bucket_key(ts, 5) == "2026-08-26 09:25"
+    assert screener.SmaBars._bucket_key(ts, 1) == "2026-08-26 09:27"
+
+
+def test_smabars_on_quote_bucketed_and_last_quote_wins():
+    from datetime import datetime as _dt
+    bars = screener.SmaBars()
+    bars.on_quote("VBL", 100.0, _dt(2026, 8, 26, 9, 30), tf_min=5)
+    bars.on_quote("VBL", 101.0, _dt(2026, 8, 26, 9, 32), tf_min=5)   # same 5-min bucket
+    bars.on_quote("VBL", 105.0, _dt(2026, 8, 26, 9, 36), tf_min=5)   # next bucket
+    closes = bars.closes("VBL", before=_dt(2026, 8, 26, 9, 40), tf_min=5)
+    assert closes == [101.0, 105.0]   # last quote in the 09:30 bucket wins
+
+
+def test_smabars_closes_excludes_the_still_forming_bucket():
+    from datetime import datetime as _dt
+    bars = screener.SmaBars()
+    bars.on_quote("VBL", 100.0, _dt(2026, 8, 26, 9, 30), tf_min=5)
+    bars.on_quote("VBL", 102.0, _dt(2026, 8, 26, 9, 33), tf_min=5)   # still inside the 09:30-09:35 bucket
+    closes = bars.closes("VBL", before=_dt(2026, 8, 26, 9, 33), tf_min=5)
+    assert closes == []   # the 09:30 bucket hasn't closed yet as of 09:33 itself
+
+
+def test_smabars_seed_close_never_overwrites_live_quote():
+    from datetime import datetime as _dt
+    bars = screener.SmaBars()
+    bars.on_quote("VBL", 100.0, _dt(2026, 8, 26, 9, 30), tf_min=5)   # real live quote first
+    bars.seed_close("VBL", _dt(2026, 8, 26, 9, 30), tf_min=5, close=999.0)   # backfill arrives later
+    closes = bars.closes("VBL", before=_dt(2026, 8, 26, 9, 40), tf_min=5)
+    assert closes == [100.0]   # live data wins, backfill never overwrites it
+
+
+def test_smabars_seeds_across_the_day_boundary():
+    """The whole point of this class vs MinuteBars: previous day's tail and
+    today's bars coexist without colliding, ordered correctly by real
+    timestamp, not just an "HH:MM" key."""
+    from datetime import datetime as _dt
+    bars = screener.SmaBars()
+    bars.seed_close("VBL", _dt(2026, 8, 25, 15, 25), tf_min=5, close=440.0)   # yesterday's last bar
+    bars.seed_close("VBL", _dt(2026, 8, 26, 9, 15), tf_min=5, close=445.0)    # today's first bar
+    bars.on_quote("VBL", 446.0, _dt(2026, 8, 26, 9, 20), tf_min=5)
+    closes = bars.closes("VBL", before=_dt(2026, 8, 26, 9, 25), tf_min=5)
+    assert closes == [440.0, 445.0, 446.0]
+
+
+def test_smabars_prune_drops_only_old_calendar_days():
+    from datetime import datetime as _dt
+    bars = screener.SmaBars()
+    bars.seed_close("VBL", _dt(2026, 8, 10, 9, 15), tf_min=5, close=400.0)   # old
+    bars.seed_close("VBL", _dt(2026, 8, 26, 9, 15), tf_min=5, close=445.0)   # recent
+    import unittest.mock as _mock
+    with _mock.patch("strategies.oi_orb_screener.screener.datetime") as _dt_mod:
+        _dt_mod.now.return_value = _dt(2026, 8, 26, 10, 0, tzinfo=screener.IST)
+        bars.prune(keep_days=5)
+    remaining = bars.closes("VBL", before=_dt(2026, 8, 27, 0, 0), tf_min=5)
+    assert remaining == [445.0]
+
+
+def test_backfill_sma_bars_from_yahoo_single_ticker_multiindex_columns(monkeypatch):
+    import sys
+    import types
+    from datetime import datetime as _dt
+
+    import pandas as pd
+
+    ist = screener.IST
+    idx = pd.DatetimeIndex(
+        [_dt(2026, 8, 25, 15, 20), _dt(2026, 8, 26, 9, 15), _dt(2026, 8, 26, 9, 20)],
+        tz=ist,
+    )
+    cols = pd.MultiIndex.from_tuples(
+        [("VBL.NS", "Open"), ("VBL.NS", "High"), ("VBL.NS", "Low"),
+         ("VBL.NS", "Close"), ("VBL.NS", "Volume")],
+        names=["Ticker", "Price"],
+    )
+    data = [
+        [438.0, 441.0, 437.5, 440.0, 0],
+        [444.0, 446.0, 443.0, 445.0, 500251],
+        [445.5, 447.0, 445.0, 446.5, 100000],
+    ]
+    fake_df = pd.DataFrame(data, index=idx, columns=cols)
+
+    fake_yf = types.SimpleNamespace(download=lambda *a, **kw: fake_df)
+    monkeypatch.setitem(sys.modules, "yfinance", fake_yf)
+
+    sma_bars = screener.SmaBars()
+    screener.backfill_sma_bars_from_yahoo(sma_bars, ["VBL"], tf_min=5, lookback_days=5)
+
+    closes = sma_bars.closes("VBL", before=_dt(2026, 8, 26, 9, 25), tf_min=5)
+    assert closes == [440.0, 445.0, 446.5]   # spans the day boundary, single-ticker MultiIndex handled

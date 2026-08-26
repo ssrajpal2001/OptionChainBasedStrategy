@@ -89,12 +89,27 @@ CONFIG = {
     "REJECTION_MIN_RISE_PCT": 2.0,
     "REJECTION_RETRACE_FRACTION": 0.5,
     # 2026-08-24, direct user spec, exit rule: 8-period SMA on the
-    # UNDERLYING STOCK's own 1-min closes (not the option premium -- same
+    # UNDERLYING STOCK's own closes (not the option premium -- same
     # deliberate spot-based-exit precedent as Liquidity Sweep/Liquidity
     # Trap in this codebase), exit on SMA_EXIT_CONSEC_CLOSES consecutive
     # candle closes on the wrong side of it.
+    #
+    # 2026-08-26, direct user spec: moved from 1-min to SMA_TF_MIN-min bars
+    # (default 5) -- checked against a real live discrepancy where a 1-min
+    # SMA exit fired while the user's own chart showed the SMA still on the
+    # correct side. SmaBars (below) is seeded via backfill_sma_bars_from_
+    # yahoo with real historical closes spanning the previous trading day's
+    # tail AND today's own elapsed intraday bars, so an sma_period-bar
+    # window is available from the START of the entry window, not ~40min
+    # into the day (an 8-period 5-min SMA needs 40min of same-day bars
+    # alone). Seeding across the day boundary is deliberate and standard --
+    # unlike FVG's own multi-day gap-pool bug (a stale SETUP PATTERN
+    # persisting across days), a plain SMA legitimately blends the prior
+    # session's tail into an early reading on any real charting platform.
     "SMA_PERIOD": 8,
     "SMA_EXIT_CONSEC_CLOSES": 2,
+    "SMA_TF_MIN": 5,
+    "SMA_SEED_LOOKBACK_DAYS": 5,
     # 2026-08-24, direct user spec: strike is 2% OTM (above spot for a
     # CALL, below spot for a PUT), not ATM -- see resolve_strike_step_for_
     # price's caller in engine.py for where this is actually applied.
@@ -364,6 +379,100 @@ class MinuteBars:
         keys = sorted(k for k in self.bars.get(symbol, {})
                        if (not after or k > after) and (not before or k < before))
         return [self.bars[symbol][k]["c"] for k in keys]
+
+
+class SmaBars:
+    """Rolling per-symbol CLOSE history used ONLY for the SMA exit
+    (2026-08-26), bucketed to `tf_min`-minute bars and keyed by a
+    (date, bucket-start) string so multi-day data can never collide the way
+    a bare "HH:MM" key (MinuteBars' own scheme, correct for its own
+    deliberately intraday-only ORB use) would. Deliberately NOT reset daily
+    -- a plain SMA is legitimately continuous across a session boundary on
+    any real chart; see this module's own SMA_PERIOD config comment for why
+    that's a different case from FVG's multi-day gap-pool bug."""
+
+    def __init__(self) -> None:
+        self.bars: dict = defaultdict(dict)   # symbol -> {bucket_key: close}
+
+    @staticmethod
+    def _bucket_key(ts: datetime, tf_min: int) -> str:
+        floored_minute = (ts.minute // tf_min) * tf_min
+        return f"{ts.strftime('%Y-%m-%d')} {ts.hour:02d}:{floored_minute:02d}"
+
+    def on_quote(self, symbol: str, price: float, ts: datetime, tf_min: int) -> None:
+        """Live poll update -- last quote in a bucket wins as its close,
+        same convention as MinuteBars.on_quote."""
+        if price <= 0:
+            return
+        self.bars[symbol][self._bucket_key(ts, tf_min)] = price
+
+    def seed_close(self, symbol: str, ts: datetime, tf_min: int, close: float) -> None:
+        """Historical backfill seed. Never overwrites a bucket the live poll
+        loop has already updated this session -- live data always wins over
+        a backfilled seed for the same bucket."""
+        key = self._bucket_key(ts, tf_min)
+        self.bars[symbol].setdefault(key, close)
+
+    def closes(self, symbol: str, before: datetime, tf_min: int) -> list:
+        """Ordered list of CLOSE prices for symbol, oldest first, strictly
+        before the bucket containing `before` -- an in-progress bucket's
+        partial close is never misread as a completed candle's real close."""
+        cutoff = self._bucket_key(before, tf_min)
+        keys = sorted(k for k in self.bars.get(symbol, {}) if k < cutoff)
+        return [self.bars[symbol][k] for k in keys]
+
+    def prune(self, keep_days: int) -> None:
+        """Bound memory -- drop any bucket older than `keep_days` calendar
+        days. Safe to call once per new trading day; never mid-session."""
+        cutoff_date = (datetime.now(IST) - timedelta(days=keep_days)).strftime("%Y-%m-%d")
+        for symbol in list(self.bars.keys()):
+            self.bars[symbol] = {k: v for k, v in self.bars[symbol].items() if k[:10] >= cutoff_date}
+
+
+def backfill_sma_bars_from_yahoo(sma_bars: "SmaBars", symbols, tf_min: int = 5,
+                                  lookback_days: int = 5) -> None:
+    """Best-effort seed of SmaBars with real historical closes -- both the
+    previous trading day(s)' tail AND today's own elapsed intraday bars --
+    so the SMA exit has a full sma_period-bar window from the START of the
+    entry window, not ~40min into the day. Mirrors backfill_orb_from_
+    yahoo's own yfinance pattern (same library, same df[ticker] MultiIndex-
+    column handling already confirmed live for this file). Deliberately
+    degrades safely on any failure -- check_sma_exit's own "insufficient
+    data -> no exit yet" guard already handles a partial/empty seed
+    correctly, so a failed backfill just means the SMA exit activates later
+    in the day instead of firing on bad/guessed data."""
+    try:
+        import yfinance as yf
+    except ImportError:
+        logger.warning("backfill_sma_bars_from_yahoo: yfinance not installed -- "
+                        "SMA exit will only warm up from live intraday polling.")
+        return
+    try:
+        tickers = [s + ".NS" for s in symbols]
+        df = yf.download(tickers, period=f"{lookback_days}d", interval=f"{tf_min}m",
+                          progress=False, group_by="ticker")
+        filled = 0
+        for sym, ticker in zip(symbols, tickers):
+            try:
+                sub = df[ticker]
+            except Exception as exc:
+                logger.warning("backfill_sma_bars_from_yahoo: no data for %s (%s): %r", sym, ticker, exc)
+                continue
+            sym_filled = 0
+            for ts, row in sub.iterrows():
+                if pd.isna(row.get("Close")):
+                    continue
+                ts_ist = ts.tz_convert(IST) if ts.tzinfo else ts.tz_localize(IST)
+                sma_bars.seed_close(sym, ts_ist, tf_min, float(row["Close"]))
+                sym_filled += 1
+            filled += sym_filled
+            if sym_filled == 0:
+                logger.warning("backfill_sma_bars_from_yahoo: %s (%s) returned data but 0 bars landed.",
+                                sym, ticker)
+        logger.info("backfill_sma_bars_from_yahoo: seeded %d total %d-min bars across %d symbols.",
+                     filled, tf_min, len(symbols))
+    except Exception as exc:
+        logger.warning("backfill_sma_bars_from_yahoo: failed entirely: %r", exc)
 
 
 def compute_sma(closes: list, period: int) -> Optional[float]:
