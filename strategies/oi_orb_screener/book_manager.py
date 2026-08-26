@@ -78,6 +78,10 @@ _DEFAULT_PARAMS = {
     # distance_to_wall/pcr) to the top N shortlisted stocks by rank until
     # this strategy gets its own dedicated feeder connection.
     "chain_watch_max_stocks": 2,
+    # 2026-08-26, direct user spec: S&R SL timeframe -- matches D1TrapSRBook's
+    # own validated default (3), proven via a real backtest sweep on BANKNIFTY
+    # for this identical tracker.
+    "sr_tf_minutes": 3,
 }
 _FLOAT_KEYS = ("oi_spurt_min_pct", "price_move_min_pct", "stock_move_abort_pct",
                "nifty_bullish_pct", "nifty_bearish_pct", "rejection_min_rise_pct",
@@ -86,7 +90,7 @@ _FLOAT_KEYS = ("oi_spurt_min_pct", "price_move_min_pct", "stock_move_abort_pct",
                "pcr_max_for_call", "pcr_min_for_put", "volume_confirmation_min_ratio",
                "oi_roc_min_pct", "oi_roc_lookback_sec")
 _INT_KEYS = ("top_n_per_side", "poll_seconds", "max_monitor_minutes",
-             "chain_watch_max_stocks")
+             "chain_watch_max_stocks", "sr_tf_minutes")
 _STR_KEYS = ("orb_start", "orb_end", "scan_start", "entry_window_start", "entry_window_end")
 _FILTER_BOOL_KEYS = ("oi_wall_check_enabled", "distance_to_wall_enabled", "pcr_gate_enabled",
                       "volume_confirmation_enabled", "oi_roc_enabled")
@@ -179,6 +183,7 @@ class OiOrbScreenerBookManager(StrategyBookManager):
             oi_roc_min_pct=value["oi_roc_min_pct"],
             oi_roc_lookback_sec=value["oi_roc_lookback_sec"],
             chain_watch_max_stocks=value["chain_watch_max_stocks"],
+            sr_tf_minutes=value["sr_tf_minutes"],
         )
         logger.info(
             "OiOrbScreenerBookManager: spawned %s/%s (lots=%d oi_spurt>=%.1f%% price_move>=%.1f%% "
@@ -232,6 +237,7 @@ class OiOrbScreenerBookManager(StrategyBookManager):
                 "oi_roc_enabled", "oi_roc_min_pct", "oi_roc_lookback_sec",
             ))
             or book._chain_watch_max_stocks != value["chain_watch_max_stocks"]
+            or book._sr_tf_minutes != value["sr_tf_minutes"]
         )
 
     def _log_spawned(self, key: tuple, value: dict) -> None:

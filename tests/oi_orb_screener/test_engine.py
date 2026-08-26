@@ -565,6 +565,8 @@ async def test_sr_sl_establishes_after_two_bars_and_breaches_on_the_next_tick():
     bar3 to close."""
     bus = _FakeBus()
     book = _make_book(bus)
+    book._sr_tf_minutes = 1   # exercise the mechanic on 1-min bars regardless
+                              # of the strategy's own (now 3-min) live default
     contract = _contract("MANAPPURAM", 365, "CE")
     book._positions["MANAPPURAM"] = {
         "contract": contract, "qty": 100, "entry_price": 10.0, "paper_mode": True,
@@ -611,6 +613,37 @@ async def test_sr_sl_no_close_while_sl_not_yet_established():
     await book._update_sr_and_check_sl("MANAPPURAM", 1.0, datetime(2026, 8, 26, 9, 15, 40, tzinfo=IST))
 
     assert "MANAPPURAM" not in book._live_sl
+    sell_events = [e for t, e in bus.published if t == Topic.OI_ORB_ORDER_REQUEST and e.action == "SELL"]
+    assert sell_events == []
+
+
+def test_default_sr_tf_minutes_matches_d1trapsrbook_validated_default():
+    """2026-08-26, direct user spec: the live default must be 3-min (matching
+    D1TrapSRBook's own real-backtest-validated sr_tf_minutes), not the
+    original 1-min this feature shipped with untested."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    assert book._sr_tf_minutes == 3
+
+
+@pytest.mark.asyncio
+async def test_sr_bars_bucket_by_the_configured_tf_not_always_1min():
+    """09:15 and 09:16 must fall in the SAME bar at the 3-min default
+    (floor(15/3)*3 == floor(16/3)*3 == 15) -- confirms the bucketing actually
+    uses self._sr_tf_minutes, not a hardcoded 1-min key."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    assert book._sr_tf_minutes == 3
+    contract = _contract("MANAPPURAM", 365, "CE")
+    book._positions["MANAPPURAM"] = {
+        "contract": contract, "qty": 100, "entry_price": 10.0, "paper_mode": True,
+        "opened_at": datetime(2026, 8, 26, 9, 15, 0),
+    }
+    await book._update_sr_and_check_sl("MANAPPURAM", 100.0, datetime(2026, 8, 26, 9, 15, 10, tzinfo=IST))
+    await book._update_sr_and_check_sl("MANAPPURAM", 95.0, datetime(2026, 8, 26, 9, 16, 40, tzinfo=IST))
+    # Still the SAME 3-min bar (09:15-09:17) -- no bar close, no S&R candle fed yet.
+    assert book._sr_bar_key["MANAPPURAM"] == "09:15"
+    assert "MANAPPURAM" not in book._sr_calc.states
     sell_events = [e for t, e in bus.published if t == Topic.OI_ORB_ORDER_REQUEST and e.action == "SELL"]
     assert sell_events == []
 

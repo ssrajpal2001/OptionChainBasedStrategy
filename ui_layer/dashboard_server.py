@@ -318,6 +318,9 @@ try:
         # across ALL strategies -- bound chain-watching to the top N shortlisted
         # stocks so this can't silently starve another strategy's ticks.
         chain_watch_max_stocks:    int   = 2
+        # 2026-08-26: S&R SL timeframe -- matches D1TrapSRBook's own validated
+        # default (3), proven via a real backtest sweep on BANKNIFTY.
+        sr_tf_minutes:             int   = 3
 
     class _ResetPasswordSchema(_PydanticBase):
         token:        str

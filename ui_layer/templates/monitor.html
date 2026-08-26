@@ -4625,6 +4625,8 @@ function amoTest() {
                 <input class="t-input font-mono text-xs" type="number" step="0.05" x-model.number="oiOrbConfig.rejection_retrace_fraction"/></div>
               <div><div class="sec-label mb-1">STRIKE OTM %</div>
                 <input class="t-input font-mono text-xs" type="number" step="0.1" x-model.number="oiOrbConfig.strike_otm_pct"/></div>
+              <div><div class="sec-label mb-1">S&amp;R SL TIMEFRAME (MIN)</div>
+                <input class="t-input font-mono text-xs" type="number" step="1" min="1" x-model.number="oiOrbConfig.sr_tf_minutes"/></div>
             </div>
 
             <!-- ── EXPERIMENTAL FILTERS (2026-08-25) ──────────────────────────

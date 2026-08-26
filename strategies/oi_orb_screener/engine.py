@@ -197,6 +197,13 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         oi_roc_min_pct: float = 3.0,
         oi_roc_lookback_sec: float = 300.0,
         chain_watch_max_stocks: int = 2,
+        # 2026-08-26, direct user spec: matches D1TrapSRBook's OWN validated
+        # sr_tf_minutes default (3) for this identical S&R tracker, already
+        # proven via a real backtest sweep on BANKNIFTY -- not validated for
+        # stocks specifically, but a real evidence-based starting point rather
+        # than an arbitrary guess (the original 1-min choice here was exactly
+        # that -- untested, and confirmed noisier than 3-min by the same sweep).
+        sr_tf_minutes: int = 3,
     ) -> None:
         super().__init__(bus, cfg, _UNDERLYING_SENTINEL, client_id, binding_id)
         self._strategy_name = "oi_orb_screener"
@@ -244,6 +251,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             "oi_roc_lookback_sec": oi_roc_lookback_sec,
         }
         self._chain_watch_max_stocks = max(0, int(chain_watch_max_stocks))
+        self._sr_tf_minutes = max(1, int(sr_tf_minutes))
         self._flog = {
             name: _make_filter_logger(name, client_id, binding_id) for name in _FILTER_NAMES
         }
@@ -1096,14 +1104,20 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                                       self._client_id, self._binding_id)
 
     async def _update_sr_and_check_sl(self, symbol: str, ltp: float, ts: datetime) -> None:
-        """Builds 1-min OHLC bars from live spot ticks (own accumulator, NOT
-        self._bars -- that one is REST-poll-driven and shared across the whole
-        shortlist; this one is tick-driven and only exists for symbols with an
-        open position), feeds each CLOSED bar into the shared S&R calculator,
-        and checks the CURRENT live tick (not just the last closed bar) against
-        the tracker's live SL level every time -- a real-time breach doesn't
-        wait for the next candle to close."""
-        key = ts.strftime("%H:%M")
+        """Builds self._sr_tf_minutes-min OHLC bars from live spot ticks (own
+        accumulator, NOT self._bars -- that one is REST-poll-driven and shared
+        across the whole shortlist; this one is tick-driven and only exists for
+        symbols with an open position), feeds each CLOSED bar into the shared
+        S&R calculator, and checks the CURRENT live tick (not just the last
+        closed bar) against the tracker's live SL level every time -- a
+        real-time breach doesn't wait for the next candle to close.
+
+        2026-08-26, direct user spec: defaults to 3-min bars, matching
+        D1TrapSRBook's own validated sr_tf_minutes (proven via a real backtest
+        sweep on BANKNIFTY for this identical tracker) -- not 1-min, which was
+        this feature's own original, unvalidated choice."""
+        floored_minute = (ts.minute // self._sr_tf_minutes) * self._sr_tf_minutes
+        key = f"{ts.hour:02d}:{floored_minute:02d}"
         cur_key = self._sr_bar_key.get(symbol)
         if cur_key is None:
             self._sr_bar_key[symbol] = key
