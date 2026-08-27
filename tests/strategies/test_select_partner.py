@@ -39,8 +39,9 @@ def test_partner_can_enforce_ltp_le_kept():
 
 
 def test_partner_respects_ltp_target_and_rules():
+    # 2026-08-27: ltp_target no longer gates rollover candidates -- this now tests
+    # that rule_pass alone can reject every candidate.
     cache = _cache({(100, "CE"): 60.0, (105, "PE"): 62.0, (110, "PE"): 20.0})
-    # 110 PE (20) is below target 30 → excluded; rule blocks 105 → no candidate
     res = select_partner_for(cache, "PE", 100, 60.0, 100, 5, 4, 30.0,
                              rule_pass=lambda cs, ps: False)
     assert res is None
@@ -97,26 +98,32 @@ def test_anchor_ring_falls_back_to_other_side_of_ring1():
 
 
 def test_anchor_ring_widens_to_ring2_when_ring1_fully_fails():
-    # Ring 1 (95, 105): both below ltp_target=30 -> fail dual-floor.
-    # Ring 2 (90, 110): 110 clears the floor -> ring 2 wins.
+    # 2026-08-27: the dual-floor (ltp_target/theta_target) no longer applies during
+    # rollover -- ring-widening is now exercised via ltp_le_kept (never roll into a
+    # richer leg than the one being kept) instead.
+    # Ring 1 (95, 105): both pricier than kept_ltp=60 -> fail ltp_above_kept.
+    # Ring 2 (90, 110): 110 is <= kept_ltp -> ring 2 wins.
     cache = _cache({
         (100, "CE"): 60.0,
-        (95, "PE"): 10.0,    # ring 1, fails floor
-        (105, "PE"): 12.0,   # ring 1, fails floor
-        (90, "PE"): 8.0,     # ring 2, fails floor
+        (95, "PE"): 70.0,    # ring 1, fails ltp_above_kept
+        (105, "PE"): 75.0,   # ring 1, fails ltp_above_kept
+        (90, "PE"): 80.0,    # ring 2, fails ltp_above_kept
         (110, "PE"): 45.0,   # ring 2, passes
     })
     res = select_partner_for(cache, roll_side="PE", kept_strike=100, kept_ltp=60.0,
                              spot=100, step=5, offset=4, ltp_target=30.0,
-                             rule_pass=lambda cs, ps: True, anchor_strike=100)
+                             rule_pass=lambda cs, ps: True, anchor_strike=100,
+                             ltp_le_kept=True)
     assert res == (110, 45.0)
 
 
 def test_anchor_ring_none_when_every_ring_exhausted():
-    cache = _cache({(100, "CE"): 60.0, (95, "PE"): 10.0, (105, "PE"): 10.0})
+    # 2026-08-27: see comment above -- exercised via ltp_le_kept, not the removed floor.
+    cache = _cache({(100, "CE"): 60.0, (95, "PE"): 70.0, (105, "PE"): 75.0})
     res = select_partner_for(cache, roll_side="PE", kept_strike=100, kept_ltp=60.0,
                              spot=100, step=5, offset=2, ltp_target=30.0,
-                             rule_pass=lambda cs, ps: True, anchor_strike=100)
+                             rule_pass=lambda cs, ps: True, anchor_strike=100,
+                             ltp_le_kept=True)
     assert res is None
 
 

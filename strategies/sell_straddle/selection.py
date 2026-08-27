@@ -116,15 +116,23 @@ def _strikes_near_spot(
 def _evaluate_roll_candidate(strike_prem, roll_side, strike, kept_strike, kept_ltp,
                               spot, step, ltp_target, theta_target, max_itm_steps,
                               ltp_le_kept, rule_pass, metric):
-    """One candidate's full filter chain (quote → ITM cap → dual floor → ltp_le_kept →
-    rule_pass → score), factored out of select_partner_for so both the original flat
-    scan and the 2026-08-26 anchor-ring scan share EXACTLY the same checks. Returns a
-    populated diag dict; diag["reject_reason"] is None iff the candidate passed
-    everything (diag["score"] then holds its metric score)."""
+    """One candidate's full filter chain (quote → ITM cap → ltp_le_kept → rule_pass →
+    score), factored out of select_partner_for so both the original flat scan and the
+    2026-08-26 anchor-ring scan share EXACTLY the same checks. Returns a populated diag
+    dict; diag["reject_reason"] is None iff the candidate passed everything
+    (diag["score"] then holds its metric score).
+
+    2026-08-27, direct user spec: the dual ltp_target/theta_target floor (still applied
+    at fresh BEGINNING/re-entry via leg_passes_dual_floor elsewhere in this module) is
+    deliberately NOT applied here anymore -- during a rollover the only requirement is
+    ltp_above_kept (never roll into a richer leg than the one being kept); a candidate
+    strike being "too cheap" for a fresh entry's own quality bar is not a reason to
+    reject it as a rollover partner. `ltp_target`/`theta_target` are still accepted as
+    parameters (unused here now) purely so callers/traces don't need touching."""
     v = strike_prem.get((strike, roll_side))
     diag = {
         "event": "candidate", "roll_side": roll_side, "strike": int(strike),
-        "ltp": None, "has_quote": bool(v), "itm_pass": None, "dual_floor_pass": None,
+        "ltp": None, "has_quote": bool(v), "itm_pass": None,
         "ltp_le_kept_pass": None, "rule_pass": None, "rule_reason": None,
         "selected": False, "reject_reason": None,
     }
@@ -145,15 +153,6 @@ def _evaluate_roll_candidate(strike_prem, roll_side, strike, kept_strike, kept_l
         diag["itm_pass"] = True
     else:
         diag["itm_pass"] = True
-    if not leg_passes_dual_floor(roll_side, strike, ltp, spot, ltp_target, theta_target):
-        diag["dual_floor_pass"] = False
-        _tv = strip_intrinsic(float(ltp), roll_side, float(strike), float(spot)) if ltp > 0 and spot > 0 else 0.0
-        diag["reject_reason"] = (
-            f"dual_floor_fail (ltp={ltp:.2f} < ltp_target={ltp_target:.2f} "
-            f"or tv={_tv:.2f} < theta_target={theta_target:.2f})"
-        )
-        return diag
-    diag["dual_floor_pass"] = True
     # Optional: require partner premium <= kept leg premium. Disabled by default for rollover
     # so the bot can choose the closest premium regardless of direction.
     if ltp_le_kept and kept_ltp and ltp > float(kept_ltp):
@@ -194,8 +193,15 @@ def select_partner_for(strike_prem, roll_side, kept_strike, kept_ltp,
                        metric: str = "closest_to_kept",
                        anchor_strike: Optional[int] = None):
     """Rollover partner selection — keep the RUNNING leg fixed and pick a strike on
-    `roll_side` to re-sell, >= ltp_target and >= theta_target, optionally with premium
-    <= the kept leg's premium, and passing rule_pass(ce_strike, pe_strike).
+    `roll_side` to re-sell, optionally with premium <= the kept leg's premium (see
+    `ltp_le_kept`), and passing rule_pass(ce_strike, pe_strike).
+
+    2026-08-27, direct user spec: candidates are NOT required to clear the
+    ltp_target/theta_target floor here anymore -- that's a fresh-entry quality bar
+    (still enforced at BEGINNING/re-entry via leg_passes_dual_floor elsewhere in this
+    module), not a rollover requirement. During a rollover the only premium constraint
+    is `ltp_le_kept` (never roll into a richer leg than the one being kept).
+    `ltp_target`/`theta_target` remain accepted parameters for trace/logging only.
 
     Two search modes:
 
@@ -262,7 +268,7 @@ def select_partner_for(strike_prem, roll_side, kept_strike, kept_ltp,
 
     best = None  # (score, strike, ltp)
     reject_counts = {
-        "no_quote_in_pool": 0, "too_itm": 0, "dual_floor_fail": 0,
+        "no_quote_in_pool": 0, "too_itm": 0,
         "ltp_above_kept": 0, "rule_fail": 0, "not_closest": 0,
     }
     for strike in candidate_strikes:
@@ -274,8 +280,7 @@ def select_partner_for(strike_prem, roll_side, kept_strike, kept_ltp,
             _reason_key = diag["reject_reason"].split(" ", 1)[0].split("(", 1)[0].strip()
             _key_map = {
                 "no_quote_in_pool": "no_quote_in_pool", "too_itm": "too_itm",
-                "dual_floor_fail": "dual_floor_fail", "ltp_above_kept": "ltp_above_kept",
-                "rule_fail": "rule_fail",
+                "ltp_above_kept": "ltp_above_kept", "rule_fail": "rule_fail",
             }
             reject_counts[_key_map.get(_reason_key, "rule_fail")] += 1
             if trace is not None:
@@ -324,7 +329,7 @@ def _select_partner_by_ring(strike_prem, roll_side, kept_strike, kept_ltp,
         })
 
     reject_counts = {
-        "no_quote_in_pool": 0, "too_itm": 0, "dual_floor_fail": 0,
+        "no_quote_in_pool": 0, "too_itm": 0,
         "ltp_above_kept": 0, "rule_fail": 0, "not_closest": 0,
     }
     total_checked = 0
