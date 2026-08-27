@@ -484,17 +484,18 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 "paper_mode": bool(r["paper_mode"]), "opened_at": datetime.fromisoformat(r["entry_ts"]),
             }
             self._ensure_option_feed(r["symbol"], contract)
-            # 2026-08-27: restart-safe by construction, but the armed VWAP-SL level
-            # itself is NOT persisted (only the position is) -- a restored position's
-            # SL tracker starts fresh/cold from this moment, same as a brand new entry.
-            # Known, accepted gap: the position runs on the hard ₹/lot risk cap alone
-            # (see _check_hard_risk_cap) until the first adverse vwap_sl_tf_minutes bar
-            # re-arms a level from live ticks after the restart, exactly like a fresh
-            # entry's own initial unprotected window (see _on_fill's BUY branch).
             self._ensure_spot_feed(r["symbol"])
             self._clog.info("OiOrb[%s/%s]: RESTORED open position %s %s%d qty=%d @ %.2f from DB.",
                              self._client_id, self._binding_id, r["symbol"],
                              contract.option_type, contract.strike, r["qty"], r["entry_price"])
+            # 2026-08-27, direct user spec: "when we start from middle of the day and
+            # any trade is running it should get historical intraday data for that
+            # option chart from time entry happened and then evaluate the SL and
+            # target in tf which we have applied" -- reconstructs the REAL SL/target
+            # from actual history since entry, instead of starting cold at whatever
+            # moment the process happened to restart (see the method's own docstring
+            # for the mechanic; best-effort, never blocks the restore on failure).
+            await self._seed_option_bars_from_history(r["symbol"], contract, self._positions[r["symbol"]]["opened_at"])
 
         already_fired = await asyncio.to_thread(store.load_already_fired, self._client_id, self._binding_id, td)
         rejected = await asyncio.to_thread(store.load_rejected, self._client_id, self._binding_id, td)
@@ -503,6 +504,121 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         if already_fired or rejected:
             self._clog.info("OiOrb[%s/%s]: restored %d already-fired + %d rejected signal(s) from DB.",
                              self._client_id, self._binding_id, len(already_fired), len(rejected))
+
+    async def _seed_option_bars_from_history(self, symbol: str, contract: "stock_resolve.ResolvedContract",
+                                              entry_ts: datetime) -> None:
+        """2026-08-27, direct user spec: on a mid-day restart with a position
+        already running, fetch TODAY's real intraday 1-min candles for the
+        OPTION CONTRACT ITSELF (not the underlying stock) from Upstox, replay
+        them into vwap_sl_tf_minutes buckets, and run the exact same arm logic
+        _update_option_sl_target_and_check uses live -- so the SL/target
+        reflect the position's REAL history since entry, not a blank slate
+        starting at whatever moment the process happened to restart.
+
+        VWAP reference: real historical broker ATP isn't available (Upstox's
+        historical-candle response is plain OHLCV) -- self-computed instead as
+        a running cumulative(typical price x volume), the SAME "self-computed
+        VWAP as a backfill proxy" pattern already used for the underlying
+        stock's own VWAP (screener.backfill_vwap_from_yahoo) and every other
+        ORB/SMA backfill in this file. This is deliberately a same-day-only
+        fetch (fetch_upstox_intraday_1m, no date range) -- OI-ORB positions
+        are MIS/EOD-only by design, so there is never a prior day's bar to
+        seed from for this instrument anyway.
+
+        Best-effort throughout: no Upstox token, no data, a network error, or
+        the contract's own upstox_key being empty all just mean the position
+        starts cold from this moment instead -- exactly the pre-existing
+        behavior -- never blocks the restore."""
+        try:
+            from data_layer.historical_candles import fetch_upstox_intraday_1m
+            from data_layer.client_db import ClientDB
+            if not contract.upstox_key:
+                return
+            creds = await asyncio.to_thread(ClientDB().get_feeder_creds_sync, "upstox")
+            token = (creds or {}).get("access_token", "")
+            if not token:
+                self._clog.warning(
+                    "OiOrb[%s/%s]: %s option history backfill skipped -- no Upstox access "
+                    "token available; SL/target will start cold from this moment.",
+                    self._client_id, self._binding_id, symbol)
+                return
+            bars = await fetch_upstox_intraday_1m(contract.upstox_key, token)
+        except Exception:
+            self._clog.exception(
+                "OiOrb[%s/%s]: %s option history backfill failed -- SL/target will start "
+                "cold from this moment.", self._client_id, self._binding_id, symbol)
+            return
+        if not bars:
+            self._clog.info(
+                "OiOrb[%s/%s]: %s option history backfill returned no bars -- SL/target "
+                "will start cold from this moment.", self._client_id, self._binding_id, symbol)
+            return
+
+        entry_time = entry_ts.time()
+        buckets: Dict[str, dict] = {}
+        cum_num = 0.0
+        cum_den = 0.0
+        for b in bars:
+            ts = datetime.fromisoformat(b["ts"])
+            vol = float(b.get("volume", 0) or 0)
+            typical = (float(b["high"]) + float(b["low"]) + float(b["close"])) / 3.0
+            if vol > 0:
+                cum_num += typical * vol
+                cum_den += vol
+            floored = (ts.minute // self._vwap_sl_tf_minutes) * self._vwap_sl_tf_minutes
+            key = f"{ts.hour:02d}:{floored:02d}"
+            bkt = buckets.get(key)
+            vwap_now = (cum_num / cum_den) if cum_den > 0 else None
+            if bkt is None:
+                buckets[key] = {"h": float(b["high"]), "l": float(b["low"]), "c": float(b["close"]),
+                                 "ts": ts, "vwap_at_close": vwap_now}
+            else:
+                bkt["h"] = max(bkt["h"], float(b["high"]))
+                bkt["l"] = min(bkt["l"], float(b["low"]))
+                bkt["c"] = float(b["close"])
+                bkt["vwap_at_close"] = vwap_now
+        if not buckets:
+            return
+        if cum_den > 0:
+            # Seed the live ATP reference so the FIRST live tick after restart
+            # already has a real vwap to compare against, not None.
+            self._live_option_atp[symbol] = cum_num / cum_den
+
+        ordered_keys = sorted(buckets.keys())
+        pos = self._positions.get(symbol)
+        for key in ordered_keys[:-1]:   # last bucket is still-forming -- live loop continues it
+            bkt = buckets[key]
+            if bkt["ts"].time() < entry_time or bkt["vwap_at_close"] is None or pos is None:
+                continue
+            new_sl = screener.compute_option_premium_sl_arm(bkt["c"], bkt["vwap_at_close"], bkt["l"])
+            if new_sl is not None:
+                self._live_sl[symbol] = new_sl
+                new_target = screener.compute_option_premium_target(
+                    pos["entry_price"], new_sl, self._rr_multiple)
+                if new_target is not None:
+                    self._live_target[symbol] = new_target
+
+        # Seed the bar accumulator's "current" bucket to the LAST (still-forming)
+        # one so the live tick loop continues it seamlessly instead of starting a
+        # brand new bucket mid-way through.
+        last_key = ordered_keys[-1]
+        self._option_sl_bar_key[symbol] = last_key
+        self._option_sl_bar_cur[symbol] = {
+            "h": buckets[last_key]["h"], "l": buckets[last_key]["l"],
+            "c": buckets[last_key]["c"], "ts": buckets[last_key]["ts"],
+        }
+        if symbol in self._live_sl:
+            self._clog.info(
+                "OiOrb[%s/%s]: %s option history backfill complete -- SL=%.2f target=%s "
+                "(reconstructed from %d real intraday bars since entry).",
+                self._client_id, self._binding_id, symbol, self._live_sl[symbol],
+                f"{self._live_target[symbol]:.2f}" if symbol in self._live_target else "n/a",
+                len(bars))
+        else:
+            self._clog.info(
+                "OiOrb[%s/%s]: %s option history backfill complete -- no adverse bar found "
+                "since entry yet (%d real intraday bars replayed).",
+                self._client_id, self._binding_id, symbol, len(bars))
 
     async def _maybe_run_afternoon_scan(self, now: datetime, cfg: dict) -> None:
         """2026-08-27, direct user spec: "next session is after noon session
@@ -1401,20 +1517,38 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         elif key != cur_key:
             closed = self._option_sl_bar_cur[symbol]
             vwap_at_close = self._live_option_atp.get(symbol)
-            if pos is not None and vwap_at_close is not None:
-                new_sl = screener.compute_option_premium_sl_arm(closed["c"], vwap_at_close, closed["l"])
-                if new_sl is not None:
-                    self._live_sl[symbol] = new_sl
-                    new_target = screener.compute_option_premium_target(
-                        pos["entry_price"], new_sl, self._rr_multiple)
-                    if new_target is not None:
-                        self._live_target[symbol] = new_target
+            if pos is not None:
+                # 2026-08-27, direct user request (same visibility gap flagged for
+                # SellStraddle's ITM-roll-protection): log EVERY bar close, not just
+                # an actual re-arm -- otherwise "no RE-ARMED line yet" is impossible
+                # to tell apart from "genuinely favorable/flat so far" vs "ATP never
+                # arriving for this contract at all, silently stuck forever".
+                if vwap_at_close is None:
                     self._clog.info(
-                        "OiOrb[%s/%s]: %s OPTION-SL RE-ARMED -- bar_close=%.2f vwap(atp)=%.2f "
-                        "new_sl=%.2f target=%s (bar %s)",
-                        self._client_id, self._binding_id, symbol, closed["c"],
-                        vwap_at_close, new_sl,
-                        f"{new_target:.2f}" if new_target is not None else "n/a", cur_key)
+                        "OiOrb[%s/%s]: %s OPTION BAR CLOSED -- close=%.2f (bar %s) -- "
+                        "no broker ATP received yet for this contract, SL/target cannot "
+                        "arm until one arrives.",
+                        self._client_id, self._binding_id, symbol, closed["c"], cur_key)
+                else:
+                    new_sl = screener.compute_option_premium_sl_arm(closed["c"], vwap_at_close, closed["l"])
+                    if new_sl is not None:
+                        self._live_sl[symbol] = new_sl
+                        new_target = screener.compute_option_premium_target(
+                            pos["entry_price"], new_sl, self._rr_multiple)
+                        if new_target is not None:
+                            self._live_target[symbol] = new_target
+                        self._clog.info(
+                            "OiOrb[%s/%s]: %s OPTION-SL RE-ARMED -- bar_close=%.2f vwap(atp)=%.2f "
+                            "new_sl=%.2f target=%s (bar %s)",
+                            self._client_id, self._binding_id, symbol, closed["c"],
+                            vwap_at_close, new_sl,
+                            f"{new_target:.2f}" if new_target is not None else "n/a", cur_key)
+                    else:
+                        self._clog.info(
+                            "OiOrb[%s/%s]: %s OPTION BAR CLOSED -- close=%.2f >= vwap(atp)=%.2f "
+                            "(favorable) -- no re-arm (bar %s)",
+                            self._client_id, self._binding_id, symbol, closed["c"],
+                            vwap_at_close, cur_key)
             self._option_sl_bar_key[symbol] = key
             self._option_sl_bar_cur[symbol] = {"h": ltp, "l": ltp, "c": ltp, "ts": ts}
         else:

@@ -520,6 +520,123 @@ async def test_restore_from_db_reopens_position_and_resubscribes_feed(monkeypatc
     assert contract.upstox_key in bus._global_feeder.subscribed_tokens
 
 
+# ── option history backfill on mid-day restart (2026-08-27, direct user spec:
+# "it should get historical intraday data for that option chart from time
+# entry happened and then evaluate the sl and target in tf which we have
+# applied") ──────────────────────────────────────────────────────────────
+
+def _bar(hhmm: str, h: float, l: float, c: float, vol: float) -> dict:
+    return {"ts": f"2026-08-24T{hhmm}:00", "high": h, "low": l, "close": c, "volume": vol}
+
+
+@pytest.mark.asyncio
+async def test_seed_option_bars_from_history_reconstructs_sl_from_real_bars(monkeypatch):
+    """Baseline bars (09:55-09:59, flat @100) establish a running vwap ~100.
+    Position entered at 10:00. The 10:00-10:04 bucket (vwap_sl_tf_minutes=5)
+    drifts down to a close of 82 -- adverse -- must arm the SL at that
+    bucket's own low. A later still-forming bucket (10:05, partial) must NOT
+    be replayed -- it becomes the seeded "current" bar for the live loop to
+    continue."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    contract = _contract("DIXON", 14500, "PE")
+    book._positions["DIXON"] = {
+        "contract": contract, "qty": 50, "entry_price": 118.80, "paper_mode": True,
+        "opened_at": datetime(2026, 8, 24, 10, 0, 0),
+    }
+    bars = (
+        [_bar(f"09:{m:02d}", 100, 100, 100, 100) for m in range(55, 60)]
+        + [
+            _bar("10:00", 100, 95, 95, 100),
+            _bar("10:01", 95, 90, 90, 100),
+            _bar("10:02", 90, 88, 88, 100),
+            _bar("10:03", 88, 85, 85, 100),
+            _bar("10:04", 85, 82, 82, 100),
+            _bar("10:05", 82, 80, 80, 50),   # still-forming bucket -- not replayed
+        ]
+    )
+    monkeypatch.setattr("data_layer.historical_candles.fetch_upstox_intraday_1m", _async_return(bars))
+    monkeypatch.setattr("data_layer.client_db.ClientDB.get_feeder_creds_sync",
+                         lambda self, provider: {"access_token": "tok"})
+
+    await book._seed_option_bars_from_history("DIXON", contract, book._positions["DIXON"]["opened_at"])
+
+    assert book._live_sl["DIXON"] == 82.0
+    # entry=118.80, sl=82 -> risk=36.80, default rr_multiple=2.0 -> target=118.80+73.60=192.40
+    assert book._live_target["DIXON"] == pytest.approx(192.40, abs=0.01)
+    # The still-forming 10:05 bucket is seeded as the CURRENT bar, not replayed.
+    assert book._option_sl_bar_key["DIXON"] == "10:05"
+    assert book._option_sl_bar_cur["DIXON"]["c"] == 80.0
+    assert book._live_option_atp["DIXON"] is not None
+
+
+@pytest.mark.asyncio
+async def test_seed_option_bars_from_history_ignores_bars_before_entry(monkeypatch):
+    """A bucket that closed adverse entirely BEFORE the position existed must
+    never arm an SL -- only bars from entry_ts onward count."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    contract = _contract("DIXON", 14500, "PE")
+    book._positions["DIXON"] = {
+        "contract": contract, "qty": 50, "entry_price": 118.80, "paper_mode": True,
+        "opened_at": datetime(2026, 8, 24, 10, 30, 0),
+    }
+    bars = [
+        _bar("09:55", 100, 60, 60, 100),   # adverse close, but BEFORE entry -- must be ignored
+        _bar("10:30", 100, 100, 100, 100),
+        _bar("10:35", 100, 100, 100, 50),   # still-forming
+    ]
+    monkeypatch.setattr("data_layer.historical_candles.fetch_upstox_intraday_1m", _async_return(bars))
+    monkeypatch.setattr("data_layer.client_db.ClientDB.get_feeder_creds_sync",
+                         lambda self, provider: {"access_token": "tok"})
+
+    await book._seed_option_bars_from_history("DIXON", contract, book._positions["DIXON"]["opened_at"])
+
+    assert "DIXON" not in book._live_sl
+
+
+@pytest.mark.asyncio
+async def test_seed_option_bars_from_history_noop_without_a_token(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    contract = _contract("DIXON", 14500, "PE")
+    book._positions["DIXON"] = {
+        "contract": contract, "qty": 50, "entry_price": 118.80, "paper_mode": True,
+        "opened_at": datetime(2026, 8, 24, 10, 0, 0),
+    }
+    async def _must_not_be_called(*a, **k):
+        raise AssertionError("must never fetch without a token")
+    monkeypatch.setattr("data_layer.historical_candles.fetch_upstox_intraday_1m", _must_not_be_called)
+    monkeypatch.setattr("data_layer.client_db.ClientDB.get_feeder_creds_sync",
+                         lambda self, provider: {})
+
+    await book._seed_option_bars_from_history("DIXON", contract, book._positions["DIXON"]["opened_at"])
+
+    assert "DIXON" not in book._live_sl
+    assert "DIXON" not in book._live_option_atp
+
+
+@pytest.mark.asyncio
+async def test_seed_option_bars_from_history_noop_on_fetch_exception(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    contract = _contract("DIXON", 14500, "PE")
+    book._positions["DIXON"] = {
+        "contract": contract, "qty": 50, "entry_price": 118.80, "paper_mode": True,
+        "opened_at": datetime(2026, 8, 24, 10, 0, 0),
+    }
+
+    async def _raise(*a, **k):
+        raise RuntimeError("network error")
+    monkeypatch.setattr("data_layer.historical_candles.fetch_upstox_intraday_1m", _raise)
+    monkeypatch.setattr("data_layer.client_db.ClientDB.get_feeder_creds_sync",
+                         lambda self, provider: {"access_token": "tok"})
+
+    await book._seed_option_bars_from_history("DIXON", contract, book._positions["DIXON"]["opened_at"])
+
+    assert "DIXON" not in book._live_sl
+
+
 @pytest.mark.asyncio
 async def test_restore_from_db_restores_already_fired_and_rejected_sets(monkeypatch):
     """The other real half of the 2026-08-24 incident: DIXON PUT re-signaled
