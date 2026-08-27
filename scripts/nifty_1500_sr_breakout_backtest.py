@@ -244,6 +244,12 @@ def by_day(bars: List[Bar]) -> Dict[date, List[Bar]]:
     return days
 
 
+async def _fetch_dated(key: str, day: date, token: str) -> List[dict]:
+    url = (f"https://api.upstox.com/v2/historical-candle/{_q(key, safe='')}/1minute/"
+           f"{day.isoformat()}/{day.isoformat()}")
+    return await asyncio.to_thread(lambda: _parse_candles(_http_get_json(url, token)))
+
+
 async def fetch_option_day(strike: int, side: str, expiry, day: date, token: str) -> List[Bar]:
     """2026-08-27 fix (real user-caught bug, e.g. today's ATM computed as 24300
     when the real 15:00 spot was 24200): Upstox's DATED historical-candle
@@ -254,16 +260,25 @@ async def fetch_option_day(strike: int, side: str, expiry, day: date, token: str
     the dated endpoint for `day == date.today()` silently returned wrong/empty
     data, which fed a wrong or stale 15:00 bar into the ATM calc. Every day
     strictly before today still uses the dated endpoint (that data is
-    finalized and the dated endpoint is the correct/only source for it)."""
+    finalized and the dated endpoint is the correct/only source for it).
+
+    2026-08-27 ELEVENTH FIX (real user-caught bug): the intraday endpoint
+    only serves data while today's session is still live/recently closed --
+    running this script well after market close on the same calendar day
+    (date.today() still equals the trading day, but the session itself is
+    long over) gets an EMPTY intraday response, even though that same day's
+    data is by then available via the ordinary dated endpoint (same as any
+    past day). Falls back to _fetch_dated() when the intraday call returns
+    nothing, instead of treating "today" as permanently intraday-only."""
     key = REGISTRY.get_upstox_key("NIFTY", expiry, strike, side)
     if not key:
         return []
     if day == date.today():
         rows = await fetch_upstox_intraday_1m(key, token)
+        if not rows:
+            rows = await _fetch_dated(key, day, token)
     else:
-        url = (f"https://api.upstox.com/v2/historical-candle/{_q(key, safe='')}/1minute/"
-               f"{day.isoformat()}/{day.isoformat()}")
-        rows = _parse_candles(_http_get_json(url, token))
+        rows = await _fetch_dated(key, day, token)
     return _rows_to_bars(rows)
 
 
@@ -558,14 +573,23 @@ async def main() -> None:
     # fetch_option_day's own docstring for why. Fetched separately and merged
     # in so today gets exactly the same "spot 15:00 bar -> ATM" treatment as
     # every past day, just sourced correctly.
+    # 2026-08-27, real user-caught bug: the intraday endpoint only serves
+    # data while today's session is still live/recently closed -- running
+    # this well after market close on the same calendar day gets an EMPTY
+    # intraday response even though that day's data is by then available via
+    # the ordinary dated endpoint (same as any past day). Falls back to the
+    # dated range fetch instead of treating "today" as permanently
+    # intraday-only.
     today = date.today()
     today_rows = await fetch_upstox_intraday_1m(SPOT_KEY, TOKEN)
+    if not today_rows:
+        today_rows = await fetch_upstox_range_1m(SPOT_KEY, TOKEN, today, today)
     if today_rows:
         spot_by_day[today] = _rows_to_bars(today_rows)
-        print(f"{today}: {len(spot_by_day[today])} intraday spot bars fetched "
+        print(f"{today}: {len(spot_by_day[today])} spot bars fetched "
               f"({spot_by_day[today][0].ts.strftime('%H:%M')} .. {spot_by_day[today][-1].ts.strftime('%H:%M')})")
     else:
-        print(f"{today}: intraday spot fetch returned nothing (market closed / no token / holiday)")
+        print(f"{today}: no spot data via intraday OR dated endpoint (market closed / no token / holiday)")
 
     if not spot_by_day:
         print("No spot data returned -- check token / date range.")
