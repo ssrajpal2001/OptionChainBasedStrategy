@@ -16,17 +16,16 @@ Concretely, per trading day:
      -- returns None rather than silently substituting today's live contract when
      the true historical expiry has since rolled off Upstox's instrument master;
      that day is skipped, not faked).
-  3. Fetch the WHOLE day's real 1-min premium candles for the ATM CE and the ATM
-     PE. Both sides are fed, bar-by-bar in timestamp order, from market open
-     (09:15) into the REAL, reused strategies/d1_trap_option/support_resistance.py
-     SupportResistanceCalculator (one instance, two independent inst_keys "CE"/
-     "PE" -- same one-calculator/two-logical-instrument pattern this module's own
-     PositionalSRTracker already uses for LONG/SHORT zone pools). Feeding from
-     market open (not from 15:00) is a deliberate choice so R1/S1 are already
-     *established* structure by 15:00, not a state machine starting from
-     scratch at the exact moment we start checking it -- an S&R engine with no
-     prior candles has nothing to trail yet (see support_resistance.py's own
-     INITIAL_TREND_ESTABLISHMENT phase).
+  3. Fetch the ATM CE/PE 1-min premium candles for that day, then keep ONLY
+     the [15:00, 15:35] window (_window_bars() -- see the EIGHTH correction
+     below, which SUPERSEDES this step's original "feed from market open"
+     design). Both sides are fed, bar-by-bar in timestamp order, into the
+     REAL, reused strategies/d1_trap_option/support_resistance.py
+     SupportResistanceCalculator (one instance, two independent inst_keys
+     "CE"/"PE" -- same one-calculator/two-logical-instrument pattern this
+     module's own PositionalSRTracker already uses for LONG/SHORT zone
+     pools). The 15:00 bar is the calculator's genuine very first candle
+     (Phase 0 init) -- no pre-15:00 history is used at all.
   4. Only START checking the entry condition on bars closing in [15:00, 15:35].
      R1/S1 are read as the CALCULATOR'S OWN LEVELS AS OF BEFORE the bar being
      checked is fed in (never the level that bar itself just extended -- see
