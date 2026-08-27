@@ -109,25 +109,13 @@ finish on its own; only afterward is the globally-earliest confirmed signal
 (across both sides) picked as the actual trade, and that side alone is
 re-walked to simulate the SL/exit going forward.
 
-2026-08-27 SECOND CORRECTION (direct user spec refinement) -- entry/exit are
-now a TWO-CANDLE confirmation, not a single close-beyond-level check:
-  ENTRY: a bar closing above the pre-bar R1 becomes a "signal" bar (its own
-    HIGH is recorded as the trigger level). Only the very NEXT bar on that
-    same side is checked against it -- if that next bar's HIGH breaches the
-    signal bar's high, the trade is taken (entry_price = the signal bar's
-    high, i.e. the level that got breached, not the confirming bar's own
-    close/high). If the next bar does NOT breach it, that signal expires --
-    it is not re-checked against any later bar. A fresh signal can still form
-    from any later bar that itself closes above the (by-then-updated) R1.
-  EXIT/SL: mirrors this exactly once in a trade -- a bar closing below the
-    pre-bar S1 becomes an SL "signal" (its own LOW recorded). Only the very
-    next bar (same side) is checked -- if its LOW breaches the signal bar's
-    low, the position exits at that signal low. Otherwise the SL signal
-    expires (a later close-below-S1 can still arm a fresh one).
-  Both signals are single-shot (consumed by the very next bar's check
-  regardless of outcome) -- this is a literal reading of the user's own
-  wording ("next candle breached the high" / "next candle... low is
-  breached"), not a lookback-any-later-bar rule.
+2026-08-27 SECOND CORRECTION (direct user spec refinement, PARTIALLY
+SUPERSEDED by the SIXTH correction below -- kept for history) -- entry/exit
+are a TWO-CANDLE confirmation, not a single close-beyond-level check: a bar
+closing beyond R1/S1 becomes a "signal" (its own high/low recorded as the
+trigger level); a later bar breaching that level fills it. Originally this
+only checked the SINGLE very-next bar (see the SIXTH correction for why that
+was wrong -- it's a standing order, not next-bar-only).
 
 2026-08-27 FOURTH CORRECTION -- SUPERSEDES the ENTRY half of the SECOND
 correction above (the EXIT/SL half is unchanged). The ENTRY signal is now
@@ -149,18 +137,39 @@ we are not going to check for R1 and R2 instead only check for S1 and S2".
 
 2026-08-27 FIFTH CORRECTION -- no longer one trade per day. If a trade's
 exit is an SL (not the 15:35 EOD close or running out of data), scanning
-resumes on BOTH sides again "from that time onwards" (user's own words) for
-the next-earliest confirmed signal strictly after that exit, and that trade
-is taken too -- repeating until an EOD/data_end close, or no further
-candidate signal exists before 15:35. run_day() therefore returns a LIST of
-Trade objects per day (possibly empty, one, or several), not a single
+resumes on BOTH sides again "from that time onwards" (user's own words,
+inclusive of the exit's own minute -- see the seventh fix below for why
+inclusive matters) for the next-earliest confirmed signal, and that trade is
+taken too -- repeating until an EOD/data_end close, or no further candidate
+signal exists before 15:35. run_day() therefore returns a LIST of Trade
+objects per day (possibly empty, one, or several), not a single
 Optional[Trade].
+
+2026-08-27 SEVENTH FIX -- the re-entry cursor above used a STRICT `>` when
+filtering candidates after an SL exit, so a genuinely valid confirmation on
+the OTHER side landing in the exact same minute as the exit (e.g. CE stops
+out at 15:06 while PE's own confirmation also lands at 15:06) was silently
+skipped, and the scan wrongly jumped to that side's own next LATER signal
+instead of switching to the side that actually confirmed next (a real,
+user-caught bug: two CE trades fired the same day while PE's clearly-earlier
+15:06 confirmation was ignored). Changed to `>=` -- inclusive of the exit
+minute itself.
+
+2026-08-27 SIXTH CORRECTION, direct user clarification -- both the entry and
+SL "signal" are STANDING orders, not a single-shot next-bar-only check:
+"any candle that breached this value, entry happened, not next candle."
+Once armed (by an R1-breach phase event for entry, or a close-below-S1 for
+SL), the order stays live across as many subsequent bars as it takes -- the
+FIRST later bar (any bar, not just the very next one) whose high/low
+breaches it fills the order. It is only cleared on an actual fill, never
+merely for going unconfirmed on a given bar; a fresh breach event still
+replaces an unfilled order with the newer level.
 
 Usage:
     python scripts/nifty_1500_sr_breakout_backtest.py <upstox_token> [--days N] [--trace-day YYYY-MM-DD]
     (N = number of NIFTY trading days to look back over; default 10. Every
     1-min CE/PE bar in the 15:00-15:35 window -- high/low/close/R1/S1, tagged
-    with "signal" / "2ND CANDLE CONFIRMED ENTRY" -- is printed for EVERY day
+    with "R1 BREACHED" / "CONFIRMED ENTRY" -- is printed for EVERY day
     by default, per the user's own 2026-08-27 request to verify the S&R
     engine's behavior candle-by-candle rather than take a summary on faith.
     --trace-day restricts that verbose dump to just one date, for less
@@ -312,24 +321,28 @@ def _scan_side(bars: List[Bar]) -> tuple[dict, List[dict]]:
         # established so trade did not happen" was the bug). The order is
         # placed "on the high" -- the BREACHING bar's own high (which, by the
         # state machine's own promotion rule, becomes the new R1 immediately
-        # after this bar) -- confirmed by the user's own worked PE example:
-        # signal armed at the 15:20 bar (own high 76.20, which prints as R1
-        # on the very next 15:21 row), confirmed when 15:21's own high
-        # (76.95) exceeds it. The very NEXT bar confirms (its own HIGH must
-        # exceed that level); entry fires at that level. Once in a trade,
-        # R1/R2 are no longer watched at all -- only S1/S2 (see
-        # _simulate_exit) for the trailing SL, per the user's own explicit
-        # "when breached we are not going to check for R1 and R2 instead
-        # only check for S1 and S2".
+        # after this bar). Once in a trade, R1/R2 are no longer watched at
+        # all -- only S1/S2 (see _simulate_exit) for the trailing SL, per the
+        # user's own explicit "when breached we are not going to check for
+        # R1 and R2 instead only check for S1 and S2".
+        #
+        # 2026-08-27 SIXTH CORRECTION, direct user clarification -- this is a
+        # STANDING order, not a single-shot next-bar-only check: "any candle
+        # that breached this value, entry happened, not next candle." Once
+        # armed, the order stays live across as many subsequent bars as it
+        # takes; the FIRST later bar (any bar, not just the very next one)
+        # whose HIGH exceeds it fills the order. It is only cleared on an
+        # actual fill, never merely for going unconfirmed on a given bar. A
+        # fresh r1_breach_event still replaces it with the newer level.
         r1_breach_event = phase_before in ("S2_TRACKING", "R2_TRACKING") and phase_after == "R1_TRACKING"
         s1_breach_event = phase_before in ("S2_TRACKING", "R2_TRACKING") and phase_after == "S1_TRACKING"
 
         confirmed_now = pending_signal is not None and bar.high > pending_signal["level"]
         if confirmed_now:
             confirmed.append({"ts": bar.ts, "price": pending_signal["level"]})
-        pending_signal = None   # single-shot -- consumed either way
+            pending_signal = None   # order filled -- done
         if r1_breach_event:
-            pending_signal = {"level": bar.high, "ts": bar.ts}
+            pending_signal = {"level": bar.high, "ts": bar.ts}   # arm (or replace) the standing order
 
         d["trace"].append({
             "ts": bar.ts, "high": bar.high, "low": bar.low, "close": bar.close,
@@ -363,13 +376,16 @@ def _simulate_exit(bars: List[Bar], side: str, strike: int, day: date,
         if t >= FORCE_EXIT_TIME:
             trade.exit_ts, trade.exit_price, trade.exit_reason = bar.ts, bar.close, "eod_1535"
             return trade
+        # 2026-08-27 SIXTH CORRECTION (mirrors the entry-side fix in
+        # _scan_side): a standing order, not single-shot next-bar-only --
+        # stays live until an actual fill (any later bar's LOW breaching it),
+        # never cleared merely for going unconfirmed on a given bar.
         if pending_sl_signal is not None and bar.low < pending_sl_signal["low"]:
             trade.exit_ts, trade.exit_price = bar.ts, pending_sl_signal["low"]
             trade.exit_reason = f"sl_s1_breach@{pending_sl_signal['low']:.2f}"
             return trade
-        pending_sl_signal = None   # single-shot -- consumed either way
         if s1_before is not None and bar.close < s1_before:
-            pending_sl_signal = {"low": bar.low, "ts": bar.ts}
+            pending_sl_signal = {"low": bar.low, "ts": bar.ts}   # arm (or replace) the standing order
 
     last_bar = bars[-1]
     trade.exit_ts, trade.exit_price, trade.exit_reason = last_bar.ts, last_bar.close, "data_end"
@@ -402,7 +418,16 @@ def run_day(day: date, strike: int, ce_bars: List[Bar],
     trades: List[Trade] = []
     cursor_ts: Optional[datetime] = None
     while True:
-        candidates = [c for c in all_candidates if cursor_ts is None or c[1]["ts"] > cursor_ts]
+        # 2026-08-27, real user-caught bug: this used a STRICT `>` here, so a
+        # different side's genuinely valid confirmed entry landing on the
+        # EXACT SAME MINUTE as the just-closed trade's exit (e.g. CE stops
+        # out at 15:06 while PE's own confirmation also lands at 15:06) was
+        # silently skipped -- the scan jumped straight to that side's OWN
+        # next later signal instead, wrongly re-entering the same side twice
+        # instead of switching to the side that actually confirmed next.
+        # `>=` includes same-minute candidates -- "from that time onwards"
+        # (the user's own words) is inclusive of the exit minute itself.
+        candidates = [c for c in all_candidates if cursor_ts is None or c[1]["ts"] >= cursor_ts]
         if not candidates:
             break
         winner_side, winner = candidates[0]
