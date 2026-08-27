@@ -550,9 +550,33 @@ def report(trades: List[Trade]) -> None:
           f"net={net_pts:+.2f} pts (₹{net_pts * LOT_SIZE:+.0f} @ lot={LOT_SIZE})")
 
 
+async def _token_is_valid(token: str) -> bool:
+    """2026-08-27, real user-caught confusion: _http_get_json (data_layer/
+    historical_candles.py) silently swallows ALL HTTP errors into {} --
+    including a 401 from an expired/invalid token -- so an expired token and
+    "genuinely no data available yet" look byte-for-byte identical from this
+    script's own output ("no spot data" either way). Upstox access tokens
+    are short-lived (this session's own token showed a ~10.5 hour lifetime
+    via its own JWT `exp`/`iat` claims). A quick /v2/user/profile probe
+    up front distinguishes the two: Upstox returns {"status":"error",...}
+    for a bad/expired token vs {"status":"success","data":{...}} for a
+    valid one."""
+    try:
+        resp = await asyncio.to_thread(_http_get_json, "https://api.upstox.com/v2/user/profile", token)
+    except Exception:
+        return False
+    return bool(resp) and resp.get("status") == "success"
+
+
 async def main() -> None:
     if not TOKEN:
         print("Usage: python scripts/nifty_1500_sr_breakout_backtest.py <upstox_token> [--days N]")
+        return
+    if not await _token_is_valid(TOKEN):
+        print("ERROR: Upstox token appears INVALID or EXPIRED (checked via /v2/user/profile).\n"
+              "       Generate a fresh token and re-run -- Upstox access tokens are short-lived\n"
+              "       (this is very likely why fetches silently returned 'no data' below, not a\n"
+              "       genuine data-availability gap).")
         return
     days_back = 7   # 2026-08-27, direct user request: default to a 7-day run
     if "--days" in sys.argv:
