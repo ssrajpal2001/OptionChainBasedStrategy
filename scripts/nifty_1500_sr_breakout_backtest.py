@@ -266,19 +266,38 @@ def _new_diag() -> dict:
     return {"r1": None, "s1": None, "max_close": None, "min_close": None, "bars_checked": 0, "trace": []}
 
 
+def _window_bars(bars: List[Bar]) -> List[Bar]:
+    """2026-08-27 EIGHTH CORRECTION, direct user clarification: the S&R
+    calculator must start COMPLETELY FRESH at 15:00 -- the 15:00 bar IS the
+    very first candle (Phase 0 init: R1=that bar's high, S1=that bar's low),
+    not a state machine that's already cycled through several ping-pong
+    phases from market-open history. Feeding market-open-to-15:00 history in
+    first (the ORIGINAL design in this script, since superseded) let leftover
+    pre-15:00 structure make a bar AT 15:00 already read as mid-ping-pong
+    (e.g. phase_before=R2_TRACKING on the very first window bar) -- which the
+    user confirmed is impossible for a genuine R2-breaches-R1 event to have
+    happened for real that early ("that did not happen at 15:01 as it is 2nd
+    candle"). Only bars within [15:00, 15:35] are ever fed to the calculator
+    now; nothing before 15:00 is used for phase/R1/S1 purposes at all."""
+    return [b for b in bars if ENTRY_CHECK_START <= b.ts.time() <= FORCE_EXIT_TIME]
+
+
 def _scan_side(bars: List[Bar]) -> tuple[dict, List[dict]]:
-    """Run ONE side's whole day, independently of the other side and of
-    whether a trade ends up being taken at all. This independence is the
-    2026-08-27 fix for a real bug: the old single merged-loop stopped
-    updating a side's diagnostics (bars_checked/R1/S1/trace) the instant the
-    OTHER side's confirmation fired first (e.g. CE and PE both had a 15:00
-    bar; CE happened to be processed first in the merged/sorted loop, so
-    PE's own R1/S1/trace was silently never recorded at all, printing as
-    "not yet initialized" even though PE had real data the whole time).
-    Returns (diag, confirmed_events) where confirmed_events is every
-    signal-then-next-candle-breach event that fired during the window, in
-    chronological order (there can be more than one per side across the
-    window; run_day below only ever acts on the globally-earliest one)."""
+    """Run ONE side's whole 15:00-15:35 window, independently of the other
+    side and of whether a trade ends up being taken at all. This
+    independence is the 2026-08-27 fix for a real bug: the old single
+    merged-loop stopped updating a side's diagnostics (bars_checked/R1/S1/
+    trace) the instant the OTHER side's confirmation fired first (e.g. CE
+    and PE both had a 15:00 bar; CE happened to be processed first in the
+    merged/sorted loop, so PE's own R1/S1/trace was silently never recorded
+    at all, printing as "not yet initialized" even though PE had real data
+    the whole time). `bars` must already be window-filtered via
+    _window_bars() -- the 15:00 bar is treated as the calculator's very
+    first candle (see _window_bars' own docstring). Returns (diag,
+    confirmed_events) where confirmed_events is every signal-then-later-bar-
+    breach event that fired during the window, in chronological order (there
+    can be more than one per side across the window; run_day below acts on
+    the globally-earliest one not yet consumed by a prior trade)."""
     calc = SupportResistanceCalculator()
     d = _new_diag()
     pending_signal: Optional[dict] = None
@@ -407,8 +426,10 @@ def run_day(day: date, strike: int, ce_bars: List[Bar],
     words) for the next-earliest confirmed signal strictly after this exit,
     and take that trade too -- repeating until an EOD/data_end close or no
     further candidates remain before 15:35."""
-    ce_diag, ce_confirmed = _scan_side(ce_bars)
-    pe_diag, pe_confirmed = _scan_side(pe_bars)
+    ce_window = _window_bars(ce_bars)
+    pe_window = _window_bars(pe_bars)
+    ce_diag, ce_confirmed = _scan_side(ce_window)
+    pe_diag, pe_confirmed = _scan_side(pe_window)
     diag = {"CE": ce_diag, "PE": pe_diag}
 
     all_candidates = sorted(
@@ -431,7 +452,7 @@ def run_day(day: date, strike: int, ce_bars: List[Bar],
         if not candidates:
             break
         winner_side, winner = candidates[0]
-        bars = ce_bars if winner_side == "CE" else pe_bars
+        bars = ce_window if winner_side == "CE" else pe_window
         trade = _simulate_exit(bars, winner_side, strike, day, winner["ts"], winner["price"])
         trades.append(trade)
         if trade.exit_reason in ("eod_1535", "data_end"):
