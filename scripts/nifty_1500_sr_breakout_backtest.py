@@ -267,30 +267,51 @@ async def fetch_option_day(strike: int, side: str, expiry, day: date, token: str
     return _rows_to_bars(rows)
 
 
+_STRIKE_SEARCH_CONCURRENCY = 5   # bound concurrent Upstox requests (see docstring below)
+
+
 async def find_closest_premium_strike(atm: int, side: str, expiry, day: date, token: str,
                                        target: float = TARGET_PREMIUM_RS,
                                        steps: int = STRIKE_SEARCH_STEPS) -> tuple[Optional[int], List[Bar]]:
     """2026-08-27, direct user spec change: trade the strike whose 15:00
     premium is closest to Rs100, not plain ATM. Scans candidate strikes
-    ATM-steps*STRIKE_STEP .. ATM+steps*STRIKE_STEP (fetched in parallel via
-    asyncio.gather -- this multiplies the REST call count considerably vs the
-    old fixed-ATM design, since every candidate strike needs its own
-    historical-candle fetch; Upstox has no bulk historical option-chain
-    endpoint), and returns whichever candidate's 15:00 close is nearest
-    `target`, along with that strike's already-fetched full-window bars (no
-    second fetch needed for the winner). Returns (None, []) if nothing valid
-    was found (e.g. every candidate strike failed to resolve/fetch)."""
+    ATM-steps*STRIKE_STEP .. ATM+steps*STRIKE_STEP -- this multiplies the
+    REST call count considerably vs the old fixed-ATM design, since every
+    candidate strike needs its own historical-candle fetch (Upstox has no
+    bulk historical option-chain endpoint) -- and returns whichever
+    candidate's 15:00 close is nearest `target`, along with that strike's
+    already-fetched full-window bars (no second fetch needed for the
+    winner). Returns (None, []) if nothing valid was found.
+
+    2026-08-27 TENTH FIX (real user-caught bug): firing all 2*steps+1
+    candidates as one unbounded asyncio.gather batch -- especially against
+    TODAY's intraday endpoint, which the user separately confirmed DOES have
+    real CE/PE entries when fetched plainly at ATM (fetch_option_day, no
+    concurrent batch) -- silently returned empty/failed responses for enough
+    candidates that NO valid strike survived some days, wrongly skipping a
+    day that plain-ATM fetching proves has real data (almost certainly
+    Upstox rate-limiting a burst of simultaneous requests from one token).
+    Fixed with a semaphore capping concurrency to
+    _STRIKE_SEARCH_CONCURRENCY, and a safety-net fallback: if the bounded
+    search still comes back empty, fall back to plain ATM (fetch_option_day)
+    rather than silently skipping the whole day."""
     candidates = [atm + k * STRIKE_STEP for k in range(-steps, steps + 1)]
+    sem = asyncio.Semaphore(_STRIKE_SEARCH_CONCURRENCY)
 
     async def _probe(strike: int) -> tuple[int, List[Bar], Optional[float]]:
-        bars = await fetch_option_day(strike, side, expiry, day, token)
+        async with sem:
+            bars = await fetch_option_day(strike, side, expiry, day, token)
         bar_1500 = next((b for b in bars if b.ts.time() >= ENTRY_CHECK_START), None)
         return strike, bars, (bar_1500.close if bar_1500 else None)
 
     results = await asyncio.gather(*[_probe(s) for s in candidates])
     valid = [(s, bars, p) for s, bars, p in results if p is not None and bars]
     if not valid:
-        return None, []
+        print(f"    {side} strike search: all {len(candidates)} candidates around ATM={atm} "
+              f"came back empty -- falling back to plain ATM (likely a rate-limited burst, not "
+              f"genuinely missing data)")
+        atm_bars = await fetch_option_day(atm, side, expiry, day, token)
+        return (atm, atm_bars) if atm_bars else (None, [])
     best_strike, best_bars, _ = min(valid, key=lambda r: abs(r[2] - target))
     return best_strike, best_bars
 
