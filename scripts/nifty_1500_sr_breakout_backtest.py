@@ -73,8 +73,12 @@ Known, honestly-flagged limitations (same category as this repo's other
     wrong ATM is auditable directly from the script's own output.
 
 Usage:
-    python scripts/nifty_1500_sr_breakout_backtest.py <upstox_token> [--days N]
-    (N = number of NIFTY trading days to look back over; default 10)
+    python scripts/nifty_1500_sr_breakout_backtest.py <upstox_token> [--days N] [--trace-day YYYY-MM-DD]
+    (N = number of NIFTY trading days to look back over; default 10.
+    --trace-day prints every 1-min CE/PE bar in the 15:00-15:35 window for
+    that one date -- high/low/close/phase/R1/S1 -- for direct comparison
+    against the real option-premium chart, per the user's own 2026-08-27
+    request to verify the computed R1/S1 levels.)
 """
 from __future__ import annotations
 
@@ -164,11 +168,11 @@ async def fetch_option_day(strike: int, side: str, expiry, day: date, token: str
 
 
 def _new_diag() -> dict:
-    return {"r1": None, "s1": None, "max_close": None, "min_close": None, "bars_checked": 0}
+    return {"r1": None, "s1": None, "max_close": None, "min_close": None, "bars_checked": 0, "trace": []}
 
 
-def run_day(day: date, strike: int, ce_bars: List[Bar],
-            pe_bars: List[Bar]) -> tuple[Optional[Trade], dict]:
+def run_day(day: date, strike: int, ce_bars: List[Bar], pe_bars: List[Bar],
+            trace: bool = False) -> tuple[Optional[Trade], dict]:
     """Feed both sides into one SupportResistanceCalculator (2 logical
     inst_keys), from market open, then look for the first bar CLOSING inside
     the [15:00, 15:35] window that breaches its own established R1. See
@@ -208,6 +212,13 @@ def run_day(day: date, strike: int, ce_bars: List[Bar],
                     d["s1"] = state["sr_levels"]["S1"]["low"]
                 d["max_close"] = bar.close if d["max_close"] is None else max(d["max_close"], bar.close)
                 d["min_close"] = bar.close if d["min_close"] is None else min(d["min_close"], bar.close)
+                if trace:
+                    d["trace"].append({
+                        "ts": bar.ts, "high": bar.high, "low": bar.low, "close": bar.close,
+                        "phase": state["current_phase"],
+                        "r1": state["sr_levels"]["R1"]["high"] if state["r1_established"] else None,
+                        "s1": state["sr_levels"]["S1"]["low"] if state["s1_established"] else None,
+                    })
 
                 if state["r1_established"] and bar.close > state["sr_levels"]["R1"]["high"]:
                     trade = Trade(day=day, side=side, strike=strike,
@@ -254,6 +265,9 @@ async def main() -> None:
     days_back = 10
     if "--days" in sys.argv:
         days_back = int(sys.argv[sys.argv.index("--days") + 1])
+    trace_day: Optional[date] = None
+    if "--trace-day" in sys.argv:
+        trace_day = date.fromisoformat(sys.argv[sys.argv.index("--trace-day") + 1])
 
     end = date.today() - timedelta(days=1)
     start = end - timedelta(days=days_back * 2 + 5)  # buffer for weekends/holidays
@@ -306,7 +320,7 @@ async def main() -> None:
             print(f"{day}: ATM={atm} expiry={expiry} -- missing CE/PE premium data -- skip")
             continue
 
-        trade, diag = run_day(day, atm, ce_bars, pe_bars)
+        trade, diag = run_day(day, atm, ce_bars, pe_bars, trace=(day == trace_day))
         for side in ("CE", "PE"):
             d = diag[side]
             r1_str = f"{d['r1']:.2f}" if d["r1"] is not None else "not established"
@@ -316,6 +330,18 @@ async def main() -> None:
             print(f"    {side}{atm}: R1={r1_str} S1={s1_str} "
                   f"window[15:00-15:35] close range=[{min_str}..{max_str}] "
                   f"bars_checked={d['bars_checked']}")
+        if day == trace_day:
+            print(f"    --- minute-by-minute trace for {day} (compare against the real "
+                  f"{atm} CE/PE chart) ---")
+            merged_trace = sorted(
+                ({**row, "side": s} for s in ("CE", "PE") for row in diag[s]["trace"]),
+                key=lambda r: r["ts"])
+            for row in merged_trace:
+                r1_s = f"{row['r1']:.2f}" if row["r1"] is not None else "-"
+                s1_s = f"{row['s1']:.2f}" if row["s1"] is not None else "-"
+                print(f"    {row['ts'].strftime('%H:%M')} {row['side']} "
+                      f"H={row['high']:.2f} L={row['low']:.2f} C={row['close']:.2f} "
+                      f"phase={row['phase']} R1={r1_s} S1={s1_s}")
         if trade is None:
             print(f"{day}: ATM={atm} expiry={expiry} -- no R1 breakout entry")
             continue
