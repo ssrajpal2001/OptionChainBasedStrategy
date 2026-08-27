@@ -48,9 +48,24 @@ _DEFAULT_PARAMS = {
     "strike_otm_pct": 2.0,
     "orb_start": "09:15",
     "orb_end": "09:25",
-    "scan_start": "09:25",
-    "entry_window_start": "09:25",
-    "entry_window_end": "10:30",
+    # 2026-08-27, direct user spec: TWO scan sessions. Session 1 is a single
+    # point-in-time scan at scan_start (09:26) -- whichever stocks qualify AT
+    # THAT MOMENT get added, no further morning scanning. Session 2 re-runs
+    # the scan periodically between afternoon_scan_start (12:00) and
+    # afternoon_scan_end (13:00), ADDING any newly-qualifying stock. No
+    # scanning happens outside these two windows. Both default ON.
+    "scan_start": "09:26",
+    "two_session_scan_enabled": True,
+    "afternoon_scan_start": "12:00",
+    "afternoon_scan_end": "13:00",
+    "afternoon_scan_interval_sec": 300.0,
+    "entry_window_start": "09:26",
+    # direct user spec: "if that stock does not hit vwap till 15.00 it will
+    # get cancelled" -- both sessions' candidates share this cutoff (was
+    # 10:30). No new entries fire and no further scanning after this time;
+    # a position already running is unaffected -- it only closes at EOD
+    # square-off, target, or SL.
+    "entry_window_end": "15:00",
     # 2026-08-25, direct user spec: five additive, independently-toggleable
     # filters (see strategies/oi_orb_screener/filters.py's module docstring
     # for the real incident -- a SAIL CALL breakout fired right under a
@@ -75,23 +90,44 @@ _DEFAULT_PARAMS = {
     # connection) -- watching every shortlisted stock's full option chain
     # unbounded could silently starve ticks for a completely different
     # strategy. Cap chain-watching (the 3 chain-dependent filters: oi_wall/
-    # distance_to_wall/pcr) to the top N shortlisted stocks by rank until
-    # this strategy gets its own dedicated feeder connection.
-    "chain_watch_max_stocks": 2,
-    # 2026-08-26, direct user spec: S&R SL timeframe -- matches D1TrapSRBook's
-    # own validated default (3), proven via a real backtest sweep on BANKNIFTY
-    # for this identical tracker.
-    "sr_tf_minutes": 3,
+    # distance_to_wall/pcr) to the top N shortlisted stocks by rank.
+    # 2026-08-27: OI-ORB now gets its own DEDICATED upstox2 feeder
+    # (run_system.py's `bus._oiorb_feeder`, separate WS connection from every
+    # other strategy) -- a real live trade (KOTAKBANK) proved the old cap=2
+    # directly starved the OI-wall/distance-to-wall/PCR filters of real data
+    # for any stock outside the top-2 rank. Raised to 10 (covers a full
+    # top_n_per_side=5-per-side shortlist) now that watching more stocks no
+    # longer risks starving a different strategy's shared feed. Still
+    # per-deployment overridable via strategy_params if the dedicated feeder
+    # isn't configured/available and the shared-budget concern applies again.
+    "chain_watch_max_stocks": 10,
+    # 2026-08-27, direct user spec ("wait for the stock to come back to vwap
+    # then we enter... this is optional"): replaces the ORB-breach entry
+    # trigger with a VWAP retest, and replaces the S&R (R1/S1/R2/S2) SL with
+    # a VWAP-relative structural stop. All three are fresh, unvalidated
+    # defaults (this strategy still can't be backtested) -- watch real
+    # forward telemetry before trusting them.
+    "vwap_entry_min_gap_pct": 0.15,
+    "vwap_cancel_if_unreached": True,
+    "vwap_sl_tf_minutes": 5,
+    # 2026-08-27, direct user spec: SL/target now track the OPTION's own
+    # premium ("checking for target and SL in stock, change it to the
+    # option which we are taking"), not the underlying stock's spot price.
+    # rr_multiple is a fixed risk-reward target off the currently-armed
+    # SL's own points distance from entry -- fresh, unvalidated default.
+    "rr_multiple": 2.0,
 }
 _FLOAT_KEYS = ("oi_spurt_min_pct", "price_move_min_pct", "stock_move_abort_pct",
                "nifty_bullish_pct", "nifty_bearish_pct", "rejection_min_rise_pct",
                "rejection_retrace_fraction", "strike_otm_pct",
                "oi_wall_dominance_ratio", "distance_to_wall_min_pct",
                "pcr_max_for_call", "pcr_min_for_put", "volume_confirmation_min_ratio",
-               "oi_roc_min_pct", "oi_roc_lookback_sec")
+               "oi_roc_min_pct", "oi_roc_lookback_sec", "vwap_entry_min_gap_pct",
+               "afternoon_scan_interval_sec", "rr_multiple")
 _INT_KEYS = ("top_n_per_side", "poll_seconds", "max_monitor_minutes",
-             "chain_watch_max_stocks", "sr_tf_minutes")
-_STR_KEYS = ("orb_start", "orb_end", "scan_start", "entry_window_start", "entry_window_end")
+             "chain_watch_max_stocks", "vwap_sl_tf_minutes")
+_STR_KEYS = ("orb_start", "orb_end", "scan_start", "entry_window_start", "entry_window_end",
+             "afternoon_scan_start", "afternoon_scan_end")
 _FILTER_BOOL_KEYS = ("oi_wall_check_enabled", "distance_to_wall_enabled", "pcr_gate_enabled",
                       "volume_confirmation_enabled", "oi_roc_enabled")
 
@@ -136,6 +172,10 @@ class OiOrbScreenerBookManager(StrategyBookManager):
                                                              _DEFAULT_PARAMS["regime_filter_enabled"]))
             cfg["ignore_time_windows"] = bool(params.get("ignore_time_windows",
                                                            _DEFAULT_PARAMS["ignore_time_windows"]))
+            cfg["vwap_cancel_if_unreached"] = bool(params.get("vwap_cancel_if_unreached",
+                                                                _DEFAULT_PARAMS["vwap_cancel_if_unreached"]))
+            cfg["two_session_scan_enabled"] = bool(params.get("two_session_scan_enabled",
+                                                                _DEFAULT_PARAMS["two_session_scan_enabled"]))
             for k in _FILTER_BOOL_KEYS:
                 cfg[k] = bool(params.get(k, _DEFAULT_PARAMS[k]))
             # Key on the sentinel underlying so this fits the base class's
@@ -170,6 +210,10 @@ class OiOrbScreenerBookManager(StrategyBookManager):
             scan_start=value["scan_start"],
             entry_window_start=value["entry_window_start"],
             entry_window_end=value["entry_window_end"],
+            two_session_scan_enabled=value["two_session_scan_enabled"],
+            afternoon_scan_start=value["afternoon_scan_start"],
+            afternoon_scan_end=value["afternoon_scan_end"],
+            afternoon_scan_interval_sec=value["afternoon_scan_interval_sec"],
             oi_wall_check_enabled=value["oi_wall_check_enabled"],
             oi_wall_dominance_ratio=value["oi_wall_dominance_ratio"],
             distance_to_wall_enabled=value["distance_to_wall_enabled"],
@@ -183,7 +227,10 @@ class OiOrbScreenerBookManager(StrategyBookManager):
             oi_roc_min_pct=value["oi_roc_min_pct"],
             oi_roc_lookback_sec=value["oi_roc_lookback_sec"],
             chain_watch_max_stocks=value["chain_watch_max_stocks"],
-            sr_tf_minutes=value["sr_tf_minutes"],
+            vwap_entry_min_gap_pct=value["vwap_entry_min_gap_pct"],
+            vwap_cancel_if_unreached=value["vwap_cancel_if_unreached"],
+            vwap_sl_tf_minutes=value["vwap_sl_tf_minutes"],
+            rr_multiple=value["rr_multiple"],
         )
         logger.info(
             "OiOrbScreenerBookManager: spawned %s/%s (lots=%d oi_spurt>=%.1f%% price_move>=%.1f%% "
@@ -237,7 +284,14 @@ class OiOrbScreenerBookManager(StrategyBookManager):
                 "oi_roc_enabled", "oi_roc_min_pct", "oi_roc_lookback_sec",
             ))
             or book._chain_watch_max_stocks != value["chain_watch_max_stocks"]
-            or book._sr_tf_minutes != value["sr_tf_minutes"]
+            or book._vwap_entry_min_gap_pct != value["vwap_entry_min_gap_pct"]
+            or book._vwap_cancel_if_unreached != value["vwap_cancel_if_unreached"]
+            or book._vwap_sl_tf_minutes != value["vwap_sl_tf_minutes"]
+            or book._rr_multiple != value["rr_multiple"]
+            or book._screener_cfg["TWO_SESSION_SCAN_ENABLED"] != value["two_session_scan_enabled"]
+            or book._screener_cfg["AFTERNOON_SCAN_START"] != value["afternoon_scan_start"]
+            or book._screener_cfg["AFTERNOON_SCAN_END"] != value["afternoon_scan_end"]
+            or book._screener_cfg["AFTERNOON_SCAN_INTERVAL_SEC"] != value["afternoon_scan_interval_sec"]
         )
 
     def _log_spawned(self, key: tuple, value: dict) -> None:

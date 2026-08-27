@@ -422,6 +422,164 @@ def test_smabars_closes_excludes_the_still_forming_bucket():
     assert closes == []   # the 09:30 bucket hasn't closed yet as of 09:33 itself
 
 
+# ── VWAP retest entry + VWAP-relative SL (2026-08-27, direct user spec:
+# replaces the ORB-breach entry trigger and the S&R R1/S1/R2/S2 SL) ────────
+
+def test_vwapstate_current_none_until_any_volume_recorded():
+    vwap = screener.VwapState()
+    assert vwap.current("VBL") is None
+
+
+def test_vwapstate_update_computes_running_weighted_average():
+    vwap = screener.VwapState()
+    vwap.update("VBL", 100.0, 10.0)   # 100*10 / 10 = 100
+    assert vwap.current("VBL") == 100.0
+    vwap.update("VBL", 200.0, 10.0)   # (1000+2000)/20 = 150
+    assert vwap.current("VBL") == 150.0
+
+
+def test_vwapstate_update_ignores_non_positive_price_or_volume():
+    vwap = screener.VwapState()
+    vwap.update("VBL", 0.0, 10.0)
+    vwap.update("VBL", 100.0, 0.0)
+    assert vwap.current("VBL") is None
+
+
+def test_vwapstate_seed_adds_to_not_replaces_existing_accumulation():
+    vwap = screener.VwapState()
+    vwap.seed("VBL", 500.0, 5.0)   # 500/5 = 100
+    assert vwap.current("VBL") == 100.0
+    vwap.seed("VBL", 1000.0, 5.0)   # (500+1000)/(5+5) = 150
+    assert vwap.current("VBL") == 150.0
+
+
+def test_side_from_pchange_gainer_is_call_loser_is_put():
+    assert screener.side_from_pchange(2.5) == "CALL"
+    assert screener.side_from_pchange(-2.5) == "PUT"
+
+
+def test_side_allowed_by_regime_matches_evaluate_breakouts_own_table():
+    # Bullish day: both sides tradeable.
+    assert screener.side_allowed_by_regime("CALL", "bullish", True) is True
+    assert screener.side_allowed_by_regime("PUT", "bullish", True) is True
+    # Bearish day: CALL blocked, PUT still tradeable.
+    assert screener.side_allowed_by_regime("CALL", "bearish", True) is False
+    assert screener.side_allowed_by_regime("PUT", "bearish", True) is True
+    # Neutral day: nothing tradeable.
+    assert screener.side_allowed_by_regime("CALL", "neutral", True) is False
+    assert screener.side_allowed_by_regime("PUT", "neutral", True) is False
+    # Filter off: everything tradeable regardless of regime.
+    assert screener.side_allowed_by_regime("CALL", "neutral", False) is True
+
+
+def test_check_vwap_retest_entry_call_arms_above_then_fires_on_touch_back_down():
+    # Not yet armed, price below the arming threshold -- stays unarmed, no fire.
+    armed, fire = screener.check_vwap_retest_entry("CALL", 100.05, 100.0, False, 0.15)
+    assert armed is False and fire is False
+    # Price moves far enough above vwap (>=0.15%) -- arms, but doesn't fire yet.
+    armed, fire = screener.check_vwap_retest_entry("CALL", 100.20, 100.0, False, 0.15)
+    assert armed is True and fire is False
+    # Now armed, price pulls back down to touch vwap -- fires.
+    armed, fire = screener.check_vwap_retest_entry("CALL", 100.0, 100.0, True, 0.15)
+    assert armed is True and fire is True
+    # Armed, still above vwap -- no fire yet.
+    armed, fire = screener.check_vwap_retest_entry("CALL", 100.10, 100.0, True, 0.15)
+    assert armed is True and fire is False
+
+
+def test_check_vwap_retest_entry_put_arms_below_then_fires_on_bounce_back_up():
+    armed, fire = screener.check_vwap_retest_entry("PUT", 99.95, 100.0, False, 0.15)
+    assert armed is False and fire is False
+    armed, fire = screener.check_vwap_retest_entry("PUT", 99.80, 100.0, False, 0.15)
+    assert armed is True and fire is False
+    armed, fire = screener.check_vwap_retest_entry("PUT", 100.0, 100.0, True, 0.15)
+    assert armed is True and fire is True
+
+
+def test_check_vwap_retest_entry_none_vwap_never_arms_or_fires():
+    armed, fire = screener.check_vwap_retest_entry("CALL", 100.0, 0.0, False, 0.15)
+    assert armed is False and fire is False
+
+
+# ── option-premium SL/target (2026-08-27, direct user spec: "checking for
+# target and SL in stock, change it to the option which we are taking") ────
+
+def test_compute_option_premium_sl_arm_arms_on_close_below_vwap():
+    # Side-independent -- a bought CE and a bought PE both want their OWN
+    # premium to rise, so adverse is always "closed below its own vwap".
+    assert screener.compute_option_premium_sl_arm(95.0, 100.0, 90.0) == 90.0
+    # Favorable close (above vwap) -> no arm.
+    assert screener.compute_option_premium_sl_arm(105.0, 100.0, 90.0) is None
+
+
+def test_compute_option_premium_sl_arm_no_vwap_never_arms():
+    assert screener.compute_option_premium_sl_arm(95.0, 0.0, 90.0) is None
+
+
+def test_compute_option_premium_target_uses_rr_multiple_off_sl_distance():
+    # entry=100, sl=90 -> risk=10, rr=2.0 -> target=100+20=120
+    assert screener.compute_option_premium_target(100.0, 90.0, 2.0) == 120.0
+
+
+def test_compute_option_premium_target_none_without_a_valid_sl():
+    assert screener.compute_option_premium_target(100.0, None, 2.0) is None
+    # An sl at or above entry can't define a sane risk distance.
+    assert screener.compute_option_premium_target(100.0, 100.0, 2.0) is None
+    assert screener.compute_option_premium_target(100.0, 105.0, 2.0) is None
+
+
+def test_check_option_premium_exit_sl_hit():
+    assert screener.check_option_premium_exit(90.0, 120.0, 90.0) == "sl"
+    assert screener.check_option_premium_exit(90.0, 120.0, 89.99) == "sl"
+
+
+def test_check_option_premium_exit_target_hit():
+    assert screener.check_option_premium_exit(90.0, 120.0, 120.0) == "target"
+    assert screener.check_option_premium_exit(90.0, 120.0, 120.01) == "target"
+
+
+def test_check_option_premium_exit_none_when_neither_hit():
+    assert screener.check_option_premium_exit(90.0, 120.0, 105.0) is None
+
+
+def test_check_option_premium_exit_sl_takes_priority_if_both_somehow_hit():
+    # A single tick straddling both (a large gap move) -- the loss-cap wins.
+    assert screener.check_option_premium_exit(90.0, 80.0, 85.0) == "sl"
+
+
+def test_check_option_premium_exit_handles_missing_levels():
+    assert screener.check_option_premium_exit(None, None, 100.0) is None
+    assert screener.check_option_premium_exit(None, 120.0, 130.0) == "target"
+    assert screener.check_option_premium_exit(90.0, None, 80.0) == "sl"
+
+
+def test_backfill_vwap_from_yahoo_seeds_typical_price_times_volume(monkeypatch):
+    import pandas as _pd
+
+    class _FakeYF:
+        @staticmethod
+        def download(tickers, period, interval, progress, group_by):
+            idx = _pd.date_range("2026-08-27 09:15", periods=2, freq="1min", tz="Asia/Kolkata")
+            df = _pd.DataFrame({
+                "Open": [100.0, 101.0], "High": [102.0, 103.0],
+                "Low": [99.0, 100.0], "Close": [101.0, 102.0],
+                "Volume": [1000.0, 2000.0],
+            }, index=idx)
+            df.columns = _pd.MultiIndex.from_product([["VBL.NS"], df.columns])
+            return df
+
+    import sys
+    monkeypatch.setitem(sys.modules, "yfinance", _FakeYF)
+
+    vwap = screener.VwapState()
+    screener.backfill_vwap_from_yahoo(vwap, ["VBL"], screener.CONFIG)
+
+    # bar1: typical=(102+99+101)/3=100.667, vol=1000 -> 100666.67
+    # bar2: typical=(103+100+102)/3=101.667, vol=2000 -> 203333.33
+    # vwap = (100666.67+203333.33)/(1000+2000) = 101.333...
+    assert vwap.current("VBL") == pytest.approx(101.333, abs=0.01)
+
+
 def test_smabars_seed_close_never_overwrites_live_quote():
     from datetime import datetime as _dt
     bars = screener.SmaBars()

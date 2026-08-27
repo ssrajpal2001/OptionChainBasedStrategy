@@ -4595,7 +4595,7 @@ function amoTest() {
               <div><div class="sec-label mb-1">NIFTY BEARISH %</div>
                 <input class="t-input font-mono text-xs" type="number" step="0.05" x-model.number="oiOrbConfig.nifty_bearish_pct"/></div>
 
-              <div class="col-span-4 sec-label mt-2" style="color:var(--t-amber)">TIMING</div>
+              <div class="col-span-4 sec-label mt-2" style="color:var(--t-amber)">TIMING — SESSION 1 (MORNING, single point-in-time scan)</div>
               <div><div class="sec-label mb-1">ORB START</div>
                 <input class="t-input font-mono text-xs" type="text" placeholder="HH:MM" x-model="oiOrbConfig.orb_start"/></div>
               <div><div class="sec-label mb-1">ORB END</div>
@@ -4604,16 +4604,39 @@ function amoTest() {
                 <input class="t-input font-mono text-xs" type="text" placeholder="HH:MM" x-model="oiOrbConfig.scan_start"/></div>
               <div><div class="sec-label mb-1">POLL SECONDS</div>
                 <input class="t-input font-mono text-xs" type="number" step="1" x-model.number="oiOrbConfig.poll_seconds"/></div>
+
+              <div class="col-span-4 sec-label mt-2" style="color:var(--t-amber)">TIMING — SESSION 2 (AFTERNOON re-scan, adds new stocks only)</div>
+              <div class="flex items-center gap-2">
+                <div class="sec-label mb-1">TWO-SESSION SCAN</div>
+                <input type="checkbox" x-model="oiOrbConfig.two_session_scan_enabled"/>
+              </div>
+              <div><div class="sec-label mb-1">AFTERNOON SCAN START</div>
+                <input class="t-input font-mono text-xs" type="text" placeholder="HH:MM" x-model="oiOrbConfig.afternoon_scan_start"/></div>
+              <div><div class="sec-label mb-1">AFTERNOON SCAN END</div>
+                <input class="t-input font-mono text-xs" type="text" placeholder="HH:MM" x-model="oiOrbConfig.afternoon_scan_end"/></div>
+              <div><div class="sec-label mb-1">AFTERNOON RE-SCAN INTERVAL (SEC)</div>
+                <input class="t-input font-mono text-xs" type="number" step="30" x-model.number="oiOrbConfig.afternoon_scan_interval_sec"/></div>
+              <div class="col-span-4 text-[10px]" style="color:var(--t-muted)">
+                No scanning happens outside these two windows — entry evaluation (VWAP retest) for whatever's already shortlisted keeps running continuously all day regardless of the scan gaps.
+              </div>
+
+              <div class="col-span-4 sec-label mt-2" style="color:var(--t-amber)">ENTRY / CANCEL</div>
               <div><div class="sec-label mb-1">ENTRY WINDOW START</div>
                 <input class="t-input font-mono text-xs" type="text" placeholder="HH:MM" x-model="oiOrbConfig.entry_window_start"/></div>
-              <div><div class="sec-label mb-1">ENTRY WINDOW END</div>
+              <div><div class="sec-label mb-1">ENTRY WINDOW END (CANCEL IF VWAP NOT HIT)</div>
                 <input class="t-input font-mono text-xs" type="text" placeholder="HH:MM" x-model="oiOrbConfig.entry_window_end"/></div>
+              <div class="flex items-center gap-2">
+                <div class="sec-label mb-1">CANCEL IF VWAP UNREACHED</div>
+                <input type="checkbox" x-model="oiOrbConfig.vwap_cancel_if_unreached"/>
+              </div>
+              <div><div class="sec-label mb-1">VWAP ENTRY ARM GAP %</div>
+                <input class="t-input font-mono text-xs" type="number" step="0.05" x-model.number="oiOrbConfig.vwap_entry_min_gap_pct"/></div>
               <div class="flex items-center gap-2">
                 <div class="sec-label mb-1">IGNORE TIME WINDOWS</div>
                 <input type="checkbox" x-model="oiOrbConfig.ignore_time_windows"/>
               </div>
               <div class="col-span-3 text-[10px]" style="color:var(--t-amber)" x-show="oiOrbConfig.ignore_time_windows">
-                ⚠ Connectivity-test mode — bypasses real ORB/entry-window timing. Turn OFF for real trading days.
+                ⚠ Connectivity-test mode — bypasses real ORB/entry-window/scan-session timing. Turn OFF for real trading days.
               </div>
 
               <div class="col-span-4 sec-label mt-2" style="color:var(--t-amber)">EXIT RULES / STRIKE</div>
@@ -4625,8 +4648,13 @@ function amoTest() {
                 <input class="t-input font-mono text-xs" type="number" step="0.05" x-model.number="oiOrbConfig.rejection_retrace_fraction"/></div>
               <div><div class="sec-label mb-1">STRIKE OTM %</div>
                 <input class="t-input font-mono text-xs" type="number" step="0.1" x-model.number="oiOrbConfig.strike_otm_pct"/></div>
-              <div><div class="sec-label mb-1">S&amp;R SL TIMEFRAME (MIN)</div>
-                <input class="t-input font-mono text-xs" type="number" step="1" min="1" x-model.number="oiOrbConfig.sr_tf_minutes"/></div>
+              <div><div class="sec-label mb-1">OPTION SL/TARGET TIMEFRAME (MIN)</div>
+                <input class="t-input font-mono text-xs" type="number" step="1" min="1" x-model.number="oiOrbConfig.vwap_sl_tf_minutes"/></div>
+              <div><div class="sec-label mb-1">TARGET RISK:REWARD MULTIPLE</div>
+                <input class="t-input font-mono text-xs" type="number" step="0.1" min="0.1" x-model.number="oiOrbConfig.rr_multiple"/></div>
+              <div class="col-span-4 text-[10px]" style="color:var(--t-muted)">
+                SL/target now track the OPTION'S OWN premium (its own VWAP/bars), not the underlying stock's spot price. A bar closing below the option's own VWAP re-arms the SL at that bar's low; target = entry + (RR multiple × the armed SL's own distance from entry).
+              </div>
             </div>
 
             <!-- ── EXPERIMENTAL FILTERS (2026-08-25) ──────────────────────────
@@ -8735,13 +8763,19 @@ function amoTest() {
                                     <span style="color:var(--t-muted)">Entry / LTP · Qty</span>
                                     <span x-text="fmt(p.entry_price)+' / '+(p.live_ltp!=null?fmt(p.live_ltp):'—')+' · '+p.qty"></span>
                                   </div>
-                                  <!-- 2026-08-26, direct user spec: S&R (R1/S1/R2/S2) SL, tracked on
-                                       the underlying's own live spot price -- both values update on
-                                       every real tick, not on a poll interval. sl=null means the S&R
-                                       tracker hasn't confirmed its first level yet (hard risk cap only). -->
+                                  <!-- 2026-08-27, direct user spec: SL/target now track the OPTION'S
+                                       OWN live premium (its own VWAP/bars), not the stock's spot price
+                                       -- both values update on every real tick, not on a poll interval.
+                                       sl/target=null means the first adverse bar hasn't confirmed yet
+                                       (hard risk cap only until then). spot_ltp is a live UI reference
+                                       price only -- no longer trading-relevant. -->
                                   <div class="flex justify-between">
-                                    <span style="color:var(--t-muted)">Spot LTP / SL</span>
-                                    <span x-text="(p.spot_ltp!=null?fmt(p.spot_ltp):'—')+' / '+(p.sl!=null?fmt(p.sl):'establishing…')"
+                                    <span style="color:var(--t-muted)">Spot LTP (ref)</span>
+                                    <span x-text="p.spot_ltp!=null?fmt(p.spot_ltp):'—'"></span>
+                                  </div>
+                                  <div class="flex justify-between">
+                                    <span style="color:var(--t-muted)">Option SL / Target</span>
+                                    <span x-text="(p.sl!=null?fmt(p.sl):'establishing…')+' / '+(p.target!=null?fmt(p.target):'—')"
                                           :style="p.sl!=null?'color:var(--t-amber)':'color:var(--t-dim)'"></span>
                                   </div>
                                   <div class="flex justify-between" x-show="p.pnl!=null">
@@ -8751,7 +8785,7 @@ function amoTest() {
                                   </div>
                                 </div>
                               </template>
-                              <div style="color:var(--t-dim);font-size:10px" class="text-right">S&amp;R SL (spot-based) + hard ₹/lot risk cap + EOD square-off</div>
+                              <div style="color:var(--t-dim);font-size:10px" class="text-right">Option-premium SL/target + hard ₹/lot risk cap + EOD square-off</div>
                             </div>
                           </template>
 

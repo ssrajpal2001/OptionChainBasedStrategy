@@ -294,9 +294,18 @@ try:
         strike_otm_pct:            float = 2.0
         orb_start:                 str   = "09:15"
         orb_end:                   str   = "09:25"
-        scan_start:                str   = "09:25"
-        entry_window_start:        str   = "09:25"
-        entry_window_end:          str   = "10:30"
+        # 2026-08-27: two scan sessions -- session 1 is a single point-in-time
+        # scan at scan_start (09:26); session 2 re-scans between afternoon_scan_
+        # start/end (12:00-13:00), adding any newly-qualifying stock. Both
+        # sessions' candidates share entry_window_end (15:00) as the "cancel if
+        # VWAP never touched" cutoff -- was 10:30.
+        scan_start:                str   = "09:26"
+        entry_window_start:        str   = "09:26"
+        entry_window_end:          str   = "15:00"
+        two_session_scan_enabled:  bool  = True
+        afternoon_scan_start:      str   = "12:00"
+        afternoon_scan_end:        str   = "13:00"
+        afternoon_scan_interval_sec: float = 300.0
         # 2026-08-25: five additive, independently-toggleable filters (see
         # strategies/oi_orb_screener/filters.py). Each *_enabled flag only
         # controls whether that filter can actually block a trade -- every
@@ -316,11 +325,17 @@ try:
         oi_roc_lookback_sec:        float = 300.0
         # Shared WS feed subscription is capped ~50 symbols/broker connection
         # across ALL strategies -- bound chain-watching to the top N shortlisted
-        # stocks so this can't silently starve another strategy's ticks.
-        chain_watch_max_stocks:    int   = 2
-        # 2026-08-26: S&R SL timeframe -- matches D1TrapSRBook's own validated
-        # default (3), proven via a real backtest sweep on BANKNIFTY.
-        sr_tf_minutes:             int   = 3
+        # stocks so this can't silently starve another strategy's ticks. Raised
+        # to 10 (2026-08-27) now that OI-ORB has its own dedicated upstox2 feeder.
+        chain_watch_max_stocks:    int   = 10
+        # 2026-08-27: VWAP retest entry (replaces the old ORB-breach trigger) +
+        # option-premium SL/target (replaces the old S&R R1/S1/R2/S2 tracker,
+        # "checking for target and SL in stock, change it to the option which
+        # we are taking"). All fresh, unvalidated defaults.
+        vwap_entry_min_gap_pct:    float = 0.15
+        vwap_cancel_if_unreached:  bool  = True
+        vwap_sl_tf_minutes:        int   = 5
+        rr_multiple:               float = 2.0
 
     class _ResetPasswordSchema(_PydanticBase):
         token:        str

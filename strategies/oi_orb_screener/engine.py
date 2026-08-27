@@ -57,13 +57,10 @@ from data_layer.base_feeder import IndexTick, OptionTick
 from data_layer.instrument_registry import REGISTRY
 from matrix_engine.option_matrix import ChainRow, ChainSnapshot, OptionMatrix
 from strategies.core.base_book import AbstractStrategyBook
-# 2026-08-26, direct user spec: reuse the SAME Support & Resistance "ping-pong"
-# R1/S1/R2/S2 tracker already live on BANKNIFTY (D1TrapSRBook) as OI-ORB's own
-# per-position stop-loss, replacing the removed SMA-exit. Reused directly (not
-# reimplemented) -- this is genuine platform-shared logic the user explicitly
-# asked to reuse, not another strategy's private decision logic.
+# Shared hard ₹/lot risk-cap constant (not the S&R tracker itself, which OI-ORB
+# no longer uses as of 2026-08-27 -- see _update_vwap_sl_and_check's own docstring).
 from strategies.d1_trap_option.support_resistance import (
-    SupportResistanceCalculator, _MAX_RISK_RS_PER_LOT as _SR_MAX_RISK_RS_PER_LOT,
+    _MAX_RISK_RS_PER_LOT as _SR_MAX_RISK_RS_PER_LOT,
 )
 from strategies.oi_orb_screener import filters as oi_filters
 from strategies.oi_orb_screener import screener
@@ -200,9 +197,17 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         strike_otm_pct: float = 2.0,
         orb_start: str = "09:15",
         orb_end: str = "09:25",
-        scan_start: str = "09:25",
-        entry_window_start: str = "09:25",
-        entry_window_end: str = "10:30",
+        scan_start: str = "09:26",
+        entry_window_start: str = "09:26",
+        entry_window_end: str = "15:00",
+        # 2026-08-27, direct user spec: two scan sessions -- session 1 is the
+        # single point-in-time scan_start above; session 2 re-scans between
+        # afternoon_scan_start and afternoon_scan_end, adding any newly-
+        # qualifying stock. No scanning happens outside these two windows.
+        two_session_scan_enabled: bool = True,
+        afternoon_scan_start: str = "12:00",
+        afternoon_scan_end: str = "13:00",
+        afternoon_scan_interval_sec: float = 300.0,
         # 2026-08-25, direct user spec: five additive, independently-
         # toggleable filters (see filters.py's own module docstring for the
         # real incident this addresses -- SAIL fired a CALL breakout right
@@ -225,13 +230,19 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         oi_roc_min_pct: float = 3.0,
         oi_roc_lookback_sec: float = 300.0,
         chain_watch_max_stocks: int = 2,
-        # 2026-08-26, direct user spec: matches D1TrapSRBook's OWN validated
-        # sr_tf_minutes default (3) for this identical S&R tracker, already
-        # proven via a real backtest sweep on BANKNIFTY -- not validated for
-        # stocks specifically, but a real evidence-based starting point rather
-        # than an arbitrary guess (the original 1-min choice here was exactly
-        # that -- untested, and confirmed noisier than 3-min by the same sweep).
-        sr_tf_minutes: int = 3,
+        # 2026-08-27, direct user spec: replaces the ORB-breach entry trigger with
+        # a stock-VWAP retest. See screener.py's VwapState/check_vwap_retest_entry
+        # docstrings for the full mechanic. Fresh, unvalidated defaults (this
+        # strategy still can't be backtested -- same honest limitation as every
+        # OI-ORB mechanic so far) -- watch real forward telemetry before trusting
+        # them.
+        vwap_entry_min_gap_pct: float = 0.15,
+        vwap_cancel_if_unreached: bool = True,
+        vwap_sl_tf_minutes: int = 5,
+        # 2026-08-27, direct user spec: SL/target now track the OPTION's own
+        # premium (its own VWAP, its own bars), not the underlying stock's
+        # spot price -- see screener.compute_option_premium_sl_arm/_target.
+        rr_multiple: float = 2.0,
     ) -> None:
         super().__init__(bus, cfg, _UNDERLYING_SENTINEL, client_id, binding_id)
         self._strategy_name = "oi_orb_screener"
@@ -262,6 +273,11 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._screener_cfg["SCAN_START"] = scan_start
         self._screener_cfg["ENTRY_WINDOW_START"] = entry_window_start
         self._screener_cfg["ENTRY_WINDOW_END"] = entry_window_end
+        self._screener_cfg["TWO_SESSION_SCAN_ENABLED"] = two_session_scan_enabled
+        self._screener_cfg["AFTERNOON_SCAN_START"] = afternoon_scan_start
+        self._screener_cfg["AFTERNOON_SCAN_END"] = afternoon_scan_end
+        self._screener_cfg["AFTERNOON_SCAN_INTERVAL_SEC"] = afternoon_scan_interval_sec
+        self._screener_cfg["RR_MULTIPLE"] = rr_multiple
 
         # ── 5 additive filters: config + one dedicated log file each ────
         self._filters_cfg = {
@@ -279,7 +295,10 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             "oi_roc_lookback_sec": oi_roc_lookback_sec,
         }
         self._chain_watch_max_stocks = max(0, int(chain_watch_max_stocks))
-        self._sr_tf_minutes = max(1, int(sr_tf_minutes))
+        self._vwap_entry_min_gap_pct = max(0.0, float(vwap_entry_min_gap_pct))
+        self._vwap_cancel_if_unreached = bool(vwap_cancel_if_unreached)
+        self._vwap_sl_tf_minutes = max(1, int(vwap_sl_tf_minutes))
+        self._rr_multiple = max(0.1, float(rr_multiple))
         self._flog = {
             name: _make_filter_logger(name, client_id, binding_id) for name in _FILTER_NAMES
         }
@@ -297,12 +316,13 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._regime: Optional[str] = None
         self._already_fired: set = set()
         self._entry_window_done_logged = False
-        # "50% rejection rule" state (screener.check_rejection_pattern) --
-        # running post-ORB extreme per symbol, and the set of (symbol, side)
-        # pairs already marked rejected for today (never re-evaluated even
-        # on a later legitimate breakout).
-        self._peak_since_orb: Dict[str, float] = {}
-        self._trough_since_orb: Dict[str, float] = {}
+        # (symbol, side) pairs no longer eligible to enter today -- as of
+        # 2026-08-27 populated solely by the VWAP cancel-if-unreached rule
+        # (see _run_today_pipeline's entry-window-close handling). The old
+        # ORB-push-then-retrace "50% rejection rule" was removed along with
+        # the ORB-breach entry trigger it was designed to gate -- it doesn't
+        # map onto a VWAP-retest entry (screener.check_rejection_pattern is
+        # left in place, unused, in case a future ORB-based mechanic wants it).
         self._rejected: set = set()
 
         # ── 5-filter tracking state, keyed by stock symbol ──────────────
@@ -314,13 +334,10 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._oi_history: Dict[str, list] = {}                      # [(unix_ts, oi_spurt_pct), ...] for OI ROC
         self._oi_history_last_poll_ts: float = 0.0                  # throttle: don't re-hit the OI-Spurt endpoint every cycle
         self._last_heartbeat_log_ts: float = 0.0                    # throttle: periodic per-stock status line
-        # 2026-08-27, direct user spec: "I want a confirm close in 1 min TF" --
-        # entries now require a CONFIRMED 1-min bar CLOSE beyond ORB-high/low,
-        # not a raw instantaneous poll price crossing it (a brief wick that
-        # reverts before the next poll snapshot must NOT fire a signal).
-        # Tracks which minute-bucket key was last seen per symbol so a
-        # newly-closed bar is detected and evaluated exactly once.
-        self._last_bar_key_for_signal: Dict[str, str] = {}
+        # ── VWAP retest entry state (2026-08-27, replaces the ORB-breach
+        # entry trigger) -- see screener.VwapState/check_vwap_retest_entry.
+        self._vwap = screener.VwapState()
+        self._vwap_armed: Dict[str, bool] = {}   # symbol -> has it moved far enough from vwap to arm a retest yet
 
         # ── contract/feed/position state, keyed by stock symbol ────────
         self._pending_contracts: Dict[str, "stock_resolve.ResolvedContract"] = {}
@@ -332,20 +349,32 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._option_key_subscribed: Dict[str, str] = {}
         self._eod_closing: Set[str] = set()
 
-        # ── S&R (R1/S1/R2/S2 ping-pong) stop-loss, replacing the removed
-        # SMA-exit (2026-08-26, direct user spec) -- one shared calculator
-        # instance, keyed internally by stock symbol; seeded FRESH the
-        # moment a position opens on that symbol (not before), tracked on
-        # the stock's own live spot price (never option premium, same
-        # honest limitation Liquidity Trap/Sweep already documented: no
-        # validated delta/greeks model exists in this codebase to translate
-        # a spot-based level into an option-premium one).
-        self._sr_calc = SupportResistanceCalculator()
-        self._sr_bar_key: Dict[str, str] = {}    # symbol -> current forming 1-min bar's "HH:MM" key
-        self._sr_bar_cur: Dict[str, dict] = {}   # symbol -> {"h","l","ts"} for the forming bar
-        self._live_spot_ltp: Dict[str, float] = {}   # symbol -> most recent live spot tick (UI + SL check)
-        self._live_sl: Dict[str, float] = {}         # symbol -> current live SL level (S1 for CALL, R1 for PUT)
+        # ── VWAP-relative structural stop-loss + fixed-RR target (2026-08-27,
+        # replaces the removed S&R R1/S1/R2/S2 tracker) -- tracked on the
+        # OPTION's OWN live premium (its own VWAP, its own bars), NOT the
+        # underlying stock's spot price ("checking for target and SL in
+        # stock, change it to the option which we are taking", direct user
+        # spec). See _update_option_sl_target_and_check's own docstring for
+        # the full mechanic. VWAP reference = the broker's own ATP field on
+        # each OptionTick (same "VWAP = broker ATP, never computed
+        # internally" convention SellStraddle's PoolIndicatorEngine already
+        # uses for this exact reason -- the feed already supplies it, no
+        # need to reconstruct it from a volume-delta accumulation). Bar
+        # state is seeded FRESH the moment a position opens on that symbol
+        # (not before) -- a same-day re-entry, or simply a different
+        # strike, is a different instrument entirely.
+        self._live_option_atp: Dict[str, float] = {}    # symbol -> latest broker ATP (= VWAP) for the held option
+        self._option_sl_bar_key: Dict[str, str] = {}    # symbol -> current forming vwap_sl_tf_minutes bar's "HH:MM" key
+        self._option_sl_bar_cur: Dict[str, dict] = {}   # symbol -> {"h","l","c","ts"} for the forming OPTION-premium bar
+        self._live_sl: Dict[str, float] = {}         # symbol -> current live SL level (armed bar's low, option-premium terms)
+        self._live_target: Dict[str, float] = {}     # symbol -> current live target level (option-premium terms)
+        # Stock spot tick feed -- kept for LIVE UI VISIBILITY ONLY now (the
+        # SL/target check itself no longer uses it); see _ensure_spot_feed's
+        # own docstring.
+        self._live_spot_ltp: Dict[str, float] = {}   # symbol -> most recent live spot tick (UI only)
         self._spot_tick_subscribed: Dict[str, bool] = {}
+        # Two-session scan state (2026-08-27, direct user spec).
+        self._afternoon_scan_last_ts: float = 0.0    # throttle: don't re-scan every poll cycle
 
     # ── lifecycle ────────────────────────────────────────────────────────
 
@@ -364,8 +393,6 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._regime = None
         self._already_fired = set()
         self._entry_window_done_logged = False
-        self._peak_since_orb = {}
-        self._trough_since_orb = {}
         self._rejected = set()
         self._stock_chains = {}
         self._chain_subscribed = {}
@@ -374,7 +401,9 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._volume_history = {}
         self._oi_history = {}
         self._oi_history_last_poll_ts = 0.0
-        self._last_bar_key_for_signal = {}
+        self._vwap = screener.VwapState()
+        self._vwap_armed = {}
+        self._afternoon_scan_last_ts = 0.0
         self._clog.info("OiOrb[%s/%s]: session reset for new trading day.",
                          self._client_id, self._binding_id)
 
@@ -383,6 +412,13 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._subscribe(Topic.OI_ORB_ORDER_FILL)
         self._subscribe(Topic.OPTION_TICK)
         self._subscribe(Topic.EQUITY_TICK)
+        # 2026-08-27: the dedicated upstox2 feeder's register_extra_spot_keys()
+        # publishes stock spot ticks as INDEX_TICK (Upstox-native mechanic),
+        # not EQUITY_TICK (that's the Fyers-only subscribe_fno_equity route,
+        # still used as a fallback when no dedicated feeder is configured --
+        # see _ensure_spot_feed). Subscribe both so _spot_tick_loop catches
+        # whichever one actually fires.
+        self._subscribe(Topic.INDEX_TICK)
         self._tasks.append(asyncio.create_task(
             self._daily_loop(), name=f"oiorb_daily_{self._client_id}_{self._binding_id}"))
         self._tasks.append(asyncio.create_task(
@@ -448,13 +484,13 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 "paper_mode": bool(r["paper_mode"]), "opened_at": datetime.fromisoformat(r["entry_ts"]),
             }
             self._ensure_option_feed(r["symbol"], contract)
-            # 2026-08-26: restart-safe by construction, but the S&R ladder itself is
-            # NOT persisted (only the position is) -- a restored position's S&R
-            # tracker starts fresh/cold from this moment, same as a brand new entry.
+            # 2026-08-27: restart-safe by construction, but the armed VWAP-SL level
+            # itself is NOT persisted (only the position is) -- a restored position's
+            # SL tracker starts fresh/cold from this moment, same as a brand new entry.
             # Known, accepted gap: the position runs on the hard ₹/lot risk cap alone
-            # (see _check_hard_risk_cap) until the first S1/R1 level re-establishes
-            # from live ticks after the restart, exactly like a fresh entry's own
-            # initial unprotected window (see _on_fill's BUY branch).
+            # (see _check_hard_risk_cap) until the first adverse vwap_sl_tf_minutes bar
+            # re-arms a level from live ticks after the restart, exactly like a fresh
+            # entry's own initial unprotected window (see _on_fill's BUY branch).
             self._ensure_spot_feed(r["symbol"])
             self._clog.info("OiOrb[%s/%s]: RESTORED open position %s %s%d qty=%d @ %.2f from DB.",
                              self._client_id, self._binding_id, r["symbol"],
@@ -467,6 +503,90 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         if already_fired or rejected:
             self._clog.info("OiOrb[%s/%s]: restored %d already-fired + %d rejected signal(s) from DB.",
                              self._client_id, self._binding_id, len(already_fired), len(rejected))
+
+    async def _maybe_run_afternoon_scan(self, now: datetime, cfg: dict) -> None:
+        """2026-08-27, direct user spec: "next session is after noon session
+        which will start scan for stocks form 12.00 onwards till 1 pm and any
+        stosk which comes will be added." Session 2 -- unlike session 1's
+        single point-in-time scan at SCAN_START, this window re-runs
+        build_shortlist() periodically (throttled to
+        AFTERNOON_SCAN_INTERVAL_SEC, default 300s, so it doesn't hammer NSE
+        every POLL_SECONDS cycle) and ADDS any newly-qualifying symbol to the
+        existing shortlist -- never drops or replaces one already being
+        watched. Regime stays whatever was frozen at ORB_END (09:25) all day
+        (direct user choice) -- no fresh NIFTY regime fetch here. No-ops
+        entirely outside the AFTERNOON_SCAN_START-AFTERNOON_SCAN_END window,
+        or if TWO_SESSION_SCAN_ENABLED is off, or if IGNORE_TIME_WINDOWS is on
+        (connectivity-test mode already bypasses all real timing)."""
+        if not cfg.get("TWO_SESSION_SCAN_ENABLED", True) or cfg.get("IGNORE_TIME_WINDOWS"):
+            return
+        now_key = now.strftime("%H:%M")
+        if not (cfg["AFTERNOON_SCAN_START"] <= now_key < cfg["AFTERNOON_SCAN_END"]):
+            return
+        now_ts = now.timestamp()
+        interval = float(cfg.get("AFTERNOON_SCAN_INTERVAL_SEC", 300.0) or 300.0)
+        if now_ts - self._afternoon_scan_last_ts < interval:
+            return
+        self._afternoon_scan_last_ts = now_ts
+
+        try:
+            shortlist, _nifty_pchange = await asyncio.to_thread(screener.build_shortlist, self._nse, cfg)
+        except Exception as exc:
+            self._clog.warning("OiOrb[%s/%s]: afternoon scan failed (non-fatal, will retry next "
+                                "interval): %s", self._client_id, self._binding_id, exc)
+            return
+        if shortlist is None or shortlist.empty:
+            return
+
+        sl_indexed = shortlist.set_index("symbol")
+        new_symbols = [s for s in shortlist["symbol"].tolist() if s not in self._shortlist_symbols]
+        if not new_symbols:
+            return
+
+        new_rows = []
+        for sym in new_symbols:
+            row = sl_indexed.loc[sym]
+            pchange = float(row["pChange"]) if "pChange" in shortlist.columns else 0.0
+            self._shortlist_symbols.append(sym)
+            self._shortlist_pchange[sym] = pchange
+            if "previousClose" in shortlist.columns:
+                self._prev_close_map[sym] = float(row["previousClose"])
+            new_rows.append({
+                "symbol": sym, "price_change_pct": pchange,
+                "oi_spurt_pct": float(row["oi_spurt_pct"]) if "oi_spurt_pct" in shortlist.columns else None,
+                "score": float(row["score"]) if "score" in shortlist.columns else None,
+                "side_bias": "bullish" if pchange > 0 else "bearish",
+            })
+            await asyncio.to_thread(
+                store.log_signal_event, self._client_id, self._binding_id, sym,
+                "afternoon_scan_added", side=screener.side_from_pchange(pchange),
+                detail=f"pChange={pchange:+.2f}%")
+            # Backfill this NEW symbol's own ORB/VWAP from Yahoo (real 09:15-start
+            # basis) -- it was never polled during the morning session, so it has
+            # no bar history of its own yet, unlike session-1 stocks.
+            try:
+                await asyncio.to_thread(screener.backfill_orb_from_yahoo, self._bars, [sym], cfg)
+                await asyncio.to_thread(screener.backfill_vwap_from_yahoo, self._vwap, [sym], cfg)
+            except Exception:
+                self._clog.exception("OiOrb[%s/%s]: afternoon-scan backfill failed for %s "
+                                      "(non-fatal, VWAP will start cold from now).",
+                                      self._client_id, self._binding_id, sym)
+            # Chain subscription for the 5 additive filters, same shared-WS-budget
+            # cap as the morning batch -- only if there's still room.
+            if len(self._shortlist_symbols) <= self._chain_watch_max_stocks:
+                try:
+                    spot = float(row["lastPrice"]) if "lastPrice" in shortlist.columns else 0.0
+                    await self._ensure_chain_subscription(sym, spot)
+                except Exception:
+                    self._clog.exception("OiOrb[%s/%s]: afternoon-scan chain subscription failed "
+                                          "for %s.", self._client_id, self._binding_id, sym)
+
+        await asyncio.to_thread(store.record_shortlist, self._client_id, self._binding_id, new_rows)
+        self._clog.info(
+            "OiOrb[%s/%s]: afternoon scan added %d new stock(s): %s",
+            self._client_id, self._binding_id, len(new_symbols),
+            ", ".join(f"{s}({self._shortlist_pchange[s]:+.2f}%)" for s in new_symbols),
+        )
 
     async def _run_today_pipeline(self) -> None:
         cfg = self._screener_cfg
@@ -591,11 +711,20 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                                       self._client_id, self._binding_id, sym)
 
         await asyncio.to_thread(screener.backfill_orb_from_yahoo, self._bars, self._shortlist_symbols, cfg)
+        # 2026-08-27: VWAP is now the entry trigger (see below) AND the SL reference --
+        # backfilled the same way ORB/SMA already are, real 09:15-start basis instead of
+        # starting cold from whatever time live polling first begins.
+        await asyncio.to_thread(screener.backfill_vwap_from_yahoo, self._vwap, self._shortlist_symbols, cfg)
 
-        start_time = datetime.now(IST)
-        deadline = start_time + timedelta(minutes=cfg["MAX_MONITOR_MINUTES"])
+        # 2026-08-27: MAX_MONITOR_MINUTES used to be this loop's own outer deadline, but a
+        # position can now stay open (and needs live VWAP updates for its own SL) all the
+        # way to EOD square-off -- far longer than a 90-min scan window. The loop now keeps
+        # running (poll + VWAP maintenance) past ENTRY_WINDOW_END for as long as ANY
+        # position is still open, bounded only by a hard end-of-day safety cutoff; new
+        # entries still stop being evaluated the instant the entry window itself closes.
+        _hard_stop_time = dtime(15, 20)
 
-        while self._running and datetime.now(IST) < deadline:
+        while self._running and datetime.now(IST).time() < _hard_stop_time:
             now = datetime.now(IST)
             now_key = now.strftime("%H:%M")
 
@@ -607,6 +736,8 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                                     self._client_id, self._binding_id, exc)
                 await asyncio.sleep(cfg["POLL_SECONDS"])
                 continue
+
+            await self._maybe_run_afternoon_scan(now, cfg)
 
             _heartbeat_parts: list = []
             for sym in self._shortlist_symbols:
@@ -629,22 +760,23 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 oi_hist = self._oi_history.get(sym)
                 oi_str = f"OI={oi_hist[-1][1]:+.1f}%" if oi_hist else "OI=—"
 
+                vwap_now = self._vwap.current(sym)
                 orb_lvl = self._orb_frozen.get(sym)
+                _vwap_str = f"VWAP={vwap_now:.2f} armed={self._vwap_armed.get(sym, False)}" if vwap_now else "VWAP=—"
                 if orb_lvl is not None:
                     orb_high, orb_low = orb_lvl
-                    dist_call_pct = (orb_high - ltp) / ltp * 100.0 if ltp else 0.0
-                    dist_put_pct = (ltp - orb_low) / ltp * 100.0 if ltp else 0.0
                     _heartbeat_parts.append(
-                        f"{sym}={ltp:.2f} [ORB {orb_low:.2f}-{orb_high:.2f}] "
-                        f"CALL@+{dist_call_pct:.2f}% PUT@-{dist_put_pct:.2f}% {oi_str}"
+                        f"{sym}={ltp:.2f} [ORB {orb_low:.2f}-{orb_high:.2f}] {_vwap_str} {oi_str}"
                     )
                 else:
-                    _heartbeat_parts.append(f"{sym}={ltp:.2f} [ORB pending] {oi_str}")
+                    _heartbeat_parts.append(f"{sym}={ltp:.2f} [ORB pending] {_vwap_str} {oi_str}")
 
                 # Volume-confirmation filter: totalTradedVolume is a CUMULATIVE session
                 # total (same gotcha OI-Flow's own BarAccumulator already handles for
                 # option volume) -- track the poll-to-poll DELTA, not the raw number,
-                # and keep a short rolling history for a trailing average.
+                # and keep a short rolling history for a trailing average. The SAME
+                # delta also feeds the running session VWAP (screener.VwapState) --
+                # both need exactly the same poll-to-poll volume delta.
                 if "totalTradedVolume" in live.columns:
                     try:
                         cum_vol = float(live.loc[sym, "totalTradedVolume"])
@@ -656,43 +788,10 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                             hist.append(delta)
                             if len(hist) > 30:
                                 del hist[:-30]
+                            self._vwap.update(sym, ltp, delta)
                         self._volume_cum_last[sym] = cum_vol
                     except Exception:
                         pass
-
-                # "50% rejection rule" tracking -- only meaningful once the
-                # ORB level actually exists to measure a push beyond.
-                orb_lvl = self._orb_frozen.get(sym)
-                if orb_lvl is not None:
-                    orb_high, orb_low = orb_lvl
-                    self._peak_since_orb[sym] = max(self._peak_since_orb.get(sym, ltp), ltp)
-                    self._trough_since_orb[sym] = min(self._trough_since_orb.get(sym, ltp), ltp)
-                    if (sym, "CALL") not in self._rejected and screener.check_rejection_pattern(
-                            self._peak_since_orb[sym], orb_high, ltp, "CALL",
-                            cfg["REJECTION_MIN_RISE_PCT"], cfg["REJECTION_RETRACE_FRACTION"]):
-                        self._rejected.add((sym, "CALL"))
-                        self._clog.info("OiOrb[%s/%s]: %s CALL marked REJECTED (50%% rejection rule) -- "
-                                         "peak=%.2f orb_high=%.2f current=%.2f",
-                                         self._client_id, self._binding_id, sym,
-                                         self._peak_since_orb[sym], orb_high, ltp)
-                        await asyncio.to_thread(
-                            store.log_signal_event, self._client_id, self._binding_id, sym,
-                            "rejection_rule_triggered", side="CALL",
-                            detail=f"peak={self._peak_since_orb[sym]:.2f} orb_high={orb_high:.2f} current={ltp:.2f}",
-                            trigger_price=ltp, orb_high=orb_high, orb_low=orb_low)
-                    if (sym, "PUT") not in self._rejected and screener.check_rejection_pattern(
-                            self._trough_since_orb[sym], orb_low, ltp, "PUT",
-                            cfg["REJECTION_MIN_RISE_PCT"], cfg["REJECTION_RETRACE_FRACTION"]):
-                        self._rejected.add((sym, "PUT"))
-                        self._clog.info("OiOrb[%s/%s]: %s PUT marked REJECTED (50%% rejection rule) -- "
-                                         "trough=%.2f orb_low=%.2f current=%.2f",
-                                         self._client_id, self._binding_id, sym,
-                                         self._trough_since_orb[sym], orb_low, ltp)
-                        await asyncio.to_thread(
-                            store.log_signal_event, self._client_id, self._binding_id, sym,
-                            "rejection_rule_triggered", side="PUT",
-                            detail=f"trough={self._trough_since_orb[sym]:.2f} orb_low={orb_low:.2f} current={ltp:.2f}",
-                            trigger_price=ltp, orb_high=orb_high, orb_low=orb_low)
 
             self._maybe_log_heartbeat(_heartbeat_parts)
             await self._maybe_poll_oi_history(now)
@@ -719,58 +818,91 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             entry_window_open = cfg.get("IGNORE_TIME_WINDOWS") or (
                 cfg["ENTRY_WINDOW_START"] <= now_key < cfg["ENTRY_WINDOW_END"])
             if self._regime is not None and entry_window_open:
+                regime_filter_on = cfg.get("REGIME_FILTER_ENABLED", True)
                 for sym in self._shortlist_symbols:
-                    if sym not in self._orb_frozen or sym not in live.index:
+                    if sym not in live.index or sym in self._positions or sym in self._pending_contracts:
                         continue
-                    sig, last_key = self._maybe_confirmed_breakout(sym, now, cfg)
-                    if sig is not None and (sig.symbol, sig.side) in self._rejected:
-                        self._clog.info("OiOrb[%s/%s]: %s %s breakout fired but skipped -- "
-                                         "already REJECTED (50%% rejection rule) earlier today.",
-                                         self._client_id, self._binding_id, sig.symbol, sig.side)
-                        await asyncio.to_thread(
-                            store.log_signal_event, self._client_id, self._binding_id, sig.symbol,
-                            "signal_skipped_rejected", side=sig.side, detail=sig.reason,
-                            trigger_price=sig.trigger_price, orb_high=sig.orb_high, orb_low=sig.orb_low)
-                        sig = None
-                    if sig is not None:
+                    side = screener.side_from_pchange(self._shortlist_pchange.get(sym, 0.0))
+                    if (sym, side) in self._already_fired or (sym, side) in self._rejected:
+                        continue
+                    if not screener.side_allowed_by_regime(side, self._regime, regime_filter_on):
+                        continue
+                    vwap_now = self._vwap.current(sym)
+                    if vwap_now is None:
+                        continue   # not enough volume history yet to trust a VWAP reading
+                    ltp = float(live.loc[sym, "lastPrice"])
+                    armed = self._vwap_armed.get(sym, False)
+                    new_armed, fire = screener.check_vwap_retest_entry(
+                        side, ltp, vwap_now, armed, self._vwap_entry_min_gap_pct)
+                    self._vwap_armed[sym] = new_armed
+                    if not fire:
+                        continue
+                    self._already_fired.add((sym, side))
+                    orb_lvl = self._orb_frozen.get(sym, (0.0, 0.0))
+                    sig = screener.Signal(symbol=sym, side=side, reason="vwap_retest",
+                                          trigger_price=ltp, orb_high=orb_lvl[0], orb_low=orb_lvl[1],
+                                          ts=now.strftime("%H:%M:%S"))
+                    self._clog.info(
+                        "OiOrb[%s/%s]: SIGNAL %s BUY %s VWAP-RETEST ltp=%.2f vwap=%.2f reason=%s",
+                        self._client_id, self._binding_id, sig.symbol, sig.side,
+                        sig.trigger_price, vwap_now, sig.reason)
+                    await asyncio.to_thread(
+                        store.log_signal_event, self._client_id, self._binding_id, sig.symbol,
+                        "signal_fired", side=sig.side, detail=sig.reason,
+                        trigger_price=sig.trigger_price, orb_high=sig.orb_high, orb_low=sig.orb_low)
+                    if self._evaluate_additive_filters(sig):
+                        asyncio.create_task(self._handle_signal(sig))
+                    else:
                         self._clog.info(
-                            "OiOrb[%s/%s]: SIGNAL %s BUY %s 1m-CONFIRMED-CLOSE=%.2f (bar %s) "
-                            "ORB=%.2f-%.2f reason=%s",
-                            self._client_id, self._binding_id, sig.symbol, sig.side,
-                            sig.trigger_price, last_key, sig.orb_low, sig.orb_high, sig.reason)
-                        await asyncio.to_thread(
-                            store.log_signal_event, self._client_id, self._binding_id, sig.symbol,
-                            "signal_fired", side=sig.side, detail=sig.reason,
-                            trigger_price=sig.trigger_price, orb_high=sig.orb_high, orb_low=sig.orb_low)
-                        if self._evaluate_additive_filters(sig):
-                            asyncio.create_task(self._handle_signal(sig))
-                        else:
-                            self._clog.info(
-                                "OiOrb[%s/%s]: %s %s signal BLOCKED by an enabled additive filter -- "
-                                "see the individual oiorb_filter_* logs for which one and why.",
-                                self._client_id, self._binding_id, sig.symbol, sig.side)
+                            "OiOrb[%s/%s]: %s %s signal BLOCKED by an enabled additive filter -- "
+                            "see the individual oiorb_filter_* logs for which one and why.",
+                            self._client_id, self._binding_id, sig.symbol, sig.side)
             elif (not cfg.get("IGNORE_TIME_WINDOWS") and now_key >= cfg["ENTRY_WINDOW_END"]
                   and not self._entry_window_done_logged):
                 self._entry_window_done_logged = True
-                self._clog.info("OiOrb[%s/%s]: entry window closed for today (%s). Monitoring stops; "
-                                 "EOD loop will still square off any open positions.",
+                # 2026-08-27, direct user spec, default ON: any shortlisted candidate that
+                # never armed+retested VWAP by entry-window-end is cancelled for the day --
+                # logged to the audit trail; the loop itself already naturally stops
+                # evaluating new entries here regardless (entry_window_open goes False), this
+                # just makes the "why nothing happened for this stock" reason explicit.
+                if self._vwap_cancel_if_unreached:
+                    regime_filter_on = cfg.get("REGIME_FILTER_ENABLED", True)
+                    for sym in self._shortlist_symbols:
+                        side = screener.side_from_pchange(self._shortlist_pchange.get(sym, 0.0))
+                        if ((sym, side) in self._already_fired or (sym, side) in self._rejected
+                                or not screener.side_allowed_by_regime(side, self._regime, regime_filter_on)):
+                            continue
+                        self._rejected.add((sym, side))
+                        self._clog.info(
+                            "OiOrb[%s/%s]: %s %s CANCELLED -- never retested VWAP by entry-window-end (%s).",
+                            self._client_id, self._binding_id, sym, side, cfg["ENTRY_WINDOW_END"])
+                        await asyncio.to_thread(
+                            store.log_signal_event, self._client_id, self._binding_id, sym,
+                            "vwap_entry_window_expired", side=side)
+                self._clog.info("OiOrb[%s/%s]: entry window closed for today (%s). New entries stop; "
+                                 "still polling for VWAP/SL maintenance on any open position until EOD.",
                                  self._client_id, self._binding_id, cfg["ENTRY_WINDOW_END"])
+
+            if (self._entry_window_done_logged and not self._positions
+                    and not cfg.get("IGNORE_TIME_WINDOWS")):
+                # Entry window closed AND every position is already flat -- nothing left
+                # for this loop to usefully do today.
                 break
 
             await asyncio.sleep(cfg["POLL_SECONDS"])
 
     async def _wait_until_actionable(self, cfg) -> bool:
-        """2026-08-24, direct user spec: "it should scan for stocks after
-        9.25am only... application will start at 9.25.05am" -- waits for
-        SCAN_START (default 09:25, matching the new 09:15-09:25 ORB window),
-        not the old "any time after 09:10" gate. Since the whole pipeline
-        now never starts before the ORB window has already closed, live
-        polling can never build real 09:15-09:25 bars itself -- the Yahoo
-        backfill is the ONLY source of them, every day (see screener.py's
-        ORB_END docstring)."""
+        """Waits for SCAN_START (session 1's single point-in-time scan,
+        default 09:26 -- direct user spec) before running today's pipeline at
+        all. Since the whole pipeline never starts before the 09:15-09:25 ORB
+        window has already closed, live polling can never build real
+        09:15-09:25 bars itself -- the Yahoo backfill is the ONLY source of
+        them, every day (see screener.py's ORB_END docstring). Session 2 (the
+        12:00-13:00 afternoon re-scan) is handled separately, inside the main
+        loop -- see _maybe_run_afternoon_scan."""
         if cfg.get("IGNORE_TIME_WINDOWS"):
             return True
-        scan_start = cfg.get("SCAN_START", "09:25")
+        scan_start = cfg.get("SCAN_START", "09:26")
         while self._running:
             now = datetime.now(IST)
             now_key = now.strftime("%H:%M")
@@ -944,7 +1076,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         key = contract.upstox_key
         if not key or self._option_key_subscribed.get(stock_symbol) == key:
             return
-        gf = getattr(self._bus, "_global_feeder", None)
+        gf = getattr(self._bus, "_oiorb_feeder", None) or getattr(self._bus, "_global_feeder", None)
         if gf is None or not hasattr(gf, "subscribe_tokens"):
             self._clog.warning("OiOrb[%s/%s]: no live GlobalFeeder available -- cannot subscribe %s.",
                                 self._client_id, self._binding_id, stock_symbol)
@@ -960,23 +1092,54 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         this stock's OWN spot price, but ONLY once a position actually opens on
         it (never for the whole shortlist all day) -- keeps the shared WS feed
         budget impact minimal (same budget-conscious philosophy already used for
-        chain_watch_max_stocks) while giving real tick-by-tick reactivity
-        exactly where it matters: the S&R SL and the live spot LTP shown in the
-        UI. Idempotent per stock symbol. Mirrors _ensure_option_feed's own
-        pattern, using the Fyers-only FnO-equity-spot route (same one
-        strategies/fno_positional/book.py already uses for the identical need)."""
+        chain_watch_max_stocks).
+
+        2026-08-27: SL/target now track the OPTION's own premium, not the
+        stock's spot price (see _update_option_sl_target_and_check) -- this
+        feed is kept purely so monitoring_state()'s `spot_ltp` field still
+        shows a live reference price in the UI, not because anything trading-
+        relevant depends on it anymore. Idempotent per stock symbol.
+
+        2026-08-27: prefers the dedicated upstox2 feeder (`bus._oiorb_feeder`,
+        see run_system.py) via Upstox-native `register_extra_spot_keys` --
+        needs this stock's own NSE_EQ instrument key, resolved via
+        stock_resolve.resolve_eq_instrument_key() (same master-JSON cache
+        used for lot-size lookups). Falls back to the shared feeder's
+        Fyers-only `subscribe_fno_equity` route (same one
+        strategies/fno_positional/book.py uses) only when no dedicated
+        upstox2 feeder is configured."""
         if self._spot_tick_subscribed.get(stock_symbol):
             return
+        oiorb_gf = getattr(self._bus, "_oiorb_feeder", None)
+        if oiorb_gf is not None and hasattr(oiorb_gf, "register_extra_spot_keys"):
+            eq_key = stock_resolve.resolve_eq_instrument_key(stock_symbol)
+            if eq_key:
+                try:
+                    oiorb_gf.register_extra_spot_keys({eq_key: stock_symbol})
+                    self._spot_tick_subscribed[stock_symbol] = True
+                    self._clog.info("OiOrb[%s/%s]: subscribed live spot feed for %s via dedicated "
+                                     "upstox2 feeder (%s) (live UI reference price only).",
+                                     self._client_id, self._binding_id, stock_symbol, eq_key)
+                    return
+                except Exception:
+                    self._clog.exception("OiOrb[%s/%s]: dedicated upstox2 spot feed subscribe "
+                                          "failed for %s -- falling back to shared feeder.",
+                                          self._client_id, self._binding_id, stock_symbol)
+            else:
+                self._clog.warning("OiOrb[%s/%s]: no NSE_EQ instrument key resolved for %s -- "
+                                    "cannot use dedicated upstox2 spot feed, falling back.",
+                                    self._client_id, self._binding_id, stock_symbol)
+
         gf = getattr(self._bus, "_global_feeder", None)
         if gf is None or not hasattr(gf, "subscribe_fno_equity"):
             self._clog.warning("OiOrb[%s/%s]: no live GlobalFeeder available -- cannot subscribe "
-                                "live spot feed for %s (S&R SL will not track for it).",
+                                "live spot feed for %s (UI reference price only).",
                                 self._client_id, self._binding_id, stock_symbol)
             return
         try:
             gf.subscribe_fno_equity(f"NSE:{stock_symbol}-EQ", stock_symbol)
             self._spot_tick_subscribed[stock_symbol] = True
-            self._clog.info("OiOrb[%s/%s]: subscribed live spot feed for %s (S&R SL tracking active).",
+            self._clog.info("OiOrb[%s/%s]: subscribed live spot feed for %s (live UI reference price only).",
                              self._client_id, self._binding_id, stock_symbol)
         except Exception:
             self._clog.exception("OiOrb[%s/%s]: live spot feed subscribe failed for %s.",
@@ -1006,7 +1169,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             return
         self._stock_chains[stock_symbol] = mat
 
-        gf = getattr(self._bus, "_global_feeder", None)
+        gf = getattr(self._bus, "_oiorb_feeder", None) or getattr(self._bus, "_global_feeder", None)
         if gf is None or not hasattr(gf, "subscribe_tokens"):
             self._clog.warning("OiOrb[%s/%s]: no live GlobalFeeder available -- chain for %s built "
                                 "but cannot subscribe strikes.", self._client_id, self._binding_id, stock_symbol)
@@ -1026,34 +1189,6 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._clog.info("OiOrb[%s/%s]: chain tracking started for %s (ATM=%.2f depth=%d, %d contracts).",
                          self._client_id, self._binding_id, stock_symbol,
                          mat.snapshot().atm_strike, depth, len(keys))
-
-    def _maybe_confirmed_breakout(self, sym: str, now: datetime, cfg: dict):
-        """2026-08-27, direct user spec: "I want a confirm close in 1 min TF" --
-        a breakout only counts once the 1-min bar for the PREVIOUS minute has
-        fully CLOSED beyond ORB-high/low, not a raw instantaneous poll price (a
-        wick that reverts before the next snapshot must never fire a signal).
-        self._bars is already fed this cycle's tick (self._bars.on_quote, called
-        earlier in the same loop iteration) before this runs, so `last_key`'s
-        bucket -- the PREVIOUS minute -- is now closed for good the first time
-        a new minute key appears for this symbol; evaluated exactly once.
-
-        Returns (Signal | None, last_key) -- last_key is only meaningful
-        (non-None) when a bar genuinely closed this cycle, for the caller's own
-        logging."""
-        current_bar_key = now.strftime("%H:%M")
-        last_key = self._last_bar_key_for_signal.get(sym)
-        self._last_bar_key_for_signal[sym] = current_bar_key
-        if last_key is None or last_key == current_bar_key:
-            return None, None
-        closed_bar = self._bars.bars.get(sym, {}).get(last_key)
-        if closed_bar is None:
-            return None, None
-        orb_high, orb_low = self._orb_frozen[sym]
-        confirm_close = closed_bar["c"]
-        prev_close = self._prev_close_map.get(sym, 0.0)
-        sig = screener.evaluate_breakout(sym, confirm_close, prev_close, orb_high, orb_low,
-                                          self._regime, self._already_fired, cfg, now=now)
-        return sig, last_key
 
     def _maybe_log_heartbeat(self, heartbeat_parts: list) -> None:
         """2026-08-27, direct user spec: real observation was "only one log is
@@ -1136,6 +1271,11 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             if (tick.strike == contract.strike and tick.option_type == contract.option_type
                     and tick.expiry == contract.expiry):
                 self._live_option_ltp[tick.underlying] = tick.ltp
+                # VWAP = broker ATP, never computed internally -- same convention
+                # SellStraddle's PoolIndicatorEngine already uses. Guard against a
+                # stale/zero ATP overwriting a genuinely good prior reading.
+                if tick.atp and tick.atp > 0:
+                    self._live_option_atp[tick.underlying] = float(tick.atp)
                 # 2026-08-26 fix (user request): this used to log every single tick --
                 # dozens per minute per open position, flooding the per-underlying log
                 # with near-duplicate lines. Throttled to once/60s per symbol, matching
@@ -1149,17 +1289,17 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                                       self._client_id, self._binding_id, tick.underlying,
                                       contract.option_type, contract.strike, tick.ltp)
                 await self._check_hard_risk_cap(tick.underlying, tick.ltp)
+                await self._update_option_sl_target_and_check(tick.underlying, tick.ltp, tick.timestamp)
 
     async def _check_hard_risk_cap(self, symbol: str, option_ltp: float) -> None:
-        """2026-08-26, added alongside the S&R SL (not explicitly requested, but
-        the S&R tracker needs a few live bars to establish its first real S1/R1 --
-        a fresh entry (or a restored one after a restart) runs with NO structural
-        SL at all until that first level confirms. This is the SAME universal
-        hard ₹/lot risk cap every other option-buyer strategy in this codebase
-        already carries as a backstop (_MAX_RISK_RS_PER_LOT=2000, reused directly
-        from support_resistance.py, not reimplemented) -- checked on the position's
-        OWN option premium (unlike the S&R SL, which is spot-based), so it's a
-        genuine independent safety net, not a duplicate of the same check."""
+        """2026-08-26, added alongside the structural SL -- a fresh entry (or a
+        restored one after a restart) needs a few live option bars before its
+        first real SL/target confirms, running with NO structural protection
+        at all until then. This is the SAME universal hard ₹/lot risk cap
+        every other option-buyer strategy in this codebase already carries as
+        a backstop (_MAX_RISK_RS_PER_LOT=2000, reused directly from
+        support_resistance.py, not reimplemented) -- an independent safety
+        net that fires regardless of whether the structural SL has armed yet."""
         pos = self._positions.get(symbol)
         if pos is None or symbol in self._eod_closing or option_ltp <= 0:
             return
@@ -1182,21 +1322,35 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
 
     async def _spot_tick_loop(self) -> None:
         """2026-08-26, direct user spec: live spot ticks for a stock, ONLY once
-        a position is open on it (see _ensure_spot_feed) -- feeds the S&R (R1/
-        S1/R2/S2 ping-pong) tracker and checks its live SL level on EVERY tick,
-        not once per candle close, same "checked more often than the reference
-        mechanic's own bar-close-only check" discipline Liquidity Trap/Sweep
-        already use for their own spot-based SL."""
-        q = self._loop_queues.get(Topic.EQUITY_TICK)
-        if q is None:
+        a position is open on it (see _ensure_spot_feed).
+
+        2026-08-27: SL/target moved to the OPTION's own premium (see
+        _update_option_sl_target_and_check, driven by _option_tick_loop
+        instead) -- this loop now exists purely to keep monitoring_state()'s
+        `spot_ltp` field showing a live reference price in the UI."""
+        eq_q = self._loop_queues.get(Topic.EQUITY_TICK)
+        idx_q = self._loop_queues.get(Topic.INDEX_TICK)
+        queues = [q for q in (eq_q, idx_q) if q is not None]
+        if not queues:
             return
+        pending_gets = {asyncio.create_task(q.get()): q for q in queues}
         while self._running:
             try:
-                ev = await asyncio.wait_for(q.get(), timeout=1.0)
-            except asyncio.TimeoutError:
-                continue
+                done, _ = await asyncio.wait(pending_gets.keys(), timeout=1.0,
+                                              return_when=asyncio.FIRST_COMPLETED)
             except asyncio.CancelledError:
+                for t in pending_gets:
+                    t.cancel()
                 break
+            if not done:
+                continue
+            task = next(iter(done))
+            q = pending_gets.pop(task)
+            pending_gets[asyncio.create_task(q.get())] = q
+            try:
+                ev = task.result()
+            except asyncio.CancelledError:
+                continue
             try:
                 if not isinstance(ev, IndexTick):
                     continue
@@ -1207,82 +1361,86 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 if ltp <= 0:
                     continue
                 self._live_spot_ltp[symbol] = ltp
-                await self._update_sr_and_check_sl(symbol, ltp, ev.timestamp)
             except Exception:
                 self._clog.exception("OiOrb[%s/%s]: spot tick processing error (recovered).",
                                       self._client_id, self._binding_id)
 
-    async def _update_sr_and_check_sl(self, symbol: str, ltp: float, ts: datetime) -> None:
-        """Builds self._sr_tf_minutes-min OHLC bars from live spot ticks (own
-        accumulator, NOT self._bars -- that one is REST-poll-driven and shared
-        across the whole shortlist; this one is tick-driven and only exists for
-        symbols with an open position), feeds each CLOSED bar into the shared
-        S&R calculator, and checks the CURRENT live tick (not just the last
-        closed bar) against the tracker's live SL level every time -- a
-        real-time breach doesn't wait for the next candle to close.
+    async def _update_option_sl_target_and_check(self, symbol: str, ltp: float, ts: datetime) -> None:
+        """2026-08-27, direct user spec, replaces the S&R (R1/S1/R2/S2) SL and
+        adds a fixed-RR target -- BOTH now track the OPTION's OWN premium
+        ("checking for target and SL in stock, change it to the option which
+        we are taking"), not the underlying stock's spot price.
 
-        2026-08-26, direct user spec: defaults to 3-min bars, matching
-        D1TrapSRBook's own validated sr_tf_minutes (proven via a real backtest
-        sweep on BANKNIFTY for this identical tracker) -- not 1-min, which was
-        this feature's own original, unvalidated choice."""
-        floored_minute = (ts.minute // self._sr_tf_minutes) * self._sr_tf_minutes
+        OI-ORB only ever BUYS options -- a bought CE and a bought PE both
+        want their OWN premium to rise, so this mechanic is side-INDEPENDENT
+        (unlike the old stock-spot version, where CALL/PUT genuinely pointed
+        opposite directions on the underlying spot).
+
+        Builds self._vwap_sl_tf_minutes-min OHLC bars from live OPTION ticks
+        (own accumulator, driven by _option_tick_loop). On each bar CLOSE,
+        screener.compute_option_premium_sl_arm() checks whether that bar
+        closed BELOW the option's own live VWAP (broker ATP,
+        self._live_option_atp) -- adverse -- and if so RE-ARMS self._live_sl
+        to THAT bar's own LOW, replacing whatever was armed before (re-arms
+        on every adverse bar, not just the first). The target
+        (self._live_target) is recomputed alongside every re-arm: entry +
+        rr_multiple * (entry - armed_sl). A bar closing on the favorable
+        side leaves both levels untouched.
+
+        The CURRENT live tick (not just the last closed bar) is checked
+        against BOTH levels on EVERY tick via screener.
+        check_option_premium_exit() -- a real-time breach doesn't wait for
+        the next candle to close."""
+        floored_minute = (ts.minute // self._vwap_sl_tf_minutes) * self._vwap_sl_tf_minutes
         key = f"{ts.hour:02d}:{floored_minute:02d}"
-        cur_key = self._sr_bar_key.get(symbol)
+        cur_key = self._option_sl_bar_key.get(symbol)
+        pos = self._positions.get(symbol)
         if cur_key is None:
-            self._sr_bar_key[symbol] = key
-            self._sr_bar_cur[symbol] = {"h": ltp, "l": ltp, "ts": ts}
+            self._option_sl_bar_key[symbol] = key
+            self._option_sl_bar_cur[symbol] = {"h": ltp, "l": ltp, "c": ltp, "ts": ts}
         elif key != cur_key:
-            closed = self._sr_bar_cur[symbol]
-            self._sr_calc.process_straddle_candle(symbol, {
-                "timestamp": closed["ts"], "high": closed["h"], "low": closed["l"], "duration": 1,
-            })
-            self._sr_bar_key[symbol] = key
-            self._sr_bar_cur[symbol] = {"h": ltp, "l": ltp, "ts": ts}
-            self._recompute_live_sl(symbol)
+            closed = self._option_sl_bar_cur[symbol]
+            vwap_at_close = self._live_option_atp.get(symbol)
+            if pos is not None and vwap_at_close is not None:
+                new_sl = screener.compute_option_premium_sl_arm(closed["c"], vwap_at_close, closed["l"])
+                if new_sl is not None:
+                    self._live_sl[symbol] = new_sl
+                    new_target = screener.compute_option_premium_target(
+                        pos["entry_price"], new_sl, self._rr_multiple)
+                    if new_target is not None:
+                        self._live_target[symbol] = new_target
+                    self._clog.info(
+                        "OiOrb[%s/%s]: %s OPTION-SL RE-ARMED -- bar_close=%.2f vwap(atp)=%.2f "
+                        "new_sl=%.2f target=%s (bar %s)",
+                        self._client_id, self._binding_id, symbol, closed["c"],
+                        vwap_at_close, new_sl,
+                        f"{new_target:.2f}" if new_target is not None else "n/a", cur_key)
+            self._option_sl_bar_key[symbol] = key
+            self._option_sl_bar_cur[symbol] = {"h": ltp, "l": ltp, "c": ltp, "ts": ts}
         else:
-            b = self._sr_bar_cur[symbol]
+            b = self._option_sl_bar_cur[symbol]
             b["h"] = max(b["h"], ltp)
             b["l"] = min(b["l"], ltp)
+            b["c"] = ltp
 
-        pos = self._positions.get(symbol)
-        sl = self._live_sl.get(symbol)
-        if pos is None or sl is None or symbol in self._eod_closing:
+        if pos is None or symbol in self._eod_closing:
             return
-        side = "CALL" if pos["contract"].option_type == "CE" else "PUT"
-        breached = (ltp <= sl) if side == "CALL" else (ltp >= sl)
-        if breached:
+        sl = self._live_sl.get(symbol)
+        target = self._live_target.get(symbol)
+        hit = screener.check_option_premium_exit(sl, target, ltp)
+        if hit is not None:
             self._eod_closing.add(symbol)
             self._clog.info(
-                "OiOrb[%s/%s]: %s S&R SL HIT -- side=%s live_spot=%.2f sl=%.2f -- closing.",
-                self._client_id, self._binding_id, symbol, side, ltp, sl,
+                "OiOrb[%s/%s]: %s OPTION %s HIT -- option_ltp=%.2f sl=%s target=%s -- closing.",
+                self._client_id, self._binding_id, symbol, hit.upper(), ltp,
+                f"{sl:.2f}" if sl is not None else "n/a",
+                f"{target:.2f}" if target is not None else "n/a",
             )
             await asyncio.to_thread(
                 store.log_signal_event, self._client_id, self._binding_id, symbol,
-                "sr_sl_triggered", side=side,
-                detail=f"live_spot={ltp:.2f} sl={sl:.2f}")
-            await self._emit_close(symbol, pos, "sr_sl")
-
-    def _recompute_live_sl(self, symbol: str) -> None:
-        """Reads the S&R calculator's current state for this symbol and updates
-        self._live_sl -- only once a level is genuinely CONFIRMED (is_established),
-        never a still-forming provisional one, so the SL never silently tightens
-        or loosens on an unconfirmed swing that could itself still be invalidated
-        next bar. CALL position -> trail on S1 (support); PUT position -> trail
-        on R1 (resistance) -- mirrors D1TrapSRBook's own use of the tracker."""
-        pos = self._positions.get(symbol)
-        if pos is None:
-            return
-        state = self._sr_calc.get_calculated_sr_state(symbol)
-        levels = state.get("sr_levels", {}) or {}
-        side = "CALL" if pos["contract"].option_type == "CE" else "PUT"
-        if side == "CALL":
-            s1 = levels.get("S1")
-            if s1 and s1.get("is_established"):
-                self._live_sl[symbol] = s1["low"]
-        else:
-            r1 = levels.get("R1")
-            if r1 and r1.get("is_established"):
-                self._live_sl[symbol] = r1["high"]
+                f"option_{hit}_triggered",
+                detail=f"option_ltp={ltp:.2f} sl={sl} target={target}")
+            await self._emit_close(symbol, pos, f"option_{hit}")
 
     # ── fills ────────────────────────────────────────────────────────────
 
@@ -1331,18 +1489,19 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 "paper_mode": paper_mode,
                 "opened_at": datetime.now(IST),
             }
-            # 2026-08-26, direct user spec: S&R (R1/S1/R2/S2 ping-pong) SL tracking
-            # starts FRESH the moment the trade starts, not before -- pop any stale
-            # state (shouldn't exist for a fresh symbol, but a same-day re-entry on
-            # a symbol that already ran once must not inherit its prior ladder) and
-            # begin tracking the underlying's own live spot price from this instant.
-            self._sr_calc.states.pop(symbol, None)
-            self._sr_bar_key.pop(symbol, None)
-            self._sr_bar_cur.pop(symbol, None)
+            # 2026-08-27, direct user spec: option-premium SL/target tracking starts
+            # FRESH the moment the trade starts, not before -- pop any stale state
+            # (shouldn't exist for a fresh symbol, but a same-day re-entry on a
+            # symbol that already ran once -- possibly a different strike/contract
+            # entirely -- must not inherit its prior armed level/ATP/target).
+            self._option_sl_bar_key.pop(symbol, None)
+            self._option_sl_bar_cur.pop(symbol, None)
             self._live_sl.pop(symbol, None)
+            self._live_target.pop(symbol, None)
+            self._live_option_atp.pop(symbol, None)
             self._ensure_spot_feed(symbol)
             self._clog.info("OiOrb[%s/%s]: ENTRY CONFIRMED %s %s%d qty=%d @ %.2f (paper_mode=%s) "
-                             "-- S&R SL tracking starts now.",
+                             "-- option-premium SL/target tracking starts now.",
                              self._client_id, self._binding_id, symbol, contract.option_type,
                              contract.strike, pending["qty"], fill.fill_price, fill.paper_mode)
             await asyncio.to_thread(
@@ -1436,13 +1595,14 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 "pnl": pnl,
                 "pnl_pct": pnl_pct,
                 "opened_at": opened_at.isoformat() if hasattr(opened_at, "isoformat") else opened_at,
-                # 2026-08-26, direct user spec: live spot LTP + the S&R tracker's
-                # current SL level, both updating on every real tick -- None for
-                # spot_ltp means the live feed hasn't ticked yet; None for sl means
-                # the S&R tracker hasn't confirmed its first S1/R1 level yet (the
-                # position is running on the hard risk cap alone until it does).
+                # spot_ltp: live UI reference price only (2026-08-27 -- SL/target no
+                # longer track the stock, see _update_option_sl_target_and_check).
+                # sl/target: the OPTION's own live levels, both None until the first
+                # adverse vwap_sl_tf_minutes bar re-arms them -- the position runs on
+                # the hard risk cap alone until then.
                 "spot_ltp": self._live_spot_ltp.get(sym),
                 "sl": self._live_sl.get(sym),
+                "target": self._live_target.get(sym),
             }
         return {
             "client_id": self._client_id,

@@ -102,7 +102,14 @@ def _load_upstox_lot_cache_locked() -> None:
     """The actual fetch -- ONLY ever called while _lot_cache_lock is held
     (see resolve_lot() below). Never raises -- a failure here just means
     resolve_lot() returns 0 (caller must treat 0 as unresolvable and skip
-    the entry, never guess a lot size for real order quantity)."""
+    the entry, never guess a lot size for real order quantity).
+
+    2026-08-27, direct user spec: also populates _eq_key_cache (symbol ->
+    real NSE_EQ instrument_key) in this SAME pass over the SAME downloaded
+    master JSON -- OI-ORB's dedicated upstox2 feeder needs this to subscribe
+    live spot ticks (UpstoxFeeder.register_extra_spot_keys takes instrument
+    keys, not a symbol string). A second full download just for this would
+    be wasteful; NSE_EQ rows are already present in the same file."""
     global _lot_cache_loaded
     try:
         from curl_cffi import requests as cc
@@ -120,8 +127,16 @@ def _load_upstox_lot_cache_locked() -> None:
         return
 
     lots: dict = {}
+    eq_keys: dict = {}
     for inst in instruments:
-        if inst.get("segment") != "NSE_FO":
+        segment = inst.get("segment")
+        if segment == "NSE_EQ":
+            sym = str(inst.get("trading_symbol", "")).upper()
+            ikey = inst.get("instrument_key", "")
+            if sym and ikey:
+                eq_keys[sym] = ikey
+            continue
+        if segment != "NSE_FO":
             continue
         if inst.get("instrument_type") not in ("CE", "PE"):
             continue
@@ -136,8 +151,10 @@ def _load_upstox_lot_cache_locked() -> None:
         if underlying not in lots or ls < lots[underlying]:
             lots[underlying] = ls
     _lot_cache.update(lots)
+    _eq_key_cache.update(eq_keys)
     _lot_cache_loaded = True
-    logger.info("stock_resolve: Upstox instrument-master lot cache loaded (%d underlyings).", len(lots))
+    logger.info("stock_resolve: Upstox instrument-master lot cache loaded (%d underlyings, "
+                "%d NSE_EQ instrument keys).", len(lots), len(eq_keys))
 
 
 def resolve_lot(stock_symbol: str) -> int:
@@ -165,6 +182,22 @@ def resolve_lot(stock_symbol: str) -> int:
             if not _lot_cache_loaded:
                 _load_upstox_lot_cache_locked()
     return _lot_cache.get(sym, 0)
+
+
+def resolve_eq_instrument_key(stock_symbol: str) -> str:
+    """2026-08-27, direct user spec: returns the real Upstox NSE_EQ
+    instrument_key for a stock (e.g. "NSE_EQ|INE202E01016" for RELIANCE), or
+    "" if unresolvable -- caller must skip live spot-tick subscription for
+    this symbol rather than guess. Same cache/lock/loaded-flag as
+    resolve_lot() (same underlying master JSON, same real concurrent-signal
+    race it already guards against). Blocking (network on first miss) --
+    call via asyncio.to_thread() from async code."""
+    sym = stock_symbol.upper()
+    if not _lot_cache_loaded:
+        with _lot_cache_lock:
+            if not _lot_cache_loaded:
+                _load_upstox_lot_cache_locked()
+    return _eq_key_cache.get(sym, "")
 
 
 def resolve_strike_step_for_price(stock_symbol: str, price: float) -> float:

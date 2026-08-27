@@ -882,6 +882,40 @@ async def _run_live(
         raise SystemExit(1)
     await feeder.start()
 
+    # OI-ORB Screener: dedicated upstox2 GlobalFeeder, own WS connection.
+    # 2026-08-27, direct user spec ("integrate the 2nd upstox") -- the shared
+    # `feeder` above is what SellStraddle/D1Trap/OI-Flow/etc. all subscribe
+    # option strikes through, and OI-ORB's own chain_watch_max_stocks=2 cap
+    # exists ONLY to keep that shared WS subscription budget from being
+    # blown out by a stock screener that can shortlist many symbols a day.
+    # A real live trade (KOTAKBANK, 2026-08-27) proved this cap directly
+    # blocks the OI-wall/distance-to-wall/PCR filters from ever seeing real
+    # data for any stock outside the top-2 rank. Giving OI-ORB its own
+    # dedicated Upstox session (credentials already configured under the
+    # existing "upstox2" admin-UI provider slot, confirmed working via a real
+    # OAuth exchange today) removes that shared-budget constraint entirely.
+    # monitored_indices=[] so this connection carries NO index auto-subscribe
+    # of its own -- OI-ORB explicitly subscribes whatever option/spot keys it
+    # needs via subscribe_tokens()/register_extra_spot_keys() below.
+    oiorb_feeder = None
+    if "oi_orb_screener" in _enabled_strats:
+        try:
+            import copy as _copy
+            _oiorb_cfg = _copy.copy(cfg)
+            _oiorb_cfg.primary_feeder_provider = "upstox2"
+            _oiorb_cfg.secondary_feeder_provider = "none"
+            _oiorb_cfg.monitored_indices = []
+            oiorb_feeder = GlobalFeeder(bus, _oiorb_cfg, _shared_client_db)
+            await oiorb_feeder.start()
+            bus._oiorb_feeder = oiorb_feeder
+            logger.info("run_system: OI-ORB dedicated upstox2 feeder started (own WS "
+                        "connection, separate from the shared feeder).")
+        except Exception as exc:
+            logger.warning("run_system: OI-ORB dedicated upstox2 feeder failed to start (%s) "
+                            "-- OI-ORB will fall back to the shared feeder for chain/spot "
+                            "subscriptions (chain_watch_max_stocks cap still applies).", exc)
+            oiorb_feeder = None
+
     # Live tick/bars recorder — captures raw INDEX_TICK + OPTION_TICK to Parquet
     # for post-market replay, backtest, and optimisation.
     tick_recorder = None
@@ -992,6 +1026,8 @@ async def _run_live(
     await client_mgr.stop()
     await admin.stop()   # stops console + dashboard server + cancels dashboard task
     await feeder.stop()
+    if oiorb_feeder is not None:
+        await oiorb_feeder.stop()
     if tick_recorder is not None:
         try:
             await tick_recorder.stop()

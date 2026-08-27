@@ -66,14 +66,29 @@ CONFIG = {
     # bars, every single day, since live polling never starts before the
     # range has already closed.
     "ORB_END": "09:25",
-    # Scanning/shortlist-build/ORB-freeze all wait until this exact time,
-    # per direct user spec ("scan for stocks after 9:25am only... will
-    # start at 9.25.05am") -- NOT the same as ENTRY_WINDOW_END's old
-    # "already too late, do nothing" cutoff. See engine.py's
-    # _wait_until_actionable.
-    "SCAN_START": "09:25",
-    "ENTRY_WINDOW_START": "09:25",
-    "ENTRY_WINDOW_END": "10:30",
+    # 2026-08-27, direct user spec: TWO scan sessions, not one continuous
+    # scan. Session 1 ("morning") is a single point-in-time shortlist build
+    # at SCAN_START (09:26) -- whichever stocks qualify AT THAT MOMENT get
+    # added; no further morning scanning. Session 2 ("afternoon") re-runs
+    # the scan periodically between AFTERNOON_SCAN_START (12:00) and
+    # AFTERNOON_SCAN_END (13:00), ADDING any newly-qualifying stock to the
+    # existing shortlist (never dropping one already being watched). NO
+    # scanning happens outside these two windows -- entry evaluation (VWAP
+    # retest) for whatever's already shortlisted keeps running continuously
+    # all day regardless of the scan gaps. See engine.py's
+    # _wait_until_actionable / _maybe_run_afternoon_scan.
+    "SCAN_START": "09:26",
+    "TWO_SESSION_SCAN_ENABLED": True,
+    "AFTERNOON_SCAN_START": "12:00",
+    "AFTERNOON_SCAN_END": "13:00",
+    "AFTERNOON_SCAN_INTERVAL_SEC": 300.0,
+    "ENTRY_WINDOW_START": "09:26",
+    # 2026-08-27, direct user spec: "if that stock does not hit vwap till
+    # 15.00 it will get cancelled" -- both sessions' candidates share this
+    # SAME cutoff (was 10:30). No new entries fire and no further scanning
+    # happens after this time; a position already running is unaffected --
+    # it still only closes at EOD square-off, target, or SL.
+    "ENTRY_WINDOW_END": "15:00",
     "SCORE_WEIGHTS": {"price": 0.25, "oi_spurt": 0.25, "rel_strength": 0.25, "volume": 0.25},
     "POLL_SECONDS": 20,
     "MAX_MONITOR_MINUTES": 90,
@@ -129,6 +144,12 @@ CONFIG = {
     # Turn this back OFF once connectivity is confirmed -- see
     # strategies/oi_orb_screener/engine.py's own docstring.
     "IGNORE_TIME_WINDOWS": False,
+    # 2026-08-27, direct user spec: SL/target now track the OPTION's own
+    # premium (see compute_option_premium_sl_arm/_target). RR_MULTIPLE is a
+    # fixed risk-reward target off the currently-armed SL's own points
+    # distance from entry -- fresh, unvalidated default (this strategy still
+    # can't be backtested).
+    "RR_MULTIPLE": 2.0,
 }
 
 NSE_HEADERS = {
@@ -520,6 +541,192 @@ def check_rejection_pattern(extreme_since_orb: float, orb_level: float, current_
             return False
         retrace_level = extreme_since_orb + retrace_fraction * move
         return current_ltp >= retrace_level
+
+
+class VwapState:
+    """2026-08-27, direct user spec: replaces the ORB-breach entry trigger
+    with a session-anchored VWAP retest, and replaces the S&R (R1/S1/R2/S2)
+    SL with a VWAP-relative structural stop. Session VWAP = cumulative(price
+    x volume) / cumulative(volume), anchored to market open (ORB_START).
+
+    Built incrementally from POLL-TO-POLL (price, cumulative-volume)
+    samples -- the live poll (fetch_fno_price_universe) already carries a
+    real cumulative `totalTradedVolume` field per symbol (same one the
+    existing volume-confirmation filter already tracks), so the caller
+    feeds this the SAME poll-to-poll volume DELTA it already computes for
+    that filter, never the raw cumulative number itself."""
+
+    def __init__(self) -> None:
+        self._num: dict = defaultdict(float)   # symbol -> cumulative price*volume
+        self._den: dict = defaultdict(float)   # symbol -> cumulative volume
+
+    def seed(self, symbol: str, price_vol_sum: float, vol_sum: float) -> None:
+        """Adds to (never replaces) whatever's already accumulated -- used
+        once by backfill_vwap_from_yahoo before live polling begins for the
+        day, so the running VWAP has a real 09:15-start basis instead of
+        only starting from whatever time live polling first began."""
+        if vol_sum <= 0:
+            return
+        self._num[symbol] += price_vol_sum
+        self._den[symbol] += vol_sum
+
+    def update(self, symbol: str, price: float, volume_delta: float) -> None:
+        if price <= 0 or volume_delta <= 0:
+            return
+        self._num[symbol] += price * volume_delta
+        self._den[symbol] += volume_delta
+
+    def current(self, symbol: str) -> Optional[float]:
+        den = self._den.get(symbol, 0.0)
+        if den <= 0:
+            return None
+        return self._num[symbol] / den
+
+
+def backfill_vwap_from_yahoo(vwap: "VwapState", symbols, cfg=CONFIG) -> None:
+    """Best-effort seed of VwapState with real historical (typical price x
+    volume) from ORB_START (09:15) up to now -- mirrors backfill_orb_from_
+    yahoo/backfill_sma_bars_from_yahoo's own yfinance pattern exactly (same
+    library, same df[ticker] MultiIndex-column handling already confirmed
+    live for this file). Without this, the very first live poll's cumulative
+    totalTradedVolume already bundles up everything traded since 09:15 in
+    one lump with no weighted-price breakdown, so VWAP would start life
+    wrong for the first ~10-15 minutes. Degrades safely on any failure --
+    VwapState.current() returning None (insufficient data) already means
+    "not ready yet" everywhere it's checked."""
+    try:
+        import yfinance as yf
+    except ImportError:
+        logger.warning("backfill_vwap_from_yahoo: yfinance not installed -- "
+                        "VWAP will only warm up from live intraday polling.")
+        return
+    try:
+        tickers = [s + ".NS" for s in symbols]
+        df = yf.download(tickers, period="1d", interval="1m", progress=False, group_by="ticker")
+        filled = 0
+        for sym, ticker in zip(symbols, tickers):
+            try:
+                sub = df[ticker]
+            except Exception as exc:
+                logger.warning("backfill_vwap_from_yahoo: no data for %s (%s): %r", sym, ticker, exc)
+                continue
+            price_vol_sum = 0.0
+            vol_sum = 0.0
+            sym_filled = 0
+            for ts, row in sub.iterrows():
+                if any(pd.isna(row.get(c)) for c in ("High", "Low", "Close", "Volume")):
+                    continue
+                ts_ist = ts.tz_convert(IST) if ts.tzinfo else ts.tz_localize(IST)
+                key = ts_ist.strftime("%H:%M")
+                if key >= cfg.get("ORB_START", "09:15") and float(row["Volume"]) > 0:
+                    typical = (float(row["High"]) + float(row["Low"]) + float(row["Close"])) / 3.0
+                    price_vol_sum += typical * float(row["Volume"])
+                    vol_sum += float(row["Volume"])
+                    sym_filled += 1
+            if vol_sum > 0:
+                vwap.seed(sym, price_vol_sum, vol_sum)
+            filled += sym_filled
+            if sym_filled == 0:
+                logger.warning("backfill_vwap_from_yahoo: %s (%s) returned data but 0 bars landed.",
+                                sym, ticker)
+        logger.info("backfill_vwap_from_yahoo: seeded %d total 1-min bars across %d symbols.",
+                     filled, len(symbols))
+    except Exception as exc:
+        logger.warning("backfill_vwap_from_yahoo: failed entirely: %r", exc)
+
+
+def side_from_pchange(pchange: float) -> str:
+    """Gainer (pChange > 0) -> CALL candidate; loser -> PUT candidate. Same
+    bullish/bearish split build_shortlist() already used to bucket the
+    shortlist itself."""
+    return "CALL" if pchange > 0 else "PUT"
+
+
+def side_allowed_by_regime(side: str, regime: Optional[str], regime_filter_on: bool = True) -> bool:
+    """Same regime table evaluate_breakout() already enforces: Bullish day
+    -> CALL and PUT both tradeable. Bearish day -> CALL ignored, PUT
+    tradeable. Neutral day -> nothing tradeable (unless the filter is
+    explicitly off)."""
+    if not regime_filter_on:
+        return True
+    if regime is None or regime == "neutral":
+        return False
+    if side == "CALL":
+        return regime == "bullish"
+    return True   # PUT tradeable on both bullish and bearish days
+
+
+def check_vwap_retest_entry(side: str, ltp: float, vwap: float, armed: bool,
+                             min_gap_pct: float) -> tuple:
+    """2026-08-27, direct user spec: "wait for the stock to come back to
+    vwap then we enter" -- not an ORB breach.
+
+    A candidate first has to be genuinely AWAY from VWAP in its own
+    direction (CALL: ltp >= vwap*(1+min_gap_pct%); PUT: ltp <=
+    vwap*(1-min_gap_pct%)) before it counts as "armed" -- this is what
+    "come BACK to vwap" presupposes (it has to have left first). Once
+    armed, entry fires the moment price touches/crosses back to the VWAP
+    level (CALL: ltp <= vwap: a pullback down onto support; PUT: ltp >=
+    vwap: a bounce up onto resistance) -- a simple tick-based touch, no
+    candle-close confirmation.
+
+    Returns (new_armed, fire_entry). Idempotent: once fired, the caller is
+    responsible for marking the (symbol, side) as already-fired so this
+    isn't called again for it same day."""
+    if vwap <= 0:
+        return armed, False
+    if side == "CALL":
+        if not armed:
+            return (ltp >= vwap * (1 + min_gap_pct / 100.0)), False
+        return armed, (ltp <= vwap)
+    else:  # PUT
+        if not armed:
+            return (ltp <= vwap * (1 - min_gap_pct / 100.0)), False
+        return armed, (ltp >= vwap)
+
+
+def compute_option_premium_sl_arm(bar_close: float, vwap_at_close: float,
+                                   bar_low: float) -> Optional[float]:
+    """2026-08-27, direct user spec: "checking for target and SL in stock,
+    change it to the option which we are taking" -- SL/target now track the
+    OPTION'S OWN premium (its own VWAP, its own bars), not the underlying
+    stock's spot price. OI-ORB only ever BUYS options (side="CALL" -> bought
+    CE, side="PUT" -> bought PE) -- a bought option's owner ALWAYS wants its
+    OWN premium to rise, regardless of CE/PE, so this is side-INDEPENDENT
+    (unlike the old stock-spot SL, where CALL/PUT genuinely pointed opposite
+    directions on the underlying). Adverse = a vwap_sl_tf_minutes bar closes
+    BELOW the option's own vwap -- re-arms the SL to THAT bar's own LOW,
+    replacing whatever was armed before (re-arms on every adverse bar, not
+    just the first). Returns None (no re-arm) on a bar that closed on the
+    favorable side."""
+    if vwap_at_close <= 0:
+        return None
+    return bar_low if bar_close < vwap_at_close else None
+
+
+def compute_option_premium_target(entry_price: float, sl_level: Optional[float],
+                                   rr_multiple: float) -> Optional[float]:
+    """2026-08-27, direct user spec: a fixed risk-reward target off the
+    CURRENTLY ARMED SL's own points-distance from entry -- re-computed
+    every time the SL re-arms, so it shifts alongside it. None until a real
+    (below-entry) SL has armed at least once -- a bar_low sitting AT or
+    ABOVE entry can't define a sane risk distance."""
+    if sl_level is None or entry_price <= 0 or sl_level >= entry_price:
+        return None
+    risk = entry_price - sl_level
+    return entry_price + rr_multiple * risk
+
+
+def check_option_premium_exit(sl_level: Optional[float], target_level: Optional[float],
+                               ltp: float) -> Optional[str]:
+    """Tick-basis check (not candle-close). Returns "sl", "target", or None.
+    SL checked first -- if a single tick somehow straddles both (a large gap
+    move), the loss-cap takes priority over locking a gain."""
+    if sl_level is not None and ltp <= sl_level:
+        return "sl"
+    if target_level is not None and ltp >= target_level:
+        return "target"
+    return None
 
 
 def check_sma_exit(closes: list, sma_period: int, consec_closes: int, side: str) -> bool:
