@@ -132,7 +132,7 @@ def test_single_side_roll_waits_for_close_fill_before_open():
 
         s._emit_order = capture_emit
 
-        with patch("strategies.sell_straddle.selection.select_partner_for",
+        with patch("strategies.sell_straddle.selection.select_rollover_partner_directional",
                    return_value=(24350, 156.90)):
             async def deliver_fills():
                 await asyncio.sleep(0.02)
@@ -213,7 +213,7 @@ def test_single_side_roll_reopen_rejected_closes_kept_leg_for_real():
 
         s._emit_order = capture_emit
 
-        with patch("strategies.sell_straddle.selection.select_partner_for",
+        with patch("strategies.sell_straddle.selection.select_rollover_partner_directional",
                    return_value=(24350, 156.90)):
             async def deliver_fills():
                 await asyncio.sleep(0.02)
@@ -269,16 +269,14 @@ def test_single_side_roll_reopen_rejected_closes_kept_leg_for_real():
     asyncio.run(run())
 
 
-def test_single_side_roll_enforces_ltp_le_kept_on_the_real_selection_call():
-    """2026-08-06 CRITICAL FIX regression test. select_partner_for's ltp_le_kept
-    parameter defaults to False (documented as intentional for OTHER callers,
-    e.g. re-entry pair selection) -- but this codebase's OWN documented
-    rollover rule is "the new partner must be ... STRICTLY <= the kept leg's
-    LTP (never roll into a richer leg)". The two live rolling.py call sites
-    were passing ltp_le_kept=False, silently disabling that rule for every
-    real roll. This directly asserts the actual keyword argument
-    _single_side_roll passes at its real call site -- not a re-derivation of
-    select_partner_for's own already-tested behavior."""
+def test_single_side_roll_calls_the_directional_search_with_the_closing_strike():
+    """2026-08-27: the main rollover path now calls select_rollover_partner_directional
+    (not select_partner_for), which enforces "never roll into a richer leg than the
+    one being kept" unconditionally inside _evaluate_roll_candidate (ltp_le_kept=True
+    is no longer a caller-supplied flag at all -- see selection.py). This asserts the
+    real call site passes the strike actually being closed as `closing_strike`, the
+    keep_strike/keep_ltp of the OTHER (kept) leg, and DOESN'T ask for the guarantee
+    via a kwarg since it's now baked in structurally."""
     async def run():
         bus = EventBus()
         s = SellStraddleStrategy(bus, cfg=GlobalConfig(), underlying="NIFTY")
@@ -294,16 +292,14 @@ def test_single_side_roll_enforces_ltp_le_kept_on_the_real_selection_call():
         )
 
         mock_select = MagicMock(return_value=None)  # None -> "no partner", roll no-ops cleanly
-        with patch("strategies.sell_straddle.selection.select_partner_for", mock_select):
+        with patch("strategies.sell_straddle.selection.select_rollover_partner_directional", mock_select):
             await s._single_side_roll(datetime.datetime.now(IST), "ltp_decay")
 
         assert mock_select.called
         _, kwargs = mock_select.call_args
-        assert kwargs.get("ltp_le_kept") is True, (
-            f"_single_side_roll called select_partner_for with ltp_le_kept="
-            f"{kwargs.get('ltp_le_kept')!r} -- the 'never roll into a richer leg' "
-            f"rule is not being enforced."
-        )
+        assert kwargs.get("closing_strike") == 24450   # the CE leg being rolled/exited
+        assert kwargs.get("kept_strike") == 24450       # the PE leg (same strike, different side)
+        assert kwargs.get("kept_ltp") == 162.95
 
     asyncio.run(run())
 

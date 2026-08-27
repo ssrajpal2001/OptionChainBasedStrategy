@@ -18,13 +18,21 @@ logger = logging.getLogger(__name__)
 # spamming partner searches every tick when a market condition persists.
 _ROLL_RETRY_SECONDS = 60
 
-# 2026-08-20 user spec: BEGINNING keeps the real listed strike grid (50pt for NIFTY),
-# but every rollover/roll-protection partner search rounds ATM and enumerates
-# candidate strikes on a 100pt grid instead -- deliberately NOT derived from
-# ExchangeConfig.strike_steps (which stays 50, the real tradeable grid, for
-# BEGINNING/quoting purposes) so this can't silently drift if the exchange config
-# changes for unrelated reasons.
+# 2026-08-20 user spec: still used by the ITM-roll-PROTECTION pool search
+# (_check_itm_roll_protection_side, a DIFFERENT mechanic from the main rollover
+# path below -- searching for a fresh pool partner after a protection-budget
+# stop-out, not "hit a loss, enter rollover mode"). BEGINNING keeps the real
+# listed strike grid (50pt for NIFTY); this one deliberately still uses an
+# artificial 100pt grid, NOT derived from ExchangeConfig.strike_steps.
 _ROLLOVER_STRIKE_STEP = 100.0
+
+# 2026-08-27, direct user spec ("one major change in rollover"): the MAIN
+# rollover path (_single_side_roll) now searches the REAL strike grid in one
+# direction only (toward spot), but still enforces a hard minimum gap from the
+# strike being closed -- a candidate closer than this is ignored outright, no
+# matter how good its premium match, and the search keeps walking outward
+# until it finds one that clears this gap.
+_ROLLOVER_MIN_GAP_PTS = 100.0
 
 
 def _summarize_partner_trace(trace: list) -> dict:
@@ -61,15 +69,27 @@ def _format_partner_trace(trace: list) -> str:
     kept_strike = start.get("kept_strike", "?")
     kept_ltp = float(start.get("kept_ltp", 0.0) or 0.0)
     spot = float(start.get("spot", 0.0) or 0.0)
-    ltp_target = float(start.get("ltp_target", 0.0) or 0.0)
-    theta_target = float(start.get("theta_target", 0.0) or 0.0)
     max_itm_steps = start.get("max_itm_steps")
     lines = [
         f"Partner search: keep {kept_strike} @ {kept_ltp:.2f} | "
         f"roll_side={roll_side} | spot={spot:.2f}",
-        f"Filters: ltp_target={ltp_target:.2f} theta_target={theta_target:.2f} "
-        f"max_itm_steps={max_itm_steps}",
     ]
+    if "min_gap_pts" in start:
+        # 2026-08-27 directional min-gap search (select_rollover_partner_directional).
+        lines.append(
+            f"Filters: closing_strike={start.get('closing_strike')} direction={start.get('direction')} "
+            f"real_step={float(start.get('real_step', 0.0) or 0.0):.2f} "
+            f"min_gap_pts={float(start.get('min_gap_pts', 0.0) or 0.0):.2f} "
+            f"max_itm_steps={max_itm_steps}"
+        )
+    else:
+        # Legacy select_partner_for trace shape (still used by ITM-roll-protection).
+        ltp_target = float(start.get("ltp_target", 0.0) or 0.0)
+        theta_target = float(start.get("theta_target", 0.0) or 0.0)
+        lines.append(
+            f"Filters: ltp_target={ltp_target:.2f} theta_target={theta_target:.2f} "
+            f"max_itm_steps={max_itm_steps}"
+        )
     candidates = [t for t in trace if t.get("event") == "candidate"]
     if not candidates:
         lines.append("No candidate trace records.")
@@ -117,7 +137,7 @@ class RollingMixin:
         Returns True if the roll actually executed (new leg opened), False otherwise --
         callers (e.g. the ITM-pair-gate rollover path) use this to decide whether to fall
         back to a full close."""
-        from strategies.sell_straddle.selection import select_partner_for
+        from strategies.sell_straddle.selection import select_rollover_partner_directional
         pos = self._position
         if not pos or pos.status != "open":
             return False
@@ -152,16 +172,19 @@ class RollingMixin:
 
         ss = RuntimeConfig.index_section(self._underlying, "sell_straddle")
         rules = ss.get("entry_rules_reentry", [])
-        step = _ROLLOVER_STRIKE_STEP
+        # 2026-08-27, direct user spec ("one major change in rollover"): the real
+        # LISTED strike grid (50pt for NIFTY), not the old artificial flat 100pt
+        # ring step -- so a real, live, already-warm strike (e.g. NIFTY 24200)
+        # can actually be considered instead of being structurally skipped.
+        real_step = self._cfg.exchange.strike_steps.get(self._underlying, 50.0) if self._cfg else 50.0
         offset = int(max(int(ss.get("pool_otm_depth", 0) or 0), int(ss.get("pool_itm_depth", 0) or 0)) or ss.get("v_slope_pool_offset") or ss.get("reentry_offset") or 4)
-        ltp_target = self._ltp_target if self._ltp_target > 0 else 50.0
         max_itm = int(ss.get("roll_max_itm_steps", 5))
-        variable_strikes = bool(ss.get("variable_strikes", False))
 
         # 2. FIND A VALID PARTNER for the running/bleeding leg.
-        #    - premium must be <= kept leg (select_partner_for)
-        #    - must pass LTP/theta floor and re-entry rule
+        #    - premium must be <= kept leg (LOSING/kept leg's own LTP)
+        #    - must pass the re-entry rule
         #    - must be within roll_max_itm_steps
+        #    - must be at least _ROLLOVER_MIN_GAP_PTS away from the strike being closed
         def _rule_pass_with_detail(ce_s: int, pe_s: int):
             """Return (passed, reason, ind_by_tf) so the trace can show exact values."""
             ind = self._ind_by_tf(ce_s, pe_s, rules)
@@ -169,48 +192,39 @@ class RollingMixin:
             return passed, reason, ind
 
         _partner_trace: list = []
-        partner = select_partner_for(
+        # 2026-08-27, direct user spec ("one major change in rollover"): replaces the
+        # old bidirectional anchor-ring search (select_partner_for) with a directional,
+        # minimum-100pt-gap search on the REAL strike grid -- search only strikes LESS
+        # OTM than orig_strike (moving toward the market price, never away from it),
+        # skip anything closer than _ROLLOVER_MIN_GAP_PTS to orig_strike outright (even
+        # if its premium is a perfect match), and take the FIRST strike (walking
+        # outward) that also clears the premium condition (<= kept leg's LTP) and the
+        # re-entry rule. See select_rollover_partner_directional's own docstring for
+        # the full worked example this was built from.
+        partner = select_rollover_partner_directional(
             self._strike_prem,
             roll_side=roll_side,
             kept_strike=keep_strike,
             kept_ltp=keep_ltp,
+            closing_strike=orig_strike,
             # 2026-08-26, direct user confirmation: intrinsic/time-value stripping
             # is ALSO computed off the mean-of-spot-and-futures reference, not real
             # spot, for consistency with entry/expiry-shift selection (self._atm_ref
             # falls back to plain self._spot for a non-futures_atm underlying).
             spot=(self._atm_ref if self._atm_ref > 0 else self._spot),
-            step=step,
-            offset=offset,
-            ltp_target=ltp_target,
+            real_step=real_step,
+            min_gap_pts=_ROLLOVER_MIN_GAP_PTS,
             rule_pass=_rule_pass_with_detail,
             max_itm_steps=max_itm,
-            theta_target=self._theta_target,
-            variable_strikes=variable_strikes,
+            max_search_steps=max(1, offset * 2),
             trace=_partner_trace,
-            # 2026-08-06 CRITICAL FIX: was False, contradicting this codebase's own
-            # documented rule ("the new partner must be ... STRICTLY <= the kept
-            # leg's LTP -- never roll into a richer leg"). With False, the "MAX SKEW
-            # CHECK" a few lines below this call is silently toothless -- its own
-            # comment claims "select_partner_for guarantees new_ltp <= keep_ltp" but
-            # that guarantee only holds when this flag is True. A roll meant to
-            # de-risk a decayed leg could select a MORE expensive/exposed leg than
-            # the one being kept, the opposite of the intended behavior.
-            ltp_le_kept=True,
-            metric="balanced_ratio",
-            # 2026-08-26, direct user spec (real incident: the old ATM-centered global
-            # search picked whatever strike anywhere in the window best-matched the kept
-            # leg's LTP, landing 50-150+ points from the strike actually being closed with
-            # no predictable relationship to it): anchor the search on orig_strike (the
-            # strike being closed) instead of ATM, in expanding rings of `step` (100pts) --
-            # ring 1 = orig_strike +/-100 is tried FIRST; only widens to +/-200, +/-300...
-            # if neither +/-100 candidate passes every existing filter (floor/rule/skew).
-            anchor_strike=orig_strike,
+            itm_cap_step_pts=_ROLLOVER_STRIKE_STEP,
         )
 
         # Always dump the full partner-search trace so it is obvious which
         # candidates were checked, which filters blocked them, and which passed.
         _trace_dump = _format_partner_trace(_partner_trace)
-        _pool_diag = self._pool_warmth_diag(roll_side, candidate_count=offset * 2 + 1)
+        _pool_diag = self._pool_warmth_diag(roll_side, candidate_count=max(1, offset * 2))
         self._clog.info(
             "SellStraddle[%s]: ROLLOVER %s partner-search trace for running %s%d @%.2f "
             "(CE pnl=%.2f PE pnl=%.2f):\n%s\npool_warmth=%s",
@@ -236,7 +250,7 @@ class RollingMixin:
             return False
 
         # 3. MAX SKEW CHECK (max_entry_ratio).
-        #    Because select_partner_for guarantees new_ltp <= keep_ltp,
+        #    Because select_rollover_partner_directional guarantees new_ltp <= keep_ltp,
         #    ratio = keep_ltp / new_ltp. Set ratio_exit.max_entry_ratio > 0 to enable.
         if self._max_entry_ratio > 0 and keep_ltp > 0 and new_ltp > 0:
             _skew = float(keep_ltp) / float(new_ltp)

@@ -14,6 +14,7 @@ from strategies.sell_straddle.selection import (
     scan_pool,
     select_balanced_pair,
     select_partner_for,
+    select_rollover_partner_directional,
     strip_intrinsic,
 )
 
@@ -25,5 +26,6 @@ __all__ = [
     "scan_pool",
     "select_balanced_pair",
     "select_partner_for",
+    "select_rollover_partner_directional",
     "strip_intrinsic",
 ]

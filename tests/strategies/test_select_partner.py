@@ -1,6 +1,6 @@
 """Rollover partner selection — balance the new leg against the running (kept) leg."""
 
-from strategies.straddle_selection import select_partner_for
+from strategies.straddle_selection import select_partner_for, select_rollover_partner_directional
 
 
 def _cache(d):
@@ -141,3 +141,89 @@ def test_anchor_ring_never_considers_a_farther_ring_once_ring1_passes():
                              rule_pass=lambda cs, ps: True, metric="balanced_ratio",
                              anchor_strike=100)
     assert res == (105, 58.0)
+
+
+# ── select_rollover_partner_directional (2026-08-27, direct user spec: "one major
+# change in rollover" -- the worked example below is the user's own Call-side
+# rollover scenario, reproduced exactly) ────────────────────────────────────
+
+def test_directional_rejects_candidate_closer_than_min_gap_even_with_good_premium():
+    # Losing leg: PE22500 @150 (kept). Exiting leg: CE22000. 21950 CE is only
+    # 50pts from the closing strike -- must be ignored even though its premium
+    # (140 <= 150) is a good match.
+    cache = _cache({(22500, "PE"): 150.0, (21950, "CE"): 140.0})
+    res = select_rollover_partner_directional(
+        cache, roll_side="CE", kept_strike=22500, kept_ltp=150.0, closing_strike=22000,
+        spot=21980, real_step=50, min_gap_pts=100, rule_pass=lambda cs, ps: True,
+    )
+    assert res is None
+
+
+def test_directional_accepts_first_candidate_that_clears_min_gap():
+    # Same scenario -- 21900 CE is exactly 100pts from 22000 and clears the gap;
+    # its premium (140) is <= the kept PE's 150 -- must be selected.
+    cache = _cache({(22500, "PE"): 150.0, (21950, "CE"): 999.0, (21900, "CE"): 140.0})
+    res = select_rollover_partner_directional(
+        cache, roll_side="CE", kept_strike=22500, kept_ltp=150.0, closing_strike=22000,
+        spot=21980, real_step=50, min_gap_pts=100, rule_pass=lambda cs, ps: True,
+    )
+    assert res == (21900, 140.0)
+
+
+def test_directional_never_searches_away_from_spot():
+    # A CE roll only ever searches DOWN (toward spot) from the closing strike --
+    # a cheaper, gap-clearing candidate sitting ABOVE (farther OTM) must never
+    # be considered even though it would otherwise pass every filter.
+    cache = _cache({(22500, "PE"): 150.0, (22100, "CE"): 10.0})  # above closing_strike, wrong direction
+    res = select_rollover_partner_directional(
+        cache, roll_side="CE", kept_strike=22500, kept_ltp=150.0, closing_strike=22000,
+        spot=21980, real_step=50, min_gap_pts=100, rule_pass=lambda cs, ps: True,
+    )
+    assert res is None
+
+
+def test_directional_put_side_searches_upward_toward_spot():
+    # PE rolls UP toward spot (mirror of the CE example). Closing strike 22000 PE,
+    # kept CE @150. 22050 (50pts) must be skipped; 22100 (100pts, premium<=150) wins.
+    cache = _cache({(22500, "CE"): 150.0, (22050, "PE"): 140.0, (22100, "PE"): 145.0})
+    res = select_rollover_partner_directional(
+        cache, roll_side="PE", kept_strike=22500, kept_ltp=150.0, closing_strike=22000,
+        spot=22020, real_step=50, min_gap_pts=100, rule_pass=lambda cs, ps: True,
+    )
+    assert res == (22100, 145.0)
+
+
+def test_directional_enforces_premium_le_kept_leg():
+    # 21900 clears the gap but is pricier than the kept leg (150) -- rejected;
+    # no candidate within reach passes, so the roll finds no partner.
+    cache = _cache({(22500, "PE"): 150.0, (21900, "CE"): 160.0})
+    res = select_rollover_partner_directional(
+        cache, roll_side="CE", kept_strike=22500, kept_ltp=150.0, closing_strike=22000,
+        spot=21980, real_step=50, min_gap_pts=100, rule_pass=lambda cs, ps: True,
+    )
+    assert res is None
+
+
+def test_directional_none_when_nothing_within_max_search_steps():
+    cache = _cache({(22500, "PE"): 150.0, (21400, "CE"): 50.0})  # far beyond the search reach
+    res = select_rollover_partner_directional(
+        cache, roll_side="CE", kept_strike=22500, kept_ltp=150.0, closing_strike=22000,
+        spot=21980, real_step=50, min_gap_pts=100, rule_pass=lambda cs, ps: True,
+        max_search_steps=4,   # only reaches 22000-200=21800
+    )
+    assert res is None
+
+
+def test_directional_itm_cap_uses_its_own_step_unit_not_the_real_grid_step():
+    # 2026-08-27 regression: the ITM-depth safety cap must be measured in
+    # itm_cap_step_pts (default/explicit 100), NOT real_step (50) -- otherwise
+    # max_itm_steps silently becomes twice as strict as before. spot=21980,
+    # candidate 21500 is 480pts ITM for a CE -- passes under a 100pt-unit cap of
+    # max_itm_steps=5 (500pt reach) but would fail under a 50pt-unit cap (250pt reach).
+    cache = _cache({(22500, "PE"): 150.0, (21500, "CE"): 140.0})
+    res = select_rollover_partner_directional(
+        cache, roll_side="CE", kept_strike=22500, kept_ltp=150.0, closing_strike=22000,
+        spot=21980, real_step=50, min_gap_pts=100, rule_pass=lambda cs, ps: True,
+        max_itm_steps=5, max_search_steps=20, itm_cap_step_pts=100.0,
+    )
+    assert res == (21500, 140.0)

@@ -375,6 +375,101 @@ def _select_partner_by_ring(strike_prem, roll_side, kept_strike, kept_ltp,
     return None
 
 
+def select_rollover_partner_directional(
+    strike_prem, roll_side, kept_strike, kept_ltp, closing_strike,
+    spot, real_step, min_gap_pts, rule_pass, max_itm_steps=None,
+    max_search_steps: int = 20, trace: Optional[list] = None,
+    itm_cap_step_pts: float = 100.0,
+):
+    """2026-08-27, direct user spec ("one major change in rollover") — replaces the
+    2026-08-26 anchor-ring search for the MAIN rollover path (_single_side_roll):
+
+    - Direction: search only strikes LESS OTM than `closing_strike` (the leg being
+      exited) -- i.e. moving TOWARD the market price. CE rolls DOWN (decreasing
+      strike, since OTM=strike>spot for a call); PE rolls UP (increasing strike).
+      Never searches in the opposite (deeper-OTM) direction.
+    - Real listed grid: candidates are enumerated on `real_step` (the underlying's
+      OWN strike step, e.g. 50 for NIFTY -- NOT an artificial coarser grid), so a
+      real, live, already-warm strike like NIFTY's own 24200/24300/24400 can
+      actually be considered -- the old flat 100pt-only ring search structurally
+      could never reach these.
+    - Minimum-gap rule: any candidate closer than `min_gap_pts` (default 100) to
+      `closing_strike` is ignored outright, regardless of how good its premium
+      match would otherwise be -- e.g. a strike only 50pts away is skipped even
+      if its premium is a perfect match; the search keeps going outward until it
+      finds one that clears the gap.
+    - Premium condition: candidate's LTP must be <= kept_ltp (the LOSING/kept
+      leg's own live LTP) -- enforced via _evaluate_roll_candidate's ltp_le_kept
+      check (always on here, not optional, per direct spec).
+    - Selection: the FIRST candidate (smallest distance that still clears
+      min_gap_pts) that passes quote-availability + ITM cap + the premium
+      condition + rule_pass wins -- this is a "keep searching until you find A
+      valid one" walk outward, not a best-of-the-whole-range search.
+
+    `itm_cap_step_pts` (default 100, NOT `real_step`): the point-unit
+    `max_itm_steps` is measured in for the ITM-depth safety cap, kept at the
+    SAME 100pt unit the pre-2026-08-27 ring search always used -- reusing
+    `real_step` (50 for NIFTY) here instead would silently HALVE the real
+    point-reach of an already-tuned `roll_max_itm_steps` config (a real
+    regression caught by tests/strategies/test_roll_exit_ladder_never_freezes.
+    py's 5-consecutive-roll simulation: candidates that were within the
+    original 500pt reach at max_itm_steps=5 started getting rejected at
+    250pts once this was wrongly conflated with the 50pt candidate grid).
+
+    Returns (strike, ltp) or None (caller falls back to "keep original pair")."""
+    direction = -1 if roll_side == "CE" else 1
+    if trace is not None:
+        trace.append({
+            "event": "select_partner_for_start", "roll_side": roll_side,
+            "kept_strike": int(kept_strike), "kept_ltp": float(kept_ltp or 0.0),
+            "closing_strike": int(closing_strike), "spot": float(spot or 0.0),
+            "real_step": float(real_step or 0.0), "min_gap_pts": float(min_gap_pts or 0.0),
+            "direction": "toward_spot", "max_search_steps": int(max_search_steps),
+        })
+    reject_counts = {
+        "no_quote_in_pool": 0, "too_itm": 0, "min_gap_violation": 0,
+        "ltp_above_kept": 0, "rule_fail": 0,
+    }
+    checked = 0
+    for i in range(1, max_search_steps + 1):
+        strike = int(closing_strike + direction * real_step * i)
+        gap = abs(strike - closing_strike)
+        if gap < min_gap_pts:
+            reject_counts["min_gap_violation"] += 1
+            if trace is not None:
+                trace.append({
+                    "event": "candidate", "roll_side": roll_side, "strike": strike,
+                    "reject_reason": f"min_gap_violation ({gap:.0f} < {min_gap_pts:.0f})",
+                })
+            continue
+        checked += 1
+        diag = _evaluate_roll_candidate(
+            strike_prem, roll_side, strike, kept_strike, kept_ltp, spot, itm_cap_step_pts,
+            0.0, 0.0, max_itm_steps, True, rule_pass, "closest_to_kept",
+        )
+        if diag["reject_reason"] is None:
+            diag["selected"] = True
+            if trace is not None:
+                trace.append(diag)
+                trace.append({
+                    "event": "select_partner_for_end", "best_strike": strike,
+                    "best_ltp": diag["ltp"], "reject_counts": reject_counts,
+                    "candidates_total": checked,
+                })
+            return (strike, diag["ltp"])
+        _reason_key = diag["reject_reason"].split(" ", 1)[0].split("(", 1)[0].strip()
+        reject_counts[_reason_key if _reason_key in reject_counts else "rule_fail"] += 1
+        if trace is not None:
+            trace.append(diag)
+
+    if trace is not None:
+        trace.append({
+            "event": "select_partner_for_end", "best_strike": None, "best_ltp": None,
+            "reject_counts": reject_counts, "candidates_total": checked,
+        })
+    return None
+
+
 def strip_intrinsic(ltp: float, side: str, strike: float, spot: float) -> float:
     """Time-value-only LTP. CE intrinsic = max(0, spot-strike); PE = max(0, strike-spot)."""
     if side == "CE":
