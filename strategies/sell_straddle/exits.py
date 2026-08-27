@@ -277,6 +277,28 @@ class ExitMixin:
         except Exception as exc:
             logger.error("SellStraddle[%s]: _build_exit_criteria ITMgate failed: %s", self._underlying, exc)
 
+        # 2026-08-27, direct user request: the 70%-of-booked-profit roll-protection
+        # stop (rolling.py's _check_itm_roll_protection_side) only ever logged when
+        # it actually FIRED -- there was no visibility that this check was even
+        # running while armed but not yet triggered. Surfaced here so it appears in
+        # the same periodic EXIT-CHECK log line + UI panel as every other exit rule,
+        # every cycle, whether or not it's currently armed.
+        try:
+            _prot_map = getattr(self, "_itm_roll_protection", None) or {}
+            for _side, _prot in _prot_map.items():
+                _leg = pos.ce_leg if _side == "CE" else pos.pe_leg
+                _pnl_pts = float(_leg.entry_price or 0.0) - float(getattr(_leg, "ltp", 0.0) or 0.0)
+                _running_loss_rs = -self._pnl_rs(_pnl_pts) if _pnl_pts < 0 else 0.0
+                _budget_rs = float(_prot.get("protect_rs", 0.0) or 0.0)
+                _crit.append((
+                    f"ITMrollProt({_side})",
+                    f"strike={int(_leg.strike)} loss=₹{_running_loss_rs:.0f} vs budget=₹{_budget_rs:.0f} "
+                    f"(70% of profit booked on the prior roll)",
+                    _budget_rs > 0 and _running_loss_rs >= _budget_rs,
+                ))
+        except Exception as exc:
+            logger.error("SellStraddle[%s]: _build_exit_criteria ITMrollProt failed: %s", self._underlying, exc)
+
         return _crit, _exit_dump
 
     def _day_pct(self, pos) -> float:
@@ -942,6 +964,7 @@ class ExitMixin:
 
         if _t.monotonic() - getattr(self, "_last_exit_log", 0.0) > 60.0:
             self._last_exit_log = _t.monotonic()
+            _prot_map = getattr(self, "_itm_roll_protection", None) or {}
             _active = "".join([
                 " Decay" if self._ltp_decay_enabled else "",
                 " Ratio" if getattr(self, "_ratio_threshold", 0.0) > 0 else "",
@@ -949,6 +972,9 @@ class ExitMixin:
                 " VWAPrise" if self._vwap_rise_enabled else "",
                 " exit_rules" if getattr(self, "_exit_rules", None) else "",
                 " ITMgate" if getattr(self, "_itm_pair_gate_enabled", False) else "",
+                # 2026-08-27, direct user request: visible every cycle while armed,
+                # not just when the stop actually fires -- shows WHICH side(s).
+                f" ITMrollProt({'/'.join(sorted(_prot_map.keys()))})" if _prot_map else "",
             ]) or " (none)"
             logger.info(
                 "SellStraddle[%s]: EXIT-CHECK pnl=%.2f pts | Day%% T:%.0f%%/SL:%.0f%% (credit=%.2f) | "
