@@ -200,7 +200,9 @@ FORCE_EXIT_TIME = dtime(15, 35)
 # searched independently (their premium curves differ), so the traded CE
 # strike and PE strike can legitimately differ from each other and from ATM.
 TARGET_PREMIUM_RS = 100.0
-STRIKE_SEARCH_STEPS = 10   # scans ATM +/- this many STRIKE_STEP increments
+STRIKE_SEARCH_STEPS = 6   # scans ATM +/- this many STRIKE_STEP increments (was 10 --
+                          # 2026-08-27 real user-caught rate-limit exhaustion over a
+                          # multi-day run, see find_closest_premium_strike's docstring)
 
 
 @dataclass
@@ -323,9 +325,18 @@ async def find_closest_premium_strike(atm: int, side: str, expiry, day: date, to
     valid = [(s, bars, p) for s, bars, p in results if p is not None and bars]
     if not valid:
         print(f"    {side} strike search: all {len(candidates)} candidates around ATM={atm} "
-              f"came back empty -- falling back to plain ATM (likely a rate-limited burst, not "
-              f"genuinely missing data)")
+              f"came back empty -- falling back to plain ATM (likely rate-limit exhaustion from "
+              f"cumulative request volume over a multi-day run, not genuinely missing data)")
+        # 2026-08-27, real user-caught bug: on a long multi-day run, cumulative
+        # request volume can exhaust Upstox's rate limit hard enough that even
+        # this single ATM fallback call fails too (confirmed: it failed on the
+        # LAST 2 days of a run that succeeded fine on the first 6). One short
+        # backoff-and-retry gives the limit window a chance to clear before
+        # giving up on the whole day.
         atm_bars = await fetch_option_day(atm, side, expiry, day, token)
+        if not atm_bars:
+            await asyncio.sleep(3.0)
+            atm_bars = await fetch_option_day(atm, side, expiry, day, token)
         return (atm, atm_bars) if atm_bars else (None, [])
     best_strike, best_bars, _ = min(valid, key=lambda r: abs(r[2] - target))
     return best_strike, best_bars
@@ -624,7 +635,16 @@ async def main() -> None:
     past_days = sorted(d for d in spot_by_day if d < today)[-days_back:]
     trading_days = past_days + ([today] if today in spot_by_day else [])
     trades: List[Trade] = []
-    for day in trading_days:
+    for day_idx, day in enumerate(trading_days):
+        # 2026-08-27, real user-caught bug: a multi-day run's cumulative
+        # request volume (2*STRIKE_SEARCH_STEPS+1 candidates x 2 sides x
+        # every day) exhausted Upstox's rate limit hard enough that the
+        # LAST 2 days of a run that succeeded fine on the first 6 failed
+        # completely (even their single ATM fallback call). A short pause
+        # between days spreads the request rate out instead of firing every
+        # day back-to-back as fast as possible.
+        if day_idx > 0:
+            await asyncio.sleep(2.0)
         day_spot = spot_by_day[day]
         bar_1500 = next((b for b in day_spot if b.ts.time() >= ENTRY_CHECK_START), None)
         if bar_1500 is None:
