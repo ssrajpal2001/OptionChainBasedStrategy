@@ -584,6 +584,53 @@ def test_hedge_cumulative_profit_close_includes_booked_session_pnl():
     asyncio.run(run())
 
 
+def test_hedge_cumulative_profit_close_requires_rs500_not_just_breakeven():
+    """2026-08-27, direct user correction: a net that merely nets to ~0 must
+    NOT close the trade -- the trigger is a genuine Rs500 of real cumulative
+    profit, not breakeven."""
+    async def run():
+        s = _make()   # sold legs net -50 pts
+        s._session_realized_pnl_pts = 55.0   # booked earlier today
+        # hedge net = 0 (ltp == entry_price on both hedge legs)
+        # total = -50 + 55 + 0 = +5 pts -> Rs375 (lot=75) -- below the Rs500 bar
+        pos = _hedged(s, ce_hedge_ltp=60.0, pe_hedge_ltp=55.0)
+        hedge_calls = _stub_dispatch(s, {})
+        closed = []
+        s._close_position = lambda reason: closed.append(reason)
+
+        fired = await s._check_hedge_cumulative_profit_close(pos, datetime.datetime.now(IST))
+
+        assert fired is False
+        assert hedge_calls == []
+        assert closed == []
+        assert pos.is_hedged_positional is True
+    asyncio.run(run())
+
+
+def test_hedge_cumulative_profit_close_fires_once_rs500_reached():
+    async def run():
+        s = _make()   # sold legs net -50 pts
+        s._session_realized_pnl_pts = 57.0
+        # total = -50 + 57 + 0 = +7 pts -> Rs525 (lot=75) -- clears the Rs500 bar
+        pos = _hedged(s, ce_hedge_ltp=60.0, pe_hedge_ltp=55.0)
+        hedge_calls = _stub_dispatch(s, {
+            ("SELL", "CE", 24500): _fill("SELL", "CE", 24500, 60.0),
+            ("SELL", "PE", 23500): _fill("SELL", "PE", 23500, 55.0),
+        })
+        closed = []
+        async def _fake_close(reason):
+            closed.append(reason)
+            s._position.status = "closed"
+        s._close_position = _fake_close
+        s._apply_sl_cooldown = lambda rule_key="entry_rules_reentry": None
+
+        fired = await s._check_hedge_cumulative_profit_close(pos, datetime.datetime.now(IST))
+
+        assert fired is True
+        assert closed == ["hedge_cumulative_profit"]
+    asyncio.run(run())
+
+
 def test_check_exits_hedge_profit_close_runs_before_other_exit_checks():
     """Wired into _check_exits ahead of the same-strike-collision guard and
     every normal sold-leg exit -- while hedged and cumulatively profitable,

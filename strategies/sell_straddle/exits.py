@@ -23,6 +23,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# 2026-08-27, direct user correction: the EOD hedge-and-carry's cumulative-profit
+# close fires once real profit (today's booked P&L + running P&L across all
+# sold+hedge legs, converted to rupees) reaches this much -- NOT merely >=0/breakeven.
+_HEDGE_CLOSE_PROFIT_RS = 500.0
+
 
 class ExitMixin:
     """Exit-side logic for the sell-straddle book."""
@@ -880,19 +885,30 @@ class ExitMixin:
         entry_rules_beginning's own max timeframe has elapsed.
 
         Returns True if this fired (caller should stop evaluating any other
-        exit for this position this tick -- it's closing)."""
-        total_pnl = self._cumulative_hedge_pnl(pos, include_hedge=True)
-        if total_pnl <= 0:
+        exit for this position this tick -- it's closing).
+
+        2026-08-27, direct user correction: the close trigger is NOT
+        breakeven (total >= 0) -- it's a genuine ₹{_HEDGE_CLOSE_PROFIT_RS:.0f}
+        of real cumulative profit (today's already-booked P&L + running P&L
+        across all sold+hedge legs), same shape/spirit as the ITM-pair-gate's
+        own ₹500 profit threshold elsewhere in this file. A day where the
+        booked profit and the running loss happen to net to exactly ₹0 must
+        NOT close the trade early -- only stop once ₹500 of real profit is
+        actually sitting there.
+        """
+        total_pnl_pts = self._cumulative_hedge_pnl(pos, include_hedge=True)
+        total_pnl_rs = self._pnl_rs(total_pnl_pts)
+        if total_pnl_rs < _HEDGE_CLOSE_PROFIT_RS:
             return False
         logger.info(
-            "SellStraddle[%s]: HEDGE CUMULATIVE PROFIT — total=%.2f pts "
-            "(booked=%.2f sold=%.2f hedge=%.2f) — closing all 4 legs, starting fresh.",
-            self._underlying, total_pnl, self._session_realized_pnl_pts,
+            "SellStraddle[%s]: HEDGE CUMULATIVE PROFIT — total=₹%.2f (%.2f pts) "
+            "(booked=%.2f sold=%.2f hedge=%.2f pts) — closing all 4 legs, starting fresh.",
+            self._underlying, total_pnl_rs, total_pnl_pts, self._session_realized_pnl_pts,
             pos.unrealized_pnl, pos.hedge_unrealized_pnl,
         )
         self._clog.info(
-            "HEDGE CUMULATIVE PROFIT total=%.2f (booked=%.2f sold=%.2f hedge=%.2f) — "
-            "closing all 4 legs", total_pnl, self._session_realized_pnl_pts,
+            "HEDGE CUMULATIVE PROFIT total=₹%.2f (%.2f pts, booked=%.2f sold=%.2f hedge=%.2f pts) — "
+            "closing all 4 legs", total_pnl_rs, total_pnl_pts, self._session_realized_pnl_pts,
             pos.unrealized_pnl, pos.hedge_unrealized_pnl,
         )
         await self._close_hedge_legs(pos, "hedge_cumulative_profit")
