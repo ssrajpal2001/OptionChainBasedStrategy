@@ -700,6 +700,30 @@ class InstrumentRegistry:
         """Return all loaded active expiry dates for an underlying."""
         return list(self._expiries.get(underlying, []))
 
+    def get_available_strikes(self, underlying: str, expiry: date, opt_type: str = "") -> List[int]:
+        """2026-08-27, real incident: GVT&D PE entry failed with "no upstox_key
+        resolved for GVT&D PE4350" -- stock_resolve.py's price-band strike-step
+        heuristic (no real chain grid available to it) assumed a flat 50pt grid
+        for anything under Rs5000, but GVT&D's REAL listed grid switches to
+        100pt around that price level (4300/4400 are real, 4350 was never
+        listed at all). Confirmed against the real Upstox master JSON directly
+        (scripts/check_stock_expiries_raw.py): underlying_symbol matched
+        perfectly, real contracts existed at 2026-09-29/10-27/11-23 -- the
+        heuristic's guessed strike was simply never a real one.
+
+        This exposes the ACTUAL listed strikes already loaded in
+        self._upstox_keys (keyed (expiry_iso, strike, opt_type)) so a caller
+        can snap to the nearest REAL strike instead of guessing a step from a
+        price band. Returns [] if this underlying/expiry has no loaded
+        contracts (caller must fall back to the old heuristic, never crash)."""
+        keys = self._upstox_keys.get(underlying.upper(), {})
+        exp_iso = expiry.isoformat()
+        strikes = {
+            k[1] for k in keys
+            if k[0] == exp_iso and (not opt_type or k[2] == opt_type.upper())
+        }
+        return sorted(strikes)
+
     # ── Upstox ───────────────────────────────────────────────────────────────
 
     def get_upstox_key(

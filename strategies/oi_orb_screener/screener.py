@@ -592,6 +592,18 @@ def evaluate_breakout(symbol, ltp, prev_close, orb_high, orb_low, regime,
         return None
     stock_move_pct = (ltp - prev_close) / prev_close * 100.0 if prev_close else 0.0
     if abs(stock_move_pct) >= cfg["STOCK_MOVE_ABORT_PCT"]:
+        # 2026-08-27 fix, confirmed live: TATAPOWER's own ORB-low was genuinely
+        # breached but NO signal ever fired and nothing logged anywhere -- this
+        # abort path used to be completely silent, indistinguishable from "no
+        # breach happened at all." Logs to screener's own module logger (same
+        # general-log visibility stock_resolve.py's warnings already use, NOT
+        # engine.py's per-binding self._clog -- this is a pure function with no
+        # access to that instance logger).
+        logger.warning(
+            "OiOrb screener: %s breakout ABORTED -- stock moved %.2f%% since prev close "
+            "(abs >= STOCK_MOVE_ABORT_PCT=%.1f%%), ltp=%.2f prev_close=%.2f.",
+            symbol, stock_move_pct, cfg["STOCK_MOVE_ABORT_PCT"], ltp, prev_close,
+        )
         return None
 
     now = now or datetime.now(IST)

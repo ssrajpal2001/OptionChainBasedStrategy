@@ -157,6 +157,12 @@ def test_resolve_contract_returns_none_when_no_upstox_key(monkeypatch):
 def test_resolve_contract_rounds_strike_to_step(monkeypatch):
     monkeypatch.setattr(REGISTRY, "is_loaded", lambda sym: True)
     monkeypatch.setattr(REGISTRY, "get_active_expiry", lambda sym, **kw: date(2026, 8, 27))
+    # No real strikes loaded for this underlying/expiry -- falls back to the
+    # price-band/FNO_STOCK_CONFIG heuristic, same as before this was added.
+    # Explicit (not relying on REGISTRY's real, incidental empty state) so
+    # this test can't silently start disagreeing with itself if some OTHER
+    # test in the same session happens to load real RELIANCE strikes first.
+    monkeypatch.setattr(REGISTRY, "get_available_strikes", lambda sym, exp, opt: [])
     captured = {}
     def _fake_get_upstox_key(sym, exp, strike, opt):
         captured["strike"] = strike
@@ -167,3 +173,76 @@ def test_resolve_contract_rounds_strike_to_step(monkeypatch):
     # RELIANCE (FNO_STOCK_CONFIG step=20) at 1234.0 -> rounds to 1240.
     stock_resolve.resolve_contract("RELIANCE", 1234.0, "CE")
     assert captured["strike"] == 1240
+
+
+# ── 2026-08-27 CRITICAL fix: snap to the nearest REAL listed strike ─────────
+# Real incident: GVT&D PE entry failed with "no upstox_key resolved for
+# GVT&D PE4350" -- the price-band heuristic assumed a flat 50pt grid for
+# anything under Rs5000, but GVT&D's real listed grid switches to 100pt
+# around that price level (4300/4400 real, 4350 never listed at all).
+# Verified generic (not a GVT&D-only patch) -- any stock whose real grid
+# doesn't match the heuristic's price-band assumption is fixed the same way.
+
+def test_resolve_contract_snaps_to_nearest_real_strike_when_available(monkeypatch):
+    """The exact real incident: raw_strike=4342.77 rounds to 4350 under the
+    old heuristic (never listed); with real strikes loaded, it must snap to
+    the nearest one that's ACTUALLY listed (4300 or 4400, not 4350)."""
+    monkeypatch.setattr(REGISTRY, "is_loaded", lambda sym: True)
+    monkeypatch.setattr(REGISTRY, "get_active_expiry", lambda sym, **kw: date(2026, 9, 29))
+    monkeypatch.setattr(
+        REGISTRY, "get_available_strikes",
+        lambda sym, exp, opt: [3900, 4000, 4100, 4200, 4300, 4400, 4500] if sym == "GVT&D" else [],
+    )
+    captured = {}
+    def _fake_get_upstox_key(sym, exp, strike, opt):
+        captured["strike"] = strike
+        return "NSE_FO|107736" if strike == 4400 else "NSE_FO|999"
+    monkeypatch.setattr(REGISTRY, "get_upstox_key", _fake_get_upstox_key)
+    monkeypatch.setattr(REGISTRY, "get_broker_symbol", lambda sym, exp, strike, opt, provider: "SYM")
+
+    contract = stock_resolve.resolve_contract("GVT&D", 4342.77, "PE")
+    assert captured["strike"] == 4300   # nearest real strike to 4342.77 -- NOT 4350
+    assert contract is not None
+    assert contract.strike == 4300
+
+
+def test_resolve_contract_falls_back_to_heuristic_when_no_strikes_loaded(monkeypatch):
+    """Defensive fallback: an underlying/expiry the registry has no strikes
+    loaded for yet must still fall back to the old heuristic, never crash
+    or silently return no contract when the heuristic would have worked."""
+    monkeypatch.setattr(REGISTRY, "is_loaded", lambda sym: True)
+    monkeypatch.setattr(REGISTRY, "get_active_expiry", lambda sym, **kw: date(2026, 8, 27))
+    monkeypatch.setattr(REGISTRY, "get_available_strikes", lambda sym, exp, opt: [])
+    captured = {}
+    def _fake_get_upstox_key(sym, exp, strike, opt):
+        captured["strike"] = strike
+        return "NSE_FO|1"
+    monkeypatch.setattr(REGISTRY, "get_upstox_key", _fake_get_upstox_key)
+    monkeypatch.setattr(REGISTRY, "get_broker_symbol", lambda sym, exp, strike, opt, provider: "SYM")
+
+    stock_resolve.resolve_contract("GVT&D", 4342.77, "PE")
+    # No real strikes loaded -> old price-band heuristic (step=50 under Rs5000).
+    assert captured["strike"] == 4350
+
+
+def test_resolve_contract_strike_snapping_is_generic_not_gvtd_specific(monkeypatch):
+    """Same mechanic, a completely different (non-curated, non-GVT&D) stock --
+    proves this isn't a special case hardcoded for one symbol."""
+    monkeypatch.setattr(REGISTRY, "is_loaded", lambda sym: True)
+    monkeypatch.setattr(REGISTRY, "get_active_expiry", lambda sym, **kw: date(2026, 9, 29))
+    monkeypatch.setattr(
+        REGISTRY, "get_available_strikes",
+        lambda sym, exp, opt: [1180, 1200, 1220, 1260, 1300] if sym == "SOMESTOCK" else [],
+    )
+    captured = {}
+    def _fake_get_upstox_key(sym, exp, strike, opt):
+        captured["strike"] = strike
+        return "NSE_FO|555"
+    monkeypatch.setattr(REGISTRY, "get_upstox_key", _fake_get_upstox_key)
+    monkeypatch.setattr(REGISTRY, "get_broker_symbol", lambda sym, exp, strike, opt, provider: "SYM")
+
+    # raw_strike=1234 -> old heuristic (step=20 under Rs2500) would round to
+    # 1240, which ISN'T in this stock's real (irregular, partly 20pt/40pt)
+    # grid -- must snap to the nearest REAL one (1220) instead.
+    stock_resolve.resolve_contract("SOMESTOCK", 1234.0, "CE")
+    assert captured["strike"] == 1220

@@ -76,6 +76,14 @@ logger = logging.getLogger(__name__)
 _EOD_TIME_DEFAULT = dtime(15, 15)
 _EOD_POLL_SEC = 10.0
 _ENTRY_LTP_WAIT_TIMEOUT_SEC = 5.0
+# 2026-08-27, direct user spec (real observation: "log is not showing which
+# stock is for which side, rest of the log is blank"): before this, nothing
+# logged between "ORB frozen" and an actual fired/rejected signal -- with a
+# small shortlist and neither stock breaching yet, that could be the whole
+# rest of the session with zero visibility into whether the book was even
+# still alive/polling. A periodic status line (see _maybe_log_heartbeat)
+# shows every shortlisted stock's live price against its own ORB levels.
+_HEARTBEAT_INTERVAL_SEC = 60.0
 _UNDERLYING_SENTINEL = "SCREENER"
 # 2026-08-24, confirmed live: an aggressive retry pattern here (many
 # attempts, short spacing, each doing its own internal re-warm) can make
@@ -114,29 +122,49 @@ def _build_stock_chain(stock_symbol: str, spot: float, expiry: date, depth: int)
     initialize(), which hardcodes cfg.exchange.strike_steps (index-only,
     defaults to a flat 50pt step) and would generate garbage, non-existent
     strikes for a stock trading well outside that grid (e.g. a ~Rs180
-    stock needs a ~2.5-5pt step, not 50). Uses this strategy's own already-
-    correct stock-aware step logic (stock_resolve.resolve_strike_step_for_
-    price, same function every real contract resolution in this strategy
-    already goes through) to build the rows dict directly, then hands the
-    resulting ChainSnapshot to a normal OptionMatrix instance so its
-    existing on_option_tick()/recompute()/snapshot() keep working exactly
-    as they already do for indices -- only the ATM/step/rows construction
-    is stock-aware and bespoke here."""
+    stock needs a ~2.5-5pt step, not 50).
+
+    2026-08-27 CRITICAL fix, confirmed live (same root cause as the GVT&D
+    PE4350 entry-resolution bug -- see stock_resolve.resolve_contract's own
+    fix comment): the price-band heuristic step assumes a UNIFORM grid, but
+    a real stock's grid can switch step size across price bands (GVT&D:
+    100pt around Rs4300-5000, not the assumed flat 50pt). A synthetic
+    ATM+/-depth*step window built from that heuristic could include several
+    strikes that were NEVER actually listed -- silently wasting subscription
+    slots on rows that can never receive a real tick. Now prefers the
+    REGISTRY's own already-loaded real listed strikes (REGISTRY.
+    get_available_strikes) when available: picks the real strike nearest
+    spot as ATM, then takes `depth` real strikes on either side of it from
+    the actual grid -- correct regardless of how irregular that grid is.
+    Falls back to the old heuristic-based synthetic window only when the
+    registry has no strikes loaded yet for this underlying/expiry (never
+    blocks chain-tracking outright -- same best-effort discipline as
+    everywhere else this feature already documents)."""
     if spot <= 0 or expiry is None:
         return None
-    step = stock_resolve.resolve_strike_step_for_price(stock_symbol, spot)
-    if step <= 0:
-        return None
-    # Match stock_resolve.resolve_contract()'s own int-cast convention exactly (strategies/
-    # oi_orb_screener/stock_resolve.py) -- real traded contracts, and therefore real incoming
-    # OptionTick.strike values, are always int-cast even for a non-integer step like 2.5.
-    # A float-keyed chain here would silently never match a single real tick.
-    atm_raw = round(spot / step) * step
-    rows = {}
-    for i in range(-depth, depth + 1):
-        strike = int(round(atm_raw + i * step))
-        rows[strike] = ChainRow(strike=strike)
-    atm = int(round(atm_raw))
+    from data_layer.instrument_registry import REGISTRY as _REGISTRY
+    real_strikes = _REGISTRY.get_available_strikes(stock_symbol, expiry)
+    if real_strikes:
+        atm = min(real_strikes, key=lambda s: abs(s - spot))
+        atm_idx = real_strikes.index(atm)
+        lo = max(0, atm_idx - depth)
+        hi = min(len(real_strikes), atm_idx + depth + 1)
+        rows = {s: ChainRow(strike=s) for s in real_strikes[lo:hi]}
+    else:
+        step = stock_resolve.resolve_strike_step_for_price(stock_symbol, spot)
+        if step <= 0:
+            return None
+        # Match stock_resolve.resolve_contract()'s own int-cast convention exactly
+        # (strategies/oi_orb_screener/stock_resolve.py) -- real traded contracts, and
+        # therefore real incoming OptionTick.strike values, are always int-cast even
+        # for a non-integer step like 2.5. A float-keyed chain here would silently
+        # never match a single real tick.
+        atm_raw = round(spot / step) * step
+        rows = {}
+        for i in range(-depth, depth + 1):
+            strike = int(round(atm_raw + i * step))
+            rows[strike] = ChainRow(strike=strike)
+        atm = int(round(atm_raw))
     mat = OptionMatrix(stock_symbol, None)   # cfg unused once _snap is set directly (see above)
     mat._snap = ChainSnapshot(underlying=stock_symbol, spot=spot, atm_strike=atm,
                                expiry=expiry, timestamp=datetime.now(IST), rows=rows)
@@ -285,6 +313,14 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._volume_history: Dict[str, list] = {}                  # rolling deltas, for a trailing average
         self._oi_history: Dict[str, list] = {}                      # [(unix_ts, oi_spurt_pct), ...] for OI ROC
         self._oi_history_last_poll_ts: float = 0.0                  # throttle: don't re-hit the OI-Spurt endpoint every cycle
+        self._last_heartbeat_log_ts: float = 0.0                    # throttle: periodic per-stock status line
+        # 2026-08-27, direct user spec: "I want a confirm close in 1 min TF" --
+        # entries now require a CONFIRMED 1-min bar CLOSE beyond ORB-high/low,
+        # not a raw instantaneous poll price crossing it (a brief wick that
+        # reverts before the next poll snapshot must NOT fire a signal).
+        # Tracks which minute-bucket key was last seen per symbol so a
+        # newly-closed bar is detected and evaluated exactly once.
+        self._last_bar_key_for_signal: Dict[str, str] = {}
 
         # ── contract/feed/position state, keyed by stock symbol ────────
         self._pending_contracts: Dict[str, "stock_resolve.ResolvedContract"] = {}
@@ -338,6 +374,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._volume_history = {}
         self._oi_history = {}
         self._oi_history_last_poll_ts = 0.0
+        self._last_bar_key_for_signal = {}
         self._clog.info("OiOrb[%s/%s]: session reset for new trading day.",
                          self._client_id, self._binding_id)
 
@@ -571,11 +608,38 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 await asyncio.sleep(cfg["POLL_SECONDS"])
                 continue
 
+            _heartbeat_parts: list = []
             for sym in self._shortlist_symbols:
                 if sym not in live.index:
                     continue
                 ltp = float(live.loc[sym, "lastPrice"])
                 self._bars.on_quote(sym, ltp, now)
+
+                # 2026-08-27, direct user spec: per-stock live price vs its own ORB
+                # levels, logged periodically (see _maybe_log_heartbeat below) --
+                # neither side is a "restriction", a stock can fire either CALL or
+                # PUT depending on which level actually gets breached; this is just
+                # visibility into how close each one currently is to either.
+                # 2026-08-27, direct user spec ("open interest value or anything
+                # which I wanted to see"): the latest polled OI-Spurt% for this
+                # symbol (self._oi_history, fed by _maybe_poll_oi_history -- the
+                # SAME data the OI-ROC filter uses, just surfaced here too since
+                # that filter only ever logs at signal time, which may never
+                # happen for a stock that never breaches).
+                oi_hist = self._oi_history.get(sym)
+                oi_str = f"OI={oi_hist[-1][1]:+.1f}%" if oi_hist else "OI=—"
+
+                orb_lvl = self._orb_frozen.get(sym)
+                if orb_lvl is not None:
+                    orb_high, orb_low = orb_lvl
+                    dist_call_pct = (orb_high - ltp) / ltp * 100.0 if ltp else 0.0
+                    dist_put_pct = (ltp - orb_low) / ltp * 100.0 if ltp else 0.0
+                    _heartbeat_parts.append(
+                        f"{sym}={ltp:.2f} [ORB {orb_low:.2f}-{orb_high:.2f}] "
+                        f"CALL@+{dist_call_pct:.2f}% PUT@-{dist_put_pct:.2f}% {oi_str}"
+                    )
+                else:
+                    _heartbeat_parts.append(f"{sym}={ltp:.2f} [ORB pending] {oi_str}")
 
                 # Volume-confirmation filter: totalTradedVolume is a CUMULATIVE session
                 # total (same gotcha OI-Flow's own BarAccumulator already handles for
@@ -630,6 +694,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                             detail=f"trough={self._trough_since_orb[sym]:.2f} orb_low={orb_low:.2f} current={ltp:.2f}",
                             trigger_price=ltp, orb_high=orb_high, orb_low=orb_low)
 
+            self._maybe_log_heartbeat(_heartbeat_parts)
             await self._maybe_poll_oi_history(now)
 
             if self._regime is None and (now_key >= cfg["ORB_END"] or cfg.get("IGNORE_TIME_WINDOWS")):
@@ -657,11 +722,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 for sym in self._shortlist_symbols:
                     if sym not in self._orb_frozen or sym not in live.index:
                         continue
-                    orb_high, orb_low = self._orb_frozen[sym]
-                    ltp = float(live.loc[sym, "lastPrice"])
-                    prev_close = self._prev_close_map.get(sym, 0.0)
-                    sig = screener.evaluate_breakout(sym, ltp, prev_close, orb_high, orb_low,
-                                                      self._regime, self._already_fired, cfg, now=now)
+                    sig, last_key = self._maybe_confirmed_breakout(sym, now, cfg)
                     if sig is not None and (sig.symbol, sig.side) in self._rejected:
                         self._clog.info("OiOrb[%s/%s]: %s %s breakout fired but skipped -- "
                                          "already REJECTED (50%% rejection rule) earlier today.",
@@ -672,9 +733,11 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                             trigger_price=sig.trigger_price, orb_high=sig.orb_high, orb_low=sig.orb_low)
                         sig = None
                     if sig is not None:
-                        self._clog.info("OiOrb[%s/%s]: SIGNAL %s BUY %s trigger=%.2f ORB=%.2f-%.2f reason=%s",
-                                         self._client_id, self._binding_id, sig.symbol, sig.side,
-                                         sig.trigger_price, sig.orb_low, sig.orb_high, sig.reason)
+                        self._clog.info(
+                            "OiOrb[%s/%s]: SIGNAL %s BUY %s 1m-CONFIRMED-CLOSE=%.2f (bar %s) "
+                            "ORB=%.2f-%.2f reason=%s",
+                            self._client_id, self._binding_id, sig.symbol, sig.side,
+                            sig.trigger_price, last_key, sig.orb_low, sig.orb_high, sig.reason)
                         await asyncio.to_thread(
                             store.log_signal_event, self._client_id, self._binding_id, sig.symbol,
                             "signal_fired", side=sig.side, detail=sig.reason,
@@ -963,6 +1026,52 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._clog.info("OiOrb[%s/%s]: chain tracking started for %s (ATM=%.2f depth=%d, %d contracts).",
                          self._client_id, self._binding_id, stock_symbol,
                          mat.snapshot().atm_strike, depth, len(keys))
+
+    def _maybe_confirmed_breakout(self, sym: str, now: datetime, cfg: dict):
+        """2026-08-27, direct user spec: "I want a confirm close in 1 min TF" --
+        a breakout only counts once the 1-min bar for the PREVIOUS minute has
+        fully CLOSED beyond ORB-high/low, not a raw instantaneous poll price (a
+        wick that reverts before the next snapshot must never fire a signal).
+        self._bars is already fed this cycle's tick (self._bars.on_quote, called
+        earlier in the same loop iteration) before this runs, so `last_key`'s
+        bucket -- the PREVIOUS minute -- is now closed for good the first time
+        a new minute key appears for this symbol; evaluated exactly once.
+
+        Returns (Signal | None, last_key) -- last_key is only meaningful
+        (non-None) when a bar genuinely closed this cycle, for the caller's own
+        logging."""
+        current_bar_key = now.strftime("%H:%M")
+        last_key = self._last_bar_key_for_signal.get(sym)
+        self._last_bar_key_for_signal[sym] = current_bar_key
+        if last_key is None or last_key == current_bar_key:
+            return None, None
+        closed_bar = self._bars.bars.get(sym, {}).get(last_key)
+        if closed_bar is None:
+            return None, None
+        orb_high, orb_low = self._orb_frozen[sym]
+        confirm_close = closed_bar["c"]
+        prev_close = self._prev_close_map.get(sym, 0.0)
+        sig = screener.evaluate_breakout(sym, confirm_close, prev_close, orb_high, orb_low,
+                                          self._regime, self._already_fired, cfg, now=now)
+        return sig, last_key
+
+    def _maybe_log_heartbeat(self, heartbeat_parts: list) -> None:
+        """2026-08-27, direct user spec: real observation was "only one log is
+        showing data, rest are blank" -- before this, nothing logged between
+        "ORB frozen" and an actual fired/rejected signal, so a small shortlist
+        with neither stock breaching yet looked identical to "book stalled" as
+        "book alive but nothing's happened." Logs each shortlisted stock's live
+        price against its own ORB-high/ORB-low once per _HEARTBEAT_INTERVAL_SEC,
+        purely informational -- neither side is a restriction (a stock can fire
+        either CALL or PUT depending on which level actually breaches)."""
+        if not heartbeat_parts:
+            return
+        _now_mono = _time.monotonic()
+        if _now_mono - self._last_heartbeat_log_ts < _HEARTBEAT_INTERVAL_SEC:
+            return
+        self._last_heartbeat_log_ts = _now_mono
+        self._clog.info("OiOrb[%s/%s]: WATCH  %s",
+                         self._client_id, self._binding_id, " | ".join(heartbeat_parts))
 
     async def _maybe_poll_oi_history(self, now: datetime) -> None:
         """Feeds the OI rate-of-change filter -- ADDITIVE to the existing

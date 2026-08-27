@@ -56,6 +56,14 @@ _UPSTOX_NSE_MASTER_URL = "https://assets.upstox.com/market-quote/instruments/exc
 # down entry latency for no benefit, since lot sizes don't change intraday).
 _lot_cache: dict = {}
 _lot_cache_loaded = False
+# 2026-08-27, direct user spec: OI-ORB's own dedicated upstox2 feeder needs
+# each shortlisted stock's real NSE_EQ instrument_key to subscribe live spot
+# ticks (UpstoxFeeder.register_extra_spot_keys takes instrument keys, not
+# Fyers' "NSE:SYMBOL-EQ" string format). No such lookup existed anywhere in
+# this codebase before this. Populated in the SAME pass as the lot cache
+# (same master JSON, just also keeping NSE_EQ rows instead of only NSE_FO
+# ones) -- avoids a second full download for a cache this closely related.
+_eq_key_cache: dict = {}
 # 2026-08-24 CRITICAL fix, confirmed live: resolve_lot() runs via
 # asyncio.to_thread -- real OS threads, one per concurrently-firing signal.
 # _lot_cache_loaded used to be set True BEFORE the fetch even started, so
@@ -203,8 +211,22 @@ def resolve_contract(stock_symbol: str, raw_strike: float, option_type: str,
         logger.warning("stock_resolve: no active expiry resolved for %s -- skipping.", sym)
         return None
 
-    step = resolve_strike_step_for_price(sym, raw_strike)
-    strike = int(round(raw_strike / step) * step) if step > 0 else int(round(raw_strike))
+    # 2026-08-27 CRITICAL fix, confirmed live: GVT&D PE entry failed with
+    # "no upstox_key resolved for GVT&D PE4350" -- the price-band heuristic
+    # below assumed a flat 50pt grid for anything under Rs5000, but GVT&D's
+    # REAL listed grid switches to 100pt around that price level (4300/4400
+    # are real, 4350 was never listed at all -- confirmed directly against
+    # the real Upstox master JSON via scripts/check_stock_expiries_raw.py).
+    # Snap to the NEAREST REAL listed strike (now that the registry is
+    # already loaded, it knows the true grid) instead of guessing a step --
+    # only fall back to the old heuristic if this underlying/expiry
+    # genuinely has no strikes loaded (never crash, never guess a symbol).
+    available = REGISTRY.get_available_strikes(sym, expiry, option_type)
+    if available:
+        strike = min(available, key=lambda s: abs(s - raw_strike))
+    else:
+        step = resolve_strike_step_for_price(sym, raw_strike)
+        strike = int(round(raw_strike / step) * step) if step > 0 else int(round(raw_strike))
 
     upstox_key = REGISTRY.get_upstox_key(sym, expiry, strike, option_type)
     if not upstox_key:

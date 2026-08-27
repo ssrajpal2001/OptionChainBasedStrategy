@@ -732,3 +732,117 @@ async def test_hard_risk_cap_scales_with_lot_multiplier():
 
     sell_events = [e for t, e in bus.published if t == Topic.OI_ORB_ORDER_REQUEST and e.action == "SELL"]
     assert sell_events == []
+
+
+# ── Periodic per-stock heartbeat log (2026-08-27) ────────────────────────
+
+def test_heartbeat_logs_price_vs_orb_levels():
+    """_clog uses propagate=False (its own dedicated per-binding log file),
+    so caplog can't observe it -- monkeypatch .info directly instead, same
+    pattern the throttle test below already uses."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    calls = []
+    book._clog.info = lambda *a, **k: calls.append(a)
+    book._maybe_log_heartbeat(["GVT&D=4550.00 [ORB 4433.20-4523.40] CALL@-0.59% PUT@2.57%"])
+    assert len(calls) == 1
+    assert "WATCH" in calls[0][0]
+    assert "GVT&D" in calls[0][-1]
+
+
+def test_heartbeat_is_throttled():
+    bus = _FakeBus()
+    book = _make_book(bus)
+    calls = []
+    book._clog.info = lambda *a, **k: calls.append(a)
+    book._maybe_log_heartbeat(["A=1 [ORB pending]"])
+    book._maybe_log_heartbeat(["A=2 [ORB pending]"])   # same cycle, must not double-log
+    assert len(calls) == 1
+
+
+def test_heartbeat_no_op_with_no_parts():
+    bus = _FakeBus()
+    book = _make_book(bus)
+    calls = []
+    book._clog.info = lambda *a, **k: calls.append(a)
+    book._maybe_log_heartbeat([])
+    assert calls == []
+
+
+# ── 1-min confirmed-close breakout (2026-08-27, direct user spec) ───────
+
+def _seed_orb(book, sym, high, low):
+    book._orb_frozen[sym] = (high, low)
+    book._regime = "bullish"
+    book._prev_close_map[sym] = low
+
+
+def test_confirmed_breakout_no_signal_on_the_very_first_tick_of_a_symbol():
+    """First-ever tick for a symbol: no prior bar key exists yet, so nothing
+    has "closed" -- must not fire, must not even look at self._bars."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    _seed_orb(book, "GVT&D", high=4523.40, low=4433.20)
+    now = datetime(2026, 8, 27, 9, 30, 10, tzinfo=IST)
+    book._bars.on_quote("GVT&D", 4550.0, now)   # above ORB-high, but first tick ever
+    sig, last_key = book._maybe_confirmed_breakout("GVT&D", now, book._screener_cfg)
+    assert sig is None
+    assert last_key is None
+
+
+def test_confirmed_breakout_no_signal_while_still_in_the_same_minute():
+    """Two ticks in the SAME minute bucket -- the bar hasn't closed yet, no
+    signal even though price is above ORB-high both times."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    _seed_orb(book, "GVT&D", high=4523.40, low=4433.20)
+    t1 = datetime(2026, 8, 27, 9, 30, 10, tzinfo=IST)
+    t2 = datetime(2026, 8, 27, 9, 30, 40, tzinfo=IST)
+    book._bars.on_quote("GVT&D", 4550.0, t1)
+    sig1, _ = book._maybe_confirmed_breakout("GVT&D", t1, book._screener_cfg)
+    book._bars.on_quote("GVT&D", 4560.0, t2)
+    sig2, last_key2 = book._maybe_confirmed_breakout("GVT&D", t2, book._screener_cfg)
+    assert sig1 is None
+    assert sig2 is None
+    assert last_key2 is None   # still same "09:30" bucket, nothing closed
+
+
+def test_confirmed_breakout_fires_once_the_bar_genuinely_closes_above_orb_high():
+    """A wick that reverts within the SAME minute (e.g. spikes to 4550 then
+    settles back to 4500 by the time the bar closes) must NOT fire -- only
+    the bar's own CLOSE matters, not its high."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    _seed_orb(book, "GVT&D", high=4523.40, low=4433.20)
+    t1 = datetime(2026, 8, 27, 9, 30, 10, tzinfo=IST)
+    t2_wick = datetime(2026, 8, 27, 9, 30, 40, tzinfo=IST)
+    t3_next_min = datetime(2026, 8, 27, 9, 31, 5, tzinfo=IST)
+
+    book._bars.on_quote("GVT&D", 4500.0, t1)
+    book._maybe_confirmed_breakout("GVT&D", t1, book._screener_cfg)
+    book._bars.on_quote("GVT&D", 4550.0, t2_wick)   # wick above ORB-high mid-bar
+    book._bars.on_quote("GVT&D", 4500.0, t2_wick)   # reverts back below ORB-high, same bar
+    # New minute tick -- the 09:30 bar (close=4500, back below ORB-high) just closed.
+    book._bars.on_quote("GVT&D", 4501.0, t3_next_min)
+    sig, last_key = book._maybe_confirmed_breakout("GVT&D", t3_next_min, book._screener_cfg)
+    assert sig is None   # the bar's CLOSE (4500) never actually cleared 4523.40
+    assert last_key == "09:30"
+
+
+def test_confirmed_breakout_fires_when_the_bar_closes_beyond_orb_high():
+    bus = _FakeBus()
+    book = _make_book(bus)
+    _seed_orb(book, "GVT&D", high=4523.40, low=4433.20)
+    t1 = datetime(2026, 8, 27, 9, 30, 10, tzinfo=IST)
+    t2_next_min = datetime(2026, 8, 27, 9, 31, 5, tzinfo=IST)
+
+    book._bars.on_quote("GVT&D", 4500.0, t1)
+    book._maybe_confirmed_breakout("GVT&D", t1, book._screener_cfg)
+    # 09:30 bar's own close ends up genuinely above ORB-high (4523.40).
+    book._bars.on_quote("GVT&D", 4530.0, t1)
+    book._bars.on_quote("GVT&D", 4535.0, t2_next_min)   # new minute -- 09:30 bar closed at 4530
+    sig, last_key = book._maybe_confirmed_breakout("GVT&D", t2_next_min, book._screener_cfg)
+    assert sig is not None
+    assert sig.symbol == "GVT&D"
+    assert sig.side == "CALL"
+    assert last_key == "09:30"
