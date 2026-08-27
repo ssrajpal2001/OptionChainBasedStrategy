@@ -195,6 +195,12 @@ STRIKE_STEP = 50
 LOT_SIZE = 75
 ENTRY_CHECK_START = dtime(15, 0)
 FORCE_EXIT_TIME = dtime(15, 35)
+# 2026-08-27 NINTH CORRECTION, direct user spec change: trade the strike
+# whose 15:00 premium is closest to Rs100 -- NOT plain ATM. CE and PE are
+# searched independently (their premium curves differ), so the traded CE
+# strike and PE strike can legitimately differ from each other and from ATM.
+TARGET_PREMIUM_RS = 100.0
+STRIKE_SEARCH_STEPS = 10   # scans ATM +/- this many STRIKE_STEP increments
 
 
 @dataclass
@@ -259,6 +265,34 @@ async def fetch_option_day(strike: int, side: str, expiry, day: date, token: str
                f"{day.isoformat()}/{day.isoformat()}")
         rows = _parse_candles(_http_get_json(url, token))
     return _rows_to_bars(rows)
+
+
+async def find_closest_premium_strike(atm: int, side: str, expiry, day: date, token: str,
+                                       target: float = TARGET_PREMIUM_RS,
+                                       steps: int = STRIKE_SEARCH_STEPS) -> tuple[Optional[int], List[Bar]]:
+    """2026-08-27, direct user spec change: trade the strike whose 15:00
+    premium is closest to Rs100, not plain ATM. Scans candidate strikes
+    ATM-steps*STRIKE_STEP .. ATM+steps*STRIKE_STEP (fetched in parallel via
+    asyncio.gather -- this multiplies the REST call count considerably vs the
+    old fixed-ATM design, since every candidate strike needs its own
+    historical-candle fetch; Upstox has no bulk historical option-chain
+    endpoint), and returns whichever candidate's 15:00 close is nearest
+    `target`, along with that strike's already-fetched full-window bars (no
+    second fetch needed for the winner). Returns (None, []) if nothing valid
+    was found (e.g. every candidate strike failed to resolve/fetch)."""
+    candidates = [atm + k * STRIKE_STEP for k in range(-steps, steps + 1)]
+
+    async def _probe(strike: int) -> tuple[int, List[Bar], Optional[float]]:
+        bars = await fetch_option_day(strike, side, expiry, day, token)
+        bar_1500 = next((b for b in bars if b.ts.time() >= ENTRY_CHECK_START), None)
+        return strike, bars, (bar_1500.close if bar_1500 else None)
+
+    results = await asyncio.gather(*[_probe(s) for s in candidates])
+    valid = [(s, bars, p) for s, bars, p in results if p is not None and bars]
+    if not valid:
+        return None, []
+    best_strike, best_bars, _ = min(valid, key=lambda r: abs(r[2] - target))
+    return best_strike, best_bars
 
 
 def _new_diag() -> dict:
@@ -410,14 +444,18 @@ def _simulate_exit(bars: List[Bar], side: str, strike: int, day: date,
     return trade
 
 
-def run_day(day: date, strike: int, ce_bars: List[Bar],
+def run_day(day: date, ce_strike: int, pe_strike: int, ce_bars: List[Bar],
             pe_bars: List[Bar]) -> tuple[List[Trade], dict]:
     """Scan CE and PE fully and independently (see _scan_side's own
     docstring for why that independence matters). Pick the globally-earliest
     confirmed entry across both sides (CE wins an exact-timestamp tie, since
     it's evaluated first below -- an arbitrary but deterministic tie-break;
     genuine same-minute CE/PE ties are rare and not otherwise specified by
-    the user), simulate that side's SL/exit.
+    the user), simulate that side's SL/exit. ce_strike/pe_strike are
+    separate (2026-08-27 NINTH correction: each side trades its own
+    ~Rs100-premium strike, found independently via
+    find_closest_premium_strike -- not necessarily the same as each other or
+    as plain ATM).
 
     2026-08-27 FIFTH CORRECTION, direct user spec: this is no longer a
     single trade per day. If a trade's exit is an SL (not EOD/data_end), we
@@ -452,7 +490,8 @@ def run_day(day: date, strike: int, ce_bars: List[Bar],
             break
         winner_side, winner = candidates[0]
         bars = ce_window if winner_side == "CE" else pe_window
-        trade = _simulate_exit(bars, winner_side, strike, day, winner["ts"], winner["price"])
+        winner_strike = ce_strike if winner_side == "CE" else pe_strike
+        trade = _simulate_exit(bars, winner_side, winner_strike, day, winner["ts"], winner["price"])
         trades.append(trade)
         if trade.exit_reason in ("eod_1535", "data_end"):
             break
@@ -479,7 +518,7 @@ async def main() -> None:
     if not TOKEN:
         print("Usage: python scripts/nifty_1500_sr_breakout_backtest.py <upstox_token> [--days N]")
         return
-    days_back = 10
+    days_back = 7   # 2026-08-27, direct user request: default to a 7-day run
     if "--days" in sys.argv:
         days_back = int(sys.argv[sys.argv.index("--days") + 1])
     trace_day: Optional[date] = None
@@ -531,20 +570,29 @@ async def main() -> None:
                   f"(contract likely rolled off Upstox's live instrument master) -- skip")
             continue
 
-        ce_bars = await fetch_option_day(atm, "CE", expiry, day, TOKEN)
-        pe_bars = await fetch_option_day(atm, "PE", expiry, day, TOKEN)
-        if not ce_bars or not pe_bars:
-            print(f"{day}: ATM={atm} expiry={expiry} -- missing CE/PE premium data -- skip")
+        # 2026-08-27 NINTH CORRECTION, direct user spec change: trade the
+        # ~Rs100-premium strike (found independently per side), not plain
+        # ATM. This means many more REST calls per day (up to 2*STRIKE_
+        # SEARCH_STEPS+1 candidates per side) -- see find_closest_premium_
+        # strike's own docstring.
+        ce_strike, ce_bars = await find_closest_premium_strike(atm, "CE", expiry, day, TOKEN)
+        pe_strike, pe_bars = await find_closest_premium_strike(atm, "PE", expiry, day, TOKEN)
+        if ce_strike is None or pe_strike is None or not ce_bars or not pe_bars:
+            print(f"{day}: ATM={atm} expiry={expiry} -- could not find a ~Rs{TARGET_PREMIUM_RS:.0f} "
+                  f"CE/PE strike -- skip")
             continue
+        print(f"{day}: selected CE{ce_strike} / PE{pe_strike} (closest to Rs{TARGET_PREMIUM_RS:.0f} "
+              f"at 15:00, ATM was {atm})")
 
-        day_trades, diag = run_day(day, atm, ce_bars, pe_bars)
+        day_trades, diag = run_day(day, ce_strike, pe_strike, ce_bars, pe_bars)
         for side in ("CE", "PE"):
             d = diag[side]
+            side_strike = ce_strike if side == "CE" else pe_strike
             r1_str = f"{d['r1']:.2f}" if d["r1"] is not None else "n/a (not yet initialized)"
             s1_str = f"{d['s1']:.2f}" if d["s1"] is not None else "n/a (not yet initialized)"
             max_str = f"{d['max_close']:.2f}" if d["max_close"] is not None else "n/a"
             min_str = f"{d['min_close']:.2f}" if d["min_close"] is not None else "n/a"
-            print(f"    {side}{atm}: R1={r1_str} S1={s1_str} "
+            print(f"    {side}{side_strike}: R1={r1_str} S1={s1_str} "
                   f"window[15:00-15:35] close range=[{min_str}..{max_str}] "
                   f"bars_checked={d['bars_checked']}")
         # Full per-minute S&R trace for BOTH sides, every day, unless
@@ -553,7 +601,7 @@ async def main() -> None:
         # engine's behavior candle-by-candle, not just a final summary).
         if trace_day is None or day == trace_day:
             print(f"    --- minute-by-minute trace for {day} (compare against the real "
-                  f"{atm} CE/PE chart) ---")
+                  f"CE{ce_strike}/PE{pe_strike} chart) ---")
             merged_trace = sorted(
                 ({**row, "side": s} for s in ("CE", "PE") for row in diag[s]["trace"]),
                 key=lambda r: r["ts"])
