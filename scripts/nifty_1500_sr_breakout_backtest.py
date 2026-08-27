@@ -192,7 +192,7 @@ from strategies.d1_trap_option.support_resistance import SupportResistanceCalcul
 TOKEN = sys.argv[1] if len(sys.argv) > 1 else ""
 SPOT_KEY = "NSE_INDEX|Nifty 50"
 STRIKE_STEP = 50
-LOT_SIZE = 75
+LOT_SIZE = 65   # 2026-08-27, direct user correction: current NIFTY lot size is 65, not 75
 ENTRY_CHECK_START = dtime(15, 0)
 FORCE_EXIT_TIME = dtime(15, 35)
 # 2026-08-27 NINTH CORRECTION, direct user spec change: trade the strike
