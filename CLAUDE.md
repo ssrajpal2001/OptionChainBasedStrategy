@@ -2,12 +2,12 @@
 
 Complete codebase reference for Claude Code. Updated after each major phase.
 
-> **CURRENT FOCUS (2026-08-24):** This project's core work is six strategies, **plus one
-> explicit exception added 2026-08-24 (see #7 below)**. **Actually live-deployed and
-> running right now: SellStraddle, OI-Flow, and Liquidity Trap.** D1 Trap FnO/Index, FVG,
-> and Liquidity Sweep are built but not part of the current live rotation (see each one's
-> own status below). OI-ORB Screener (#7) is built, tested, NOT yet deployed — see its
-> own section.
+> **CURRENT FOCUS (2026-08-27):** This project's core work is six strategies, **plus two
+> explicit exceptions (see #7 and #8 below)**. **Actually live-deployed and running right
+> now: SellStraddle, OI-Flow, and Liquidity Trap.** D1 Trap FnO/Index, FVG, and Liquidity
+> Sweep are built but not part of the current live rotation (see each one's own status
+> below). OI-ORB Screener (#7) is built, tested, NOT yet deployed. CAG Long Straddle (#8)
+> is built, tested, awaiting first paper-mode deployment — see its own section.
 > 1. **SellStraddle** — theta-decay option seller (mature, live in production)
 > 2. **D1 Trap FnO/Index** — zone-based option buyer (built, not in the current live rotation — see "D1 Trap FnO / Index" section below)
 > 3. **FVG (Fair Value Gap)** — Smart Money Concepts option buyer (new 2026-08-01/03, built for paper trading, not in the current live rotation; see "FVG Strategy" section below)
@@ -15,10 +15,11 @@ Complete codebase reference for Claude Code. Updated after each major phase.
 > 5. **Liquidity Sweep** — SMC/ICT sweep+displacement+FVG+retest option buyer (new 2026-08-19, built as a **fully standalone 5th strategy pipeline**, same zero-shared-infrastructure mandate as OI-Flow. Iteratively built and validated as a Pine Script indicator against real NIFTY chart data in TradingView BEFORE being ported to Python, per direct user instruction — not backtested in Python first. Not yet deployed even in paper mode — see "Liquidity Sweep Strategy" section below.)
 > 6. **Liquidity Trap** — ref-candle sweep/CHoCH option buyer (new 2026-08-20/21, built as a **fully standalone 6th strategy pipeline**, same zero-shared-infrastructure mandate. **Live-deployed** on NIFTY/SENSEX — see "Liquidity Trap Strategy" section below.)
 > 7. **OI-ORB Screener** — OI-Spurt + ORB breakout option buyer on individual F&O **STOCKS**, not an index (new 2026-08-24, built as a **fully standalone 7th strategy pipeline**, same zero-shared-infrastructure mandate. **Explicit exception to the "only six strategies" rule** — direct user instruction 2026-08-24 to port an already-working standalone Colab screener into the live app as a paper_route connectivity proof; EOD-square-off only, no SL/target yet. See "OI-ORB Screener Strategy" section below.)
+> 8. **CAG Long Straddle** — R1/S1 phase-breach option buyer on NIFTY/SENSEX, active only 15:00-15:35 IST (new 2026-08-27, built as a **fully standalone 8th strategy pipeline**, same zero-shared-infrastructure mandate. **Second explicit exception to the "only six strategies" rule** — direct user instruction 2026-08-27, same precedent as OI-ORB Screener's own addition. Built from a real-data-validated backtest (scripts/nifty_1500_sr_breakout_backtest.py) refined through many rounds of direct user review against real minute-by-minute NIFTY option premium charts. See "CAG Long Straddle Strategy" section below.)
 >
-> Do NOT suggest, implement, or discuss any other strategies beyond these seven. When
+> Do NOT suggest, implement, or discuss any other strategies beyond these eight. When
 > starting a new session, read the D1 Trap, FVG, OI-Flow, Liquidity Sweep, Liquidity
-> Trap, and OI-ORB Screener sections below first.
+> Trap, OI-ORB Screener, and CAG Long Straddle sections below first.
 
 ---
 
@@ -1325,6 +1326,117 @@ that day. A row still open from a PREVIOUS trading date is never resurrected
 broker's own EOD squareoff already flattened it in reality). Tests:
 `tests/oi_orb_screener/test_store.py`, plus the restore-specific tests in
 `tests/oi_orb_screener/test_engine.py`.
+
+---
+
+### CAG Long Straddle Strategy (`strategies/cag_straddle/`)
+
+Option **buyer** strategy trading NIFTY/SENSEX, active ONLY during a narrow
+15:00-15:35 IST window each day. 8th standalone strategy in this codebase —
+a **second explicit exception** to the "only six/seven strategies" rule
+(direct user instruction 2026-08-27, same precedent as OI-ORB Screener's own
+addition on 2026-08-24). Fully standalone, same zero-shared-runtime mandate
+as OI-Flow/Liquidity Sweep/Liquidity Trap/OI-ORB Screener — own package
+(`strategies/cag_straddle/`), own Topics (`Topic.CAG_STRADDLE_ORDER_REQUEST`/
+`CAG_STRADDLE_ORDER_FILL`), own execution bridge
+(`execution_bridge/cag_straddle_bridge.py`), own book manager.
+
+Called "straddle" because BOTH the ATM-area CE and PE premium charts are
+watched simultaneously (like a straddle), even though at most one side is
+ever actually held long at a time — the mechanic is directional single-leg,
+not a real straddle position.
+
+**Built from a real-data-validated backtest**
+(`scripts/nifty_1500_sr_breakout_backtest.py`) refined through MANY rounds
+of direct user review against real minute-by-minute NIFTY option premium
+charts before being ported into this live engine — see that script's own
+module docstring for the full correction history (10+ real bugs found and
+fixed via direct chart comparison: look-ahead ordering, is_established
+over-gating, next-bar-only vs standing-order confirmation, pre-window
+history contamination, rate-limit exhaustion on multi-day runs, etc.).
+`scripts/nifty_1500_sr_breakout_sweep.py` is a companion parameter sweep
+(target premium x strike-search-width) that independently confirmed the
+live defaults below (target=Rs100, steps=6) as the best-performing combo
+over an 8-trading-day real sample (n=10, win% 60, PF 12.06, net +Rs4,456 at
+lot=65) — though that sample is too small to treat as fully validated,
+same honesty caveat as every other backtest in this codebase.
+
+**Mechanic** (`strategies/cag_straddle/detector.py` reuses the REAL
+`strategies/d1_trap_option/support_resistance.py` `SupportResistanceCalculator`
+— platform infra already reused by D1TrapSRBook/PositionalSRTracker/
+SRPingPongTracker — never reimplements the ping-pong state machine itself):
+1. At `entry_start` (default 15:00 IST), the CE strike and PE strike
+   (independently) whose LIVE premium is closest to `target_premium_rs`
+   (default Rs100) are selected, searched within ATM
+   `+/- strike_search_steps` (default 6) `* strike_step`. Each side then
+   gets a **completely fresh** `SupportResistanceCalculator` — no pre-15:00
+   history feeds in (a real, user-caught bug: carrying market-open history
+   in let a bar AT 15:00 already read as mid-ping-pong-cycle, which is
+   impossible for a genuine breach that early).
+2. **ENTRY**: the strict ping-pong sense of "R1 is breached" — a phase
+   transition from `S2_TRACKING`/`R2_TRACKING` back into `R1_TRACKING`
+   ("R2 breaches R1") — arms a **standing order** at the breaching bar's
+   own high. The order stays live across as many later bars as it takes
+   (not just the immediate next one — a real user-caught bug, "any candle
+   that breached this value, entry happened, not next candle") until a
+   later bar's own high exceeds it. Deliberately NOT gated on
+   `is_established` (that flag legitimately reads False right after this
+   exact promotion — normal internal bookkeeping, not evidence the breach
+   didn't happen; requiring it was a real bug: "system see that r1 is not
+   established so trade did not happen"). The very first
+   `INITIAL_TREND_ESTABLISHMENT -> R1_TRACKING` transition (a fresh
+   base-candle breakout) does NOT count — only a mature ping-pong re-breach
+   does.
+3. Once filled, only S1/S2 matter for that side — SL mirrors the entry
+   mechanic exactly (a bar closing below S1 arms a standing order at that
+   bar's own low; a later bar's low breaching it exits) — "trailing SL as
+   S1 itself".
+4. Force-exit at `force_exit_time` (default 15:35 IST) regardless.
+5. An SL exit (not EOD) resumes scanning **both sides immediately** for the
+   next confirmed signal — multiple sequential trades per day are expected,
+   not capped at one.
+
+SL is an **option-premium** level (not spot-index, unlike Liquidity Sweep/
+Liquidity Trap's own deliberate spot-based design) — the whole S&R read
+runs directly on each side's own premium chart, so no spot-to-premium
+translation is needed. A hard Rs2000/lot risk-cap backstop (same constant
+every other option-buyer strategy in this codebase uses) runs alongside the
+structural SL.
+
+**Known, honestly-flagged limitations** (same category as this codebase's
+other "not fully built out" callouts): strike selection at 15:00 depends on
+this book already having live ticks for its candidate strikes by then
+(`self._live_premium`, built passively from every `Topic.OPTION_TICK` for
+this underlying — no dedicated subscription request is made by this book
+itself; relies on the platform's shared strike-rebalancer already keeping a
+reasonably wide ATM-centered band subscribed). No REST-based intraday
+warmup/replay is implemented (unlike e.g. Liquidity Trap's
+`_warmup_intraday`) — a restart during the narrow 15:00-15:35 window loses
+in-progress standing-order/tracker state and simply resumes watching fresh;
+an already-OPEN position still survives via the existing `position_store`
+persistence, same as every other strategy.
+
+**Files**: `strategies/cag_straddle/detector.py` (pure functions —
+`Bar`/`BarAccumulator`, `SideTracker` the standing-order signal mechanic,
+`pick_strike`), `engine.py` (`CagStraddleStrategy`), `book_manager.py`,
+`events.py`. Execution: `execution_bridge/cag_straddle_bridge.py` (modeled
+directly on `liquidity_sweep_bridge.py` — same confirm-then-finalize
+contract). Strategy name in DB: `cag_straddle`. Dashboard: deploy dropdown
+option in `monitor.html` (default underlying NIFTY, `strategy_params='{}'`
+lets `CagStraddleBookManager._parse_params()` fill in validated defaults),
+live panel via `GET /api/cagstraddle/status` ->
+`CagStraddleStrategy.monitoring_state()` (per-side selected strike +
+R1/S1/phase, open position, recent remarks).
+
+**Status (2026-08-27)**: built, unit-tested (`tests/cag_straddle/
+test_detector.py` — standing-order persistence across unconfirmed bars for
+both entry and SL, the INITIAL_TREND_ESTABLISHMENT exclusion;
+`tests/execution/test_cag_straddle_bridge.py` — paper/live/gate-closed/
+SELL-always-routes), registered, wired into `run_system.py` (`--strategies
+cag_straddle`) and the dashboard. **Not yet deployed** — awaiting first
+paper-mode deployment to confirm the live wiring end-to-end before any
+further scale-up, same graduation discipline established for every prior
+standalone strategy in this codebase.
 
 ---
 

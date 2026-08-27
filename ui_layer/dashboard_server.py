@@ -734,6 +734,7 @@ class DashboardServer:
         liquidity_sweep_manager=None,  # LiquiditySweepBookManager — Sweep+Displacement+FVG+Retest books
         liquidity_trap_manager=None,  # LiquidityTrapBookManager — 15m/5m/1m cascade + CHoCH + scale-in books
         oi_orb_manager=None,  # OiOrbScreenerBookManager — OI-Spurt + ORB screener books (F&O stocks)
+        cag_straddle_manager=None,  # CagStraddleBookManager — 15:00-15:35 R1/S1 breach books
     ) -> None:
         self._bus = bus
         self._cfg = cfg
@@ -754,6 +755,7 @@ class DashboardServer:
         self._liquidity_sweep_manager = liquidity_sweep_manager
         self._liquidity_trap_manager = liquidity_trap_manager
         self._oi_orb_manager = oi_orb_manager
+        self._cag_straddle_manager = cag_straddle_manager
         self._fno_monitor = None          # set via set_fno_monitor()
         self._ws_bridge = WsBridge(bus, cfg=cfg)
         self._uvicorn_server = None
@@ -4145,6 +4147,7 @@ class DashboardServer:
                 "d1_trap_option", "d1_trap_index", "d1_trap_fno", "d1_trap_bear_only",
                 "d1_trap_sr", "d1_trap_fno_sr",
                 "fvg", "oi_flow", "liquidity_sweep", "liquidity_trap", "oi_orb_screener",
+                "cag_straddle",
             }
             if body.strategy_name not in allowed_strategies:
                 return {"ok": False, "error": f"Unknown strategy '{body.strategy_name}'."}
@@ -6290,6 +6293,7 @@ pm2 save
         self._register_liquidity_sweep_routes(app)
         self._register_oi_orb_routes(app)
         self._register_liquidity_trap_routes(app)
+        self._register_cag_straddle_routes(app)
         return app
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -6667,6 +6671,33 @@ pm2 save
                 except Exception:
                     logger.exception(
                         "liquidity_trap_status: monitoring_state() raised for %s -- dropped from panel.",
+                        getattr(b, "_underlying", "?"),
+                    )
+            result.sort(key=lambda r: (0 if r.get("position") else 1, r.get("underlying", "")))
+            return {"ok": True, "books": result}
+
+    def _register_cag_straddle_routes(self, app) -> None:
+        _srv = self
+
+        @app.get("/api/cagstraddle/status")
+        async def cag_straddle_status():
+            """Same shape/intent as /api/liqtrap/status above: per-side
+            (CE/PE) selected strike + R1/S1/phase, the open position, and
+            the recent remarks trail, straight from
+            CagStraddleStrategy.monitoring_state() (strategies/
+            cag_straddle/engine.py)."""
+            if _srv._cag_straddle_manager is None:
+                return {"ok": True, "books": []}
+            books = getattr(_srv._cag_straddle_manager, "books", [])
+            result = []
+            for b in books:
+                if not hasattr(b, "monitoring_state"):
+                    continue
+                try:
+                    result.append(b.monitoring_state())
+                except Exception:
+                    logger.exception(
+                        "cag_straddle_status: monitoring_state() raised for %s -- dropped from panel.",
                         getattr(b, "_underlying", "?"),
                     )
             result.sort(key=lambda r: (0 if r.get("position") else 1, r.get("underlying", "")))

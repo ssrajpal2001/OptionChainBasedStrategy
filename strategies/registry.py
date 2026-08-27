@@ -18,6 +18,7 @@ from strategies.oi_flow import OIFlowBookManager
 from strategies.liquidity_sweep import LiquiditySweepBookManager
 from strategies.liquidity_trap import LiquidityTrapBookManager
 from strategies.oi_orb_screener import OiOrbScreenerBookManager
+from strategies.cag_straddle import CagStraddleBookManager
 
 
 STRATEGY_REGISTRY: Dict[str, Dict[str, Any]] = {
@@ -84,6 +85,16 @@ STRATEGY_REGISTRY: Dict[str, Dict[str, Any]] = {
     # STOCKS (chosen dynamically each day) rather than a fixed underlying.
     "oi_orb_screener": {
         "manager_class": OiOrbScreenerBookManager,
+        "per_binding": True,
+    },
+    # 2026-08-27: 8th standalone strategy -- explicit exception to the prior
+    # 7-strategy cap (see CLAUDE.md's own CAG Straddle section), same
+    # zero-shared-runtime mandate as oi_flow/liquidity_sweep/liquidity_trap/
+    # oi_orb_screener. See strategies/cag_straddle/__init__.py. Built from a
+    # real-data-validated backtest --
+    # scripts/nifty_1500_sr_breakout_backtest.py.
+    "cag_straddle": {
+        "manager_class": CagStraddleBookManager,
         "per_binding": True,
     },
 }

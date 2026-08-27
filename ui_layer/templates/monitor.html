@@ -2323,7 +2323,7 @@ document.addEventListener('alpine:init', () => {
     async toggleStrategyRun(dep, b) {
       const want = !this.depRunning(dep);
       const did = dep.deploy_id || `${this.authClientId}_${dep.binding_id}_${dep.strategy_name}_${dep.underlying}`;
-      const _stratLabel = {sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'D1 Trap Option',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow',liquidity_sweep:'Liquidity Sweep',liquidity_trap:'Liquidity Trap',oi_orb_screener:'OI-ORB Screener'};
+      const _stratLabel = {sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'D1 Trap Option',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow',liquidity_sweep:'Liquidity Sweep',liquidity_trap:'Liquidity Trap',oi_orb_screener:'OI-ORB Screener',cag_straddle:'CAG Long Straddle'};
       const _undLabel = u => u==='ALL_FNO'?'All FnO Stocks':u==='WATCHLIST'?'Watchlist (top-5)':u;
       const label = (_stratLabel[dep.strategy_name]||dep.strategy_name)+' · '+_undLabel(dep.underlying);
       const ok = want
@@ -2900,7 +2900,7 @@ document.addEventListener('alpine:init', () => {
             // default (SELL-to-open), mislabeling every D1Trap/FVG entry backwards.
             // d1_trap_sr added 2026-08-12 -- same option-buyer mechanic, only the entry
             // trigger (S&R ping-pong vs T1/T2) differs from d1_trap_bear_only.
-            const _buyerOnlyStrats = ['d1_trap_bear_only', 'd1_trap_sr', 'd1_trap_option', 'd1_trap_index', 'd1_trap_fno', 'fvg', 'oi_flow', 'liquidity_sweep', 'liquidity_trap', 'oi_orb_screener'];
+            const _buyerOnlyStrats = ['d1_trap_bear_only', 'd1_trap_sr', 'd1_trap_option', 'd1_trap_index', 'd1_trap_fno', 'fvg', 'oi_flow', 'liquidity_sweep', 'liquidity_trap', 'oi_orb_screener', 'cag_straddle'];
             const _openAction = (lg) => strat === 'v4_cascade'
                 ? (_isCryptoShort(lg) ? 'SELL' : 'BUY')
                 : _buyerOnlyStrats.includes(strat) ? 'BUY' : 'SELL';
@@ -7692,6 +7692,17 @@ function amoTest() {
                           deployForm.product_type='MIS';
                           deployForm.underlying='SCREENER';
                           deployForm.squareoff_time='15:15';
+                        } else if(deployForm.strategy_name==='cag_straddle'){
+                          // No dedicated advanced-params UI yet -- '{}' (set
+                          // below) lets CagStraddleBookManager._parse_params()
+                          // fill in its own validated defaults (target_premium_
+                          // rs=100, strike_search_steps=6, entry 15:00, force
+                          // exit 15:35) -- see CLAUDE.md's own CAG Straddle
+                          // section for the real-data-validated backtest this
+                          // was built from.
+                          deployForm.product_type='MIS';
+                          deployForm.underlying='NIFTY';
+                          deployForm.squareoff_time='15:35';
                         } else {
                           deployForm.product_type='MIS';
                         }
@@ -7708,6 +7719,8 @@ function amoTest() {
                           : deployForm.strategy_name==='liquidity_trap'
                           ? '{}'
                           : deployForm.strategy_name==='oi_orb_screener'
+                          ? '{}'
+                          : deployForm.strategy_name==='cag_straddle'
                           ? '{}'
                           : JSON.stringify({htf:deployForm._htf||'D1',mtf:deployForm._mtf||'1H',itm:deployForm._itm||1});
                       ">
@@ -7726,6 +7739,7 @@ function amoTest() {
                 <option value="liquidity_trap">Liquidity Trap (Multi-Ref 20m/3m + 60m Trend Filter)</option>
                 <option value="fno_positional">FnO Positional (Swing, All FnO Stocks)</option>
                 <option value="oi_orb_screener">OI-ORB Screener (F&amp;O Stocks, EOD-only)</option>
+                <option value="cag_straddle">CAG Long Straddle (15:00-15:35 R1/S1 Breach)</option>
               </select>
             </div>
             <div>
@@ -8257,7 +8271,7 @@ function amoTest() {
                   <div class="flex items-center justify-between mb-3">
                     <div>
                       <div class="font-ui font-bold text-sm" style="color:var(--t-bright)"
-                           x-text="({sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'Trap Scanner',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow',liquidity_sweep:'Liquidity Sweep',liquidity_trap:'Liquidity Trap',oi_orb_screener:'OI-ORB Screener'}[dep.strategy_name]||dep.strategy_name)"></div>
+                           x-text="({sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'Trap Scanner',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow',liquidity_sweep:'Liquidity Sweep',liquidity_trap:'Liquidity Trap',oi_orb_screener:'OI-ORB Screener',cag_straddle:'CAG Long Straddle'}[dep.strategy_name]||dep.strategy_name)"></div>
                       <div class="flex items-center gap-2 mt-0.5">
                         <span class="font-mono text-xs" style="color:var(--t-cyan)" x-text="dep.underlying==='ALL_FNO'?'All 30 FnO Stocks':dep.underlying==='WATCHLIST'?'Watchlist (top-5)':dep.underlying"></span>
                         <span class="font-mono text-xs" style="color:var(--t-muted)"
@@ -8893,6 +8907,85 @@ function amoTest() {
                               </div>
                             </div>
                           </template>
+
+                          <!-- Remarks trail -->
+                          <div class="mt-2 pt-2" style="border-top:1px solid var(--t-border)" x-show="(_bk.recent_remarks||[]).length>0">
+                            <div class="mb-1" style="color:var(--t-muted);font-size:10px">RECENT REMARKS</div>
+                            <div style="max-height:110px;overflow-y:auto">
+                              <template x-for="(r,ri) in (_bk.recent_remarks||[]).slice(0,8)" :key="ri">
+                                <div class="mb-0.5" :style="{
+                                    'entry':'color:var(--t-green)', 'exit':'color:var(--t-amber)',
+                                    'watch':'color:var(--t-cyan)', 'info':'color:var(--t-dim)',
+                                  }[r.level]||'color:var(--t-dim)'">
+                                  <span style="color:var(--t-dim)" x-text="(r.ts||'').slice(11,19)"></span>
+                                  <span x-text="' '+r.text"></span>
+                                </div>
+                              </template>
+                            </div>
+                          </div>
+                        </div>
+                      </template>
+                    </div>
+                  </template>
+
+                  <!-- CAG Long Straddle live panel (2026-08-27): CagStraddleStrategy's own
+                       monitoring_state() (strategies/cag_straddle/engine.py) -- shows the
+                       selected CE/PE strikes + live R1/S1/phase per side, the open position,
+                       and the recent remarks trail. -->
+                  <template x-if="dep.strategy_name==='cag_straddle'">
+                    <div class="rounded p-3 mb-2 text-xs font-mono" style="background:rgba(var(--t-cyan-rgb),0.04);border:1px solid rgba(var(--t-cyan-rgb),0.18)"
+                         x-data="{
+                           _bk: null,
+                           async _load() {
+                             try {
+                               const tok = localStorage.getItem('terminus_token') || (authToken||'');
+                               const r = await fetch('/api/cagstraddle/status', {headers:{'Authorization':'Bearer '+tok}});
+                               const d = await r.json();
+                               if (d.ok) {
+                                 this._bk = (d.books||[]).find(bk => bk.binding_id===b.binding_id && bk.underlying===dep.underlying) || null;
+                               }
+                             } catch(e) {}
+                           }
+                         }"
+                         x-init="_load(); setInterval(()=>_load(), 15000)">
+                      <template x-if="!_bk">
+                        <div class="text-center" style="color:var(--t-dim)">Loading CAG Straddle state…</div>
+                      </template>
+                      <template x-if="_bk">
+                        <div>
+                          <div class="flex items-center justify-between mb-2">
+                            <span style="color:var(--t-muted)">STATUS
+                              <span :style="_bk.day_done?'color:var(--t-amber)':(_bk.entry_window_started?'color:var(--t-green)':'color:var(--t-dim)')"
+                                    x-text="_bk.day_done ? 'day done' : (_bk.entry_window_started ? 'watching' : 'waiting for entry window')"></span>
+                            </span>
+                            <span class="px-1.5 py-0.5 rounded" style="background:rgba(var(--t-cyan-rgb),0.15);color:var(--t-cyan)"
+                                  x-text="_bk.position ? 'IN TRADE' : 'FLAT'"></span>
+                          </div>
+
+                          <!-- Open position -->
+                          <template x-if="_bk.position">
+                            <div class="mb-2 pb-2" style="border-bottom:1px solid var(--t-border)"
+                                 x-data="{ get _p(){ return _bk.position; } }">
+                              <div class="flex items-center gap-2 mb-1" style="color:var(--t-green);font-weight:600">
+                                ● TRADE ACTIVE
+                                <span x-text="_p.side+' '+_p.strike"></span>
+                              </div>
+                              <div class="flex justify-between">
+                                <span style="color:var(--t-muted)">Entry price</span>
+                                <span x-text="fmt(_p.entry_price)"></span>
+                              </div>
+                            </div>
+                          </template>
+
+                          <!-- Per-side R1/S1/phase -->
+                          <div class="mb-1.5">
+                            <template x-for="side in ['CE','PE']" :key="side">
+                              <div class="flex items-center justify-between">
+                                <span style="color:var(--t-muted)" x-text="side+' '+((_bk.sides&&_bk.sides[side]&&_bk.sides[side].strike)||'—')"></span>
+                                <span x-text="(_bk.sides&&_bk.sides[side]) ? ('R1:'+fmt(_bk.sides[side].r1)+' S1:'+fmt(_bk.sides[side].s1)+' '+(_bk.sides[side].phase||'')) : '—'"></span>
+                              </div>
+                            </template>
+                          </div>
 
                           <!-- Remarks trail -->
                           <div class="mt-2 pt-2" style="border-top:1px solid var(--t-border)" x-show="(_bk.recent_remarks||[]).length>0">

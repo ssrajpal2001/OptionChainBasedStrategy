@@ -238,6 +238,14 @@ class Topic:
                                                       # Colab screener (colab/oi_orb_screener/); trades
                                                       # individual F&O STOCKS (not NIFTY/SENSEX/BANKNIFTY),
                                                       # a first for this codebase's live pipelines.
+    CAG_STRADDLE_ORDER_REQUEST = "cag_straddle_order_request"  # CAG Long Straddle strategy orders
+    CAG_STRADDLE_ORDER_FILL    = "cag_straddle_order_fill"     # (2026-08-27) -- 8th standalone strategy,
+                                                      # explicit exception to the prior 7-strategy cap (see
+                                                      # CLAUDE.md's own CAG Straddle section). Fully
+                                                      # standalone, same zero-shared-runtime mandate as
+                                                      # OI-Flow/Liquidity Sweep/Liquidity Trap/OI-ORB.
+                                                      # Built from a real-data-validated backtest --
+                                                      # scripts/nifty_1500_sr_breakout_backtest.py.
 
 
 # ─────────────────────────────────────────────────────────────────────────────
