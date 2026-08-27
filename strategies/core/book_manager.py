@@ -206,10 +206,22 @@ class StrategyBookManager:
         logger.warning("%s: liquidation complete.", self.__class__.__name__)
 
     async def _liquidate_book(self, book: Any, key: Key, reason: str = "kill_switch",
-                               skip_close: bool = False) -> None:
+                               skip_close: bool = False) -> bool:
         """Close any open position on ``book`` with the given reason and stop its tasks.
         skip_close=True (see liquidate_all's own docstring) skips ONLY the
-        real book.liquidate() close call -- the book is still stopped normally."""
+        real book.liquidate() close call -- the book is still stopped normally.
+
+        2026-08-27, real incident fix: book.liquidate() can fail WITHOUT
+        raising -- a real "order placement failed" abort reverts the
+        position back to open and only logs CRITICAL, it never raises. The
+        old code only ever caught a raised exception here, so a soft-failed
+        liquidation was indistinguishable from a genuine success and the
+        book's tasks got stopped regardless, orphaning a real open position
+        with nothing left monitoring it. Now checks _is_flat() AFTER the
+        liquidate attempt and refuses to stop the book's tasks while a
+        position is still open -- returns True if the book is STILL not
+        flat (caller's responsibility to keep it alive/retry), False once
+        it's genuinely flat and safely stopped."""
         if skip_close:
             logger.info("%s: %s -- skip_close=True, not calling book.liquidate().",
                         self.__class__.__name__, key)
@@ -218,6 +230,10 @@ class StrategyBookManager:
                 await book.liquidate(reason)
             except Exception as exc:
                 logger.warning("%s: book.liquidate(%s) failed: %s", self.__class__.__name__, key, exc)
+
+        if not skip_close and not self._is_flat(book):
+            return True   # still open -- do NOT stop the book, caller keeps it alive
+
         try:
             coro_fn = self._resolve_async_stop(book)
             if coro_fn is not None:
@@ -226,6 +242,7 @@ class StrategyBookManager:
                 book.stop()
         except Exception as exc:
             logger.warning("%s: stop book %s failed: %s", self.__class__.__name__, key, exc)
+        return False
 
     def _wanted(self) -> Dict[Key, Any]:
         """Return {(client_id, binding_id, underlying): value} for books that should exist."""
@@ -294,9 +311,33 @@ class StrategyBookManager:
         defers a replacement for this key until the real broker-flatten +
         stop_async() has actually finished -- a book carrying a live position
         is exactly the highest-stakes case for the duplicate-instance race
-        this class exists to prevent."""
+        this class exists to prevent.
+
+        2026-08-27, real incident: `_liquidate_book` used to unconditionally
+        stop the book's tasks after ONE liquidation attempt, even when that
+        attempt genuinely failed (e.g. a real "order placement failed" abort
+        that reverts the position back to open rather than raising an
+        exception -- _liquidate_book's own try/except only ever catches a
+        raised exception, never a soft revert-to-open). The book was already
+        popped from self._books by _reconcile() before this coroutine ever
+        runs, so a failed liquidation silently orphaned a still-open real
+        position: no exception, no crash, just a dead book object with zero
+        tasks left monitoring or retrying a real broker exposure. Now:
+        _liquidate_book itself refuses to stop the book while it's still not
+        flat, and if it comes back not-flat, the book is put BACK into
+        self._books here so the manager keeps it alive (still ticking,
+        still retrying the exit on its own normal exit-check cadence) and
+        will simply try to remove it again on a later reconcile tick."""
         try:
-            await self._liquidate_book(book, key, reason=reason)
+            still_open = await self._liquidate_book(book, key, reason=reason)
+            if still_open:
+                logger.critical(
+                    "%s: liquidation FAILED for %s (reason=%s) -- position is STILL OPEN. "
+                    "Keeping the book alive and monitored instead of orphaning it; will "
+                    "retry removal on a later reconcile tick.",
+                    self.__class__.__name__, key, reason,
+                )
+                self._books[key] = book
         finally:
             self._stopping.pop(key, None)
 

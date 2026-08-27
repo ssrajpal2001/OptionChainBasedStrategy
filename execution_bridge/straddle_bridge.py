@@ -760,6 +760,24 @@ class StraddleExecutionBridge:
             if not pos or getattr(pos, "status", "") != "open":
                 continue
             und = ss._underlying
+            # 2026-08-27, real incident: a manual Trade/Terminal-OFF square-off
+            # tried to buy-to-close the SOLD legs of a position that had already
+            # converted to a deliberate EOD hedge-and-carry (is_hedged_positional
+            # =True) -- exactly the position the hedge exists to protect from
+            # being flattened by routine controls. Skip it here instead (same
+            # spirit as _eod_close_or_hedge's own "if pos.is_hedged_positional:
+            # return" guard) -- it only ever closes via the hedge-cumulative-
+            # profit check or T-1-from-expiry, never a manual toggle.
+            if getattr(pos, "is_hedged_positional", False):
+                logger.warning(
+                    "StraddleBridge: SQUARE-OFF SKIPPED %s for %s/%s — position is a deliberate "
+                    "EOD hedge-and-carry (is_hedged_positional=True); it closes only via the "
+                    "hedge-cumulative-profit check or T-1-from-expiry, never a manual toggle.",
+                    und, client_id, binding_id,
+                )
+                self._trade_log.log_event(client_id, binding_id,
+                    f"SQUARE-OFF SKIPPED {und} — hedged positional carry, left untouched")
+                continue
             try:
                 # Block re-entry while we tear the book down, then route through the real exit.
                 ss._stop_for_day = True

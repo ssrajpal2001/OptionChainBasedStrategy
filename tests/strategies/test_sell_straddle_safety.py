@@ -322,6 +322,15 @@ class _FakeBook:
 
     async def liquidate(self, reason: str = "kill_switch") -> None:
         self.liquidated = (reason,)
+        # 2026-08-27: a real liquidate() that actually succeeds clears the
+        # position -- book_manager.py's _liquidate_book now checks _is_flat()
+        # after this call and refuses to stop the book while a position is
+        # still open (a real incident: a soft-failed liquidate -- no raised
+        # exception, just an internal abort-and-revert -- used to stop the
+        # book anyway, orphaning a real open position with nothing left
+        # monitoring it). Simulating a successful close here is what this
+        # fake is meant to represent.
+        self._position = None
 
     async def stop_async(self) -> None:
         self.stopped = True
@@ -390,5 +399,35 @@ def test_reconcile_liquidates_open_position_on_removal():
     asyncio.run(run_reconcile())
 
     assert ("C1", "B1", "NIFTY") not in mgr._books
+
+
+def test_reconcile_keeps_book_alive_when_liquidation_fails():
+    """2026-08-27, real incident: a manual toggle-off/deployment-removal
+    tried to liquidate a book whose exit got aborted (broker rejected the
+    order -- no exception raised, just an internal revert-to-open). The old
+    code stopped the book's tasks regardless, orphaning a real open
+    position with nothing left monitoring or retrying it. A book whose
+    liquidate() call does NOT actually clear the position (simulating a
+    failed/aborted close) must be kept alive in self._books, not stopped."""
+    class _FailingLiquidateBook(_FakeBook):
+        async def liquidate(self, reason: str = "kill_switch") -> None:
+            self.liquidated = (reason,)
+            # Deliberately does NOT clear self._position -- simulates a
+            # real aborted exit (broker rejection) that reverts to "open".
+
+    mgr = _TestBookManager()
+    book = _FailingLiquidateBook()
+    book._position = object()
+    mgr._books[("C1", "B1", "NIFTY")] = book
+
+    async def run_reconcile():
+        mgr._reconcile()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    asyncio.run(run_reconcile())
+
+    assert mgr._books.get(("C1", "B1", "NIFTY")) is book, \
+        "a book whose liquidation failed must stay in self._books, not be orphaned"
+    assert book.stopped is False, "must not stop the book's tasks while a position is still open"
     assert book.liquidated == ("deployment_stop",)
-    assert book.stopped is True
