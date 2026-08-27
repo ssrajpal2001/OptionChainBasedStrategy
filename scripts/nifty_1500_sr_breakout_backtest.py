@@ -27,24 +27,50 @@ Concretely, per trading day:
      scratch at the exact moment we start checking it -- an S&R engine with no
      prior candles has nothing to trail yet (see support_resistance.py's own
      INITIAL_TREND_ESTABLISHMENT phase).
-  4. Only START checking the entry condition on bars closing >= 15:00. The
-     FIRST side (CE or PE, in time order) whose 1-min bar CLOSES above its own
-     currently-established R1 high fires a BUY on that side, at that bar's
-     close (this backtest's own entry-price assumption -- the spec doesn't
-     specify tick-level slippage, and every other backtest script in this repo
-     enters at the triggering bar's own close/high, e.g. SRPingPongTracker's
-     R1-breach entry).
+  4. Only START checking the entry condition on bars closing in [15:00, 15:35].
+     R1/S1 are read as the CALCULATOR'S OWN LEVELS AS OF BEFORE the bar being
+     checked is fed in (never the level that bar itself just extended -- see
+     the 2026-08-27 correction below). The FIRST side (CE or PE, in time
+     order) whose 1-min bar CLOSES above that pre-bar R1 fires a BUY on that
+     side, at that bar's close.
   5. Once in a trade, only that side is tracked (the spec says "a buy trade",
-     singular -- one trade per day). SL = the CURRENT established S1 low,
-     RE-READ after every subsequent bar close, so it moves as the live S&R
-     engine's own S1 promotes upward -- this literally implements "trailing
-     stop loss as S1 itself" (no separate ratchet-only clamp is added on top;
-     if the S&R engine's own S1 print were ever to have moved down, the SL
-     would follow it down too, since the user asked for the SL to BE S1, not a
-     one-way trail of it).
-  6. A bar closing below the current S1 exits at that close (reason
+     singular -- one trade per day). SL = the pre-bar S1 low, re-read fresh
+     every subsequent bar, so it moves as the live S&R engine's own S1
+     evolves -- this implements "trailing stop loss as S1 itself".
+  6. A bar closing below the pre-bar S1 exits at that close (reason
      "sl_s1@<level>"). Otherwise the trade is force-closed at the first bar
      timestamped >= 15:35 IST, same day (reason "eod_1535").
+
+2026-08-27 CORRECTION (real user-caught bug, confirmed against an annotated
+real NIFTY 24150 PE chart showing a plain base-range breakout at R1=70.60
+with S1=65.00 that this script had reported as "no entry"): two bugs, now
+fixed.
+  (a) Look-ahead ordering bug -- the original code read R1/S1 via
+      get_calculated_sr_state() AFTER already feeding the current bar into
+      the calculator, so a bar that itself just pushed R1 to a new high was
+      being compared against ITS OWN just-updated R1 (self-referential --
+      close <= high always, so this could never legitimately fire off that
+      bar, and left R1 as printed massively lagging what the real chart
+      showed at the time). Fixed to snapshot R1/S1 BEFORE feeding each bar
+      (matches the existing "st_before"/"phase_before" pattern already used
+      by strategies/d1_trap_option/support_resistance.py's own
+      SRPingPongTracker for exactly this reason), then feed the bar, so the
+      comparison is always against the level that existed BEFORE this bar
+      closed -- a real, non-look-ahead breakout check.
+  (b) Over-strict "established" gate -- the original code additionally
+      required is_established=True (the ping-pong state machine's own
+      pullback-confirmation flag, which only flips true once a LATER bar
+      prints a lower-high+lower-low candle after the peak). The user's own
+      chart shows a plain base/consolidation R1 (set from the pre-breakout
+      sideways range, no multi-candle pullback confirmation needed) getting
+      breached and closed above immediately -- exactly Phase 0's/R1_TRACKING's
+      raw, continuously-updated R1['high'] field (which the calculator
+      already ratchets to every new high seen, independent of is_established;
+      is_established is a separate confirmation flag the calculator uses for
+      its own internal phase transitions, not a precondition this backtest's
+      entry rule needs). Dropped the is_established gate entirely -- entry
+      now fires on ANY pre-bar R1 breach, established or not, matching the
+      user's own simpler mental model and the real chart evidence.
 
 Known, honestly-flagged limitations (same category as this repo's other
 "cannot be backtested"/"structural limitation" callouts):
@@ -175,20 +201,10 @@ def run_day(day: date, strike: int, ce_bars: List[Bar], pe_bars: List[Bar],
             trace: bool = False) -> tuple[Optional[Trade], dict]:
     """Feed both sides into one SupportResistanceCalculator (2 logical
     inst_keys), from market open, then look for the first bar CLOSING inside
-    the [15:00, 15:35] window that breaches its own established R1. See
-    module docstring for the full mechanic.
-
-    2026-08-27, direct user correction: the entry check runs on EVERY 1-min
-    close from 15:00 through 15:35 (not only the exact 15:00 bar) -- this was
-    already true of the loop below (it never `break`s or `return`s out of the
-    per-bar scan just because the 15:00 bar itself didn't breach), but there
-    was no UPPER bound either, so a breach arriving after 15:35 could still
-    have opened a brand-new trade the same run was about to force-close a
-    moment later. Both bounds are now explicit on the entry side. The diag
-    dict returned alongside the trade (or None) records each side's R1/S1 as
-    last known during the window plus the highest/lowest close it reached --
-    printed by main() specifically so the levels can be checked directly
-    against the real option-premium chart for that strike."""
+    the [15:00, 15:35] window that breaches R1 as it stood BEFORE that bar.
+    See module docstring for the full mechanic and the 2026-08-27 correction
+    (look-ahead ordering bug + dropped is_established gate) that fixed real,
+    user-caught missed entries."""
     calc = SupportResistanceCalculator()
     tagged = [("CE", b) for b in ce_bars] + [("PE", b) for b in pe_bars]
     tagged.sort(key=lambda t: t[1].ts)
@@ -196,9 +212,16 @@ def run_day(day: date, strike: int, ce_bars: List[Bar], pe_bars: List[Bar],
     diag = {"CE": _new_diag(), "PE": _new_diag()}
     trade: Optional[Trade] = None
     for side, bar in tagged:
+        # Snapshot R1/S1 as they stood BEFORE this bar -- the breakout/SL
+        # check must never compare a bar against a level that bar itself
+        # just extended (see the 2026-08-27 correction in the module
+        # docstring). Only after this snapshot do we feed the bar in.
+        levels_before = (calc.get_calculated_sr_state(side).get("sr_levels") or {})
+        r1_before = (levels_before.get("R1") or {}).get("high")
+        s1_before = (levels_before.get("S1") or {}).get("low")
+
         candle = {"timestamp": bar.ts, "high": bar.high, "low": bar.low, "duration": 1}
         calc.process_straddle_candle(side, candle, silent=True)
-        state = calc.get_calculated_sr_state(side)
         t = bar.ts.time()
         in_window = ENTRY_CHECK_START <= t <= FORCE_EXIT_TIME
 
@@ -206,21 +229,19 @@ def run_day(day: date, strike: int, ce_bars: List[Bar], pe_bars: List[Bar],
             if in_window:
                 d = diag[side]
                 d["bars_checked"] += 1
-                if state["r1_established"]:
-                    d["r1"] = state["sr_levels"]["R1"]["high"]
-                if state["s1_established"]:
-                    d["s1"] = state["sr_levels"]["S1"]["low"]
+                if r1_before is not None:
+                    d["r1"] = r1_before
+                if s1_before is not None:
+                    d["s1"] = s1_before
                 d["max_close"] = bar.close if d["max_close"] is None else max(d["max_close"], bar.close)
                 d["min_close"] = bar.close if d["min_close"] is None else min(d["min_close"], bar.close)
                 if trace:
                     d["trace"].append({
                         "ts": bar.ts, "high": bar.high, "low": bar.low, "close": bar.close,
-                        "phase": state["current_phase"],
-                        "r1": state["sr_levels"]["R1"]["high"] if state["r1_established"] else None,
-                        "s1": state["sr_levels"]["S1"]["low"] if state["s1_established"] else None,
+                        "r1": r1_before, "s1": s1_before,
                     })
 
-                if state["r1_established"] and bar.close > state["sr_levels"]["R1"]["high"]:
+                if r1_before is not None and bar.close > r1_before:
                     trade = Trade(day=day, side=side, strike=strike,
                                   entry_ts=bar.ts, entry_price=bar.close)
             continue
@@ -230,12 +251,10 @@ def run_day(day: date, strike: int, ce_bars: List[Bar], pe_bars: List[Bar],
         if t >= FORCE_EXIT_TIME:
             trade.exit_ts, trade.exit_price, trade.exit_reason = bar.ts, bar.close, "eod_1535"
             break
-        if state["s1_established"]:
-            s1_low = state["sr_levels"]["S1"]["low"]
-            if bar.close < s1_low:
-                trade.exit_ts, trade.exit_price = bar.ts, bar.close
-                trade.exit_reason = f"sl_s1@{s1_low:.2f}"
-                break
+        if s1_before is not None and bar.close < s1_before:
+            trade.exit_ts, trade.exit_price = bar.ts, bar.close
+            trade.exit_reason = f"sl_s1@{s1_before:.2f}"
+            break
 
     if trade is not None and trade.exit_ts is None:
         last_bar = (ce_bars if trade.side == "CE" else pe_bars)[-1]
@@ -323,8 +342,8 @@ async def main() -> None:
         trade, diag = run_day(day, atm, ce_bars, pe_bars, trace=(day == trace_day))
         for side in ("CE", "PE"):
             d = diag[side]
-            r1_str = f"{d['r1']:.2f}" if d["r1"] is not None else "not established"
-            s1_str = f"{d['s1']:.2f}" if d["s1"] is not None else "not established"
+            r1_str = f"{d['r1']:.2f}" if d["r1"] is not None else "n/a (not yet initialized)"
+            s1_str = f"{d['s1']:.2f}" if d["s1"] is not None else "n/a (not yet initialized)"
             max_str = f"{d['max_close']:.2f}" if d["max_close"] is not None else "n/a"
             min_str = f"{d['min_close']:.2f}" if d["min_close"] is not None else "n/a"
             print(f"    {side}{atm}: R1={r1_str} S1={s1_str} "
@@ -339,9 +358,10 @@ async def main() -> None:
             for row in merged_trace:
                 r1_s = f"{row['r1']:.2f}" if row["r1"] is not None else "-"
                 s1_s = f"{row['s1']:.2f}" if row["s1"] is not None else "-"
+                breach = " <== CLOSED ABOVE R1" if row["r1"] is not None and row["close"] > row["r1"] else ""
                 print(f"    {row['ts'].strftime('%H:%M')} {row['side']} "
                       f"H={row['high']:.2f} L={row['low']:.2f} C={row['close']:.2f} "
-                      f"phase={row['phase']} R1={r1_s} S1={s1_s}")
+                      f"R1={r1_s} S1={s1_s}{breach}")
         if trade is None:
             print(f"{day}: ATM={atm} expiry={expiry} -- no R1 breakout entry")
             continue
