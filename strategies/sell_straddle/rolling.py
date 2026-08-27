@@ -342,35 +342,41 @@ class RollingMixin:
                     float(getattr(self, "_session_realized_pnl_pts", 0.0) or 0.0),
                 )
 
-            # ITM-pair-gate rollovers only: fund a protective stop on the freshly-rolled leg
-            # worth 70% of the ₹ profit just booked by closing the good leg. Scoped strictly
-            # to this reason string -- standard ltp_decay/ratio/vwap_rise/scalable-TSL rolls
-            # never touch _itm_roll_protection.
+            # 2026-08-27, direct user spec (broadens this from the original ITM-pair-gate-
+            # only scoping): fund a protective stop on the freshly-rolled leg worth 70% of
+            # the ₹ profit just booked by closing the good leg -- for EVERY single-side
+            # roll, irrespective of whether it was ITM/OTM or which reason triggered it
+            # (ltp_decay, ratio_exit, vwap_rise, exit_rules, scalable_tsl, or the ITM pair
+            # gate itself all arm this the same way now). Once the new leg's own running
+            # loss reaches this budget, _check_itm_roll_protection_side closes it and
+            # shifts back to the SAME STRIKE that was closed during this rollover (if it
+            # still passes re-entry), a pool-searched balanced replacement, or closes the
+            # whole position if neither is available -- see that method's own docstring.
             # Keyed by side (roll_side) -- arming/clearing this side's budget must never
             # touch the other side's still-active budget (e.g. CE rolls again while PE's
             # protection from an earlier rollover is still armed and running).
-            if reason == "itm_pair_gate_profit_rollover":
-                if not isinstance(getattr(self, "_itm_roll_protection", None), dict):
-                    self._itm_roll_protection = {}
-                booked_pnl_rs = self._pnl_rs(float(getattr(close_ev, "realized_pnl", 0.0) or 0.0))
-                if booked_pnl_rs > 0:
-                    protect_rs = 0.70 * booked_pnl_rs
-                    self._itm_roll_protection[roll_side] = {
-                        "protect_rs": protect_rs,
-                        "new_side": roll_side,
-                        "new_strike": int(new_strike),
-                        "orig_strike": orig_strike,
-                        "kept_side": keep_side,
-                        "kept_strike": keep_strike,
-                    }
-                    self._clog.info(
-                        "SellStraddle[%s]: ITM-ROLL PROTECTION ARMED — %s%d budget=₹%.0f "
-                        "(70%% of ₹%.0f booked on closed %s%d). Other side's budget (if any) unaffected.",
-                        self._underlying, roll_side, int(new_strike), protect_rs,
-                        booked_pnl_rs, roll_side, orig_strike,
-                    )
-                else:
-                    self._itm_roll_protection.pop(roll_side, None)
+            if not isinstance(getattr(self, "_itm_roll_protection", None), dict):
+                self._itm_roll_protection = {}
+            booked_pnl_rs = self._pnl_rs(float(getattr(close_ev, "realized_pnl", 0.0) or 0.0))
+            if booked_pnl_rs > 0:
+                protect_rs = 0.70 * booked_pnl_rs
+                self._itm_roll_protection[roll_side] = {
+                    "protect_rs": protect_rs,
+                    "new_side": roll_side,
+                    "new_strike": int(new_strike),
+                    "orig_strike": orig_strike,
+                    "kept_side": keep_side,
+                    "kept_strike": keep_strike,
+                }
+                self._clog.info(
+                    "SellStraddle[%s]: ITM-ROLL PROTECTION ARMED — %s%d budget=₹%.0f "
+                    "(70%% of ₹%.0f booked on closed %s%d, reason=%s). Other side's budget "
+                    "(if any) unaffected.",
+                    self._underlying, roll_side, int(new_strike), protect_rs,
+                    booked_pnl_rs, roll_side, orig_strike, reason,
+                )
+            else:
+                self._itm_roll_protection.pop(roll_side, None)
 
             self._persist()
             await self._check_itm_pair_gate(now)

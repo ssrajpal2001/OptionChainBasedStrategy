@@ -180,6 +180,74 @@ def test_single_side_roll_waits_for_close_fill_before_open():
     asyncio.run(run())
 
 
+def test_single_side_roll_arms_70pct_protection_regardless_of_reason():
+    """2026-08-27, direct user spec: the 70%-of-booked-profit roll-protection
+    stop is NOT scoped to itm_pair_gate_profit_rollover anymore -- it arms
+    after ANY single-side roll that books a profit on the closed leg,
+    irrespective of ITM/OTM or which reason triggered it (ltp_decay, ratio,
+    vwap_rise, exit_rules, scalable_tsl, ...). Same CE 152.75->107.0 close as
+    test_single_side_roll_waits_for_close_fill_before_open (a real ₹ profit),
+    but with reason='scalable_tsl' -- a plain non-ITM roll reason."""
+    async def run():
+        bus = EventBus()
+        s = SellStraddleStrategy(bus, cfg=GlobalConfig(), underlying="NIFTY")
+        s._itm_pair_gate_enabled = False
+        s._spot = 24400.0
+        s._position = StraddlePosition(
+            underlying="NIFTY", atm_at_entry=24500, entry_spot=24500,
+            ce_leg=StraddleLeg("CE", 24450, 152.75, 107.0,
+                               open_time=datetime.datetime.now(IST)),
+            pe_leg=StraddleLeg("PE", 24450, 132.05, 162.95,
+                               open_time=datetime.datetime.now(IST)),
+            net_credit=284.8, status="open",
+        )
+
+        emitted = []
+        orig_emit = s._emit_order
+
+        async def capture_emit(ev):
+            emitted.append(ev)
+            await orig_emit(ev)
+        s._emit_order = capture_emit
+
+        with patch("strategies.sell_straddle.selection.select_rollover_partner_directional",
+                   return_value=(24350, 156.90)):
+            async def deliver_fills():
+                await asyncio.sleep(0.02)
+                close_ev = [o for o in emitted if o.action == "EXIT"][0]
+                s._on_fill(StraddleFillEvent(
+                    action="EXIT", underlying="NIFTY", atm=24500.0,
+                    ce_strike=24450.0, pe_strike=24450.0,
+                    ce_fill=107.0, pe_fill=0.0,
+                    client_id="C", binding_id="B",
+                    event_id=close_ev.event_id, legs=["CE"],
+                ))
+                await asyncio.sleep(0.02)
+                open_ev = [o for o in emitted if o.action == "ENTRY"][0]
+                s._on_fill(StraddleFillEvent(
+                    action="ENTRY", underlying="NIFTY", atm=24500.0,
+                    ce_strike=24350.0, pe_strike=24450.0,
+                    ce_fill=156.90, pe_fill=0.0,
+                    client_id="C", binding_id="B",
+                    event_id=open_ev.event_id, legs=["CE"],
+                ))
+
+            task = asyncio.create_task(deliver_fills())
+            rolled = await s._single_side_roll(datetime.datetime.now(IST), "scalable_tsl")
+            await task
+
+        assert rolled is True
+        assert "CE" in s._itm_roll_protection, "a plain non-ITM roll reason must still arm protection"
+        prot = s._itm_roll_protection["CE"]
+        assert prot["new_strike"] == 24350
+        assert prot["orig_strike"] == 24450
+        assert prot["kept_side"] == "PE"
+        assert prot["kept_strike"] == 24450
+        assert prot["protect_rs"] > 0   # 70% of the real booked profit on the CE close
+
+    asyncio.run(run())
+
+
 def test_single_side_roll_reopen_rejected_closes_kept_leg_for_real():
     """2026-08-06 CRITICAL FIX regression test. Sequence: old CE leg closes for
     real (confirmed), then the broker REJECTS the new CE leg's reopen order
