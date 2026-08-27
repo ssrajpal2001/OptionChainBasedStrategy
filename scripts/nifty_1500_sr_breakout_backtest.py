@@ -63,6 +63,14 @@ Known, honestly-flagged limitations (same category as this repo's other
     reported in both points and rupees (NIFTY lot_size=75) for readability
     only; no live/paper wiring, this is backtest-only exactly like every
     other scripts/*_backtest.py in this repo.
+  - 2026-08-27 fix (real user-caught bug: today's ATM printed as 24300 when
+    the real 15:00 spot gave 24200): TODAY's data (both spot and CE/PE
+    premium) is fetched via Upstox's separate INTRADAY endpoint
+    (fetch_upstox_intraday_1m), never the dated historical-candle range used
+    for every prior day -- the dated endpoint does not reliably serve the
+    still-in-progress trading day. Every log line now also prints the exact
+    15:00 spot bar (timestamp + close) that produced each day's ATM, so a
+    wrong ATM is auditable directly from the script's own output.
 
 Usage:
     python scripts/nifty_1500_sr_breakout_backtest.py <upstox_token> [--days N]
@@ -79,7 +87,7 @@ from urllib.parse import quote as _q
 
 sys.path.insert(0, ".")
 
-from data_layer.historical_candles import fetch_upstox_range_1m, _http_get_json, _parse_candles
+from data_layer.historical_candles import fetch_upstox_range_1m, fetch_upstox_intraday_1m, _http_get_json, _parse_candles
 from data_layer.instrument_registry import REGISTRY
 from strategies.d1_trap_option.support_resistance import SupportResistanceCalculator
 
@@ -132,13 +140,26 @@ def by_day(bars: List[Bar]) -> Dict[date, List[Bar]]:
     return days
 
 
-def fetch_option_day(strike: int, side: str, expiry, day: date, token: str) -> List[Bar]:
+async def fetch_option_day(strike: int, side: str, expiry, day: date, token: str) -> List[Bar]:
+    """2026-08-27 fix (real user-caught bug, e.g. today's ATM computed as 24300
+    when the real 15:00 spot was 24200): Upstox's DATED historical-candle
+    endpoint (/v2/historical-candle/{key}/1minute/{from}/{to}) does not
+    reliably serve the still-in-progress trading day -- per
+    data_layer/historical_candles.py's own module docstring, TODAY's bars
+    require the separate intraday endpoint (fetch_upstox_intraday_1m). Asking
+    the dated endpoint for `day == date.today()` silently returned wrong/empty
+    data, which fed a wrong or stale 15:00 bar into the ATM calc. Every day
+    strictly before today still uses the dated endpoint (that data is
+    finalized and the dated endpoint is the correct/only source for it)."""
     key = REGISTRY.get_upstox_key("NIFTY", expiry, strike, side)
     if not key:
         return []
-    url = (f"https://api.upstox.com/v2/historical-candle/{_q(key, safe='')}/1minute/"
-           f"{day.isoformat()}/{day.isoformat()}")
-    rows = _parse_candles(_http_get_json(url, token))
+    if day == date.today():
+        rows = await fetch_upstox_intraday_1m(key, token)
+    else:
+        url = (f"https://api.upstox.com/v2/historical-candle/{_q(key, safe='')}/1minute/"
+               f"{day.isoformat()}/{day.isoformat()}")
+        rows = _parse_candles(_http_get_json(url, token))
     return _rows_to_bars(rows)
 
 
@@ -211,16 +232,32 @@ async def main() -> None:
     end = date.today() - timedelta(days=1)
     start = end - timedelta(days=days_back * 2 + 5)  # buffer for weekends/holidays
 
-    print(f"Fetching NIFTY spot 1-min candles {start} .. {end} ...")
+    print(f"Fetching NIFTY spot 1-min candles {start} .. {end} (historical) ...")
     spot_bars = _rows_to_bars(await fetch_upstox_range_1m(SPOT_KEY, TOKEN, start, end))
     spot_by_day = by_day(spot_bars)
+
+    # 2026-08-27 fix (real user-caught bug): TODAY must come from the intraday
+    # endpoint, never the dated historical-candle range above -- see
+    # fetch_option_day's own docstring for why. Fetched separately and merged
+    # in so today gets exactly the same "spot 15:00 bar -> ATM" treatment as
+    # every past day, just sourced correctly.
+    today = date.today()
+    today_rows = await fetch_upstox_intraday_1m(SPOT_KEY, TOKEN)
+    if today_rows:
+        spot_by_day[today] = _rows_to_bars(today_rows)
+        print(f"{today}: {len(spot_by_day[today])} intraday spot bars fetched "
+              f"({spot_by_day[today][0].ts.strftime('%H:%M')} .. {spot_by_day[today][-1].ts.strftime('%H:%M')})")
+    else:
+        print(f"{today}: intraday spot fetch returned nothing (market closed / no token / holiday)")
+
     if not spot_by_day:
         print("No spot data returned -- check token / date range.")
         return
 
     REGISTRY.load_sync("NIFTY", TOKEN)
 
-    trading_days = sorted(spot_by_day.keys())[-days_back:]
+    past_days = sorted(d for d in spot_by_day if d < today)[-days_back:]
+    trading_days = past_days + ([today] if today in spot_by_day else [])
     trades: List[Trade] = []
     for day in trading_days:
         day_spot = spot_by_day[day]
@@ -229,6 +266,7 @@ async def main() -> None:
             print(f"{day}: no 15:00 spot bar -- skip")
             continue
         atm = round(bar_1500.close / STRIKE_STEP) * STRIKE_STEP
+        print(f"{day}: 15:00 spot bar @ {bar_1500.ts.strftime('%H:%M:%S')} close={bar_1500.close:.2f} -> ATM={atm}")
 
         expiry = REGISTRY.get_active_expiry_strict("NIFTY", from_date=day)
         if expiry is None:
@@ -236,8 +274,8 @@ async def main() -> None:
                   f"(contract likely rolled off Upstox's live instrument master) -- skip")
             continue
 
-        ce_bars = await asyncio.to_thread(fetch_option_day, atm, "CE", expiry, day, TOKEN)
-        pe_bars = await asyncio.to_thread(fetch_option_day, atm, "PE", expiry, day, TOKEN)
+        ce_bars = await fetch_option_day(atm, "CE", expiry, day, TOKEN)
+        pe_bars = await fetch_option_day(atm, "PE", expiry, day, TOKEN)
         if not ce_bars or not pe_bars:
             print(f"{day}: ATM={atm} expiry={expiry} -- missing CE/PE premium data -- skip")
             continue
