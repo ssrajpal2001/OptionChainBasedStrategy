@@ -2848,6 +2848,35 @@ class DashboardServer:
                                 "ltp": round(_val, 2), "pnl": _pnl, "mtm": _pnl,
                                 "entry_time": _ot,
                                 "option_type": ot, "underlying": str(pos.underlying)})
+                # 2026-08-27, real user-found incident: the EOD hedge-and-carry BUY legs
+                # (pos.hedge_ce_leg/hedge_pe_leg) were correctly placed at the broker but
+                # never surfaced anywhere in the UI or History -- a real position invisible
+                # to the client. Same shape as the sold legs above, but side="BUY" (long,
+                # qty positive, P&L = current-entry not entry-current).
+                for leg in (getattr(pos, "hedge_ce_leg", None), getattr(pos, "hedge_pe_leg", None)):
+                    if leg is None:
+                        continue
+                    strike = int(getattr(leg, "strike", 0))
+                    if strike <= 0:
+                        continue
+                    ot = getattr(leg, "option_type", "")
+                    ep = float(getattr(leg, "entry_price", 0.0) or 0.0)
+                    ltp = float(getattr(leg, "ltp", ep) or ep)
+                    ls = int(getattr(pos, "lot_size", 0) or 0)
+                    qty = ls  # hedge legs are BOUGHT (long)
+                    _pnl = round((ltp - ep) * abs(qty) * cv, 2)
+                    _exp_lbl = _fmt_exp(getattr(pos, "expiry_date", None))
+                    _instr = f"{pos.underlying} {strike} {ot} HEDGE" + (f" {_exp_lbl}" if _exp_lbl else "")
+                    _ot = leg.open_time.isoformat(timespec="seconds") if getattr(leg, "open_time", None) else None
+                    out.append({"symbol": f"{pos.underlying} {strike}{ot} BUY (HEDGE)",
+                                "instrument": _instr,
+                                "type": product, "side": "BUY", "ccy": ccy,
+                                "qty": qty, "lot_size": ls, "lots": 1,
+                                "entry_price": round(ep, 2),
+                                "sell_avg": 0.0, "buy_avg": round(ep, 2),
+                                "ltp": round(ltp, 2), "pnl": _pnl, "mtm": _pnl,
+                                "entry_time": _ot, "is_hedge": True,
+                                "option_type": ot, "underlying": str(pos.underlying)})
                 return out
 
             by_broker: dict = {}
@@ -6692,6 +6721,28 @@ pm2 save
                         "exit_ts": None,
                         "entry_reason": getattr(leg, "open_reason", "") or "",
                     })
+                # 2026-08-27, real user-found incident: the EOD hedge-and-carry BUY legs
+                # were correctly placed at the broker but never surfaced in the History
+                # tab's "currently open" rows -- a real position invisible to the client.
+                # Bought (long), so P&L is (ltp - entry), opposite sign from the sold legs.
+                for side, leg in (("CE", getattr(pos, "hedge_ce_leg", None)),
+                                   ("PE", getattr(pos, "hedge_pe_leg", None))):
+                    if leg is None:
+                        continue
+                    strike = int(getattr(leg, "strike", 0) or 0)
+                    if strike <= 0:
+                        continue
+                    ep = float(getattr(leg, "entry_price", 0.0) or 0.0)
+                    ltp = float(getattr(leg, "ltp", ep) or ep)
+                    _legs.append({
+                        "side": side, "strike": strike,
+                        "entry": round(ep, 2), "exit": 0,
+                        "pnl": round((ltp - ep) * _lot, 2),
+                        "entry_ts": _ts(getattr(leg, "open_time", None)),
+                        "exit_ts": None,
+                        "entry_reason": getattr(leg, "open_reason", "") or "eod_hedge",
+                        "is_hedge": True,
+                    })
                 if _legs:
                     rows.append({
                         "date": _ts(_ot) or datetime.now(IST).isoformat(timespec="seconds"),
@@ -6701,7 +6752,9 @@ pm2 save
                         "entry_price": round(sum(l["entry"] for l in _legs), 2),
                         "exit_price": 0,
                         "exit_reason": "OPEN",
-                        "exit_remark": "Live open position",
+                        "exit_remark": ("Hedged positional carry (NRML)"
+                                        if getattr(pos, "is_hedged_positional", False)
+                                        else "Live open position"),
                         "pnl": round(sum(l["pnl"] for l in _legs), 2),
                         "legs": _legs,
                     })
