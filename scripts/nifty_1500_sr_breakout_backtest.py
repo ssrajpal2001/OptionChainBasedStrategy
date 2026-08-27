@@ -163,34 +163,60 @@ async def fetch_option_day(strike: int, side: str, expiry, day: date, token: str
     return _rows_to_bars(rows)
 
 
-def run_day(day: date, strike: int, ce_bars: List[Bar], pe_bars: List[Bar]) -> Optional[Trade]:
+def _new_diag() -> dict:
+    return {"r1": None, "s1": None, "max_close": None, "min_close": None, "bars_checked": 0}
+
+
+def run_day(day: date, strike: int, ce_bars: List[Bar],
+            pe_bars: List[Bar]) -> tuple[Optional[Trade], dict]:
     """Feed both sides into one SupportResistanceCalculator (2 logical
-    inst_keys), from market open, then look for the first >=15:00 bar close
-    that breaches its own established R1. See module docstring for the full
-    mechanic."""
+    inst_keys), from market open, then look for the first bar CLOSING inside
+    the [15:00, 15:35] window that breaches its own established R1. See
+    module docstring for the full mechanic.
+
+    2026-08-27, direct user correction: the entry check runs on EVERY 1-min
+    close from 15:00 through 15:35 (not only the exact 15:00 bar) -- this was
+    already true of the loop below (it never `break`s or `return`s out of the
+    per-bar scan just because the 15:00 bar itself didn't breach), but there
+    was no UPPER bound either, so a breach arriving after 15:35 could still
+    have opened a brand-new trade the same run was about to force-close a
+    moment later. Both bounds are now explicit on the entry side. The diag
+    dict returned alongside the trade (or None) records each side's R1/S1 as
+    last known during the window plus the highest/lowest close it reached --
+    printed by main() specifically so the levels can be checked directly
+    against the real option-premium chart for that strike."""
     calc = SupportResistanceCalculator()
     tagged = [("CE", b) for b in ce_bars] + [("PE", b) for b in pe_bars]
     tagged.sort(key=lambda t: t[1].ts)
 
+    diag = {"CE": _new_diag(), "PE": _new_diag()}
     trade: Optional[Trade] = None
     for side, bar in tagged:
         candle = {"timestamp": bar.ts, "high": bar.high, "low": bar.low, "duration": 1}
         calc.process_straddle_candle(side, candle, silent=True)
         state = calc.get_calculated_sr_state(side)
+        t = bar.ts.time()
+        in_window = ENTRY_CHECK_START <= t <= FORCE_EXIT_TIME
 
         if trade is None:
-            if bar.ts.time() < ENTRY_CHECK_START:
-                continue
-            if state["r1_established"]:
-                r1_high = state["sr_levels"]["R1"]["high"]
-                if bar.close > r1_high:
+            if in_window:
+                d = diag[side]
+                d["bars_checked"] += 1
+                if state["r1_established"]:
+                    d["r1"] = state["sr_levels"]["R1"]["high"]
+                if state["s1_established"]:
+                    d["s1"] = state["sr_levels"]["S1"]["low"]
+                d["max_close"] = bar.close if d["max_close"] is None else max(d["max_close"], bar.close)
+                d["min_close"] = bar.close if d["min_close"] is None else min(d["min_close"], bar.close)
+
+                if state["r1_established"] and bar.close > state["sr_levels"]["R1"]["high"]:
                     trade = Trade(day=day, side=side, strike=strike,
                                   entry_ts=bar.ts, entry_price=bar.close)
             continue
 
         if side != trade.side:
             continue
-        if bar.ts.time() >= FORCE_EXIT_TIME:
+        if t >= FORCE_EXIT_TIME:
             trade.exit_ts, trade.exit_price, trade.exit_reason = bar.ts, bar.close, "eod_1535"
             break
         if state["s1_established"]:
@@ -203,7 +229,7 @@ def run_day(day: date, strike: int, ce_bars: List[Bar], pe_bars: List[Bar]) -> O
     if trade is not None and trade.exit_ts is None:
         last_bar = (ce_bars if trade.side == "CE" else pe_bars)[-1]
         trade.exit_ts, trade.exit_price, trade.exit_reason = last_bar.ts, last_bar.close, "data_end"
-    return trade
+    return trade, diag
 
 
 def report(trades: List[Trade]) -> None:
@@ -280,7 +306,16 @@ async def main() -> None:
             print(f"{day}: ATM={atm} expiry={expiry} -- missing CE/PE premium data -- skip")
             continue
 
-        trade = run_day(day, atm, ce_bars, pe_bars)
+        trade, diag = run_day(day, atm, ce_bars, pe_bars)
+        for side in ("CE", "PE"):
+            d = diag[side]
+            r1_str = f"{d['r1']:.2f}" if d["r1"] is not None else "not established"
+            s1_str = f"{d['s1']:.2f}" if d["s1"] is not None else "not established"
+            max_str = f"{d['max_close']:.2f}" if d["max_close"] is not None else "n/a"
+            min_str = f"{d['min_close']:.2f}" if d["min_close"] is not None else "n/a"
+            print(f"    {side}{atm}: R1={r1_str} S1={s1_str} "
+                  f"window[15:00-15:35] close range=[{min_str}..{max_str}] "
+                  f"bars_checked={d['bars_checked']}")
         if trade is None:
             print(f"{day}: ATM={atm} expiry={expiry} -- no R1 breakout entry")
             continue
