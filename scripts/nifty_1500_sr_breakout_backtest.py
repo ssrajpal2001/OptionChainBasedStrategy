@@ -248,14 +248,18 @@ def _scan_side(bars: List[Bar]) -> tuple[dict, List[dict]]:
     pending_signal: Optional[dict] = None
     confirmed: List[dict] = []
     for bar in bars:
-        # Snapshot R1/S1 as they stood BEFORE this bar -- never compare a bar
-        # against a level that bar itself just extended (2026-08-27 fix #1).
-        levels_before = (calc.get_calculated_sr_state("OPT").get("sr_levels") or {})
+        # Snapshot R1/S1/phase as they stood BEFORE this bar -- never compare
+        # a bar against a level that bar itself just extended (2026-08-27
+        # fix #1).
+        st_before = calc.get_calculated_sr_state("OPT")
+        levels_before = st_before.get("sr_levels") or {}
         r1_before = (levels_before.get("R1") or {}).get("high")
         s1_before = (levels_before.get("S1") or {}).get("low")
+        phase_before = st_before.get("current_phase", "UNKNOWN")
 
         candle = {"timestamp": bar.ts, "high": bar.high, "low": bar.low, "duration": 1}
         calc.process_straddle_candle("OPT", candle, silent=True)
+        phase_after = calc.get_calculated_sr_state("OPT").get("current_phase", "UNKNOWN")
         t = bar.ts.time()
         if not (ENTRY_CHECK_START <= t <= FORCE_EXIT_TIME):
             continue
@@ -267,6 +271,23 @@ def _scan_side(bars: List[Bar]) -> tuple[dict, List[dict]]:
             d["s1"] = s1_before
         d["max_close"] = bar.close if d["max_close"] is None else max(d["max_close"], bar.close)
         d["min_close"] = bar.close if d["min_close"] is None else min(d["min_close"], bar.close)
+
+        # 2026-08-27, direct user clarification of the REAL ping-pong state
+        # machine (support_resistance.py): the strict/official sense of "R1
+        # is breached" is a phase transition from S2_TRACKING/R2_TRACKING
+        # back into R1_TRACKING (the S2/R2 leg gets promoted to S1/R1 and the
+        # OLD R1 gets taken out) -- mirrors S1_TRACKING for the downside.
+        # This is the SAME condition strategies/d1_trap_option/
+        # support_resistance.py's own already-validated SRPingPongTracker
+        # uses for its entry (phase_before=="R2_TRACKING" and
+        # phase_after=="R1_TRACKING"). Recorded here PURELY FOR VISIBILITY
+        # for now -- entry/exit logic below is UNCHANGED (still the simpler
+        # raw-R1/close-above rule) pending the user confirming these R1/S1
+        # levels and phase transitions look correct against the real chart
+        # first, per their own explicit "will focus on entry part" after
+        # request.
+        r1_breach_event = phase_before in ("S2_TRACKING", "R2_TRACKING") and phase_after == "R1_TRACKING"
+        s1_breach_event = phase_before in ("S2_TRACKING", "R2_TRACKING") and phase_after == "S1_TRACKING"
 
         # Two-candle confirmation (2026-08-27 fix #2, direct user spec): a bar
         # closing beyond R1 becomes a single-shot "signal"; only the very NEXT
@@ -281,6 +302,8 @@ def _scan_side(bars: List[Bar]) -> tuple[dict, List[dict]]:
         d["trace"].append({
             "ts": bar.ts, "high": bar.high, "low": bar.low, "close": bar.close,
             "r1": r1_before, "s1": s1_before, "confirmed": confirmed_now,
+            "phase_before": phase_before, "phase_after": phase_after,
+            "r1_breach_event": r1_breach_event, "s1_breach_event": s1_breach_event,
         })
     return d, confirmed
 
@@ -444,12 +467,19 @@ async def main() -> None:
             for row in merged_trace:
                 r1_s = f"{row['r1']:.2f}" if row["r1"] is not None else "-"
                 s1_s = f"{row['s1']:.2f}" if row["s1"] is not None else "-"
-                tag = " <== 2ND CANDLE CONFIRMED ENTRY" if row["confirmed"] else \
-                      (" <== signal (closed above R1, next candle must breach this HIGH)"
-                       if row["r1"] is not None and row["close"] > row["r1"] else "")
+                tags = []
+                if row["r1_breach_event"]:
+                    tags.append("R1 BREACHED (phase %s->%s)" % (row["phase_before"], row["phase_after"]))
+                if row["s1_breach_event"]:
+                    tags.append("S1 BREACHED (phase %s->%s)" % (row["phase_before"], row["phase_after"]))
+                if row["confirmed"]:
+                    tags.append("2ND CANDLE CONFIRMED ENTRY")
+                elif row["r1"] is not None and row["close"] > row["r1"]:
+                    tags.append("signal (closed above R1, next candle must breach this HIGH)")
+                tag = "  <== " + " | ".join(tags) if tags else ""
                 print(f"    {row['ts'].strftime('%H:%M')} {row['side']} "
                       f"H={row['high']:.2f} L={row['low']:.2f} C={row['close']:.2f} "
-                      f"R1={r1_s} S1={s1_s}{tag}")
+                      f"R1={r1_s} S1={s1_s} phase={row['phase_before']}->{row['phase_after']}{tag}")
         if trade is None:
             print(f"{day}: ATM={atm} expiry={expiry} -- no R1 breakout entry")
             continue
