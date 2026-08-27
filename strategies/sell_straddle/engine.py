@@ -366,6 +366,19 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                 "initial_net_credit": self._initial_net_credit,
                 "session_min_straddle_frozen": self._session_min_straddle_frozen,
                 "day_low_tracked_pair": list(self._day_low_tracked_pair) if self._day_low_tracked_pair else None,
+                # 2026-08-27, direct user-found gap: the 70%-of-booked-profit roll-
+                # protection budget (rolling.py's _itm_roll_protection) was armed in
+                # memory only -- a restart silently wiped it while the rolled leg kept
+                # running with NO protective stop at all (a real incident: a rolled CE
+                # leg ran past 100% of the profit that armed it, unprotected, across a
+                # restart). Persisted here so a restart restores exactly what was armed.
+                "itm_roll_protection": getattr(self, "_itm_roll_protection", None) or {},
+                # 2026-08-27, same audit: a stop-out's re-entry cooldown (rolling.py's
+                # _apply_sl_cooldown) was in-memory only -- a restart right after a
+                # stop-out silently forgot the cooldown and let the book re-enter
+                # immediately, defeating the whole point of resting after a loss.
+                "sl_cooldown_until": (self._sl_cooldown_until.isoformat()
+                                       if getattr(self, "_sl_cooldown_until", None) else None),
             }, product_type="MIS")
         except Exception as exc:
             logger.debug("SellStraddle[%s]: session persist failed: %s", self._underlying, exc)
@@ -392,6 +405,23 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                 _saved_pair = _sess.get("day_low_tracked_pair", None)
                 if _saved_pair is not None:
                     self._day_low_tracked_pair = tuple(int(x) for x in _saved_pair)
+                # 2026-08-27: restore any armed 70%-roll-protection budget exactly as it
+                # was -- without this, a restart silently wiped it and the rolled leg
+                # kept running with zero protective stop (real incident).
+                _saved_prot = _sess.get("itm_roll_protection", None)
+                if _saved_prot:
+                    if not isinstance(getattr(self, "_itm_roll_protection", None), dict):
+                        self._itm_roll_protection = {}
+                    self._itm_roll_protection.update(_saved_prot)
+                    logger.info("SellStraddle[%s]: restored %d armed roll-protection budget(s): %s",
+                                self._underlying, len(_saved_prot), list(_saved_prot.keys()))
+                _saved_cooldown = _sess.get("sl_cooldown_until", None)
+                if _saved_cooldown:
+                    _cd = datetime.fromisoformat(_saved_cooldown)
+                    if _cd > datetime.now(IST):
+                        self._sl_cooldown_until = _cd
+                        logger.info("SellStraddle[%s]: restored re-entry cooldown -- no re-entry "
+                                    "until %s.", self._underlying, _cd.strftime("%H:%M:%S"))
                 # If session losses already breach day_loss_sl, lock immediately so a
                 # fresh book can't re-enter and trigger an immediate day_loss_sl exit.
                 if (not self._stop_for_day and self._day_loss_sl_pct > 0

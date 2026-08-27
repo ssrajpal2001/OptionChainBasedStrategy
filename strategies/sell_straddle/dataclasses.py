@@ -103,6 +103,13 @@ class StraddlePosition:
             "entry_time_value": self.entry_time_value,
             "session_min_vwap": self.session_min_vwap,
             "vwap_last_good": self.vwap_last_good,
+            # 2026-08-27, direct user-driven audit ("check every part which is used
+            # for application work should be stored not in memory"): this field was
+            # a dataclass attribute updated live by the trailing-SL mechanic but was
+            # never actually included here -- a restart silently reset the trailing
+            # floor's own peak-profit% tracking back to 0.0 even with a real,
+            # already-progressed trailing stop in flight.
+            "trail_peak_pct": self.trail_peak_pct,
             "hedge_ce_leg": _leg(self.hedge_ce_leg) if self.hedge_ce_leg else None,
             "hedge_pe_leg": _leg(self.hedge_pe_leg) if self.hedge_pe_leg else None,
             "is_hedged_positional": self.is_hedged_positional,
@@ -131,6 +138,7 @@ class StraddlePosition:
             entry_time_value=d.get("entry_time_value", 0.0),
             session_min_vwap=d.get("session_min_vwap", float("inf")),
             vwap_last_good=d.get("vwap_last_good", 0.0),
+            trail_peak_pct=d.get("trail_peak_pct", 0.0),
             hedge_ce_leg=_leg(d["hedge_ce_leg"]) if d.get("hedge_ce_leg") else None,
             hedge_pe_leg=_leg(d["hedge_pe_leg"]) if d.get("hedge_pe_leg") else None,
             is_hedged_positional=bool(d.get("is_hedged_positional", False)),
