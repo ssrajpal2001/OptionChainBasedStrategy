@@ -98,13 +98,46 @@ Known, honestly-flagged limitations (same category as this repo's other
     15:00 spot bar (timestamp + close) that produced each day's ATM, so a
     wrong ATM is auditable directly from the script's own output.
 
+2026-08-27 THIRD FIX -- both sides' diagnostics (R1/S1/bars_checked/trace)
+are now computed FULLY INDEPENDENTLY for the whole day (see _scan_side's own
+docstring). The prior single merged-loop stopped updating a side's own
+diagnostics the instant the OTHER side's trade fired first (a real,
+user-caught bug: CE and PE both had a bar at 15:00, CE happened to be
+processed first, so PE printed "not yet initialized" despite having a real
+15:00 bar of its own the whole time). Each side is now scanned start-to-
+finish on its own; only afterward is the globally-earliest confirmed signal
+(across both sides) picked as the actual trade, and that side alone is
+re-walked to simulate the SL/exit going forward.
+
+2026-08-27 SECOND CORRECTION (direct user spec refinement) -- entry/exit are
+now a TWO-CANDLE confirmation, not a single close-beyond-level check:
+  ENTRY: a bar closing above the pre-bar R1 becomes a "signal" bar (its own
+    HIGH is recorded as the trigger level). Only the very NEXT bar on that
+    same side is checked against it -- if that next bar's HIGH breaches the
+    signal bar's high, the trade is taken (entry_price = the signal bar's
+    high, i.e. the level that got breached, not the confirming bar's own
+    close/high). If the next bar does NOT breach it, that signal expires --
+    it is not re-checked against any later bar. A fresh signal can still form
+    from any later bar that itself closes above the (by-then-updated) R1.
+  EXIT/SL: mirrors this exactly once in a trade -- a bar closing below the
+    pre-bar S1 becomes an SL "signal" (its own LOW recorded). Only the very
+    next bar (same side) is checked -- if its LOW breaches the signal bar's
+    low, the position exits at that signal low. Otherwise the SL signal
+    expires (a later close-below-S1 can still arm a fresh one).
+  Both signals are single-shot (consumed by the very next bar's check
+  regardless of outcome) -- this is a literal reading of the user's own
+  wording ("next candle breached the high" / "next candle... low is
+  breached"), not a lookback-any-later-bar rule.
+
 Usage:
     python scripts/nifty_1500_sr_breakout_backtest.py <upstox_token> [--days N] [--trace-day YYYY-MM-DD]
-    (N = number of NIFTY trading days to look back over; default 10.
-    --trace-day prints every 1-min CE/PE bar in the 15:00-15:35 window for
-    that one date -- high/low/close/phase/R1/S1 -- for direct comparison
-    against the real option-premium chart, per the user's own 2026-08-27
-    request to verify the computed R1/S1 levels.)
+    (N = number of NIFTY trading days to look back over; default 10. Every
+    1-min CE/PE bar in the 15:00-15:35 window -- high/low/close/R1/S1, tagged
+    with "signal" / "2ND CANDLE CONFIRMED ENTRY" -- is printed for EVERY day
+    by default, per the user's own 2026-08-27 request to verify the S&R
+    engine's behavior candle-by-candle rather than take a summary on faith.
+    --trace-day restricts that verbose dump to just one date, for less
+    output across a longer --days run.)
 """
 from __future__ import annotations
 
@@ -197,68 +230,117 @@ def _new_diag() -> dict:
     return {"r1": None, "s1": None, "max_close": None, "min_close": None, "bars_checked": 0, "trace": []}
 
 
-def run_day(day: date, strike: int, ce_bars: List[Bar], pe_bars: List[Bar],
-            trace: bool = False) -> tuple[Optional[Trade], dict]:
-    """Feed both sides into one SupportResistanceCalculator (2 logical
-    inst_keys), from market open, then look for the first bar CLOSING inside
-    the [15:00, 15:35] window that breaches R1 as it stood BEFORE that bar.
-    See module docstring for the full mechanic and the 2026-08-27 correction
-    (look-ahead ordering bug + dropped is_established gate) that fixed real,
-    user-caught missed entries."""
+def _scan_side(bars: List[Bar]) -> tuple[dict, List[dict]]:
+    """Run ONE side's whole day, independently of the other side and of
+    whether a trade ends up being taken at all. This independence is the
+    2026-08-27 fix for a real bug: the old single merged-loop stopped
+    updating a side's diagnostics (bars_checked/R1/S1/trace) the instant the
+    OTHER side's confirmation fired first (e.g. CE and PE both had a 15:00
+    bar; CE happened to be processed first in the merged/sorted loop, so
+    PE's own R1/S1/trace was silently never recorded at all, printing as
+    "not yet initialized" even though PE had real data the whole time).
+    Returns (diag, confirmed_events) where confirmed_events is every
+    signal-then-next-candle-breach event that fired during the window, in
+    chronological order (there can be more than one per side across the
+    window; run_day below only ever acts on the globally-earliest one)."""
     calc = SupportResistanceCalculator()
-    tagged = [("CE", b) for b in ce_bars] + [("PE", b) for b in pe_bars]
-    tagged.sort(key=lambda t: t[1].ts)
-
-    diag = {"CE": _new_diag(), "PE": _new_diag()}
-    trade: Optional[Trade] = None
-    for side, bar in tagged:
-        # Snapshot R1/S1 as they stood BEFORE this bar -- the breakout/SL
-        # check must never compare a bar against a level that bar itself
-        # just extended (see the 2026-08-27 correction in the module
-        # docstring). Only after this snapshot do we feed the bar in.
-        levels_before = (calc.get_calculated_sr_state(side).get("sr_levels") or {})
+    d = _new_diag()
+    pending_signal: Optional[dict] = None
+    confirmed: List[dict] = []
+    for bar in bars:
+        # Snapshot R1/S1 as they stood BEFORE this bar -- never compare a bar
+        # against a level that bar itself just extended (2026-08-27 fix #1).
+        levels_before = (calc.get_calculated_sr_state("OPT").get("sr_levels") or {})
         r1_before = (levels_before.get("R1") or {}).get("high")
         s1_before = (levels_before.get("S1") or {}).get("low")
 
         candle = {"timestamp": bar.ts, "high": bar.high, "low": bar.low, "duration": 1}
-        calc.process_straddle_candle(side, candle, silent=True)
+        calc.process_straddle_candle("OPT", candle, silent=True)
         t = bar.ts.time()
-        in_window = ENTRY_CHECK_START <= t <= FORCE_EXIT_TIME
-
-        if trade is None:
-            if in_window:
-                d = diag[side]
-                d["bars_checked"] += 1
-                if r1_before is not None:
-                    d["r1"] = r1_before
-                if s1_before is not None:
-                    d["s1"] = s1_before
-                d["max_close"] = bar.close if d["max_close"] is None else max(d["max_close"], bar.close)
-                d["min_close"] = bar.close if d["min_close"] is None else min(d["min_close"], bar.close)
-                if trace:
-                    d["trace"].append({
-                        "ts": bar.ts, "high": bar.high, "low": bar.low, "close": bar.close,
-                        "r1": r1_before, "s1": s1_before,
-                    })
-
-                if r1_before is not None and bar.close > r1_before:
-                    trade = Trade(day=day, side=side, strike=strike,
-                                  entry_ts=bar.ts, entry_price=bar.close)
+        if not (ENTRY_CHECK_START <= t <= FORCE_EXIT_TIME):
             continue
 
-        if side != trade.side:
-            continue
+        d["bars_checked"] += 1
+        if r1_before is not None:
+            d["r1"] = r1_before
+        if s1_before is not None:
+            d["s1"] = s1_before
+        d["max_close"] = bar.close if d["max_close"] is None else max(d["max_close"], bar.close)
+        d["min_close"] = bar.close if d["min_close"] is None else min(d["min_close"], bar.close)
+
+        # Two-candle confirmation (2026-08-27 fix #2, direct user spec): a bar
+        # closing beyond R1 becomes a single-shot "signal"; only the very NEXT
+        # bar is checked for a high-breach of that signal bar's own high.
+        confirmed_now = pending_signal is not None and bar.high > pending_signal["high"]
+        if confirmed_now:
+            confirmed.append({"ts": bar.ts, "price": pending_signal["high"]})
+        pending_signal = None   # single-shot -- consumed either way
+        if r1_before is not None and bar.close > r1_before:
+            pending_signal = {"high": bar.high, "ts": bar.ts}
+
+        d["trace"].append({
+            "ts": bar.ts, "high": bar.high, "low": bar.low, "close": bar.close,
+            "r1": r1_before, "s1": s1_before, "confirmed": confirmed_now,
+        })
+    return d, confirmed
+
+
+def _simulate_exit(bars: List[Bar], side: str, strike: int, day: date,
+                    entry_ts: datetime, entry_price: float) -> Trade:
+    """Replay ONE side's bars from scratch (cheap -- a plain state machine
+    over one day) to rebuild correct S&R state up to entry_ts, then manage
+    the SL mirror of the entry confirmation (signal bar closes below S1;
+    only the very next bar's LOW-breach of that signal bar's own low exits)
+    from entry_ts onward, or force-close at 15:35, or run out of data."""
+    calc = SupportResistanceCalculator()
+    trade = Trade(day=day, side=side, strike=strike, entry_ts=entry_ts, entry_price=entry_price)
+    pending_sl_signal: Optional[dict] = None
+    for bar in bars:
+        levels_before = (calc.get_calculated_sr_state("OPT").get("sr_levels") or {})
+        s1_before = (levels_before.get("S1") or {}).get("low")
+        candle = {"timestamp": bar.ts, "high": bar.high, "low": bar.low, "duration": 1}
+        calc.process_straddle_candle("OPT", candle, silent=True)
+
+        if bar.ts <= entry_ts:
+            continue   # still rebuilding pre-entry state, not yet managing the trade
+
+        t = bar.ts.time()
         if t >= FORCE_EXIT_TIME:
             trade.exit_ts, trade.exit_price, trade.exit_reason = bar.ts, bar.close, "eod_1535"
-            break
+            return trade
+        if pending_sl_signal is not None and bar.low < pending_sl_signal["low"]:
+            trade.exit_ts, trade.exit_price = bar.ts, pending_sl_signal["low"]
+            trade.exit_reason = f"sl_s1_breach@{pending_sl_signal['low']:.2f}"
+            return trade
+        pending_sl_signal = None   # single-shot -- consumed either way
         if s1_before is not None and bar.close < s1_before:
-            trade.exit_ts, trade.exit_price = bar.ts, bar.close
-            trade.exit_reason = f"sl_s1@{s1_before:.2f}"
-            break
+            pending_sl_signal = {"low": bar.low, "ts": bar.ts}
 
-    if trade is not None and trade.exit_ts is None:
-        last_bar = (ce_bars if trade.side == "CE" else pe_bars)[-1]
-        trade.exit_ts, trade.exit_price, trade.exit_reason = last_bar.ts, last_bar.close, "data_end"
+    last_bar = bars[-1]
+    trade.exit_ts, trade.exit_price, trade.exit_reason = last_bar.ts, last_bar.close, "data_end"
+    return trade
+
+
+def run_day(day: date, strike: int, ce_bars: List[Bar],
+            pe_bars: List[Bar]) -> tuple[Optional[Trade], dict]:
+    """Scan CE and PE fully and independently (see _scan_side's own
+    docstring for why that independence matters), pick the globally-earliest
+    confirmed entry across both sides (CE wins an exact-timestamp tie, since
+    it's evaluated first below -- an arbitrary but deterministic tie-break;
+    genuine same-minute CE/PE ties are rare and not otherwise specified by
+    the user), then simulate that side's SL/exit onward. See module
+    docstring for the full mechanic."""
+    ce_diag, ce_confirmed = _scan_side(ce_bars)
+    pe_diag, pe_confirmed = _scan_side(pe_bars)
+    diag = {"CE": ce_diag, "PE": pe_diag}
+
+    candidates = [("CE", e) for e in ce_confirmed] + [("PE", e) for e in pe_confirmed]
+    if not candidates:
+        return None, diag
+    candidates.sort(key=lambda c: c[1]["ts"])
+    winner_side, winner = candidates[0]
+    bars = ce_bars if winner_side == "CE" else pe_bars
+    trade = _simulate_exit(bars, winner_side, strike, day, winner["ts"], winner["price"])
     return trade, diag
 
 
@@ -339,7 +421,7 @@ async def main() -> None:
             print(f"{day}: ATM={atm} expiry={expiry} -- missing CE/PE premium data -- skip")
             continue
 
-        trade, diag = run_day(day, atm, ce_bars, pe_bars, trace=(day == trace_day))
+        trade, diag = run_day(day, atm, ce_bars, pe_bars)
         for side in ("CE", "PE"):
             d = diag[side]
             r1_str = f"{d['r1']:.2f}" if d["r1"] is not None else "n/a (not yet initialized)"
@@ -349,7 +431,11 @@ async def main() -> None:
             print(f"    {side}{atm}: R1={r1_str} S1={s1_str} "
                   f"window[15:00-15:35] close range=[{min_str}..{max_str}] "
                   f"bars_checked={d['bars_checked']}")
-        if day == trace_day:
+        # Full per-minute S&R trace for BOTH sides, every day, unless
+        # --trace-day restricts it to one specific date (direct user
+        # request: "provide each minute data and S&R data" to verify the
+        # engine's behavior candle-by-candle, not just a final summary).
+        if trace_day is None or day == trace_day:
             print(f"    --- minute-by-minute trace for {day} (compare against the real "
                   f"{atm} CE/PE chart) ---")
             merged_trace = sorted(
@@ -358,10 +444,12 @@ async def main() -> None:
             for row in merged_trace:
                 r1_s = f"{row['r1']:.2f}" if row["r1"] is not None else "-"
                 s1_s = f"{row['s1']:.2f}" if row["s1"] is not None else "-"
-                breach = " <== CLOSED ABOVE R1" if row["r1"] is not None and row["close"] > row["r1"] else ""
+                tag = " <== 2ND CANDLE CONFIRMED ENTRY" if row["confirmed"] else \
+                      (" <== signal (closed above R1, next candle must breach this HIGH)"
+                       if row["r1"] is not None and row["close"] > row["r1"] else "")
                 print(f"    {row['ts'].strftime('%H:%M')} {row['side']} "
                       f"H={row['high']:.2f} L={row['low']:.2f} C={row['close']:.2f} "
-                      f"R1={r1_s} S1={s1_s}{breach}")
+                      f"R1={r1_s} S1={s1_s}{tag}")
         if trade is None:
             print(f"{day}: ATM={atm} expiry={expiry} -- no R1 breakout entry")
             continue
