@@ -129,6 +129,33 @@ now a TWO-CANDLE confirmation, not a single close-beyond-level check:
   wording ("next candle breached the high" / "next candle... low is
   breached"), not a lookback-any-later-bar rule.
 
+2026-08-27 FOURTH CORRECTION -- SUPERSEDES the ENTRY half of the SECOND
+correction above (the EXIT/SL half is unchanged). The ENTRY signal is now
+armed by the strict ping-pong "R1 is breached" event -- a phase transition
+from S2_TRACKING/R2_TRACKING back into R1_TRACKING, the exact condition
+support_resistance.py's own already-validated SRPingPongTracker uses for its
+entry -- NOT a plain "close above R1" check, and explicitly NOT gated on
+is_established (is_established legitimately reads False right after this
+exact promotion; that is normal internal state-machine bookkeeping, not
+evidence the breach didn't happen -- this was a real bug the user caught:
+"system see that r1 is not established so trade did not happen"). The order
+is placed "on the high" -- the breaching bar's own high (which the state
+machine's own promotion rule makes identical to the new R1 immediately
+after) -- confirmed by the user's own worked example (PE breach bar's own
+high prints as R1 on the very next row; the next bar's own high exceeding it
+is the confirmation). Once in a trade, R1/R2 are no longer watched at all --
+only S1/S2 for the trailing SL, per the user's own explicit "when breached
+we are not going to check for R1 and R2 instead only check for S1 and S2".
+
+2026-08-27 FIFTH CORRECTION -- no longer one trade per day. If a trade's
+exit is an SL (not the 15:35 EOD close or running out of data), scanning
+resumes on BOTH sides again "from that time onwards" (user's own words) for
+the next-earliest confirmed signal strictly after that exit, and that trade
+is taken too -- repeating until an EOD/data_end close, or no further
+candidate signal exists before 15:35. run_day() therefore returns a LIST of
+Trade objects per day (possibly empty, one, or several), not a single
+Optional[Trade].
+
 Usage:
     python scripts/nifty_1500_sr_breakout_backtest.py <upstox_token> [--days N] [--trace-day YYYY-MM-DD]
     (N = number of NIFTY trading days to look back over; default 10. Every
@@ -272,32 +299,37 @@ def _scan_side(bars: List[Bar]) -> tuple[dict, List[dict]]:
         d["max_close"] = bar.close if d["max_close"] is None else max(d["max_close"], bar.close)
         d["min_close"] = bar.close if d["min_close"] is None else min(d["min_close"], bar.close)
 
-        # 2026-08-27, direct user clarification of the REAL ping-pong state
-        # machine (support_resistance.py): the strict/official sense of "R1
-        # is breached" is a phase transition from S2_TRACKING/R2_TRACKING
-        # back into R1_TRACKING (the S2/R2 leg gets promoted to S1/R1 and the
-        # OLD R1 gets taken out) -- mirrors S1_TRACKING for the downside.
-        # This is the SAME condition strategies/d1_trap_option/
+        # 2026-08-27 FOURTH CORRECTION, direct user clarification: the ENTRY
+        # signal is armed by the strict ping-pong "R1 is breached" event
+        # itself -- a phase transition from S2_TRACKING/R2_TRACKING back into
+        # R1_TRACKING (the same condition strategies/d1_trap_option/
         # support_resistance.py's own already-validated SRPingPongTracker
-        # uses for its entry (phase_before=="R2_TRACKING" and
-        # phase_after=="R1_TRACKING"). Recorded here PURELY FOR VISIBILITY
-        # for now -- entry/exit logic below is UNCHANGED (still the simpler
-        # raw-R1/close-above rule) pending the user confirming these R1/S1
-        # levels and phase transitions look correct against the real chart
-        # first, per their own explicit "will focus on entry part" after
-        # request.
+        # uses for its entry) -- NOT by a plain "close above R1" check (that
+        # was the prior, now-superseded rule), and NOT gated on is_established
+        # (is_established legitimately reads False right after this exact
+        # promotion -- that is normal internal bookkeeping, not evidence the
+        # breach didn't happen; user's own words: "system see that r1 is not
+        # established so trade did not happen" was the bug). The order is
+        # placed "on the high" -- the BREACHING bar's own high (which, by the
+        # state machine's own promotion rule, becomes the new R1 immediately
+        # after this bar) -- confirmed by the user's own worked PE example:
+        # signal armed at the 15:20 bar (own high 76.20, which prints as R1
+        # on the very next 15:21 row), confirmed when 15:21's own high
+        # (76.95) exceeds it. The very NEXT bar confirms (its own HIGH must
+        # exceed that level); entry fires at that level. Once in a trade,
+        # R1/R2 are no longer watched at all -- only S1/S2 (see
+        # _simulate_exit) for the trailing SL, per the user's own explicit
+        # "when breached we are not going to check for R1 and R2 instead
+        # only check for S1 and S2".
         r1_breach_event = phase_before in ("S2_TRACKING", "R2_TRACKING") and phase_after == "R1_TRACKING"
         s1_breach_event = phase_before in ("S2_TRACKING", "R2_TRACKING") and phase_after == "S1_TRACKING"
 
-        # Two-candle confirmation (2026-08-27 fix #2, direct user spec): a bar
-        # closing beyond R1 becomes a single-shot "signal"; only the very NEXT
-        # bar is checked for a high-breach of that signal bar's own high.
-        confirmed_now = pending_signal is not None and bar.high > pending_signal["high"]
+        confirmed_now = pending_signal is not None and bar.high > pending_signal["level"]
         if confirmed_now:
-            confirmed.append({"ts": bar.ts, "price": pending_signal["high"]})
+            confirmed.append({"ts": bar.ts, "price": pending_signal["level"]})
         pending_signal = None   # single-shot -- consumed either way
-        if r1_before is not None and bar.close > r1_before:
-            pending_signal = {"high": bar.high, "ts": bar.ts}
+        if r1_breach_event:
+            pending_signal = {"level": bar.high, "ts": bar.ts}
 
         d["trace"].append({
             "ts": bar.ts, "high": bar.high, "low": bar.low, "close": bar.close,
@@ -345,26 +377,42 @@ def _simulate_exit(bars: List[Bar], side: str, strike: int, day: date,
 
 
 def run_day(day: date, strike: int, ce_bars: List[Bar],
-            pe_bars: List[Bar]) -> tuple[Optional[Trade], dict]:
+            pe_bars: List[Bar]) -> tuple[List[Trade], dict]:
     """Scan CE and PE fully and independently (see _scan_side's own
-    docstring for why that independence matters), pick the globally-earliest
+    docstring for why that independence matters). Pick the globally-earliest
     confirmed entry across both sides (CE wins an exact-timestamp tie, since
     it's evaluated first below -- an arbitrary but deterministic tie-break;
     genuine same-minute CE/PE ties are rare and not otherwise specified by
-    the user), then simulate that side's SL/exit onward. See module
-    docstring for the full mechanic."""
+    the user), simulate that side's SL/exit.
+
+    2026-08-27 FIFTH CORRECTION, direct user spec: this is no longer a
+    single trade per day. If a trade's exit is an SL (not EOD/data_end), we
+    resume watching BOTH sides again "from that time onwards" (user's own
+    words) for the next-earliest confirmed signal strictly after this exit,
+    and take that trade too -- repeating until an EOD/data_end close or no
+    further candidates remain before 15:35."""
     ce_diag, ce_confirmed = _scan_side(ce_bars)
     pe_diag, pe_confirmed = _scan_side(pe_bars)
     diag = {"CE": ce_diag, "PE": pe_diag}
 
-    candidates = [("CE", e) for e in ce_confirmed] + [("PE", e) for e in pe_confirmed]
-    if not candidates:
-        return None, diag
-    candidates.sort(key=lambda c: c[1]["ts"])
-    winner_side, winner = candidates[0]
-    bars = ce_bars if winner_side == "CE" else pe_bars
-    trade = _simulate_exit(bars, winner_side, strike, day, winner["ts"], winner["price"])
-    return trade, diag
+    all_candidates = sorted(
+        [("CE", e) for e in ce_confirmed] + [("PE", e) for e in pe_confirmed],
+        key=lambda c: c[1]["ts"])
+
+    trades: List[Trade] = []
+    cursor_ts: Optional[datetime] = None
+    while True:
+        candidates = [c for c in all_candidates if cursor_ts is None or c[1]["ts"] > cursor_ts]
+        if not candidates:
+            break
+        winner_side, winner = candidates[0]
+        bars = ce_bars if winner_side == "CE" else pe_bars
+        trade = _simulate_exit(bars, winner_side, strike, day, winner["ts"], winner["price"])
+        trades.append(trade)
+        if trade.exit_reason in ("eod_1535", "data_end"):
+            break
+        cursor_ts = trade.exit_ts   # SL exit -- resume scanning from right after it
+    return trades, diag
 
 
 def report(trades: List[Trade]) -> None:
@@ -444,7 +492,7 @@ async def main() -> None:
             print(f"{day}: ATM={atm} expiry={expiry} -- missing CE/PE premium data -- skip")
             continue
 
-        trade, diag = run_day(day, atm, ce_bars, pe_bars)
+        day_trades, diag = run_day(day, atm, ce_bars, pe_bars)
         for side in ("CE", "PE"):
             d = diag[side]
             r1_str = f"{d['r1']:.2f}" if d["r1"] is not None else "n/a (not yet initialized)"
@@ -469,25 +517,25 @@ async def main() -> None:
                 s1_s = f"{row['s1']:.2f}" if row["s1"] is not None else "-"
                 tags = []
                 if row["r1_breach_event"]:
-                    tags.append("R1 BREACHED (phase %s->%s)" % (row["phase_before"], row["phase_after"]))
+                    tags.append("R1 BREACHED -- order ready @ %.2f (next candle must breach this)" % row["high"])
                 if row["s1_breach_event"]:
                     tags.append("S1 BREACHED (phase %s->%s)" % (row["phase_before"], row["phase_after"]))
                 if row["confirmed"]:
-                    tags.append("2ND CANDLE CONFIRMED ENTRY")
-                elif row["r1"] is not None and row["close"] > row["r1"]:
-                    tags.append("signal (closed above R1, next candle must breach this HIGH)")
+                    tags.append("CONFIRMED ENTRY")
                 tag = "  <== " + " | ".join(tags) if tags else ""
                 print(f"    {row['ts'].strftime('%H:%M')} {row['side']} "
                       f"H={row['high']:.2f} L={row['low']:.2f} C={row['close']:.2f} "
                       f"R1={r1_s} S1={s1_s} phase={row['phase_before']}->{row['phase_after']}{tag}")
-        if trade is None:
-            print(f"{day}: ATM={atm} expiry={expiry} -- no R1 breakout entry")
+        if not day_trades:
+            print(f"{day}: ATM={atm} expiry={expiry} -- no R1/S1 breakout entry")
             continue
-        trades.append(trade)
-        print(f"{day}: ATM={atm} expiry={expiry} {trade.side}{trade.strike} "
-              f"entry {trade.entry_ts.strftime('%H:%M')}@{trade.entry_price:.2f} -> "
-              f"exit {trade.exit_ts.strftime('%H:%M')}@{trade.exit_price:.2f} "
-              f"({trade.exit_reason}) pnl={trade.pnl_pts:+.2f}pts")
+        trades.extend(day_trades)
+        for trade in day_trades:
+            print(f"{day}: ATM={atm} expiry={expiry} {trade.side}{trade.strike} "
+                  f"entry {trade.entry_ts.strftime('%H:%M')}@{trade.entry_price:.2f} -> "
+                  f"exit {trade.exit_ts.strftime('%H:%M')}@{trade.exit_price:.2f} "
+                  f"({trade.exit_reason}) pnl={trade.pnl_pts:+.2f}pts"
+                  + ("  [re-entry after SL]" if trade is not day_trades[0] else ""))
 
     report(trades)
 
