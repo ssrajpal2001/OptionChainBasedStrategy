@@ -661,14 +661,22 @@ def check_vwap_retest_entry(side: str, ltp: float, vwap: float, armed: bool,
     """2026-08-27, direct user spec: "wait for the stock to come back to
     vwap then we enter" -- not an ORB breach.
 
-    A candidate first has to be genuinely AWAY from VWAP in its own
-    direction (CALL: ltp >= vwap*(1+min_gap_pct%); PUT: ltp <=
-    vwap*(1-min_gap_pct%)) before it counts as "armed" -- this is what
-    "come BACK to vwap" presupposes (it has to have left first). Once
-    armed, entry fires the moment price touches/crosses back to the VWAP
-    level (CALL: ltp <= vwap: a pullback down onto support; PUT: ltp >=
-    vwap: a bounce up onto resistance) -- a simple tick-based touch, no
-    candle-close confirmation.
+    2026-08-28 correction, direct user spec: arming is now PURE DIRECTIONAL
+    positioning relative to VWAP -- no minimum-gap threshold. "If we are
+    going long it should [be] above vwap, and vice versa[;] that is [the]
+    criteria for vwap, no threshold required." CALL arms the instant
+    ltp > vwap (any amount); PUT arms the instant ltp < vwap (any amount).
+    `min_gap_pct` is kept as a parameter (still threaded through
+    book_manager.py/engine.py/the dashboard) purely so this isn't an
+    invasive plumbing change during live market hours, but it is no longer
+    read anywhere in this function -- a future cleanup pass can remove the
+    parameter/config knob entirely once there's a safe window to also touch
+    the UI/persistence layer.
+
+    Once armed, entry fires the instant price touches back to VWAP FROM
+    THE ARMED DIRECTION -- CALL: ltp <= vwap (price was above, comes down
+    onto it); PUT: ltp >= vwap (price was below, comes up onto it) -- a
+    simple tick-based touch, no candle-close confirmation.
 
     Returns (new_armed, fire_entry). Idempotent: once fired, the caller is
     responsible for marking the (symbol, side) as already-fired so this
@@ -677,11 +685,11 @@ def check_vwap_retest_entry(side: str, ltp: float, vwap: float, armed: bool,
         return armed, False
     if side == "CALL":
         if not armed:
-            return (ltp >= vwap * (1 + min_gap_pct / 100.0)), False
+            return (ltp > vwap), False
         return armed, (ltp <= vwap)
     else:  # PUT
         if not armed:
-            return (ltp <= vwap * (1 - min_gap_pct / 100.0)), False
+            return (ltp < vwap), False
         return armed, (ltp >= vwap)
 
 

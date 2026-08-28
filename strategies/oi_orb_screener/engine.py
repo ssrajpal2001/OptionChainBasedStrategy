@@ -1114,6 +1114,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         if lot <= 0:
             self._clog.warning("OiOrb[%s/%s]: could not resolve lot size for %s -- skipping entry.",
                                 self._client_id, self._binding_id, sig.symbol)
+            self._already_fired.discard((sig.symbol, sig.side))
             await asyncio.to_thread(
                 store.log_signal_event, self._client_id, self._binding_id, sig.symbol,
                 "lot_resolve_failed", side=sig.side, trigger_price=sig.trigger_price,
@@ -1130,6 +1131,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         if contract is None:
             self._clog.warning("OiOrb[%s/%s]: could not resolve option contract for %s %s -- skipping entry.",
                                 self._client_id, self._binding_id, sig.symbol, opt_type)
+            self._already_fired.discard((sig.symbol, sig.side))
             await asyncio.to_thread(
                 store.log_signal_event, self._client_id, self._binding_id, sig.symbol,
                 "contract_resolve_failed", side=sig.side, trigger_price=sig.trigger_price,
@@ -1148,6 +1150,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 _ENTRY_LTP_WAIT_TIMEOUT_SEC,
             )
             self._pending_contracts.pop(sig.symbol, None)
+            self._already_fired.discard((sig.symbol, sig.side))
             await asyncio.to_thread(
                 store.log_signal_event, self._client_id, self._binding_id, sig.symbol,
                 "entry_ltp_timeout", side=sig.side,

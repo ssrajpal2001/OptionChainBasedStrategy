@@ -473,11 +473,9 @@ def test_side_allowed_by_regime_matches_evaluate_breakouts_own_table():
 
 
 def test_check_vwap_retest_entry_call_arms_above_then_fires_on_touch_back_down():
-    # Not yet armed, price below the arming threshold -- stays unarmed, no fire.
+    # 2026-08-28 direct user correction: arming is pure directional positioning
+    # relative to vwap, no minimum-gap threshold -- any amount above arms CALL.
     armed, fire = screener.check_vwap_retest_entry("CALL", 100.05, 100.0, False, 0.15)
-    assert armed is False and fire is False
-    # Price moves far enough above vwap (>=0.15%) -- arms, but doesn't fire yet.
-    armed, fire = screener.check_vwap_retest_entry("CALL", 100.20, 100.0, False, 0.15)
     assert armed is True and fire is False
     # Now armed, price pulls back down to touch vwap -- fires.
     armed, fire = screener.check_vwap_retest_entry("CALL", 100.0, 100.0, True, 0.15)
@@ -489,8 +487,6 @@ def test_check_vwap_retest_entry_call_arms_above_then_fires_on_touch_back_down()
 
 def test_check_vwap_retest_entry_put_arms_below_then_fires_on_bounce_back_up():
     armed, fire = screener.check_vwap_retest_entry("PUT", 99.95, 100.0, False, 0.15)
-    assert armed is False and fire is False
-    armed, fire = screener.check_vwap_retest_entry("PUT", 99.80, 100.0, False, 0.15)
     assert armed is True and fire is False
     armed, fire = screener.check_vwap_retest_entry("PUT", 100.0, 100.0, True, 0.15)
     assert armed is True and fire is True

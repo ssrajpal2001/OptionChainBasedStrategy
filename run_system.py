@@ -918,8 +918,24 @@ async def _run_live(
             oiorb_feeder = GlobalFeeder(bus, _oiorb_cfg, _shared_client_db)
             await oiorb_feeder.start()
             bus._oiorb_feeder = oiorb_feeder
-            logger.info("run_system: OI-ORB dedicated upstox2 feeder started (own WS "
-                        "connection, separate from the shared feeder).")
+            # 2026-08-28 real incident: a missing/invalid upstox2 token doesn't
+            # raise here -- .start() completes "successfully" but the feeder
+            # never actually authenticates/connects, so OI-ORB silently sat with
+            # no live option LTP all morning and the operator got zero warning
+            # (had to self-diagnose from a stuck "entry_ltp_timeout" signal).
+            # Give the connection attempt a moment to settle, then check
+            # is_running (== genuinely connected) loudly, not just "didn't throw".
+            await asyncio.sleep(3)
+            if not oiorb_feeder.is_running:
+                logger.critical(
+                    "run_system: OI-ORB dedicated upstox2 feeder did NOT connect "
+                    "(missing/invalid/expired upstox2 token?) -- OI-ORB will see zero "
+                    "option ticks and every signal will die on entry_ltp_timeout until "
+                    "this is fixed. Re-authenticate the upstox2 credentials and restart."
+                )
+            else:
+                logger.info("run_system: OI-ORB dedicated upstox2 feeder started (own WS "
+                            "connection, separate from the shared feeder).")
         except Exception as exc:
             logger.warning("run_system: OI-ORB dedicated upstox2 feeder failed to start (%s) "
                             "-- OI-ORB will fall back to the shared feeder for chain/spot "

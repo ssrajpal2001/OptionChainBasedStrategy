@@ -272,16 +272,38 @@ def load_already_fired(client_id: str, binding_id: str, trade_date: Optional[str
     the in-memory _already_fired set. Real, confirmed live consequence of
     NOT doing this: 2026-08-24, a restart at ~14:40 let DIXON PUT re-signal
     a second time the same day (only harmless because contract resolution
-    happened to fail on the retry)."""
+    happened to fail on the retry).
+
+    2026-08-28 fix, real incident: a `signal_fired` event alone used to
+    permanently consume that (symbol, side) for the rest of the day, even
+    when the ENTRY itself never actually happened (e.g. `entry_ltp_timeout`
+    because the option feed had no live tick yet) -- a stock could get one
+    real shot ruined by a transient feed problem and then never get another
+    chance, even after the feed came back. `already_fired` now EXCLUDES any
+    (symbol, side) that also has one of the "entry never completed" abort
+    event types -- it's safe to let these retry: an entry that DID actually
+    succeed is independently protected by the `_positions`/
+    `_pending_contracts` checks in `_handle_signal`/`start()`'s own restore,
+    so under-restoring `_already_fired` here can never cause a real
+    duplicate entry, only a legitimate extra chance for one that never
+    happened."""
     init_db()
     con = sqlite3.connect(_DB_PATH)
     try:
-        rows = con.execute(
+        td = trade_date or _today()
+        fired_rows = con.execute(
             """SELECT DISTINCT symbol, side FROM signal_events
                WHERE client_id=? AND binding_id=? AND trade_date=? AND event_type='signal_fired'""",
-            (client_id, binding_id, trade_date or _today()),
+            (client_id, binding_id, td),
         ).fetchall()
-        return {(r[0], r[1]) for r in rows}
+        aborted_rows = con.execute(
+            """SELECT DISTINCT symbol, side FROM signal_events
+               WHERE client_id=? AND binding_id=? AND trade_date=?
+                 AND event_type IN ('entry_ltp_timeout', 'lot_resolve_failed', 'contract_resolve_failed')""",
+            (client_id, binding_id, td),
+        ).fetchall()
+        aborted = {(r[0], r[1]) for r in aborted_rows}
+        return {(r[0], r[1]) for r in fired_rows} - aborted
     except Exception as exc:
         logger.error("oi_orb store.load_already_fired failed: %s", exc)
         return set()
