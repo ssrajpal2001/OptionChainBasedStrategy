@@ -524,10 +524,22 @@ class CagStraddleStrategy(AbstractStrategyBook):
                 s1=(t.last_s1 if t else None),
                 phase=(t.last_phase if t else None),
             )
+        position = None
+        if self._position:
+            position = dict(self._position)
+            # 2026-08-28 fix: self._live_premium already updates on every
+            # OPTION_TICK (see _on_index_tick/_on_option_tick), it just was
+            # never surfaced here -- the dashboard's live LTP/P&L fields had
+            # nothing to read, even mid-trade. CAG Straddle only ever goes
+            # long, so P&L is always (current - entry) * qty_unit.
+            current_price = self._live_premium.get((position["strike"], position["side"]))
+            position["current_price"] = current_price
+            if current_price is not None:
+                position["unrealized_pnl"] = (current_price - position["entry_price"]) * position["qty_unit"]
         return dict(
             underlying=self._underlying, client_id=self._client_id, binding_id=self._binding_id,
             entry_window_started=self._entry_window_started, day_done=self._day_done,
             sides=sides,
-            position=(dict(self._position) if self._position else None),
+            position=position,
             recent_remarks=list(self._recent_remarks),
         )

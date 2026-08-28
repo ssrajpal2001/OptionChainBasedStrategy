@@ -8974,6 +8974,15 @@ function amoTest() {
                                 <span style="color:var(--t-muted)">Entry price</span>
                                 <span x-text="fmt(_p.entry_price)"></span>
                               </div>
+                              <div class="flex justify-between">
+                                <span style="color:var(--t-muted)">LTP</span>
+                                <span x-text="_p.current_price!=null ? fmt(_p.current_price) : '—'"></span>
+                              </div>
+                              <div class="flex justify-between">
+                                <span style="color:var(--t-muted)">P&amp;L</span>
+                                <span :style="_p.unrealized_pnl>=0?'color:var(--t-green)':'color:var(--t-red)'"
+                                      x-text="_p.unrealized_pnl!=null ? fmt(_p.unrealized_pnl) : '—'"></span>
+                              </div>
                             </div>
                           </template>
 
