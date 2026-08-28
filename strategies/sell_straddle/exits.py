@@ -664,6 +664,43 @@ class ExitMixin:
             pos.is_hedged_positional = False
         self._persist()
 
+    async def _close_position_and_hedge(self, reason: str) -> None:
+        """2026-08-28, real user-caught incident: while a position is
+        is_hedged_positional, EVERY full-close exit (Day% guardrail, day-low
+        reversal, scalable TSL, ITM-pair-gate's close-fallback) must treat
+        all 4 legs (2 sold + 2 hedge) as ONE position -- close them together,
+        not just the 2 sold legs. Before this fix, only the same-strike-
+        collision guard and hedge-cumulative-profit-close routed through
+        _close_hedge_legs first; every other full-close check called
+        _close_position() alone, silently orphaning the hedge legs (a real
+        incident: day_loss_sl fired on the sold legs' own running loss --
+        which the hedge was already offsetting -- closed just the 2 sold
+        legs and left the 2 hedge legs sitting exposed with nothing hedging
+        them anymore).
+
+        Rollover (single-side roll: ltp_decay, ratio_exit, exit_rules,
+        vwap_rise, and ITM-pair-gate's own roll-ATTEMPT before this
+        fallback) is deliberately UNCHANGED -- it continues to operate on
+        the individual sold leg only, per direct user instruction ("only
+        rollover happens on individual sell leg") and the pre-existing
+        same-strike-collision guard's own precedent (rollover while hedged
+        is expected and already handled)."""
+        pos = self._position
+        if pos is not None and pos.is_hedged_positional:
+            await self._close_hedge_legs(pos, reason)
+        await self._close_position(reason)
+
+    def _combined_pnl_pts(self, pos: "StraddlePosition", sold_pnl_pts: float) -> float:
+        """Sold-legs P&L, PLUS the hedge legs' own running P&L when this
+        position is hedged -- the "treat all 4 legs as one" basis every
+        full-close exit threshold (Day%, ScalableTSL, ITM-pair-gate) must
+        use once hedged, per the same 2026-08-28 incident described in
+        _close_position_and_hedge's own docstring. 0.0 contribution when
+        not hedged (byte-identical to the old sold-legs-only behavior)."""
+        if pos is not None and pos.is_hedged_positional:
+            return sold_pnl_pts + pos.hedge_unrealized_pnl
+        return sold_pnl_pts
+
     async def _hedge_or_roll_if_eligible(self, pos: "StraddlePosition", now: datetime) -> bool:
         """Shared hedge/roll eligibility + dispatch, factored out of
         _eod_close_or_hedge (2026-08-25) so the SAME decision can also run
@@ -1088,7 +1125,10 @@ class ExitMixin:
                     self._POST_RESTORE_WARMUP_MAX_SEC,
                     pos.ce_leg.ltp, pos.pe_leg.ltp, pos.unrealized_pnl,
                 )
-                await self._close_position("post_restore_data_stale")
+                # 2026-08-28 fix: a stuck feed affects the hedge legs' own LTP
+                # too -- this is a full exit, so close any standing hedge legs
+                # alongside the sold legs (same "treat all 4 legs as one" fix).
+                await self._close_position_and_hedge("post_restore_data_stale")
                 if not (self._position and self._position.status == "open"):
                     self._post_restore_warmup = False
                 else:
@@ -1142,15 +1182,20 @@ class ExitMixin:
             return
 
         # 2. DAY-LEVEL % GUARDRAILS
+        # 2026-08-28 fix: total_day_pts now folds in the hedge legs' own
+        # running P&L when hedged (_combined_pnl_pts) -- see
+        # _close_position_and_hedge's own docstring for the real incident
+        # this fixes (day_loss_sl fired on the sold legs' own loss, which
+        # the hedge was already offsetting, and orphaned the hedge legs).
         if self._initial_net_credit > 0:
             if self._day_exit_basis == "theta" and self._initial_entry_time_value > 0:
                 _etv = float(getattr(pos, "entry_time_value", 0.0) or 0.0)
                 _running_theta = (_etv - pos.current_time_value(self._spot)) if _etv > 0 else pnl
-                total_day_pts = self._session_realized_pnl_pts + _running_theta
+                total_day_pts = self._session_realized_pnl_pts + self._combined_pnl_pts(pos, _running_theta)
                 _day_denom = self._initial_entry_time_value
                 _basis_lbl = "theta(cumulative)"
             else:
-                total_day_pts = self._session_realized_pnl_pts + pnl
+                total_day_pts = self._session_realized_pnl_pts + self._combined_pnl_pts(pos, pnl)
                 _day_denom = self._initial_net_credit
                 _basis_lbl = "ltp"
             total_day_pct = total_day_pts / _day_denom * 100
@@ -1166,7 +1211,7 @@ class ExitMixin:
                 if not self._defer_exit("day_profit_target", now):
                     return
                 self._stop_for_day = True
-                await self._close_position("day_profit_target")
+                await self._close_position_and_hedge("day_profit_target")
                 logger.info("SellStraddle[%s]: STOPPED FOR DAY (profit target reached).", self._underlying)
                 return
 
@@ -1181,7 +1226,7 @@ class ExitMixin:
                 if not self._defer_exit("day_loss_sl", now):
                     return
                 self._stop_for_day = True
-                await self._close_position("day_loss_sl")
+                await self._close_position_and_hedge("day_loss_sl")
                 logger.info("SellStraddle[%s]: STOPPED FOR DAY (loss SL hit).", self._underlying)
                 return
 
@@ -1281,7 +1326,7 @@ class ExitMixin:
                 if not self._defer_exit("day_low_reversal", now):
                     return
                 self._stop_for_day = True
-                await self._close_position("day_low_reversal_exit")
+                await self._close_position_and_hedge("day_low_reversal_exit")
                 return
 
         # 3. LTP Decay → single-side roll
@@ -1307,12 +1352,16 @@ class ExitMixin:
                 return
 
         # 5. Scalable TSL → FULL EXIT (no rollover; reset on next entry)
+        # 2026-08-28 fix: _tsl_pnl now folds in the hedge legs' own running
+        # P&L when hedged (_combined_pnl_pts) -- same "treat all 4 legs as
+        # one" fix as the Day% guardrail above.
         if self._tsl_enabled:
             _tsl_pnl = pnl
             if self._tsl_basis == "theta":
                 _etv = float(getattr(pos, "entry_time_value", 0.0) or 0.0)
                 if _etv > 0:
                     _tsl_pnl = _etv - pos.current_time_value(self._spot)
+            _tsl_pnl = self._combined_pnl_pts(pos, _tsl_pnl)
             if self._check_scalable_tsl(pos, _tsl_pnl):
                 logger.info("SellStraddle[%s]: SCALABLE TSL (%s) — locked=%s%.4f pnl=%s%.4f → FULL EXIT",
                             self._underlying, self._tsl_basis,
@@ -1320,7 +1369,7 @@ class ExitMixin:
                             self._ccy_symbol, self._pnl_rs(_tsl_pnl))
                 if not self._defer_exit("scalable_tsl", now):
                     return
-                await self._close_position("scalable_tsl")
+                await self._close_position_and_hedge("scalable_tsl")
                 return
 
         # 6. EXIT-EVAL — dynamic exit_rules → single-side roll

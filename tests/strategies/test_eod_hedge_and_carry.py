@@ -666,6 +666,96 @@ def test_check_exits_hedge_profit_close_runs_before_other_exit_checks():
     asyncio.run(run())
 
 
+# ── 2026-08-28: "treat all 4 legs as one" for full-close exits while hedged ─
+# Real incident: day_loss_sl fired using ONLY the sold legs' own running
+# loss (-50 pts), ignoring the hedge legs' offsetting gain entirely, and
+# closed just the 2 sold legs -- leaving the 2 hedge legs orphaned with
+# nothing left hedging them. Every full-close exit (Day%, ScalableTSL,
+# day-low-reversal, ITM-pair-gate's close-fallback) must now (a) compute its
+# P&L threshold using the COMBINED 4-leg P&L when hedged, and (b) close the
+# hedge legs together with the sold legs when it fires. Rollover (single-
+# side roll) is deliberately unaffected -- see _close_position_and_hedge's
+# own docstring.
+
+def test_combined_pnl_pts_adds_hedge_pnl_only_when_hedged():
+    s = _make()   # sold legs net -50 pts
+    unhedged_pos = s._position
+    assert s._combined_pnl_pts(unhedged_pos, -50.0) == -50.0   # no hedge -> unchanged
+
+    pos = _hedged(s, ce_hedge_ltp=90.0, pe_hedge_ltp=55.0)   # hedge net +30 (CE 60->90, PE 55->55)
+    assert s._combined_pnl_pts(pos, -50.0) == -20.0           # -50 + 30 = -20
+
+
+def test_day_loss_sl_does_not_fire_when_hedge_offsets_the_sold_leg_loss():
+    """Direct 2026-08-28 incident fix: the sold legs alone (-50 pts) would
+    have breached a -20% day_loss_sl on their own (old, buggy behavior) --
+    but the hedge is offsetting +30 of that, netting to -20 pts / -10%,
+    which must NOT breach the -20% threshold once hedge-aware."""
+    async def run():
+        s = _make()   # sold legs net -50 pts
+        s._force_exit = datetime.time(23, 59)
+        s._ltp_decay_enabled = False
+        s._tsl_enabled = False
+        s._vwap_rise_enabled = False
+        s._exit_rules = []
+        s._ratio_threshold = 999.0
+        s._itm_pair_gate_enabled = False
+        s._day_low_exit_enabled = False
+        s._initial_net_credit = 200.0
+        s._day_exit_basis = "ltp"
+        s._day_profit_target_pct = 0.0
+        s._day_loss_sl_pct = 20.0   # breach point = -40 pts sold-only; -50 alone WOULD breach
+        s._defer_exit = lambda reason, now: True
+
+        _hedged(s, ce_hedge_ltp=90.0, pe_hedge_ltp=55.0)   # hedge net +30 -> combined -20 pts (-10%)
+        _stub_dispatch(s, {})
+        closed = []
+        s._close_position = lambda reason: closed.append(reason)
+
+        await s._check_exits()
+
+        assert closed == []
+    asyncio.run(run())
+
+
+def test_day_loss_sl_fires_on_combined_pnl_and_closes_hedge_legs_too():
+    async def run():
+        s = _make()   # sold legs net -50 pts
+        s._force_exit = datetime.time(23, 59)
+        s._ltp_decay_enabled = False
+        s._tsl_enabled = False
+        s._vwap_rise_enabled = False
+        s._exit_rules = []
+        s._ratio_threshold = 999.0
+        s._itm_pair_gate_enabled = False
+        s._day_low_exit_enabled = False
+        s._initial_net_credit = 200.0
+        s._day_exit_basis = "ltp"
+        s._day_profit_target_pct = 0.0
+        s._day_loss_sl_pct = 5.0    # breach point = -10 pts -- combined -48 easily breaches
+        s._defer_exit = lambda reason, now: True
+
+        pos = _hedged(s, ce_hedge_ltp=61.0, pe_hedge_ltp=56.0)   # hedge net +2 -- doesn't rescue
+        hedge_calls = _stub_dispatch(s, {
+            ("SELL", "CE", 24500): _fill("SELL", "CE", 24500, 61.0),
+            ("SELL", "PE", 23500): _fill("SELL", "PE", 23500, 56.0),
+        })
+        closed = []
+        async def _fake_close(reason):
+            closed.append(reason)
+            s._position.status = "closed"
+        s._close_position = _fake_close
+        s._apply_sl_cooldown = lambda rule_key="entry_rules_reentry": None
+
+        await s._check_exits()
+
+        assert closed == ["day_loss_sl"]
+        assert ("SELL", "CE", 24500) in hedge_calls
+        assert ("SELL", "PE", 23500) in hedge_calls
+        assert pos.hedge_ce_leg is None and pos.hedge_pe_leg is None
+    asyncio.run(run())
+
+
 # ── reset_session(): standing hedge survives a day-boundary transition ─────
 
 def test_reset_session_preserves_position_when_hedged():

@@ -492,8 +492,17 @@ class RollingMixin:
         return ce_itm and pe_itm
 
     def _cumulative_pnl_pts(self) -> float:
-        """Today's booked P&L (all closed legs) + current running P&L in option pts."""
-        running = self._position.unrealized_pnl if self._position else 0.0
+        """Today's booked P&L (all closed legs) + current running P&L in option pts.
+
+        2026-08-28 fix: when the position is hedged (is_hedged_positional),
+        the running P&L now also folds in the hedge legs' own running P&L
+        (via _combined_pnl_pts, exits.py) -- this feeds the ITM-pair-gate's
+        own profit threshold, which must treat all 4 legs as one position
+        once hedged, same as every other full-close exit check (see
+        _close_position_and_hedge's own docstring for the real incident)."""
+        pos = self._position
+        running = pos.unrealized_pnl if pos else 0.0
+        running = self._combined_pnl_pts(pos, running) if pos else running
         return self._session_realized_pnl_pts + running
 
     async def _check_itm_pair_gate(self, now: datetime) -> None:
@@ -563,7 +572,10 @@ class RollingMixin:
                 "SellStraddle[%s]: ITM-PAIR GATE — no rollover partner found; closing both and restarting.",
                 self._underlying,
             )
-            await self._close_position("itm_pair_gate_profit")
+            # 2026-08-28 fix: close-fallback (no roll partner found) is a FULL
+            # exit, not a rollover -- must also close any standing hedge legs
+            # (same "treat all 4 legs as one" fix as the Day%/TSL guardrails).
+            await self._close_position_and_hedge("itm_pair_gate_profit")
             # No cooldown — restart immediately. Already goes via re-entry (not
             # beginning) since trades_today >= 1 at this point (a trade already
             # happened earlier today to reach this position) -- is_beginning is
@@ -711,7 +723,10 @@ class RollingMixin:
             "SellStraddle[%s]: ITM-ROLL PROTECTION — no valid strike (old strike or pool); "
             "closing entire position.", self._underlying,
         )
-        await self._close_position("itm_roll_protection_exit_all")
+        # 2026-08-28 fix: full exit, not a rollover -- must also close any
+        # standing hedge legs (same "treat all 4 legs as one" fix as the
+        # Day%/TSL/ITM-pair-gate guardrails).
+        await self._close_position_and_hedge("itm_roll_protection_exit_all")
 
     def _apply_sl_cooldown(self, rule_key: str = "entry_rules_reentry") -> None:
         """Block re-entry until the next boundary of the max timeframe among
