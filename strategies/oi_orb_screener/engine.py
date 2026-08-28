@@ -50,7 +50,7 @@ import asyncio
 import logging
 import time as _time
 from datetime import date, datetime, time as dtime, timedelta
-from typing import Dict, Optional, Set
+from typing import Dict, List, Optional, Set
 
 from config.global_config import IST, Topic
 from data_layer.base_feeder import IndexTick, OptionTick
@@ -368,6 +368,11 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._option_sl_bar_cur: Dict[str, dict] = {}   # symbol -> {"h","l","c","ts"} for the forming OPTION-premium bar
         self._live_sl: Dict[str, float] = {}         # symbol -> current live SL level (armed bar's low, option-premium terms)
         self._live_target: Dict[str, float] = {}     # symbol -> current live target level (option-premium terms)
+        # 2026-08-28 real incident fix: chronological history of every ADVERSE
+        # bar's own low since entry, per symbol -- feeds
+        # screener.pool_sl_from_adverse_lows() so the SL only arms once two
+        # separate bars cluster near the same floor, not on the first dip.
+        self._option_adverse_lows: Dict[str, List[float]] = {}
         # Stock spot tick feed -- kept for LIVE UI VISIBILITY ONLY now (the
         # SL/target check itself no longer uses it); see _ensure_spot_feed's
         # own docstring.
@@ -586,11 +591,19 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
 
         ordered_keys = sorted(buckets.keys())
         pos = self._positions.get(symbol)
+        # 2026-08-28 fix: replay through the SAME pooled multi-touch anchor the
+        # live loop uses (screener.pool_sl_from_adverse_lows), not the old
+        # single-bar-low re-arm, so a restored position's SL matches exactly
+        # what it would have been had the process never restarted.
+        lows = self._option_adverse_lows.setdefault(symbol, [])
         for key in ordered_keys[:-1]:   # last bucket is still-forming -- live loop continues it
             bkt = buckets[key]
             if bkt["ts"].time() < entry_time or bkt["vwap_at_close"] is None or pos is None:
                 continue
-            new_sl = screener.compute_option_premium_sl_arm(bkt["c"], bkt["vwap_at_close"], bkt["l"])
+            if not screener.is_adverse_bar_close(bkt["c"], bkt["vwap_at_close"]):
+                continue
+            lows.append(bkt["l"])
+            new_sl = screener.pool_sl_from_adverse_lows(lows)
             if new_sl is not None:
                 self._live_sl[symbol] = new_sl
                 new_target = screener.compute_option_premium_target(
@@ -1532,9 +1545,11 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                         "no broker ATP received yet for this contract, SL/target cannot "
                         "arm until one arrives.",
                         self._client_id, self._binding_id, symbol, closed["c"], cur_key)
-                else:
-                    new_sl = screener.compute_option_premium_sl_arm(closed["c"], vwap_at_close, closed["l"])
-                    if new_sl is not None:
+                elif screener.is_adverse_bar_close(closed["c"], vwap_at_close):
+                    lows = self._option_adverse_lows.setdefault(symbol, [])
+                    lows.append(closed["l"])
+                    new_sl = screener.pool_sl_from_adverse_lows(lows)
+                    if new_sl is not None and new_sl != self._live_sl.get(symbol):
                         self._live_sl[symbol] = new_sl
                         new_target = screener.compute_option_premium_target(
                             pos["entry_price"], new_sl, self._rr_multiple)
@@ -1548,10 +1563,18 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                             f"{new_target:.2f}" if new_target is not None else "n/a", cur_key)
                     else:
                         self._clog.info(
-                            "OiOrb[%s/%s]: %s OPTION BAR CLOSED -- close=%.2f >= vwap(atp)=%.2f "
-                            "(favorable) -- no re-arm (bar %s)",
+                            "OiOrb[%s/%s]: %s OPTION BAR CLOSED ADVERSE -- close=%.2f < vwap(atp)=%.2f, "
+                            "low=%.2f logged as candidate -- SL %s (bar %s)",
                             self._client_id, self._binding_id, symbol, closed["c"],
-                            vwap_at_close, cur_key)
+                            vwap_at_close, closed["l"],
+                            "unchanged (still awaiting a 2nd nearby low)" if new_sl is None
+                            else "unchanged (no closer cluster found)", cur_key)
+                else:
+                    self._clog.info(
+                        "OiOrb[%s/%s]: %s OPTION BAR CLOSED -- close=%.2f >= vwap(atp)=%.2f "
+                        "(favorable) -- no re-arm (bar %s)",
+                        self._client_id, self._binding_id, symbol, closed["c"],
+                        vwap_at_close, cur_key)
             self._option_sl_bar_key[symbol] = key
             self._option_sl_bar_cur[symbol] = {"h": ltp, "l": ltp, "c": ltp, "ts": ts}
         else:
@@ -1636,6 +1659,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             self._live_sl.pop(symbol, None)
             self._live_target.pop(symbol, None)
             self._live_option_atp.pop(symbol, None)
+            self._option_adverse_lows[symbol] = []
             self._ensure_spot_feed(symbol)
             self._clog.info("OiOrb[%s/%s]: ENTRY CONFIRMED %s %s%d qty=%d @ %.2f (paper_mode=%s) "
                              "-- option-premium SL/target tracking starts now.",

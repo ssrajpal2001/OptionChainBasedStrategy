@@ -33,7 +33,7 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import List, Optional
 
 import pandas as pd
 import requests
@@ -706,10 +706,66 @@ def compute_option_premium_sl_arm(bar_close: float, vwap_at_close: float,
     BELOW the option's own vwap -- re-arms the SL to THAT bar's own LOW,
     replacing whatever was armed before (re-arms on every adverse bar, not
     just the first). Returns None (no re-arm) on a bar that closed on the
-    favorable side."""
+    favorable side.
+
+    2026-08-28 note: this single-bar-low anchor is kept as a small,
+    independently tested primitive (mirrors strategies/oi_flow/detector.py's
+    own swing_low() vs pool_swing_low() split) -- the SL actually armed live
+    now goes through pool_sl_from_adverse_lows() below, not this function
+    directly. See that function's docstring for the real incident that
+    prompted the change."""
     if vwap_at_close <= 0:
         return None
     return bar_low if bar_close < vwap_at_close else None
+
+
+def is_adverse_bar_close(bar_close: float, vwap_at_close: float) -> bool:
+    """True if a vwap_sl_tf_minutes bar closed BELOW the option's own broker-
+    ATP VWAP -- the trigger to consider that bar's own LOW as a fresh
+    SL-anchor candidate. Split out of compute_option_premium_sl_arm so the
+    caller can grow a running history of candidate lows for
+    pool_sl_from_adverse_lows() below."""
+    return vwap_at_close > 0 and bar_close < vwap_at_close
+
+
+_SL_POOL_TOL_PCT_DEFAULT = 1.0
+_SL_POOL_MIN_TOUCHES_DEFAULT = 2
+
+
+def pool_sl_from_adverse_lows(adverse_lows: List[float], tol_pct: float = _SL_POOL_TOL_PCT_DEFAULT,
+                               min_touches: int = _SL_POOL_MIN_TOUCHES_DEFAULT) -> Optional[float]:
+    """2026-08-28, direct user chart review of a real incident: two real
+    trades the same session (COFORGE CE2000, KPITTECH CE620) both got
+    stopped out by compute_option_premium_sl_arm's single-bar-low anchor
+    right before a genuine reversal -- confirmed on real TradingView charts
+    (COFORGE rallied ~13pts, KPITTECH reclaimed its own VWAP, both shortly
+    after the SL hit). A lone adverse bar's own low is ordinary intraday
+    noise, not a real defended level -- same root cause and same fix shape
+    as OI-Flow's own real 2026-08-19 incident
+    (strategies/oi_flow/detector.py's pool_swing_low), reimplemented fresh
+    here per this strategy's standalone mandate. Adapted from OI-Flow's flat
+    ₹ tolerance to a PERCENTAGE tolerance because OI-ORB trades many
+    different F&O stocks at wildly different premium scales in the same
+    session (₹15 KPITTECH vs ₹400+ OFSS on this very day) -- one flat ₹
+    tolerance can't fit both.
+
+    `adverse_lows` is the full chronological history of every adverse bar's
+    own low for THIS position since entry (caller-maintained, oldest
+    first -- reset on every fresh entry, never carried across positions).
+    Walks them in order; each low's cluster size = itself + every EARLIER
+    low within tol_pct% of it. The most recent low whose own cluster
+    reaches min_touches becomes the active anchor -- i.e. the SL only arms
+    once at least two separate adverse bars have found roughly the same
+    floor, not on the very first dip. Returns None if no low has ever
+    reached that threshold yet -- callers must treat this exactly like "not
+    armed yet" (no fallback to the single most recent low)."""
+    active: Optional[float] = None
+    for i, low in enumerate(adverse_lows):
+        tol = abs(low) * (tol_pct / 100.0)
+        cluster = 1 + sum(1 for prior in adverse_lows[:i] if abs(prior - low) <= tol)
+        if cluster >= min_touches:
+            active = low
+    return active
 
 
 def compute_option_premium_target(entry_price: float, sl_level: Optional[float],

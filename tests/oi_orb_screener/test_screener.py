@@ -512,6 +512,44 @@ def test_compute_option_premium_sl_arm_no_vwap_never_arms():
     assert screener.compute_option_premium_sl_arm(95.0, 0.0, 90.0) is None
 
 
+# ── pooled multi-touch SL anchor (2026-08-28, real incident fix: COFORGE
+# CE2000 and KPITTECH CE620 both got stopped by the single-bar-low anchor
+# right before a genuine reversal, confirmed on real TradingView charts) ──
+
+def test_is_adverse_bar_close():
+    assert screener.is_adverse_bar_close(95.0, 100.0) is True
+    assert screener.is_adverse_bar_close(105.0, 100.0) is False
+    assert screener.is_adverse_bar_close(95.0, 0.0) is False
+
+
+def test_pool_sl_from_adverse_lows_lone_touch_never_arms():
+    assert screener.pool_sl_from_adverse_lows([90.0]) is None
+
+
+def test_pool_sl_from_adverse_lows_arms_on_a_clustering_second_touch():
+    # 90.0 then 90.5 -- within 1% of each other -- clusters, anchor = most
+    # recent (90.5).
+    assert screener.pool_sl_from_adverse_lows([90.0, 90.5]) == 90.5
+
+
+def test_pool_sl_from_adverse_lows_far_apart_lows_do_not_cluster():
+    # 90.0 then 80.0 -- outside 1% tolerance of each other -- no anchor yet.
+    assert screener.pool_sl_from_adverse_lows([90.0, 80.0]) is None
+
+
+def test_pool_sl_from_adverse_lows_moves_to_a_newer_cluster():
+    # 90.0/90.3 cluster first (anchor=90.3); a later 80.0/80.2 cluster
+    # supersedes it once ITS OWN second touch lands.
+    assert screener.pool_sl_from_adverse_lows([90.0, 90.3, 80.0]) == 90.3
+    assert screener.pool_sl_from_adverse_lows([90.0, 90.3, 80.0, 80.2]) == 80.2
+
+
+def test_pool_sl_from_adverse_lows_respects_custom_tol_and_min_touches():
+    assert screener.pool_sl_from_adverse_lows([90.0, 95.0], tol_pct=10.0) == 95.0
+    assert screener.pool_sl_from_adverse_lows([90.0, 90.1, 90.2], min_touches=3) == 90.2
+    assert screener.pool_sl_from_adverse_lows([90.0, 90.1], min_touches=3) is None
+
+
 def test_compute_option_premium_target_uses_rr_multiple_off_sl_distance():
     # entry=100, sl=90 -> risk=10, rr=2.0 -> target=100+20=120
     assert screener.compute_option_premium_target(100.0, 90.0, 2.0) == 120.0

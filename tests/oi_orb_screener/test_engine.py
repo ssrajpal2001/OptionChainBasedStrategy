@@ -533,10 +533,12 @@ def _bar(hhmm: str, h: float, l: float, c: float, vol: float) -> dict:
 async def test_seed_option_bars_from_history_reconstructs_sl_from_real_bars(monkeypatch):
     """Baseline bars (09:55-09:59, flat @100) establish a running vwap ~100.
     Position entered at 10:00. The 10:00-10:04 bucket (vwap_sl_tf_minutes=5)
-    drifts down to a close of 82 -- adverse -- must arm the SL at that
-    bucket's own low. A later still-forming bucket (10:05, partial) must NOT
-    be replayed -- it becomes the seeded "current" bar for the live loop to
-    continue."""
+    drifts down to a close of 82 -- adverse, a lone touch, no arm yet. The
+    10:05-10:09 bucket stays near that same level (low=81.70, within
+    pool_sl_from_adverse_lows' tol_pct% of bucket1's 82.0) -- the SECOND
+    touch confirms the cluster and arms the SL there. A later still-forming
+    bucket (10:10, partial) must NOT be replayed -- it becomes the seeded
+    "current" bar for the live loop to continue."""
     bus = _FakeBus()
     book = _make_book(bus)
     contract = _contract("DIXON", 14500, "PE")
@@ -552,7 +554,12 @@ async def test_seed_option_bars_from_history_reconstructs_sl_from_real_bars(monk
             _bar("10:02", 90, 88, 88, 100),
             _bar("10:03", 88, 85, 85, 100),
             _bar("10:04", 85, 82, 82, 100),
-            _bar("10:05", 82, 80, 80, 50),   # still-forming bucket -- not replayed
+            _bar("10:05", 82.0, 81.8, 81.9, 100),
+            _bar("10:06", 81.9, 81.8, 81.85, 100),
+            _bar("10:07", 81.85, 81.75, 81.8, 100),
+            _bar("10:08", 81.8, 81.75, 81.78, 100),
+            _bar("10:09", 81.78, 81.70, 81.75, 100),
+            _bar("10:10", 81.75, 80.0, 80.0, 50),   # still-forming bucket -- not replayed
         ]
     )
     monkeypatch.setattr("data_layer.historical_candles.fetch_upstox_intraday_1m", _async_return(bars))
@@ -561,11 +568,12 @@ async def test_seed_option_bars_from_history_reconstructs_sl_from_real_bars(monk
 
     await book._seed_option_bars_from_history("DIXON", contract, book._positions["DIXON"]["opened_at"])
 
-    assert book._live_sl["DIXON"] == 82.0
-    # entry=118.80, sl=82 -> risk=36.80, default rr_multiple=2.0 -> target=118.80+73.60=192.40
-    assert book._live_target["DIXON"] == pytest.approx(192.40, abs=0.01)
-    # The still-forming 10:05 bucket is seeded as the CURRENT bar, not replayed.
-    assert book._option_sl_bar_key["DIXON"] == "10:05"
+    assert book._option_adverse_lows["DIXON"] == [82.0, 81.70]
+    assert book._live_sl["DIXON"] == 81.70
+    # entry=118.80, sl=81.70 -> risk=37.10, default rr_multiple=2.0 -> target=193.00
+    assert book._live_target["DIXON"] == pytest.approx(193.00, abs=0.01)
+    # The still-forming 10:10 bucket is seeded as the CURRENT bar, not replayed.
+    assert book._option_sl_bar_key["DIXON"] == "10:10"
     assert book._option_sl_bar_cur["DIXON"]["c"] == 80.0
     assert book._live_option_atp["DIXON"] is not None
 
@@ -869,22 +877,17 @@ def test_on_fill_buy_resets_option_sl_target_state_and_subscribes_spot_feed():
 
 
 @pytest.mark.asyncio
-async def test_option_sl_arms_on_adverse_bar_close_and_breaches_on_the_next_tick():
-    """2026-08-27, direct user spec: "checking for target and SL in stock,
-    change it to the option which we are taking" + "if 5 min candle closes
-    above vwap for short trade or close below vwap for long trade... then sl
-    is hit [once the candle's own high/low is breached]." Drives real 1-min
-    OPTION-premium bars (tf overridden to 1 for the test) with a fixed
-    broker ATP (=VWAP)=100: bar1 closes ABOVE vwap (108, favorable) -- no
-    arm. bar2 closes BELOW vwap (90, adverse) -- arms the SL at bar2's own
-    LOW (90) and a target at entry+rr*(entry-sl). A live tick at 89 (below
-    90) must then close the position immediately, on that tick, not waiting
-    for bar3 to close."""
+async def test_option_sl_does_not_arm_on_a_single_adverse_bar():
+    """2026-08-28 real incident fix: a single adverse bar's own low is
+    ordinary intraday noise, not a real defended level -- two real trades
+    the same session (COFORGE CE2000, KPITTECH CE620) got stopped by the
+    OLD single-bar anchor right before a genuine reversal (confirmed on
+    real TradingView charts). See screener.pool_sl_from_adverse_lows' own
+    docstring. One adverse bar close must NOT arm the SL by itself."""
     bus = _FakeBus()
     book = _make_book(bus)
-    book._vwap_sl_tf_minutes = 1   # exercise the mechanic on 1-min bars regardless
-                                   # of the strategy's own (5-min) live default
-    book._live_option_atp["MANAPPURAM"] = 100.0   # fixed broker ATP (= VWAP) = 100.0
+    book._vwap_sl_tf_minutes = 1
+    book._live_option_atp["MANAPPURAM"] = 100.0
     contract = _contract("MANAPPURAM", 365, "CE")
     book._positions["MANAPPURAM"] = {
         "contract": contract, "qty": 100, "entry_price": 100.0, "paper_mode": True,
@@ -901,21 +904,74 @@ async def test_option_sl_arms_on_adverse_bar_close_and_breaches_on_the_next_tick
     # bar2 (09:16, high=102/low=90/close=90 < vwap=100 -- ADVERSE) closes on this next tick.
     await book._update_option_sl_target_and_check("MANAPPURAM", 91.0, datetime(2026, 8, 26, 9, 17, 10, tzinfo=IST))
 
-    assert book._live_sl["MANAPPURAM"] == 90.0
-    # entry=100, sl=90 -> risk=10, default rr_multiple=2.0 -> target=120.
-    assert book._live_target["MANAPPURAM"] == 120.0
-    assert "MANAPPURAM" in book._positions   # not breached yet (91 > 90)
+    # Only ONE adverse bar so far -- a lone touch, not a confirmed cluster.
+    assert "MANAPPURAM" not in book._live_sl
+    assert book._option_adverse_lows["MANAPPURAM"] == [90.0]
+
+
+@pytest.mark.asyncio
+async def test_option_sl_arms_once_a_second_adverse_bar_clusters_near_the_first():
+    """A second adverse bar whose own low sits within pool_sl_from_adverse_
+    lows' tol_pct% of the first confirms a real anchor -- the SL arms to
+    that (most recent) clustered low, and a live tick breaching it closes
+    immediately, same tick, not waiting for the next bar close."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._vwap_sl_tf_minutes = 1
+    book._live_option_atp["MANAPPURAM"] = 100.0
+    contract = _contract("MANAPPURAM", 365, "CE")
+    book._positions["MANAPPURAM"] = {
+        "contract": contract, "qty": 100, "entry_price": 100.0, "paper_mode": True,
+        "opened_at": datetime(2026, 8, 26, 9, 15, 0),
+    }
+    # bar1 (09:15): low=90 -- adverse, lone touch, no arm yet.
+    await book._update_option_sl_target_and_check("MANAPPURAM", 95.0, datetime(2026, 8, 26, 9, 15, 10, tzinfo=IST))
+    await book._update_option_sl_target_and_check("MANAPPURAM", 90.0, datetime(2026, 8, 26, 9, 15, 40, tzinfo=IST))
+    await book._update_option_sl_target_and_check("MANAPPURAM", 92.0, datetime(2026, 8, 26, 9, 16, 10, tzinfo=IST))
+    assert "MANAPPURAM" not in book._live_sl
+
+    # bar2 (09:16): low=90.5 -- within 1% of 90 (tol=0.905) -- clusters, arms at 90.5.
+    await book._update_option_sl_target_and_check("MANAPPURAM", 90.5, datetime(2026, 8, 26, 9, 16, 40, tzinfo=IST))
+    await book._update_option_sl_target_and_check("MANAPPURAM", 91.0, datetime(2026, 8, 26, 9, 17, 10, tzinfo=IST))
+    assert book._live_sl["MANAPPURAM"] == 90.5
+    # entry=100, sl=90.5 -> risk=9.5, default rr_multiple=2.0 -> target=119.0
+    assert book._live_target["MANAPPURAM"] == 119.0
+    assert "MANAPPURAM" in book._positions   # not breached yet (91 > 90.5)
 
     sell_events_before = [e for t, e in bus.published if t == Topic.OI_ORB_ORDER_REQUEST and e.action == "SELL"]
     assert sell_events_before == []
 
     # A live tick (same forming bar, no new bar close needed) breaches SL immediately.
-    await book._update_option_sl_target_and_check("MANAPPURAM", 89.0, datetime(2026, 8, 26, 9, 17, 20, tzinfo=IST))
+    await book._update_option_sl_target_and_check("MANAPPURAM", 90.4, datetime(2026, 8, 26, 9, 17, 20, tzinfo=IST))
 
     sell_events = [e for t, e in bus.published if t == Topic.OI_ORB_ORDER_REQUEST and e.action == "SELL"]
     assert len(sell_events) == 1
     assert sell_events[0].underlying == "MANAPPURAM"
     assert "MANAPPURAM" in book._eod_closing
+
+
+@pytest.mark.asyncio
+async def test_option_sl_two_far_apart_adverse_lows_do_not_cluster():
+    """Two adverse bars whose lows sit FAR apart (outside tol_pct%) are two
+    separate one-off dips, not a real defended level -- neither should arm
+    the SL alone."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._vwap_sl_tf_minutes = 1
+    book._live_option_atp["MANAPPURAM"] = 100.0
+    contract = _contract("MANAPPURAM", 365, "CE")
+    book._positions["MANAPPURAM"] = {
+        "contract": contract, "qty": 100, "entry_price": 100.0, "paper_mode": True,
+        "opened_at": datetime(2026, 8, 26, 9, 15, 0),
+    }
+    await book._update_option_sl_target_and_check("MANAPPURAM", 95.0, datetime(2026, 8, 26, 9, 15, 10, tzinfo=IST))
+    await book._update_option_sl_target_and_check("MANAPPURAM", 90.0, datetime(2026, 8, 26, 9, 15, 40, tzinfo=IST))
+    await book._update_option_sl_target_and_check("MANAPPURAM", 92.0, datetime(2026, 8, 26, 9, 16, 10, tzinfo=IST))
+    await book._update_option_sl_target_and_check("MANAPPURAM", 85.0, datetime(2026, 8, 26, 9, 16, 40, tzinfo=IST))
+    await book._update_option_sl_target_and_check("MANAPPURAM", 88.0, datetime(2026, 8, 26, 9, 17, 10, tzinfo=IST))
+
+    assert "MANAPPURAM" not in book._live_sl
+    assert book._option_adverse_lows["MANAPPURAM"] == [90.0, 85.0]
 
 
 @pytest.mark.asyncio
@@ -940,11 +996,11 @@ async def test_option_target_hit_closes_position():
 
 
 @pytest.mark.asyncio
-async def test_option_sl_rearms_on_every_new_adverse_bar():
-    """Direct user spec: re-arm on EVERY adverse candle, not just the first
-    one -- a second adverse bar close must replace the armed level (and its
-    target) with a fresh one, even though the first adverse bar's low was
-    never breached."""
+async def test_option_sl_rearms_once_a_new_cluster_forms_at_a_different_level():
+    """2026-08-28: re-arm is no longer "every single adverse bar" -- it now
+    requires its own fresh 2-touch cluster (screener.pool_sl_from_adverse_
+    lows). A confirmed level holds steady while a new, uncorroborated dip
+    comes in, then replaces it once THAT dip earns its own second touch."""
     bus = _FakeBus()
     book = _make_book(bus)
     book._vwap_sl_tf_minutes = 1
@@ -955,18 +1011,25 @@ async def test_option_sl_rearms_on_every_new_adverse_bar():
         "opened_at": datetime(2026, 8, 26, 9, 15, 0),
     }
 
-    # bar1 (09:15): low=90, close=92 < vwap=100 -- adverse, arms SL at 90.
+    # bar1 (09:15) low=90, bar2 (09:16) low=90.3 -- cluster confirms SL=90.3.
     await book._update_option_sl_target_and_check("MANAPPURAM", 95.0, datetime(2026, 8, 26, 9, 15, 10, tzinfo=IST))
     await book._update_option_sl_target_and_check("MANAPPURAM", 90.0, datetime(2026, 8, 26, 9, 15, 40, tzinfo=IST))
     await book._update_option_sl_target_and_check("MANAPPURAM", 92.0, datetime(2026, 8, 26, 9, 16, 10, tzinfo=IST))
-    assert book._live_sl["MANAPPURAM"] == 90.0
-    assert book._live_target["MANAPPURAM"] == 120.0
+    await book._update_option_sl_target_and_check("MANAPPURAM", 90.3, datetime(2026, 8, 26, 9, 16, 40, tzinfo=IST))
+    await book._update_option_sl_target_and_check("MANAPPURAM", 91.5, datetime(2026, 8, 26, 9, 17, 10, tzinfo=IST))
+    assert book._live_sl["MANAPPURAM"] == 90.3
+    assert book._live_target["MANAPPURAM"] == pytest.approx(119.4)   # entry=100, risk=9.7, rr=2 -> 119.4
 
-    # bar2 (09:16): low=85, close=88 < vwap=100 -- adverse again, RE-ARMS to 85.
-    await book._update_option_sl_target_and_check("MANAPPURAM", 85.0, datetime(2026, 8, 26, 9, 16, 40, tzinfo=IST))
-    await book._update_option_sl_target_and_check("MANAPPURAM", 88.0, datetime(2026, 8, 26, 9, 17, 10, tzinfo=IST))
-    assert book._live_sl["MANAPPURAM"] == 85.0
-    assert book._live_target["MANAPPURAM"] == 130.0   # entry=100, sl=85 -> risk=15, rr=2.0 -> 130
+    # bar3 (09:17): low=80 -- a fresh, uncorroborated dip -- does NOT re-arm yet.
+    await book._update_option_sl_target_and_check("MANAPPURAM", 80.0, datetime(2026, 8, 26, 9, 17, 40, tzinfo=IST))
+    await book._update_option_sl_target_and_check("MANAPPURAM", 81.0, datetime(2026, 8, 26, 9, 18, 10, tzinfo=IST))
+    assert book._live_sl["MANAPPURAM"] == 90.3   # unchanged -- only one touch at 80 so far
+
+    # bar4 (09:18): low=80.2 -- clusters with bar3's 80 -- NOW re-arms down to 80.2.
+    await book._update_option_sl_target_and_check("MANAPPURAM", 80.2, datetime(2026, 8, 26, 9, 18, 40, tzinfo=IST))
+    await book._update_option_sl_target_and_check("MANAPPURAM", 81.0, datetime(2026, 8, 26, 9, 19, 10, tzinfo=IST))
+    assert book._live_sl["MANAPPURAM"] == 80.2
+    assert book._live_target["MANAPPURAM"] == pytest.approx(139.6)   # entry=100, risk=19.8, rr=2 -> 139.6
 
 
 @pytest.mark.asyncio
@@ -1029,8 +1092,9 @@ async def test_option_sl_bars_bucket_by_the_configured_tf_not_always_1min():
 async def test_option_tick_loop_feeds_atp_and_sl_target_check():
     """End-to-end via the real _option_tick_loop (not calling the SL/target
     method directly) -- confirms OptionTick.atp is what feeds the option's
-    own VWAP reference, and that a real OPTION_TICK stream can arm + breach
-    the SL exactly like the direct-call tests above."""
+    own VWAP reference, and that a real OPTION_TICK stream can arm the SL
+    (via the 2026-08-28 pooled multi-touch anchor) exactly like the
+    direct-call tests above."""
     bus = _FakeBus()
     book = _make_book(bus)
     book._vwap_sl_tf_minutes = 1
@@ -1048,7 +1112,8 @@ async def test_option_tick_loop_feeds_atp_and_sl_target_check():
             (108.0, 100.0, datetime(2026, 8, 26, 9, 15, 40, tzinfo=IST)),
             (102.0, 100.0, datetime(2026, 8, 26, 9, 16, 10, tzinfo=IST)),   # closes bar1 (favorable)
             (90.0, 100.0, datetime(2026, 8, 26, 9, 16, 40, tzinfo=IST)),
-            (89.0, 100.0, datetime(2026, 8, 26, 9, 17, 10, tzinfo=IST)),    # closes bar2 (adverse) -> arms SL=90
+            (89.5, 100.0, datetime(2026, 8, 26, 9, 17, 10, tzinfo=IST)),    # closes bar2 (adverse, low=90.0) -- lone touch
+            (91.0, 100.0, datetime(2026, 8, 26, 9, 18, 10, tzinfo=IST)),    # closes bar3 (adverse, low=89.5) -- clusters w/ 90.0 -> arms SL=89.5
         ]
         for ltp, atp, ts in ticks:
             await bus.publish(Topic.OPTION_TICK, OptionTick(
@@ -1058,7 +1123,7 @@ async def test_option_tick_loop_feeds_atp_and_sl_target_check():
             ))
             await asyncio.sleep(0.02)
         assert book._live_option_atp["MANAPPURAM"] == 100.0
-        assert book._live_sl["MANAPPURAM"] == 90.0
+        assert book._live_sl["MANAPPURAM"] == 89.5
     finally:
         book._running = False
         task.cancel()
