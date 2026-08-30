@@ -936,6 +936,13 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         self._session_min_straddle_frozen = None
         self._day_low_tracked_pair = None
         self._day_low_computing = False
+        self._post1500_pair = None
+        self._post1500_armed = False
+        self._post1500_armed_reason = None
+        self._post1500_leg_closed = {"CE": False, "PE": False}
+        self._post1500_calc = {}
+        self._post1500_bar_acc = {}
+        self._shadow_vwap = {}
         self._prem_closes.clear()
         self._prem_volumes.clear()
         self._chart_series.clear()
@@ -1470,6 +1477,33 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
             if self._position is None:
                 self._order_pending = False
 
+    def _update_shadow_vwap(self, key: tuple, ltp: float, tick) -> None:
+        """Shadow VWAP (2026-08-28, direct user spec): a second, self-computed
+        VWAP per (strike, option_type), running purely in parallel for
+        after-market comparison against the real broker-ATP VWAP that
+        actually drives every live decision -- this value is NEVER read by
+        any entry/exit/roll check anywhere in this codebase, only logged
+        (see the periodic SHADOW_VWAP log line in _option_loop above).
+
+        cum(ltp * volume_delta) / cum(volume_delta), where volume_delta is
+        the difference between this tick's own CUMULATIVE session volume
+        (OptionTick.volume -- Upstox vtt / Fyers vol_traded_today, both
+        confirmed live cumulative-session fields, same pattern already
+        validated for OI-Flow's own volume-spike detector) and the last
+        cumulative volume seen for this same (strike, side). A tick with no
+        volume field, or a volume that hasn't advanced (duplicate/backwards
+        tick), contributes nothing rather than corrupting the running sum."""
+        st = self._shadow_vwap.get(key)
+        vol = int(getattr(tick, "volume", 0) or 0)
+        if st is None:
+            self._shadow_vwap[key] = {"cum_pv": 0.0, "cum_v": 0.0, "last_vol": vol}
+            return
+        delta = vol - st.get("last_vol", 0)
+        st["last_vol"] = vol
+        if delta > 0:
+            st["cum_pv"] += ltp * delta
+            st["cum_v"] += delta
+
     async def _option_loop(self) -> None:
         from data_layer.base_feeder import OptionTick
         q = self._bus.subscribe(Topic.OPTION_TICK)
@@ -1495,6 +1529,19 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                     _atm = int(round(_atm_src / _step) * _step) if _atm_src > 0 else 0
                     self._clog.info("OPT_TICKS: %d option ticks/60s  ATM=%d  CE%d=%.2f PE%d=%.2f",
                                     _tick_count, _atm, _atm, self._ce_ltp, _atm, self._pe_ltp)
+                    if self._shadow_vwap_enabled and _atm > 0:
+                        _ce_shadow = self._shadow_vwap.get((_atm, "CE"), {})
+                        _pe_shadow = self._shadow_vwap.get((_atm, "PE"), {})
+                        _ce_sv = (_ce_shadow.get("cum_pv", 0.0) / _ce_shadow.get("cum_v", 0.0)
+                                  if _ce_shadow.get("cum_v", 0.0) > 0 else 0.0)
+                        _pe_sv = (_pe_shadow.get("cum_pv", 0.0) / _pe_shadow.get("cum_v", 0.0)
+                                  if _pe_shadow.get("cum_v", 0.0) > 0 else 0.0)
+                        self._clog.info(
+                            "SHADOW_VWAP (log-only, never used for decisions) ATM=%d | "
+                            "CE atp=%.2f self=%.2f (Δ%.2f) | PE atp=%.2f self=%.2f (Δ%.2f)",
+                            _atm, self._ce_atp, _ce_sv, (self._ce_atp - _ce_sv) if _ce_sv else 0.0,
+                            self._pe_atp, _pe_sv, (self._pe_atp - _pe_sv) if _pe_sv else 0.0,
+                        )
                     _tick_count = 0
                     _last_log_ts = now_ts
                 step = self._cfg.exchange.strike_steps.get(self._underlying, 50.0) if self._cfg else 50.0
@@ -1520,6 +1567,8 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                         entry["ltp"] = float(tick.ltp)
                         if _a > 0:
                             entry["atp"] = _a
+                    if self._shadow_vwap_enabled:
+                        self._update_shadow_vwap(_k, float(tick.ltp), tick)
                     _eng_atp = float(self._strike_prem[_k].get("atp", 0.0) or 0.0)
                     self._pool_engine.update_tick(
                         int(tick.strike), tick.option_type,

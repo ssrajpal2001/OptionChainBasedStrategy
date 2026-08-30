@@ -17,6 +17,7 @@ from strategies.sell_straddle.audit import (
     audit_exit_exec,
 )
 from strategies.sell_straddle.dataclasses import format_exit_eval
+from strategies.d1_trap_option.support_resistance import SupportResistanceCalculator
 
 if TYPE_CHECKING:
     from strategies.sell_straddle.dataclasses import StraddlePosition
@@ -368,6 +369,15 @@ class ExitMixin:
                         f"rate={_cv:.2f} reached its own frozen low={_frozen:.2f} "
                         f"(frozen @{self._day_low_freeze_time.strftime('%H:%M')}) "
                         f"→ closed, stopped for day")
+
+            if reason == "post1500_r1_breach":
+                _armed = getattr(self, "_post1500_armed_reason", None) or "?"
+                _leg = pos.ce_leg if _side == "CE" else pos.pe_leg
+                if _full_close:
+                    return (f"Post-15:00 R1 exit | both legs closed independently on their own "
+                            f"R1 breach (armed via {_armed}) → position closed, stopped for day")
+                return (f"Post-15:00 R1 exit | {_side} leg (strike={int(_leg.strike)}) breached its own "
+                        f"R1, closed independently (armed via {_armed}) → other leg still running solo")
 
             if reason.startswith("manual_squareoff_"):
                 return f"Manual square-off ({reason})"
@@ -796,6 +806,17 @@ class ExitMixin:
              expiring tomorrow -- roll straight onto next week's expiry instead.
           3. Otherwise -- normal EOD close, exactly as before this feature existed.
         """
+        # 2026-08-28: a position that already closed one leg via the post-15:00
+        # R1 mechanic is never a hedge-and-carry candidate -- that mechanic
+        # exists specifically to flatten the day's straddle, not carry a lone
+        # remaining leg forward. Straight to closing the survivor.
+        if pos.ce_leg_closed or pos.pe_leg_closed:
+            logger.info("SellStraddle[%s]: EOD SQUAREOFF (surviving leg only) — time=%s",
+                        self._underlying, now.strftime("%H:%M"))
+            await self._close_position("eod_squareoff")
+            self._stop_for_day = True
+            return
+
         if pos.is_hedged_positional:
             if self._is_t1_from_expiry(pos, now):
                 logger.info(
@@ -952,6 +973,154 @@ class ExitMixin:
         await self._close_position("hedge_cumulative_profit")
         self._apply_sl_cooldown(rule_key="entry_rules_beginning")
         return True
+
+    _POST1500_START = dtime(15, 0)
+    _POST1500_PROFIT_CHECK = dtime(15, 15)
+
+    async def _check_post1500_r1_exit(self, pos: "StraddlePosition", now: datetime) -> None:
+        """Post-15:00 per-leg R1 exit (2026-08-28, direct user spec).
+
+        Replaces the ACTION of day_low_exit_enabled (close both legs) for any
+        binding that opts into THIS instead -- day_low_exit_enabled's own
+        close action is untouched for anyone not opting in (see the guard
+        split in the day-low block right above this call site).
+
+        Confirmed state machine, direct user sign-off across several rounds
+        of clarification:
+          1. From 15:00 onward, each leg's own 1-min R1 is tracked via a
+             FRESH SupportResistanceCalculator per leg (mirrors the OI-ORB
+             3-min-TSL bar-accumulator pattern) -- watching alone never
+             closes anything.
+          2. ARM (start actually acting on an R1 breach) the moment EITHER:
+             (a) the position's combined value reaches the frozen day-low
+                 (self._session_min_straddle_frozen -- the SAME one-time
+                 REST value day_low_exit_enabled's own block computes; read
+                 here, never written by this feature), at any time from
+                 15:00 onward, OR
+             (b) it is 15:15 or later AND the overall day P&L (booked +
+                 running, hedge-inclusive via _combined_pnl_pts) is
+                 positive.
+             If the day is still in overall loss at 15:15 and neither has
+             happened yet, NOTHING closes here -- the existing EOD
+             hedge-and-carry mechanic (unchanged, not touched by this
+             feature) is what takes over as force_exit approaches. The arm
+             check keeps re-running every tick, so a loss that later flips
+             to profit arms immediately at that point, same as reaching the
+             day-low would.
+          3. Once armed, each leg is watched INDEPENDENTLY: the instant a
+             leg's own live LTP closes above its own R1.high, that ONE leg
+             closes via _close_leg -- the other, not-yet-breached leg keeps
+             running solo, tracked by dataclasses.StraddlePosition's
+             ce_leg_closed/pe_leg_closed flags (current_value/unrealized_pnl
+             already exclude a closed leg so downstream sums can't double
+             its already-booked P&L).
+          4. A surviving single leg has no further R1-independent exit here
+             -- EOD square-off (already checked unconditionally earlier in
+             _check_exits, before this function is ever reached) is its only
+             remaining backstop, exactly as the user confirmed ("R1 logic
+             will survive and EOD").
+        """
+        _pair_id = (int(pos.ce_leg.strike), int(pos.pe_leg.strike))
+        if self._post1500_pair != _pair_id:
+            self._post1500_pair = _pair_id
+            self._post1500_calc = {"CE": SupportResistanceCalculator(), "PE": SupportResistanceCalculator()}
+            self._post1500_bar_acc = {}
+            self._post1500_armed = False
+            self._post1500_armed_reason = None
+            self._post1500_leg_closed = {"CE": False, "PE": False}
+            self._persist_session()
+
+        if now.time() < self._POST1500_START:
+            return
+
+        # Feed 1-min bars per still-open leg into that leg's own ladder.
+        for side in ("CE", "PE"):
+            leg_closed_attr = f"{side.lower()}_leg_closed"
+            if self._post1500_leg_closed.get(side) or getattr(pos, leg_closed_attr):
+                continue
+            leg = pos.ce_leg if side == "CE" else pos.pe_leg
+            ltp = float(leg.ltp or 0.0)
+            if ltp <= 0:
+                continue
+            minute = now.replace(second=0, microsecond=0)
+            acc = self._post1500_bar_acc.get(side)
+            if acc is None:
+                self._post1500_bar_acc[side] = {"minute": minute, "h": ltp, "l": ltp}
+            elif minute != acc["minute"]:
+                self._post1500_calc[side].process_straddle_candle(
+                    f"{self._underlying}_{side}_P1500",
+                    {"timestamp": acc["minute"], "high": acc["h"], "low": acc["l"], "duration": 1},
+                )
+                self._post1500_bar_acc[side] = {"minute": minute, "h": ltp, "l": ltp}
+            else:
+                acc["h"] = max(acc["h"], ltp)
+                acc["l"] = min(acc["l"], ltp)
+
+        if not self._post1500_armed:
+            _frozen = self._session_min_straddle_frozen
+            if _frozen is not None and pos.current_value <= _frozen:
+                self._post1500_armed = True
+                self._post1500_armed_reason = "day_low"
+            elif now.time() >= self._POST1500_PROFIT_CHECK:
+                _day_pnl = self._session_realized_pnl_pts + self._combined_pnl_pts(pos, pos.unrealized_pnl)
+                if _day_pnl > 0:
+                    self._post1500_armed = True
+                    self._post1500_armed_reason = "profit"
+            if self._post1500_armed:
+                self._clog.info(
+                    "POST-15:00 R1 EXIT ARMED (%s) — now watching each open leg's own R1 "
+                    "independently; a breach on either side closes that leg alone.",
+                    self._post1500_armed_reason,
+                )
+                self._persist_session()
+
+        if not self._post1500_armed:
+            return
+
+        for side in ("CE", "PE"):
+            leg_closed_attr = f"{side.lower()}_leg_closed"
+            if getattr(pos, leg_closed_attr):
+                continue
+            leg = pos.ce_leg if side == "CE" else pos.pe_leg
+            sr = self._post1500_calc[side].get_calculated_sr_state(
+                f"{self._underlying}_{side}_P1500").get("sr_levels", {})
+            r1 = sr.get("R1")
+            if r1 is None:
+                continue
+            ltp = float(leg.ltp or 0.0)
+            if ltp <= 0 or ltp <= float(r1["high"]):
+                continue
+            if not self._defer_exit(f"post1500_r1_breach_{side}", now):
+                continue
+            order_ev = await self._close_leg(side, "post1500_r1_breach", now)
+            if getattr(order_ev, "close_aborted", False):
+                continue
+            setattr(pos, leg_closed_attr, True)
+            self._post1500_leg_closed[side] = True
+            self._clog.info(
+                "POST-15:00 R1 BREACH — %s leg (strike=%.0f) closed independently "
+                "(R1.high=%.2f, ltp=%.2f); the other leg keeps running solo.",
+                side, leg.strike, float(r1["high"]), ltp,
+            )
+            self._persist()
+            if pos.ce_leg_closed and pos.pe_leg_closed:
+                # Both sides have now closed independently -- finalize the whole
+                # position exactly like a normal full close. Each leg's own P&L was
+                # already booked into self._session_realized_pnl_pts by _close_leg
+                # above (twice, once per side) -- do NOT add pos.realized_pnl again.
+                pos.status = "closed"
+                pos.close_reason = "post1500_r1_breach"
+                pos.close_time = now
+                self._unpin_position_legs(pos)
+                self._position = None
+                await self._unsubscribe_entry_expiry_tokens()
+                self._apply_sl_cooldown()
+                self._persist()
+                self._clog.info(
+                    "POST-15:00 R1 EXIT — both legs now closed independently; "
+                    "position finalized, stopping for the day."
+                )
+                self._stop_for_day = True
 
     async def _check_exits(self) -> None:
         pos = self._position
@@ -1277,7 +1446,13 @@ class ExitMixin:
         # gets a correct one-time calc, using "now" (not the fixed freeze
         # time) as the cutoff, so it captures that pair's real history up to
         # the moment it's actually checked.
-        if self._day_low_exit_enabled:
+        # 2026-08-28: post1500_exit_enabled reuses this SAME one-time frozen-low
+        # value as its own arm condition (see _check_post1500_r1_exit below) --
+        # the tracking/freeze computation runs for either flag; only the actual
+        # "close both legs" ACTION a few lines down stays gated to
+        # day_low_exit_enabled specifically, so a post1500-only binding never
+        # gets the old both-legs-close behavior this feature replaces.
+        if self._day_low_exit_enabled or self._post1500_exit_enabled:
             _cv = pos.current_value
             _pair_id = (int(pos.ce_leg.strike), int(pos.pe_leg.strike))
             if tuple(getattr(self, "_day_low_tracked_pair", None) or ()) != _pair_id:
@@ -1315,7 +1490,8 @@ class ExitMixin:
                     self._underlying, now.strftime("%H:%M"),
                     _pair_id[0], _pair_id[1], self._session_min_straddle_frozen,
                 )
-            if self._session_min_straddle_frozen is not None and _cv <= self._session_min_straddle_frozen:
+            if (self._day_low_exit_enabled and self._session_min_straddle_frozen is not None
+                    and _cv <= self._session_min_straddle_frozen):
                 self._clog.info(
                     "SellStraddle[%s]: DAY-LOW REVERSAL EXIT — CE%d/PE%d rate=%.2f "
                     "reached its frozen low=%.2f (frozen @ %s) — closing full "
@@ -1327,6 +1503,28 @@ class ExitMixin:
                     return
                 self._stop_for_day = True
                 await self._close_position_and_hedge("day_low_reversal_exit")
+                return
+
+        # 2c-2. POST-15:00 PER-LEG R1 EXIT (2026-08-28, direct user spec): see
+        # _check_post1500_r1_exit's own docstring for the full state machine.
+        # Runs AFTER the day-low block above so it can read the SAME frozen-low
+        # value that block just computed/updated this tick. Mutually exclusive
+        # in practice with day_low_exit_enabled's own close action (a binding
+        # opts into one or the other), but both can safely read the shared
+        # frozen-low state either way.
+        if self._post1500_exit_enabled:
+            await self._check_post1500_r1_exit(pos, now)
+            if not (self._position and self._position.status == "open"):
+                return
+            # 2026-08-28: once EITHER leg has closed independently under this
+            # mechanic, the surviving leg runs the rest of the day on its OWN
+            # R1 watch alone -- day%/ITM-gate/ratio/ltp-decay/TSL/exit_rules/
+            # vwap_rise below all assume two live legs and must NOT run
+            # against a single-leg position (direct user confirmation:
+            # "will not consider these exit when 1 leg is open, only R1 logic
+            # will survive and EOD"). EOD square-off itself is unaffected --
+            # it already ran, unconditionally, earlier in this function.
+            if pos.ce_leg_closed or pos.pe_leg_closed:
                 return
 
         # 3. LTP Decay → single-side roll
@@ -1507,6 +1705,47 @@ class ExitMixin:
     # than armed for trading on an unknown/frozen leg price.
     _POST_RESTORE_WARMUP_MAX_SEC = 300.0
 
+    async def _close_surviving_leg_and_finalize(self, reason: str) -> None:
+        """2026-08-28: EOD (or any other future caller) closing a position that
+        already has ONE leg closed independently via the post-15:00 R1 mechanic
+        -- close ONLY the still-open side via _close_leg (never the normal
+        dual-leg _close_position order), then finalize the position exactly
+        like a normal full close. The already-closed leg's P&L was booked into
+        self._session_realized_pnl_pts once already, at the time IT closed --
+        do not add pos.realized_pnl again here."""
+        pos = self._position
+        if not pos:
+            return
+        surviving = "PE" if pos.ce_leg_closed else "CE"
+        if getattr(pos, f"{surviving.lower()}_leg_closed"):
+            # Both sides already closed (shouldn't reach here -- _check_post1500_r1_exit
+            # already finalizes and nulls self._position the moment both close -- but
+            # guard anyway rather than double-finalizing).
+            return
+        now = datetime.now(IST)
+        order_ev = await self._close_leg(surviving, reason, now)
+        if getattr(order_ev, "close_aborted", False):
+            logger.critical(
+                "SellStraddle[%s]: surviving leg %s close NOT confirmed (reason=%s) — "
+                "left open, will retry on a later tick.",
+                self._underlying, surviving, reason,
+            )
+            return
+        setattr(pos, f"{surviving.lower()}_leg_closed", True)
+        pos.status = "closed"
+        pos.close_reason = reason
+        pos.close_time = now
+        self._unpin_position_legs(pos)
+        self._position = None
+        await self._unsubscribe_entry_expiry_tokens()
+        self._apply_sl_cooldown()
+        self._persist()
+        logger.info(
+            "SellStraddle[%s]: surviving %s leg closed [%s] — position finalized.",
+            self._underlying, surviving, reason,
+        )
+        self._clog.info("surviving %s leg closed [%s] — position finalized.", surviving, reason)
+
     async def _close_position(self, reason: str) -> None:
         # 2026-08-06 CONFIRM-MODEL REDESIGN: pos.status is now the reentrancy guard, not the
         # ephemeral _close_in_progress flag. Set to "closing" SYNCHRONOUSLY here, before the
@@ -1515,6 +1754,20 @@ class ExitMixin:
         # longer has to be short to prevent duplicates; it only decides how long we wait
         # before giving up and reverting to "open" for a retry).
         if not self._position or self._position.status != "open":
+            return
+        # 2026-08-28: a post1500_exit_enabled position that already closed ONE
+        # leg independently (pos.ce_leg_closed/pe_leg_closed) must never be
+        # closed via the normal dual-leg path below -- that always dispatches
+        # a combined EXIT for BOTH ce_strike/pe_strike, which would send a
+        # real duplicate order for the leg that's already flat AND double-book
+        # its P&L (already booked once by _close_leg at the time it closed).
+        # The only path that can still reach _close_position in this state is
+        # EOD square-off (_check_exits' single-leg-mode gate skips every other
+        # caller of _close_position/_close_position_and_hedge once a leg is
+        # closed) -- so this is effectively EOD-only, but the guard is placed
+        # here (not just at the EOD call site) so ANY future caller is safe.
+        if self._position.ce_leg_closed or self._position.pe_leg_closed:
+            await self._close_surviving_leg_and_finalize(reason)
             return
         self._position.status = "closing"
         self._roll_in_progress = False

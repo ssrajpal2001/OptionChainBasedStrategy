@@ -81,6 +81,16 @@ class StraddlePosition:
     hedge_pe_leg: Optional[StraddleLeg] = None
     is_hedged_positional: bool = False
 
+    # Post-15:00 per-leg R1 exit (2026-08-28, direct user spec): once a leg is
+    # closed independently via this mechanic, the OTHER leg keeps running solo
+    # -- these flags are how the rest of the position machinery knows one side
+    # is gone. current_value/unrealized_pnl below exclude a closed leg's ltp
+    # entirely rather than leaving it frozen-but-counted (which would silently
+    # double the closed leg's own P&L into every downstream sum once its
+    # realized P&L is also booked into the session total by _close_leg).
+    ce_leg_closed: bool = False
+    pe_leg_closed: bool = False
+
     def to_dict(self) -> dict:
         """JSON-serialisable snapshot for PositionStore."""
         def _leg(l: StraddleLeg) -> dict:
@@ -113,6 +123,8 @@ class StraddlePosition:
             "hedge_ce_leg": _leg(self.hedge_ce_leg) if self.hedge_ce_leg else None,
             "hedge_pe_leg": _leg(self.hedge_pe_leg) if self.hedge_pe_leg else None,
             "is_hedged_positional": self.is_hedged_positional,
+            "ce_leg_closed": self.ce_leg_closed,
+            "pe_leg_closed": self.pe_leg_closed,
         }
 
     @classmethod
@@ -142,15 +154,27 @@ class StraddlePosition:
             hedge_ce_leg=_leg(d["hedge_ce_leg"]) if d.get("hedge_ce_leg") else None,
             hedge_pe_leg=_leg(d["hedge_pe_leg"]) if d.get("hedge_pe_leg") else None,
             is_hedged_positional=bool(d.get("is_hedged_positional", False)),
+            ce_leg_closed=bool(d.get("ce_leg_closed", False)),
+            pe_leg_closed=bool(d.get("pe_leg_closed", False)),
         )
 
     @property
     def current_value(self) -> float:
-        return self.ce_leg.ltp + self.pe_leg.ltp
+        v = 0.0
+        if not self.ce_leg_closed:
+            v += self.ce_leg.ltp
+        if not self.pe_leg_closed:
+            v += self.pe_leg.ltp
+        return v
 
     @property
     def unrealized_pnl(self) -> float:
-        return self.net_credit - self.current_value
+        pnl = 0.0
+        if not self.ce_leg_closed:
+            pnl += self.ce_leg.entry_price - self.ce_leg.ltp
+        if not self.pe_leg_closed:
+            pnl += self.pe_leg.entry_price - self.pe_leg.ltp
+        return pnl
 
     @property
     def hedge_unrealized_pnl(self) -> float:

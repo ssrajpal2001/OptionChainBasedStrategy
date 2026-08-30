@@ -3031,6 +3031,64 @@ class DashboardServer:
                                     straddle_info["tsl"] = {"enabled": False}
                                 # Exit eval cache — built every 3s by _check_exits
                                 straddle_info["exit_eval"] = getattr(strat, "_last_exit_eval", None)
+
+                                # Post-15:00 day-low + per-leg R1 (2026-08-28, direct user
+                                # spec): "UI should tell us what situation is there after
+                                # 15:00 hrs, what is the lowest value and what is current
+                                # value and how far is the current LTP from the lowest
+                                # value" + "UI should also show R1 values of the legs in
+                                # position section" + "should also show when only one leg
+                                # is there what is R1". Surfaced whenever EITHER
+                                # day_low_exit_enabled or post1500_exit_enabled is on
+                                # (both share the same one-time frozen-low computation --
+                                # see exits.py's own guard split), so the panel is useful
+                                # even on a binding that hasn't opted into the post-15:00
+                                # per-leg mechanic itself, just the plain day-low feature.
+                                try:
+                                    _frozen = getattr(strat, "_session_min_straddle_frozen", None)
+                                    _dl_on = bool(getattr(strat, "_day_low_exit_enabled", False)) or \
+                                             bool(getattr(strat, "_post1500_exit_enabled", False))
+                                    if _dl_on:
+                                        straddle_info["day_low"] = {
+                                            "enabled": True,
+                                            "freeze_time": getattr(strat, "_day_low_freeze_time", None).strftime("%H:%M")
+                                                            if getattr(strat, "_day_low_freeze_time", None) else "15:00",
+                                            "current": round(_curC, 2),
+                                            "lowest": round(_frozen, 2) if _frozen not in (None, float("inf")) else None,
+                                            "distance": round(_curC - _frozen, 2)
+                                                        if _frozen not in (None, float("inf")) else None,
+                                        }
+                                except Exception:
+                                    pass
+
+                                try:
+                                    _p1500_on = bool(getattr(strat, "_post1500_exit_enabled", False))
+                                    if _p1500_on:
+                                        _armed = bool(getattr(strat, "_post1500_armed", False))
+                                        _armed_reason = getattr(strat, "_post1500_armed_reason", None)
+                                        _calc = getattr(strat, "_post1500_calc", {}) or {}
+                                        _r1_legs = {}
+                                        for _side, _leg in (("CE", pos.ce_leg), ("PE", pos.pe_leg)):
+                                            _leg_closed = bool(getattr(pos, f"{_side.lower()}_leg_closed", False))
+                                            _sr = {}
+                                            if _side in _calc:
+                                                _sr = _calc[_side].get_calculated_sr_state(
+                                                    f"{underlying}_{_side}_P1500").get("sr_levels", {}) or {}
+                                            _r1 = _sr.get("R1")
+                                            _r1_legs[_side] = {
+                                                "closed": _leg_closed,
+                                                "ltp": round(float(_leg.ltp or 0.0), 2),
+                                                "r1": round(float(_r1["high"]), 2) if _r1 else None,
+                                            }
+                                        straddle_info["post1500"] = {
+                                            "enabled": True,
+                                            "armed": _armed,
+                                            "armed_reason": _armed_reason,
+                                            "legs": _r1_legs,
+                                            "single_leg_mode": bool(pos.ce_leg_closed or pos.pe_leg_closed),
+                                        }
+                                except Exception:
+                                    pass
                     elif sname == "v4_cascade":
                         book = _srv._find_v4_book(cid, bid, underlying)
                         if book is not None:

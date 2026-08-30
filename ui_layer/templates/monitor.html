@@ -3037,6 +3037,7 @@ document.addEventListener('alpine:init', () => {
       if (s === 'day_loss_sl') return 'Day loss SL';
       if (s === 'day_profit_target') return 'Day profit target';
       if (s === 'day_low_reversal_exit') return 'Day-low reversal exit (retest of frozen day-low)';
+      if (s === 'post1500_r1_breach') return 'Post-15:00 R1 breach (leg closed independently)';
       if (s === 'itm_pair_gate_profit') return 'ITM pair gate (full exit)';
       if (s === 'itm_pair_gate') return 'ITM pair gate (rollover escape)';
       if (s === 'itm_roll_protection_stop') return 'ITM-roll protection SL (70% of booked profit)';
@@ -9620,6 +9621,61 @@ function amoTest() {
                             <div class="flex justify-between">
                               <span style="color:var(--t-muted)">Next step at</span>
                               <span style="color:var(--t-dim)" x-text="ccy+fmt(ss.tsl.next_step_rs)"></span>
+                            </div>
+                          </template>
+                        </div>
+                      </template>
+                      <!-- Day-Low situation after 15:00 (2026-08-28, direct user spec) -->
+                      <template x-if="ss.day_low && ss.day_low.enabled">
+                        <div class="rounded p-1.5 space-y-0.5" style="background:rgba(var(--t-amber-rgb),0.05);border:1px solid rgba(var(--t-amber-rgb),0.2)">
+                          <div class="flex justify-between items-center mb-0.5">
+                            <span class="sec-label" style="color:var(--t-amber)">DAY-LOW SITUATION</span>
+                            <span class="text-xs font-mono" style="color:var(--t-dim)" x-text="'freeze @'+ss.day_low.freeze_time"></span>
+                          </div>
+                          <div class="flex justify-between">
+                            <span style="color:var(--t-muted)">Current value</span>
+                            <span class="font-mono" style="color:var(--t-text)" x-text="(ss.day_low.current||0).toFixed(2)+' pts'"></span>
+                          </div>
+                          <template x-if="ss.day_low.lowest !== null">
+                            <div class="flex justify-between">
+                              <span style="color:var(--t-muted)">Lowest value of the day</span>
+                              <span class="font-mono" style="color:var(--t-amber)" x-text="(ss.day_low.lowest||0).toFixed(2)+' pts'"></span>
+                            </div>
+                          </template>
+                          <template x-if="ss.day_low.lowest === null">
+                            <div class="flex justify-between">
+                              <span style="color:var(--t-muted)">Lowest value of the day</span>
+                              <span style="color:var(--t-dim)">— not computed yet (before freeze time)</span>
+                            </div>
+                          </template>
+                          <template x-if="ss.day_low.distance !== null">
+                            <div class="flex justify-between border-t pt-0.5" style="border-color:var(--t-border)">
+                              <span style="color:var(--t-muted)">Distance from lowest</span>
+                              <span :style="`color:${(ss.day_low.distance||0)<=0?'var(--t-red)':'var(--t-text)'}`"
+                                    x-text="(ss.day_low.distance||0)<=0?'AT/BELOW LOW':'+'+(ss.day_low.distance||0).toFixed(2)+' pts above'"></span>
+                            </div>
+                          </template>
+                        </div>
+                      </template>
+                      <!-- Post-15:00 per-leg R1 exit (2026-08-28, direct user spec) -->
+                      <template x-if="ss.post1500 && ss.post1500.enabled">
+                        <div class="rounded p-1.5 space-y-0.5" style="background:rgba(var(--t-cyan-rgb),0.05);border:1px solid rgba(var(--t-cyan-rgb),0.2)">
+                          <div class="flex justify-between items-center mb-0.5">
+                            <span class="sec-label" style="color:var(--t-cyan)">POST-15:00 R1 EXIT</span>
+                            <span class="text-xs font-mono" :style="`color:${ss.post1500.armed?'var(--t-green)':'var(--t-dim)'}`"
+                                  x-text="ss.post1500.armed?('ARMED · '+ss.post1500.armed_reason):'watching, not armed'"></span>
+                          </div>
+                          <template x-for="side in ['CE','PE']" :key="side">
+                            <div class="flex justify-between" x-show="ss.post1500.legs[side]">
+                              <span style="color:var(--t-muted)" x-text="side+(ss.post1500.legs[side] && ss.post1500.legs[side].closed?' (closed)':'')"></span>
+                              <span class="font-mono"
+                                    :style="`color:${ss.post1500.legs[side] && ss.post1500.legs[side].closed?'var(--t-dim)':'var(--t-text)'}`"
+                                    x-text="ss.post1500.legs[side] ? ('LTP '+(ss.post1500.legs[side].ltp||0).toFixed(2)+' · R1 '+(ss.post1500.legs[side].r1!==null?ss.post1500.legs[side].r1.toFixed(2):'—')) : ''"></span>
+                            </div>
+                          </template>
+                          <template x-if="ss.post1500.single_leg_mode">
+                            <div class="text-xs pt-0.5 border-t" style="color:var(--t-amber);border-color:var(--t-border)">
+                              Single leg remaining — watched on its own R1 only, other exits (Day%, TSL, etc.) are paused; EOD square-off still applies.
                             </div>
                           </template>
                         </div>

@@ -80,6 +80,9 @@ class SellStraddleConfig:
     day_low_exit_enabled: bool
     day_low_freeze_time: dtime
 
+    post1500_exit_enabled: bool
+    shadow_vwap_enabled: bool
+
     same_day_expiry_enabled: bool
 
     hedge_carry_enabled: bool
@@ -235,6 +238,23 @@ def load_sell_straddle_config(
     day_low_exit_enabled = bool(ss.get("day_low_exit_enabled", False))
     day_low_freeze_time = _parse_time(ss.get("day_low_freeze_time", "15:00"))
 
+    # Post-15:00 per-leg R1 exit (2026-08-28, direct user spec): replaces the
+    # old day-low-reversal-exit's own action ("close both legs") for
+    # bindings that opt into this instead -- the day-low condition (and a
+    # 15:15 profit check) now only ARMS a per-leg R1/S1 watch; each leg is
+    # then closed independently the moment its OWN R1 breaches, never both
+    # together. See exits.py's own _check_post1500_r1_exit docstring for the
+    # full state machine. Opt-in, default OFF -- must not silently change
+    # behavior for an existing live deployment (e.g. day_low_exit_enabled
+    # stays fully intact/unchanged for anyone not opting into this).
+    post1500_exit_enabled = bool(ss.get("post1500_exit_enabled", False))
+
+    # Shadow VWAP (2026-08-28, direct user spec): runs a second, self-computed
+    # VWAP in parallel with the live broker-ATP VWAP that actually drives every
+    # decision -- purely logged for after-market comparison, NEVER read by any
+    # decision path. Opt-in, default OFF.
+    shadow_vwap_enabled = bool(ss.get("shadow_vwap_enabled", False))
+
     same_day_expiry_enabled = bool(ss.get("same_day_expiry_enabled", False))
 
     # EOD hedge-and-carry (2026-08-20, user spec): if BOTH sold legs are running in
@@ -284,6 +304,8 @@ def load_sell_straddle_config(
         itm_pair_gate_min_strike_gap=itm_pair_gate_min_strike_gap,
         day_low_exit_enabled=day_low_exit_enabled,
         day_low_freeze_time=day_low_freeze_time,
+        post1500_exit_enabled=post1500_exit_enabled,
+        shadow_vwap_enabled=shadow_vwap_enabled,
         same_day_expiry_enabled=same_day_expiry_enabled,
         hedge_carry_enabled=hedge_carry_enabled,
     )
@@ -368,6 +390,18 @@ class ConfigMixin:
         self._day_low_freeze_time = cfg.day_low_freeze_time
         if not hasattr(self, "_session_min_straddle_frozen"):
             self._session_min_straddle_frozen = None
+
+        self._post1500_exit_enabled = cfg.post1500_exit_enabled
+        self._shadow_vwap_enabled = cfg.shadow_vwap_enabled
+        if not hasattr(self, "_post1500_pair"):
+            self._post1500_pair = None
+            self._post1500_armed = False
+            self._post1500_armed_reason = None
+            self._post1500_leg_closed = {"CE": False, "PE": False}
+            self._post1500_calc = {}       # side -> SupportResistanceCalculator
+            self._post1500_bar_acc = {}    # side -> {"minute": datetime, "h":, "l":, "c":}
+        if not hasattr(self, "_shadow_vwap"):
+            self._shadow_vwap = {}         # (strike, side) -> {"cum_pv":, "cum_v":, "last":}
         if not hasattr(self, "_day_low_tracked_pair"):
             self._day_low_tracked_pair = None
         if not hasattr(self, "_day_low_computing"):
