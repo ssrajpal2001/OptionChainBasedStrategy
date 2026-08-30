@@ -78,6 +78,19 @@ CONFIG = {
     # all day regardless of the scan gaps. See engine.py's
     # _wait_until_actionable / _maybe_run_afternoon_scan.
     "SCAN_START": "09:26",
+    # 2026-08-30, direct user spec: instead of the pipeline only ever looking
+    # at the OI-spurt list ONCE at SCAN_START, poll the SAME underlying
+    # data (universe + OI-spurts) repeatedly through this earlier window and
+    # track each stock's RANK by oi_spurt_pct (not the raw 7% threshold) --
+    # "rank goes down" is the new alarm signal, not just crossing a fixed %.
+    # SCAN_START itself is unchanged (09:26 still locks the real shortlist,
+    # "minimal change" per direct user choice) -- this window runs ALONGSIDE
+    # it, purely to track momentum and to log every poll's ranked snapshot
+    # (see store.record_rank_snapshot) for after-market time optimization.
+    "RANK_WINDOW_START": "09:16",
+    "RANK_WINDOW_END": "09:30",
+    "RANK_POLL_INTERVAL_SEC": 90.0,
+    "RANK_TOP_N": 10,
     "TWO_SESSION_SCAN_ENABLED": True,
     "AFTERNOON_SCAN_START": "12:00",
     "AFTERNOON_SCAN_END": "13:00",
@@ -361,6 +374,31 @@ def build_shortlist(nse: "NSESession", cfg=CONFIG):
 
     shortlist = pd.concat([bullish, bearish], ignore_index=True)
     return shortlist, nifty_pchange
+
+
+def poll_oi_rank(nse: "NSESession", cfg=CONFIG) -> pd.DataFrame:
+    """2026-08-30, direct user spec: a single poll of the OI-Spurt + price
+    universe, RANKED by oi_spurt_pct descending -- deliberately does NOT
+    apply build_shortlist's OI_SPURT_MIN_PCT/PRICE_MOVE_MIN_PCT threshold
+    filters ("instead of OI percent we can use OI change rank"). Returns the
+    top RANK_TOP_N rows with an explicit `rank` column (1 = highest OI-spurt
+    %). Called repeatedly across the RANK_WINDOW_START-RANK_WINDOW_END
+    window (engine.py's own poll loop) to track which stocks are climbing
+    vs falling in OI momentum, independent of whether they'd currently pass
+    the fixed threshold build_shortlist uses to lock the real shortlist at
+    SCAN_START.
+
+    Pure/synchronous, same shape as build_shortlist -- callers wrap with
+    asyncio.to_thread() per this codebase's blocking-I/O rule."""
+    universe = fetch_fno_price_universe(nse)
+    oi_spurts = fetch_oi_spurts_nse(nse)
+    merged = universe.merge(oi_spurts, on="symbol", how="inner")
+    if merged.empty:
+        return pd.DataFrame(columns=["symbol", "rank", "oi_spurt_pct", "pChange"])
+    merged = merged.sort_values("oi_spurt_pct", ascending=False).reset_index(drop=True)
+    merged["rank"] = merged.index + 1
+    top_n = int(cfg.get("RANK_TOP_N", 10) or 10)
+    return merged.head(top_n)
 
 
 class MinuteBars:

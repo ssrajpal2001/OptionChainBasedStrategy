@@ -114,12 +114,26 @@ CREATE TABLE IF NOT EXISTS positions (
     event_id       TEXT NOT NULL DEFAULT ''
 );
 
+CREATE TABLE IF NOT EXISTS rank_snapshots (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_id         TEXT NOT NULL,
+    binding_id        TEXT NOT NULL,
+    trade_date        TEXT NOT NULL,
+    poll_ts           TEXT NOT NULL,
+    symbol            TEXT NOT NULL,
+    rank              INTEGER NOT NULL,
+    oi_spurt_pct      REAL,
+    price_change_pct  REAL
+);
+
 CREATE INDEX IF NOT EXISTS idx_positions_open
     ON positions(client_id, binding_id, status, trade_date);
 CREATE INDEX IF NOT EXISTS idx_signal_events_day
     ON signal_events(client_id, binding_id, trade_date);
 CREATE INDEX IF NOT EXISTS idx_shortlist_day
     ON shortlist(client_id, binding_id, trade_date);
+CREATE INDEX IF NOT EXISTS idx_rank_snapshots_day
+    ON rank_snapshots(client_id, binding_id, trade_date, poll_ts);
 """
 
 _initialized = False
@@ -237,6 +251,42 @@ def update_orb_levels(client_id: str, binding_id: str, symbol: str,
         con.commit()
     except Exception as exc:
         logger.error("oi_orb store.update_orb_levels failed: %s", exc)
+    finally:
+        con.close()
+
+
+# ── rank_snapshots (2026-08-30, direct user spec): "save which stocks came
+# at 9:16 till 9:20 so we can optimise the time" -- since this screener
+# cannot be backtested (no historical OI), the raw ranked poll output at
+# EVERY poll during the 09:16-09:30 ranking window is logged here so the
+# best action time (9:16? 9:20? 9:26?) and the best OI-spurt/price-move
+# thresholds can be worked out after the fact by comparing these snapshots
+# against what the shortlisted stocks actually did afterward -- the same
+# "log everything, optimize live since backtesting is impossible" pattern
+# already used for OI-Flow's telemetry.py and SellStraddle's shadow VWAP. ──
+
+def record_rank_snapshot(client_id: str, binding_id: str, poll_ts: str, rows: List[dict],
+                          trade_date: Optional[str] = None) -> None:
+    """rows: [{"symbol", "rank", "oi_spurt_pct", "price_change_pct"}, ...] -- the
+    full ranked poll output, one row per symbol per poll (not upserted --
+    every poll is its own permanent snapshot, so the time-series itself is
+    the point)."""
+    init_db()
+    td = trade_date or _today()
+    con = sqlite3.connect(_DB_PATH)
+    try:
+        for r in rows:
+            con.execute(
+                """INSERT INTO rank_snapshots
+                       (client_id, binding_id, trade_date, poll_ts, symbol, rank,
+                        oi_spurt_pct, price_change_pct)
+                   VALUES (?,?,?,?,?,?,?,?)""",
+                (client_id, binding_id, td, poll_ts, r["symbol"], int(r["rank"]),
+                 r.get("oi_spurt_pct"), r.get("price_change_pct")),
+            )
+        con.commit()
+    except Exception as exc:
+        logger.error("oi_orb store.record_rank_snapshot failed: %s", exc)
     finally:
         con.close()
 

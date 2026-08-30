@@ -381,6 +381,11 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         # Two-session scan state (2026-08-27, direct user spec).
         self._afternoon_scan_last_ts: float = 0.0    # throttle: don't re-scan every poll cycle
 
+        # ── OI-change rank tracking (2026-08-30, direct user spec) ──────
+        self._rank_last_poll_ts: float = 0.0
+        self._rank_prev_top: set = set()
+        self._rank_dropped: set = set()
+
     # ── lifecycle ────────────────────────────────────────────────────────
 
     def reset_session(self) -> None:
@@ -409,6 +414,11 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._vwap = screener.VwapState()
         self._vwap_armed = {}
         self._afternoon_scan_last_ts = 0.0
+        # 2026-08-30, direct user spec: OI-change rank tracking (09:16-09:30
+        # poll window) -- see _rank_tracking_loop's own docstring.
+        self._rank_last_poll_ts = 0.0
+        self._rank_prev_top: set = set()
+        self._rank_dropped: set = set()
         self._clog.info("OiOrb[%s/%s]: session reset for new trading day.",
                          self._client_id, self._binding_id)
 
@@ -434,6 +444,8 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             self._spot_tick_loop(), name=f"oiorb_spottick_{self._client_id}_{self._binding_id}"))
         self._tasks.append(asyncio.create_task(
             self._eod_loop(), name=f"oiorb_eod_{self._client_id}_{self._binding_id}"))
+        self._tasks.append(asyncio.create_task(
+            self._rank_tracking_loop(), name=f"oiorb_rank_{self._client_id}_{self._binding_id}"))
         self._clog.info("OiOrb[%s/%s]: started.", self._client_id, self._binding_id)
 
     # ── daily pipeline ───────────────────────────────────────────────────
@@ -716,6 +728,105 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             self._client_id, self._binding_id, len(new_symbols),
             ", ".join(f"{s}({self._shortlist_pchange[s]:+.2f}%)" for s in new_symbols),
         )
+
+    async def _rank_tracking_loop(self) -> None:
+        """2026-08-30, direct user spec: "instead of checking for stocks at
+        9:26, rank 10 stocks starting 9:16 till 9:30 and also alarm if rank
+        goes down -- instead of OI percent use OI change rank."
+
+        Runs independently of _run_today_pipeline's own SCAN_START wait --
+        polls screener.poll_oi_rank every RANK_POLL_INTERVAL_SEC through the
+        RANK_WINDOW_START-RANK_WINDOW_END window (default 09:16-09:30,
+        default poll cadence 90s), logging every poll's full ranked
+        snapshot (store.record_rank_snapshot) purely so the best action time
+        and threshold can be worked out after the fact -- this screener
+        can't be backtested (no historical OI), so that comparison can only
+        ever be done against real logged snapshots, same reasoning as
+        SellStraddle's shadow-VWAP log.
+
+        SCAN_START (default 09:26) is UNCHANGED -- it still locks the real
+        shortlist exactly as before ("minimal change", direct user choice).
+        This loop's only behavioral effect on trading: once a symbol is
+        shortlisted (after the 09:26 lock) but has NOT yet fired an entry,
+        if that symbol falls OUT of the current top-N rank on a later poll
+        within this same window, it is dropped from the active shortlist
+        (added to self._rejected, same set _run_today_pipeline's entry loop
+        already skips) and an alert is logged -- an ALREADY-OPEN position is
+        never touched by this (only pre-entry candidates can be dropped).
+        """
+        while self._running:
+            now = datetime.now(IST)
+            cfg = self._screener_cfg
+            win_start = cfg.get("RANK_WINDOW_START", "09:16")
+            win_end = cfg.get("RANK_WINDOW_END", "09:30")
+            now_key = now.strftime("%H:%M")
+            if not (win_start <= now_key < win_end) or cfg.get("IGNORE_TIME_WINDOWS"):
+                await asyncio.sleep(30)
+                continue
+            now_ts = now.timestamp()
+            interval = float(cfg.get("RANK_POLL_INTERVAL_SEC", 90.0) or 90.0)
+            if now_ts - self._rank_last_poll_ts < interval:
+                await asyncio.sleep(5)
+                continue
+            self._rank_last_poll_ts = now_ts
+            try:
+                if self._nse is None:
+                    self._nse = await asyncio.to_thread(screener.NSESession)
+                await self._do_rank_poll(now, cfg)
+            except Exception:
+                self._clog.warning("OiOrb[%s/%s]: rank-tracking poll failed (non-fatal, will "
+                                    "retry next interval).", self._client_id, self._binding_id,
+                                    exc_info=True)
+            await asyncio.sleep(5)
+
+    async def _do_rank_poll(self, now: datetime, cfg: dict) -> None:
+        """One poll + drop-detection cycle, split out from _rank_tracking_loop's
+        own timing/sleep wrapper so it's directly unit-testable (mirrors
+        _maybe_run_afternoon_scan's own (now, cfg) shape)."""
+        ranked = await asyncio.to_thread(screener.poll_oi_rank, self._nse, cfg)
+        if ranked is None or ranked.empty:
+            return
+
+        poll_ts = now.isoformat(timespec="seconds")
+        rows = [
+            {"symbol": r["symbol"], "rank": int(r["rank"]),
+             "oi_spurt_pct": float(r["oi_spurt_pct"]), "price_change_pct": float(r["pChange"])}
+            for _, r in ranked.iterrows()
+        ]
+        await asyncio.to_thread(store.record_rank_snapshot, self._client_id, self._binding_id,
+                                 poll_ts, rows)
+        new_top = set(ranked["symbol"].tolist())
+        self._clog.info(
+            "OiOrb[%s/%s]: RANK POLL @%s top-%d by OI-spurt: %s",
+            self._client_id, self._binding_id, now.strftime("%H:%M:%S"), len(new_top),
+            ", ".join(f"{r['symbol']}(#{int(r['rank'])},{r['oi_spurt_pct']:.1f}%)"
+                      for _, r in ranked.iterrows()),
+        )
+
+        if self._rank_prev_top:
+            fell_out = self._rank_prev_top - new_top
+            for sym in fell_out:
+                if sym not in self._shortlist_symbols:
+                    continue   # never was a real candidate -- nothing to drop
+                side = screener.side_from_pchange(self._shortlist_pchange.get(sym, 0.0))
+                if (sym, side) in self._already_fired or sym in self._positions:
+                    continue   # already entered -- never touched by rank tracking
+                if (sym, side) in self._rejected:
+                    continue   # already dropped on an earlier poll
+                self._rejected.add((sym, side))
+                self._rank_dropped.add(sym)
+                if sym in self._shortlist_symbols:
+                    self._shortlist_symbols.remove(sym)
+                self._clog.warning(
+                    "OiOrb[%s/%s]: RANK ALARM -- %s fell out of top-%d OI-spurt rank "
+                    "(last seen in top-%d) -- dropped from shortlist (not yet entered).",
+                    self._client_id, self._binding_id, sym, len(new_top), len(self._rank_prev_top),
+                )
+                await asyncio.to_thread(
+                    store.log_signal_event, self._client_id, self._binding_id, sym,
+                    "rank_dropped_out_of_top_n", side=side,
+                    detail=f"fell out of top-{len(new_top)} OI-spurt rank")
+        self._rank_prev_top = new_top
 
     async def _run_today_pipeline(self) -> None:
         cfg = self._screener_cfg

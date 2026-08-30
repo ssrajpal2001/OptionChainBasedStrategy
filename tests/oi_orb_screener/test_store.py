@@ -59,6 +59,30 @@ def test_record_shortlist_and_update_orb_levels():
     assert rows["SIEMENS"]["orb_high"] is None  # never frozen for this symbol
 
 
+def test_record_rank_snapshot_multiple_polls_each_kept_separately():
+    """2026-08-30, direct user spec: every poll is its own permanent
+    snapshot (not upserted) -- the whole point is the time-series across
+    the 09:16-09:30 window for after-market time/threshold optimization."""
+    store.record_rank_snapshot("C1", "B1", "2026-08-30T09:16:00+05:30", [
+        {"symbol": "AAA", "rank": 1, "oi_spurt_pct": 20.0, "price_change_pct": 3.0},
+        {"symbol": "BBB", "rank": 2, "oi_spurt_pct": 15.0, "price_change_pct": -2.5},
+    ], trade_date="2026-08-30")
+    store.record_rank_snapshot("C1", "B1", "2026-08-30T09:18:00+05:30", [
+        {"symbol": "AAA", "rank": 1, "oi_spurt_pct": 22.0, "price_change_pct": 3.2},
+    ], trade_date="2026-08-30")
+
+    con = __import__("sqlite3").connect(store._DB_PATH)
+    rows = con.execute(
+        "SELECT poll_ts, symbol, rank, oi_spurt_pct FROM rank_snapshots "
+        "WHERE client_id=? AND binding_id=? ORDER BY poll_ts, rank", ("C1", "B1")).fetchall()
+    con.close()
+    assert rows == [
+        ("2026-08-30T09:16:00+05:30", "AAA", 1, 20.0),
+        ("2026-08-30T09:16:00+05:30", "BBB", 2, 15.0),
+        ("2026-08-30T09:18:00+05:30", "AAA", 1, 22.0),
+    ]
+
+
 def test_log_signal_event_and_load_already_fired():
     store.log_signal_event("C1", "B1", "DIXON", "signal_fired", side="PUT",
                             detail="orb_low_breakdown", trigger_price=14540.0,

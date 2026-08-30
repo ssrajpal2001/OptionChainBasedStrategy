@@ -367,6 +367,110 @@ def _shortlist_df(rows):
     return pd.DataFrame(rows)
 
 
+def _ranked_df(rows):
+    import pandas as pd
+    return pd.DataFrame(rows)
+
+
+@pytest.mark.asyncio
+async def test_do_rank_poll_first_poll_only_records_no_drop_detection(monkeypatch):
+    """First poll of the day has nothing to compare against -- must never
+    drop anything, only seed self._rank_prev_top."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._nse = object()
+    book._shortlist_symbols = ["AAA", "BBB"]
+    book._shortlist_pchange = {"AAA": 3.0, "BBB": -2.5}
+    monkeypatch.setattr(screener, "poll_oi_rank", lambda nse, cfg: _ranked_df([
+        {"symbol": "AAA", "rank": 1, "oi_spurt_pct": 20.0, "pChange": 3.0},
+        {"symbol": "BBB", "rank": 2, "oi_spurt_pct": 15.0, "pChange": -2.5},
+    ]))
+
+    now = datetime(2026, 8, 30, 9, 16, 0, tzinfo=IST)
+    await book._do_rank_poll(now, book._screener_cfg)
+
+    assert book._rank_prev_top == {"AAA", "BBB"}
+    assert book._shortlist_symbols == ["AAA", "BBB"]   # untouched
+    assert book._rejected == set()
+
+
+@pytest.mark.asyncio
+async def test_do_rank_poll_drops_not_yet_entered_symbol_that_falls_out_of_top_n(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._nse = object()
+    book._shortlist_symbols = ["AAA", "BBB"]
+    book._shortlist_pchange = {"AAA": 3.0, "BBB": -2.5}
+
+    polls = [
+        _ranked_df([
+            {"symbol": "AAA", "rank": 1, "oi_spurt_pct": 20.0, "pChange": 3.0},
+            {"symbol": "BBB", "rank": 2, "oi_spurt_pct": 15.0, "pChange": -2.5},
+        ]),
+        # BBB fell out of the ranked list entirely on this later poll.
+        _ranked_df([
+            {"symbol": "AAA", "rank": 1, "oi_spurt_pct": 22.0, "pChange": 3.2},
+            {"symbol": "CCC", "rank": 2, "oi_spurt_pct": 14.0, "pChange": 2.1},
+        ]),
+    ]
+    calls = {"n": 0}
+
+    def _poll(nse, cfg):
+        df = polls[calls["n"]]
+        calls["n"] += 1
+        return df
+    monkeypatch.setattr(screener, "poll_oi_rank", _poll)
+
+    now1 = datetime(2026, 8, 30, 9, 16, 0, tzinfo=IST)
+    now2 = datetime(2026, 8, 30, 9, 18, 0, tzinfo=IST)
+    await book._do_rank_poll(now1, book._screener_cfg)
+    await book._do_rank_poll(now2, book._screener_cfg)
+
+    side_bbb = screener.side_from_pchange(-2.5)
+    assert "BBB" not in book._shortlist_symbols
+    assert "AAA" in book._shortlist_symbols
+    assert (side_bbb, ) != ()  # sanity -- side computed
+    assert (("BBB", side_bbb) in book._rejected)
+    assert "BBB" in book._rank_dropped
+
+
+@pytest.mark.asyncio
+async def test_do_rank_poll_never_drops_an_already_entered_symbol(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._nse = object()
+    book._shortlist_symbols = ["AAA", "BBB"]
+    book._shortlist_pchange = {"AAA": 3.0, "BBB": -2.5}
+    book._positions["BBB"] = {"contract": None, "qty": 1, "entry_price": 10.0,
+                               "paper_mode": True, "opened_at": datetime.now(IST)}
+
+    polls = [
+        _ranked_df([
+            {"symbol": "AAA", "rank": 1, "oi_spurt_pct": 20.0, "pChange": 3.0},
+            {"symbol": "BBB", "rank": 2, "oi_spurt_pct": 15.0, "pChange": -2.5},
+        ]),
+        _ranked_df([
+            {"symbol": "AAA", "rank": 1, "oi_spurt_pct": 22.0, "pChange": 3.2},
+            {"symbol": "CCC", "rank": 2, "oi_spurt_pct": 14.0, "pChange": 2.1},
+        ]),
+    ]
+    calls = {"n": 0}
+
+    def _poll(nse, cfg):
+        df = polls[calls["n"]]
+        calls["n"] += 1
+        return df
+    monkeypatch.setattr(screener, "poll_oi_rank", _poll)
+
+    now1 = datetime(2026, 8, 30, 9, 16, 0, tzinfo=IST)
+    now2 = datetime(2026, 8, 30, 9, 18, 0, tzinfo=IST)
+    await book._do_rank_poll(now1, book._screener_cfg)
+    await book._do_rank_poll(now2, book._screener_cfg)
+
+    assert "BBB" in book._shortlist_symbols, "an already-open position must never be dropped"
+    assert "BBB" not in book._rank_dropped
+
+
 @pytest.mark.asyncio
 async def test_afternoon_scan_noop_outside_window(monkeypatch):
     bus = _FakeBus()

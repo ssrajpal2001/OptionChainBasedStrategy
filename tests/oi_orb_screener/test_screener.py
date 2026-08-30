@@ -200,6 +200,67 @@ def test_build_shortlist_filters_and_ranks(monkeypatch):
     assert shortlist.iloc[0]["symbol"] == "VMM"
 
 
+def test_poll_oi_rank_ranks_by_oi_spurt_no_threshold_filter(monkeypatch):
+    """2026-08-30, direct user spec: rank-based, not threshold-based -- a
+    stock below OI_SPURT_MIN_PCT/PRICE_MOVE_MIN_PCT must still appear if it
+    ranks within RANK_TOP_N, unlike build_shortlist."""
+    universe = pd.DataFrame([
+        {"symbol": "VMM", "lastPrice": 112.46, "pChange": 9.03, "open": 109.2,
+         "dayHigh": 113.7, "dayLow": 109.0, "previousClose": 103.43, "totalTradedVolume": 37083092},
+        {"symbol": "MUTHOOTFIN", "lastPrice": 3154.0, "pChange": 4.34, "open": 3056.0,
+         "dayHigh": 3156.0, "dayLow": 3049.8, "previousClose": 3022.0, "totalTradedVolume": 779998},
+        # Deliberately BELOW both build_shortlist's thresholds (oi<7%, |pChange|<2%) --
+        # must still rank (and appear) here since poll_oi_rank applies no threshold.
+        {"symbol": "BELOWTHRESH", "lastPrice": 500.0, "pChange": 0.5, "open": 498.0,
+         "dayHigh": 502.0, "dayLow": 497.0, "previousClose": 497.5, "totalTradedVolume": 5000},
+    ])
+    oi_spurts = pd.DataFrame({
+        "symbol": ["VMM", "MUTHOOTFIN", "BELOWTHRESH"],
+        "oi_spurt_pct": [32.84, 21.95, 3.0],
+    })
+    monkeypatch.setattr(screener, "fetch_fno_price_universe", lambda nse: universe)
+    monkeypatch.setattr(screener, "fetch_oi_spurts_nse", lambda nse: oi_spurts)
+
+    cfg = _cfg(RANK_TOP_N=10)
+    ranked = screener.poll_oi_rank(nse=None, cfg=cfg)
+
+    assert list(ranked["symbol"]) == ["VMM", "MUTHOOTFIN", "BELOWTHRESH"]
+    assert list(ranked["rank"]) == [1, 2, 3]
+
+
+def test_poll_oi_rank_truncates_to_top_n(monkeypatch):
+    universe = pd.DataFrame([
+        {"symbol": f"S{i}", "lastPrice": 100.0, "pChange": 1.0, "open": 99.0,
+         "dayHigh": 101.0, "dayLow": 98.0, "previousClose": 99.0, "totalTradedVolume": 1000}
+        for i in range(15)
+    ])
+    oi_spurts = pd.DataFrame({
+        "symbol": [f"S{i}" for i in range(15)],
+        "oi_spurt_pct": [float(15 - i) for i in range(15)],   # S0 highest
+    })
+    monkeypatch.setattr(screener, "fetch_fno_price_universe", lambda nse: universe)
+    monkeypatch.setattr(screener, "fetch_oi_spurts_nse", lambda nse: oi_spurts)
+
+    cfg = _cfg(RANK_TOP_N=10)
+    ranked = screener.poll_oi_rank(nse=None, cfg=cfg)
+    assert len(ranked) == 10
+    assert ranked.iloc[0]["symbol"] == "S0"
+    assert list(ranked["rank"]) == list(range(1, 11))
+
+
+def test_poll_oi_rank_empty_on_no_overlap(monkeypatch):
+    universe = pd.DataFrame([
+        {"symbol": "NOMATCH", "lastPrice": 100.0, "pChange": 1.0, "open": 99.0,
+         "dayHigh": 101.0, "dayLow": 98.0, "previousClose": 99.0, "totalTradedVolume": 1000},
+    ])
+    oi_spurts = pd.DataFrame({"symbol": ["OTHER"], "oi_spurt_pct": [10.0]})
+    monkeypatch.setattr(screener, "fetch_fno_price_universe", lambda nse: universe)
+    monkeypatch.setattr(screener, "fetch_oi_spurts_nse", lambda nse: oi_spurts)
+
+    ranked = screener.poll_oi_rank(nse=None, cfg=_cfg())
+    assert ranked.empty
+
+
 def test_build_shortlist_empty_when_nothing_passes(monkeypatch):
     universe = pd.DataFrame([
         {"symbol": "FLAT", "lastPrice": 100.0, "pChange": 0.1, "open": 99.9,
