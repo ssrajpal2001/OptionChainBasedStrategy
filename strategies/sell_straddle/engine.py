@@ -520,6 +520,41 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                 break
             self._persist_pool_engine()
 
+    def _reapply_expiry_stickiness_from_restored_position(self) -> None:
+        """2026-08-31 CRITICAL FIX (real incident: a restart during a
+        same-day low-anchor-LTP expiry-shifted session orphaned an already-
+        open position's live ticks entirely). The sticky-shift flag
+        (self._expiry_shifted_low_anchor_ltp) is plain in-memory state,
+        never persisted -- it always starts False on a fresh process, so
+        _effective_entry_expiry() silently recomputed the ORIGINAL
+        (unshifted) expiry after restart while a restored position's own
+        .expiry_date stayed on the real, shifted contract it was actually
+        entered under. _option_loop only updates a leg's ltp when
+        tick.expiry == pos.expiry_date -- once self._entry_expiry_date
+        (which subscriptions/strike_prem are built around) diverged from
+        that, the position's own legs stopped receiving ticks entirely
+        (confirmed live: CE leg frozen at its entry price for 5 straight
+        minutes while OTHER strikes at the reverted expiry kept ticking
+        normally), eventually caught only by the post-restore-stale-data
+        safety close -- a real loss-of-tracking event the guard happened
+        to catch in time, not a fix.
+
+        Called right after restoring self._position in start() -- re-arms
+        the sticky flag to the RESTORED position's own real expiry
+        immediately, before any subscription/_effective_entry_expiry()
+        call can run. No-op if there's no position (nothing to re-arm) or
+        it has no expiry_date recorded."""
+        if self._position is None or self._position.expiry_date is None:
+            return
+        self._entry_expiry_date = self._position.expiry_date
+        self._expiry_shifted_low_anchor_ltp = True
+        logger.info(
+            "SellStraddle[%s]: restored position's own expiry (%s) re-armed as "
+            "the sticky entry expiry -- subscriptions/new entries stay pinned to "
+            "it for the rest of today, same as before the restart.",
+            self._underlying, self._position.expiry_date.isoformat(),
+        )
+
     def start(self) -> None:
         self._running = True
         # 2026-08-26 fix (real incident, direct user report): _is_primed's own
@@ -548,6 +583,7 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                 self._position = StraddlePosition.from_dict(_saved)
                 if not self._position.lot_size:
                     self._position.lot_size = self._lot_size * self._lot_multiplier
+                self._reapply_expiry_stickiness_from_restored_position()
                 self._trades_today = max(self._trades_today, 1)
                 if self._initial_net_credit <= 0 and self._position.net_credit > 0:
                     self._initial_net_credit = self._position.net_credit
@@ -1569,10 +1605,11 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                         # apply" required back-solving futures price from spot+ATM by
                         # hand. Log all three inputs directly, same 60s cadence as
                         # OPT_TICKS/SHADOW_VWAP.
+                        _fut_note = (" (no futures tick yet -- ATM is plain spot until one arrives)"
+                                     if self._futures_spot <= 0 else "")
                         self._clog.info(
-                            "FUTURES_ATM spot=%.2f futures=%.2f mean=%.2f -> ATM=%d "
-                            "(futures_spot=0.00 means no futures tick has arrived yet)",
-                            self._spot, self._futures_spot, _atm_src, _atm,
+                            "FUTURES_ATM spot=%.2f futures=%.2f mean=%.2f -> ATM=%d%s",
+                            self._spot, self._futures_spot, _atm_src, _atm, _fut_note,
                         )
                     if self._shadow_vwap_enabled and _atm > 0:
                         _ce_shadow = self._shadow_vwap.get((_atm, "CE"), {})
