@@ -168,6 +168,73 @@ async def test_on_fill_confirms_entry_and_tracks_position():
 
 
 @pytest.mark.asyncio
+async def test_on_fill_new_entry_tagged_trap_mechanic():
+    """2026-08-31, direct user spec: every NEW entry (going forward) uses
+    the trap+TSL mechanic, not the old VWAP-retest/VWAP-SL one."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    contract = _contract("SIEMENS", 4050, "CE")
+    book._pending_contracts["SIEMENS"] = contract
+    book._pending_fills["EVT1"] = {
+        "symbol": "SIEMENS", "contract": contract, "qty": 300, "entry_price": 105.0, "reason": "trap_retest",
+    }
+    await book._on_fill(OiOrbFillEvent(
+        action="BUY", underlying="SIEMENS", option_type="CE", strike=4050, fill_price=106.2,
+        qty=300, client_id=_TEST_CLIENT_ID, binding_id=_TEST_BINDING_ID, event_id="EVT1", paper_mode=True,
+    ))
+    assert book._positions["SIEMENS"]["sl_mechanic"] == "trap"
+
+
+@pytest.mark.asyncio
+async def test_restored_position_tagged_vwap_mechanic_not_retroactively_switched(monkeypatch):
+    """A position restored from the DB predates the trap+TSL mechanic --
+    must stay on the old option-premium-VWAP SL it was actually entered
+    under, never silently switched to the new risk model."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._today = date(2026, 8, 31)
+    contract = _contract("PERSISTENT", 5500, "PE")
+    monkeypatch.setattr(store, "load_open_positions", lambda cid, bid, td: [
+        {"symbol": "PERSISTENT", "expiry": "2026-09-29", "strike": 5500, "option_type": "PE",
+         "qty": 125, "entry_price": 114.90, "paper_mode": 1, "entry_ts": "2026-08-31T11:26:30"},
+    ])
+    monkeypatch.setattr(store, "load_already_fired", lambda cid, bid, trade_date=None: set())
+    monkeypatch.setattr(store, "load_rejected", lambda cid, bid, trade_date=None: set())
+    monkeypatch.setattr(stock_resolve, "resolve_contract_exact_async", _async_return(contract))
+    monkeypatch.setattr(book, "_ensure_option_feed", lambda *a, **k: None)
+    monkeypatch.setattr(book, "_ensure_spot_feed", lambda *a, **k: None)
+    monkeypatch.setattr(book, "_seed_option_bars_from_history", _async_return(None))
+
+    await book._restore_from_db()
+
+    assert book._positions["PERSISTENT"]["sl_mechanic"] == "vwap"
+
+
+@pytest.mark.asyncio
+async def test_update_option_sl_target_skips_trap_tagged_positions():
+    """The old option-premium-VWAP SL path must never run for a
+    trap-tagged position -- that mechanic's exit is _trap_update_tsl_and_
+    check_exit, driven by the poll loop, not option ticks."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._positions["SIEMENS"] = {
+        "contract": _contract("SIEMENS", 4050, "CE"), "qty": 300, "entry_price": 106.2,
+        "paper_mode": True, "opened_at": datetime.now(IST), "sl_mechanic": "trap",
+    }
+    await book._update_option_sl_target_and_check("SIEMENS", 110.0, datetime.now(IST))
+    assert "SIEMENS" not in book._option_sl_bar_key   # old-mechanic bar tracking never touched
+
+
+def test_trap_check_entry_returns_false_before_any_zone_forms():
+    bus = _FakeBus()
+    book = _make_book(bus)
+    now = datetime(2026, 8, 31, 9, 15, tzinfo=IST)
+    fired = book._trap_check_entry("SIEMENS", "CALL", 100.0, now)
+    assert fired is False
+    assert "SIEMENS" not in book._trap_entry_calc
+
+
+@pytest.mark.asyncio
 async def test_on_fill_entry_aborted_discards_pending():
     bus = _FakeBus()
     book = _make_book(bus)

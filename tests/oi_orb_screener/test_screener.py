@@ -200,6 +200,80 @@ def test_build_shortlist_filters_and_ranks(monkeypatch):
     assert shortlist.iloc[0]["symbol"] == "VMM"
 
 
+def _tbar(minute_offset, o, h, l, c):
+    from datetime import datetime, timedelta
+    from config.global_config import IST
+    from strategies.liquidity_trap.detector import Bar
+    base = datetime(2026, 8, 31, 9, 15, tzinfo=IST)
+    return Bar(ts=base + timedelta(minutes=minute_offset), open=o, high=h, low=l, close=c)
+
+
+def test_sharp_bear_zones_detects_confirmed_trap_with_sl_hit():
+    """2026-08-31: sharp_bear_zones ported verbatim into the live screener
+    module -- same bar pattern already proven in tests/liquidity_trap/
+    test_detector.py to produce a real BEAR setup (ref=bar1, breaks bar1's
+    low only), plus a later bar breaking the ref's high to confirm bears
+    got stopped out (the SL-hit confirmation)."""
+    bars = [
+        _tbar(0, 100, 105, 95, 102),
+        _tbar(3, 102, 110, 101, 108),     # ref: H=110 L=101 C=108
+        _tbar(6, 108, 109, 90, 92),       # breaks ref's low only -> BEAR setup
+        _tbar(9, 92, 115, 91, 112),       # breaks ref's high (110) -> bears' SL hit, zone confirmed
+    ]
+    zones = screener.sharp_bear_zones(bars)
+    assert len(zones) == 1
+    z = zones[0]
+    assert z["zone_lo"] == 90       # locked_idx bar's own low
+    assert z["zone_hi"] == 108      # ref bar's own close
+    assert z["entry_line"] == 101   # ref bar's own low
+    assert z["ref_idx"] == 1
+
+
+def test_sharp_bear_zones_empty_when_sl_never_hit():
+    bars = [
+        _tbar(0, 100, 105, 95, 102),
+        _tbar(3, 102, 110, 101, 108),
+        _tbar(6, 108, 109, 90, 92),   # BEAR setup locked, but no later bar ever breaks 110
+    ]
+    assert screener.sharp_bear_zones(bars) == []
+
+
+def test_bull_trap_zones_detects_confirmed_trap_with_sl_hit():
+    """Mirror of the bear-trap test -- BULL setup (breaks a ref's high
+    only), then a later bar breaking the ref's low confirms bulls trapped."""
+    bars = [
+        _tbar(0, 100, 105, 95, 102),
+        _tbar(3, 102, 106, 99, 101),     # ref: H=106 L=99 C=101
+        _tbar(6, 101, 112, 100, 110),    # breaks ref's high only -> BULL setup
+        _tbar(9, 110, 111, 95, 97),      # breaks ref's low (99) -> bulls' SL hit, zone confirmed
+    ]
+    zones = screener.bull_trap_zones(bars)
+    assert len(zones) == 1
+    z = zones[0]
+    assert z["zone_lo"] == 101   # ref bar's own close
+    assert z["zone_hi"] == 112   # locked_idx bar's own high
+    assert z["entry_line"] == 106   # ref bar's own high
+    assert z["ref_idx"] == 1
+
+
+def test_sharp_bear_zones_merges_with_collapse_nearby_zones():
+    """Confirms the zone dicts produced are structurally compatible with
+    the real _collapse_nearby_zones merge (same keys it reads: zone_lo,
+    zone_hi, ref_idx, lock_ts, entry_line, ref_ts)."""
+    from strategies.d1_trap_option.bear_only_book import _collapse_nearby_zones
+    bars = [
+        _tbar(0, 100, 105, 95, 102),
+        _tbar(3, 102, 110, 101, 108),
+        _tbar(6, 108, 109, 90, 92),
+        _tbar(9, 92, 115, 91, 112),
+    ]
+    zones = screener.sharp_bear_zones(bars)
+    merged = _collapse_nearby_zones(zones)
+    assert len(merged) == 1
+    assert merged[0]["zone_lo"] == 90
+    assert merged[0]["zone_hi"] == 108
+
+
 def test_poll_oi_rank_ranks_by_oi_spurt_no_threshold_filter(monkeypatch):
     """2026-08-30, direct user spec: rank-based, not threshold-based -- a
     stock below OI_SPURT_MIN_PCT/PRICE_MOVE_MIN_PCT must still appear if it

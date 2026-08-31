@@ -339,6 +339,22 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._vwap = screener.VwapState()
         self._vwap_armed: Dict[str, bool] = {}   # symbol -> has it moved far enough from vwap to arm a retest yet
 
+        # ── Bear/bull-trap entry + parallel 3-min TSL (2026-08-31, direct
+        # user spec, replaces the VWAP-retest entry + option-premium-VWAP SL
+        # for all NEW entries -- see _trap_check_entry/_trap_update_tsl_and_
+        # check_exit's own docstrings for the full mechanic, ported directly
+        # from this session's own validated backtests). Positions already
+        # open under the old mechanic (restored from DB) are tagged
+        # sl_mechanic="vwap" and stay on the old exit path untouched --
+        # see _restore_from_db.
+        self._trap_1m_acc: Dict[str, "object"] = {}
+        self._trap_3m_acc: Dict[str, "object"] = {}
+        self._trap_zones: Dict[str, list] = {}
+        self._trap_entry_calc: Dict[str, "object"] = {}
+        self._trap_tsl_calc: Dict[str, "object"] = {}
+        self._trap_tsl_acc: Dict[str, "object"] = {}
+        self._trap_tsl_fed_bars: Dict[str, int] = {}
+
         # ── contract/feed/position state, keyed by stock symbol ────────
         self._pending_contracts: Dict[str, "stock_resolve.ResolvedContract"] = {}
         self._pending_fills: Dict[str, dict] = {}   # event_id -> context
@@ -413,6 +429,13 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._oi_history_last_poll_ts = 0.0
         self._vwap = screener.VwapState()
         self._vwap_armed = {}
+        self._trap_1m_acc = {}
+        self._trap_3m_acc = {}
+        self._trap_zones = {}
+        self._trap_entry_calc = {}
+        self._trap_tsl_calc = {}
+        self._trap_tsl_acc = {}
+        self._trap_tsl_fed_bars = {}
         self._afternoon_scan_last_ts = 0.0
         # 2026-08-30, direct user spec: OI-change rank tracking (09:16-09:30
         # poll window) -- see _rank_tracking_loop's own docstring.
@@ -499,6 +522,11 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             self._positions[r["symbol"]] = {
                 "contract": contract, "qty": r["qty"], "entry_price": r["entry_price"],
                 "paper_mode": bool(r["paper_mode"]), "opened_at": datetime.fromisoformat(r["entry_ts"]),
+                # 2026-08-31: a restored position predates the trap+TSL mechanic --
+                # keep it on the old option-premium-VWAP SL it was actually entered
+                # under, never retroactively switch an already-open position's risk
+                # model. New entries (see _on_fill's BUY branch) get "trap" instead.
+                "sl_mechanic": "vwap",
             }
             self._ensure_option_feed(r["symbol"], contract)
             self._ensure_spot_feed(r["symbol"])
@@ -1055,6 +1083,17 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                                  self._client_id, self._binding_id, self._regime.upper(), nifty_pchange_now,
                                  {s: v for s, v in self._orb_frozen.items()})
 
+            # Trap-mechanic TSL: runs for every currently-open "trap"-tagged
+            # position regardless of the entry window/regime state above --
+            # an open position's own exit tracking must never pause just
+            # because new entries aren't being evaluated right now.
+            for sym, pos in list(self._positions.items()):
+                if pos.get("sl_mechanic") != "trap" or sym not in live.index:
+                    continue
+                side = screener.side_from_pchange(self._shortlist_pchange.get(sym, 0.0))
+                ltp = float(live.loc[sym, "lastPrice"])
+                await self._trap_update_tsl_and_check_exit(sym, side, ltp, now)
+
             entry_window_open = cfg.get("IGNORE_TIME_WINDOWS") or (
                 cfg["ENTRY_WINDOW_START"] <= now_key < cfg["ENTRY_WINDOW_END"])
             if self._regime is not None and entry_window_open:
@@ -1067,25 +1106,19 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                         continue
                     if not screener.side_allowed_by_regime(side, self._regime, regime_filter_on):
                         continue
-                    vwap_now = self._vwap.current(sym)
-                    if vwap_now is None:
-                        continue   # not enough volume history yet to trust a VWAP reading
                     ltp = float(live.loc[sym, "lastPrice"])
-                    armed = self._vwap_armed.get(sym, False)
-                    new_armed, fire = screener.check_vwap_retest_entry(
-                        side, ltp, vwap_now, armed, self._vwap_entry_min_gap_pct)
-                    self._vwap_armed[sym] = new_armed
+                    fire = self._trap_check_entry(sym, side, ltp, now)
                     if not fire:
                         continue
                     self._already_fired.add((sym, side))
                     orb_lvl = self._orb_frozen.get(sym, (0.0, 0.0))
-                    sig = screener.Signal(symbol=sym, side=side, reason="vwap_retest",
+                    sig = screener.Signal(symbol=sym, side=side, reason="trap_retest",
                                           trigger_price=ltp, orb_high=orb_lvl[0], orb_low=orb_lvl[1],
                                           ts=now.strftime("%H:%M:%S"))
                     self._clog.info(
-                        "OiOrb[%s/%s]: SIGNAL %s BUY %s VWAP-RETEST ltp=%.2f vwap=%.2f reason=%s",
+                        "OiOrb[%s/%s]: SIGNAL %s BUY %s TRAP-RETEST ltp=%.2f reason=%s",
                         self._client_id, self._binding_id, sig.symbol, sig.side,
-                        sig.trigger_price, vwap_now, sig.reason)
+                        sig.trigger_price, sig.reason)
                     await asyncio.to_thread(
                         store.log_signal_event, self._client_id, self._binding_id, sig.symbol,
                         "signal_fired", side=sig.side, detail=sig.reason,
@@ -1114,7 +1147,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                             continue
                         self._rejected.add((sym, side))
                         self._clog.info(
-                            "OiOrb[%s/%s]: %s %s CANCELLED -- never retested VWAP by entry-window-end (%s).",
+                            "OiOrb[%s/%s]: %s %s CANCELLED -- no trap zone retested by entry-window-end (%s).",
                             self._client_id, self._binding_id, sym, side, cfg["ENTRY_WINDOW_END"])
                         await asyncio.to_thread(
                             store.log_signal_event, self._client_id, self._binding_id, sym,
@@ -1608,6 +1641,135 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 self._clog.exception("OiOrb[%s/%s]: spot tick processing error (recovered).",
                                       self._client_id, self._binding_id)
 
+    def _trap_check_entry(self, sym: str, side: str, ltp: float, ts: datetime) -> bool:
+        """Bear-trap (side="CALL")/bull-trap (side="PUT") zone detection ->
+        retest -> 1-min R2->R1/S2->S1 ladder entry (2026-08-31, direct user
+        spec, replaces the VWAP-retest entry mechanic for all NEW entries).
+        Ported directly from this session's own validated backtests
+        (scripts/oi_orb_bear_trap_coforge_*.py / oi_orb_bull_trap_
+        tatapower_backtest.py) -- reuses the SAME real, already-validated
+        zone functions (screener.sharp_bear_zones/bull_trap_zones, which
+        themselves reuse strategies.liquidity_trap.detector.find_all_setups)
+        rather than reimplementing detection, and the same
+        strategies.d1_trap_option.bear_only_book._collapse_nearby_zones
+        merge every other trap mechanic in this codebase already uses.
+
+        Bars are built from the underlying's OWN polled price (the same
+        `ltp` the screener's poll loop already reads every POLL_SECONDS),
+        via strategies.liquidity_trap.detector.BarAccumulator -- a genuine
+        NSE poll cadence (~20s), not tick-level, same data source the
+        VWAP-retest mechanic it replaces already used.
+
+        Returns True the instant a genuine entry fires (caller emits the
+        Signal + tags the fresh position "sl_mechanic": "trap")."""
+        from strategies.liquidity_trap.detector import BarAccumulator as _TrapAcc
+        from strategies.d1_trap_option.bear_only_book import _collapse_nearby_zones
+        from strategies.d1_trap_option.support_resistance import SupportResistanceCalculator
+
+        acc1 = self._trap_1m_acc.setdefault(sym, _TrapAcc(timeframe_min=1))
+        acc3 = self._trap_3m_acc.setdefault(sym, _TrapAcc(timeframe_min=3))
+        closed1 = acc1.on_tick(ts, ltp)
+        closed3 = acc3.on_tick(ts, ltp)
+
+        if sym not in self._trap_entry_calc:
+            if closed3 and len(acc3.bars) >= 3:
+                zones_fn = screener.sharp_bear_zones if side == "CALL" else screener.bull_trap_zones
+                try:
+                    zones = zones_fn(acc3.bars)
+                    zones = _collapse_nearby_zones(zones)
+                except Exception:
+                    self._clog.exception("OiOrb[%s/%s]: %s trap zone detection error (recovered).",
+                                          self._client_id, self._binding_id, sym)
+                    zones = self._trap_zones.get(sym, [])
+                self._trap_zones[sym] = zones
+            zones = self._trap_zones.get(sym, [])
+            retested = None
+            for z in zones:
+                if side == "CALL" and ltp >= z["zone_lo"]:
+                    retested = z
+                    break
+                if side == "PUT" and ltp <= z["zone_hi"]:
+                    retested = z
+                    break
+            if retested is None:
+                return False
+            self._trap_entry_calc[sym] = SupportResistanceCalculator()
+            self._trap_tsl_calc[sym] = SupportResistanceCalculator()
+            self._trap_tsl_acc[sym] = _TrapAcc(timeframe_min=3)
+            self._trap_tsl_fed_bars[sym] = 0
+            self._clog.info(
+                "OiOrb[%s/%s]: %s TRAP RETEST (%s) zone=[%.2f,%.2f] @ ltp=%.2f -- 1-min entry "
+                "ladder starting fresh from here.",
+                self._client_id, self._binding_id, sym, side, retested["zone_lo"], retested["zone_hi"], ltp,
+            )
+
+        calc = self._trap_entry_calc[sym]
+        if not closed1 or not acc1.bars:
+            return False
+        b = acc1.bars[-1]
+        state_before = calc.get_calculated_sr_state(sym)
+        phase_before = state_before.get("current_phase")
+        calc.process_straddle_candle(sym, {"timestamp": b.ts, "high": b.high, "low": b.low, "duration": 1})
+        phase_after = calc.get_calculated_sr_state(sym).get("current_phase")
+        target_phase = "R1_TRACKING" if side == "CALL" else "S1_TRACKING"
+        if phase_before in ("S2_TRACKING", "R2_TRACKING") and phase_after == target_phase:
+            self._clog.info(
+                "OiOrb[%s/%s]: %s TRAP ENTRY CONFIRMED (%s) 1m bar %s H=%.2f L=%.2f -- %s->%s",
+                self._client_id, self._binding_id, sym, side, b.ts.strftime("%H:%M"),
+                b.high, b.low, phase_before, phase_after,
+            )
+            return True
+        return False
+
+    async def _trap_update_tsl_and_check_exit(self, sym: str, side: str, ltp: float, ts: datetime) -> None:
+        """Parallel 3-min S1(long)/R1(short) trailing stop for a trap-
+        mechanic position (2026-08-31, direct user spec) -- tracks the
+        underlying STOCK's own price structure (same source the entry zones
+        were built from), matching the validated backtest's own risk model
+        exactly (SL/TSL on the stock chart; the option is simply what's
+        bought). Ratchets one direction only, never loosens.
+
+        Cold-start safety (real bug found and fixed during this session's
+        own backtesting -- scripts/oi_orb_bull_trap_tatapower_backtest.py's
+        own history): NO exit check at all until the parallel 3-min ladder
+        has produced a genuine R1/S1 value -- a naive fallback to
+        entry_price would create a zero-risk stop that fires on the very
+        next tick."""
+        from strategies.liquidity_trap.detector import BarAccumulator as _TrapAcc
+
+        pos = self._positions.get(sym)
+        if pos is None or sym in self._eod_closing:
+            return
+        acc = self._trap_tsl_acc.setdefault(sym, _TrapAcc(timeframe_min=3))
+        acc.on_tick(ts, ltp)
+        calc = self._trap_tsl_calc.get(sym)
+        if calc is None:
+            return   # no ladder ever started for this position (shouldn't happen -- defensive)
+
+        fed = self._trap_tsl_fed_bars.get(sym, 0)
+        for b in acc.bars[fed:]:
+            calc.process_straddle_candle(sym, {"timestamp": b.ts, "high": b.high, "low": b.low, "duration": 3})
+        self._trap_tsl_fed_bars[sym] = len(acc.bars)
+
+        sr = calc.get_calculated_sr_state(sym).get("sr_levels", {})
+        level = sr.get("S1") if side == "CALL" else sr.get("R1")
+        if level is None:
+            return   # cold-start -- no exit check until a real ladder value exists
+        breach = (ltp <= level["low"]) if side == "CALL" else (ltp >= level["high"])
+        if not breach:
+            return
+        self._eod_closing.add(sym)
+        self._clog.info(
+            "OiOrb[%s/%s]: %s TRAP TSL HIT -- underlying_ltp=%.2f level=%.2f side=%s -- closing.",
+            self._client_id, self._binding_id, sym, ltp,
+            level["low"] if side == "CALL" else level["high"], side,
+        )
+        await asyncio.to_thread(
+            store.log_signal_event, self._client_id, self._binding_id, sym,
+            "trap_tsl_triggered",
+            detail=f"underlying_ltp={ltp:.2f} level={level}")
+        await self._emit_close(sym, pos, "trap_tsl")
+
     async def _update_option_sl_target_and_check(self, symbol: str, ltp: float, ts: datetime) -> None:
         """2026-08-27, direct user spec, replaces the S&R (R1/S1/R2/S2) SL and
         adds a fixed-RR target -- BOTH now track the OPTION's OWN premium
@@ -1633,11 +1795,19 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         The CURRENT live tick (not just the last closed bar) is checked
         against BOTH levels on EVERY tick via screener.
         check_option_premium_exit() -- a real-time breach doesn't wait for
-        the next candle to close."""
+        the next candle to close.
+
+        2026-08-31: skipped entirely for a "trap"-tagged position -- that
+        mechanic's own exit (_trap_update_tsl_and_check_exit) runs off the
+        underlying's own poll price, not option ticks, and is called from
+        the poll loop instead. Only a restored ("vwap"-tagged) position from
+        before this change still reaches this method."""
+        pos = self._positions.get(symbol)
+        if pos is not None and pos.get("sl_mechanic") == "trap":
+            return
         floored_minute = (ts.minute // self._vwap_sl_tf_minutes) * self._vwap_sl_tf_minutes
         key = f"{ts.hour:02d}:{floored_minute:02d}"
         cur_key = self._option_sl_bar_key.get(symbol)
-        pos = self._positions.get(symbol)
         if cur_key is None:
             self._option_sl_bar_key[symbol] = key
             self._option_sl_bar_cur[symbol] = {"h": ltp, "l": ltp, "c": ltp, "ts": ts}
@@ -1759,6 +1929,11 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 "entry_price": entry_price,
                 "paper_mode": paper_mode,
                 "opened_at": datetime.now(IST),
+                # 2026-08-31, direct user spec: every NEW entry uses the trap+TSL
+                # mechanic -- _update_option_sl_target_and_check branches on this
+                # tag to route to _trap_update_tsl_and_check_exit instead of the
+                # old option-premium-VWAP SL.
+                "sl_mechanic": "trap",
             }
             # 2026-08-27, direct user spec: option-premium SL/target tracking starts
             # FRESH the moment the trade starts, not before -- pop any stale state

@@ -376,6 +376,63 @@ def build_shortlist(nse: "NSESession", cfg=CONFIG):
     return shortlist, nifty_pchange
 
 
+def sharp_bear_zones(bars_3m: list) -> List[dict]:
+    """2026-08-31, direct user spec: replaces the VWAP-retest entry mechanic
+    for OI-ORB's CALL side (bullish underlying) with the same bear-trap
+    zone detection validated in this session's own backtests (scripts/
+    oi_orb_bear_trap_coforge_backtest.py / _fullday.py) -- ported here
+    VERBATIM (same logic, same real functions reused: find_all_setups,
+    strict-adjacency sweep, unbounded SL-hit scan) so the live engine can't
+    behaviorally drift from what was actually validated.
+
+    `bars_3m` is a live, growing list of strategies.liquidity_trap.detector.
+    Bar objects (3-min OHLC, built from the underlying's own polled price) --
+    engine.py re-scans the whole list on every new 3-min bar close, same
+    "re-scan growing bar list" pattern strategies/liquidity_trap/engine.py
+    itself already uses to guarantee zero drift from a validated design."""
+    from strategies.liquidity_trap.detector import find_all_setups
+    setups = [s for s in find_all_setups(bars_3m) if s.direction == "BEAR"]
+    out = []
+    for s in setups:
+        ref = bars_3m[s.ref_idx]
+        nxt = bars_3m[s.locked_idx]
+        lock_ts = None
+        for k in range(s.locked_idx + 1, len(bars_3m)):
+            if bars_3m[k].high > ref.high:
+                lock_ts = bars_3m[k].ts
+                break
+        if lock_ts is None:
+            continue   # SL hasn't broken yet -- not a confirmed trap
+        out.append(dict(
+            zone_lo=nxt.low, zone_hi=ref.close, entry_line=ref.low,
+            lock_ts=lock_ts, ref_ts=ref.ts, ref_idx=s.ref_idx,
+        ))
+    return out
+
+
+def bull_trap_zones(bars_3m: list) -> List[dict]:
+    """Mirror of sharp_bear_zones for OI-ORB's PUT side (bearish underlying),
+    ported verbatim from scripts/oi_orb_bull_trap_tatapower_backtest.py."""
+    from strategies.liquidity_trap.detector import find_all_setups
+    setups = [s for s in find_all_setups(bars_3m) if s.direction == "BULL"]
+    out = []
+    for s in setups:
+        ref = bars_3m[s.ref_idx]
+        nxt = bars_3m[s.locked_idx]
+        lock_ts = None
+        for k in range(s.locked_idx + 1, len(bars_3m)):
+            if bars_3m[k].low < ref.low:
+                lock_ts = bars_3m[k].ts
+                break
+        if lock_ts is None:
+            continue
+        out.append(dict(
+            zone_lo=ref.close, zone_hi=nxt.high, entry_line=ref.high,
+            lock_ts=lock_ts, ref_ts=ref.ts, ref_idx=s.ref_idx,
+        ))
+    return out
+
+
 def poll_oi_rank(nse: "NSESession", cfg=CONFIG) -> pd.DataFrame:
     """2026-08-30, direct user spec: a single poll of the OI-Spurt + price
     universe, RANKED by oi_spurt_pct descending -- deliberately does NOT
