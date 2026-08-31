@@ -1030,7 +1030,16 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
 
                 vwap_now = self._vwap.current(sym)
                 orb_lvl = self._orb_frozen.get(sym)
-                _vwap_str = f"VWAP={vwap_now:.2f} armed={self._vwap_armed.get(sym, False)}" if vwap_now else "VWAP=—"
+                # 2026-08-31: "armed=" used to reflect the VWAP-retest mechanic's own
+                # self._vwap_armed dict -- that entry path was replaced by the trap+S1
+                # mechanic (_trap_check_entry), which never touches _vwap_armed, so this
+                # would otherwise permanently freeze at "armed=False" forever, misleading
+                # rather than merely uninformative. Shows the trap zone count + whether a
+                # retest ladder is currently running instead.
+                _n_zones = len(self._trap_zones.get(sym, []))
+                _trap_str = (f"trap=running(ladder)" if sym in self._trap_entry_calc
+                             else f"trap={_n_zones}zone{'s' if _n_zones != 1 else ''}")
+                _vwap_str = f"VWAP={vwap_now:.2f} {_trap_str}" if vwap_now else f"VWAP=— {_trap_str}"
                 if orb_lvl is not None:
                     orb_high, orb_low = orb_lvl
                     _heartbeat_parts.append(
