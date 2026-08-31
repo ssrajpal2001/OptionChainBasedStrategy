@@ -425,6 +425,26 @@ class EntryMixin:
         else:
             _detail_str = "no live quote yet at ATM (neither leg has ticked)"
 
+        _reason_log = (
+            f"anchor LTP below floor (ltp≥{ltp_target:.0f} theta≥{theta_target:.0f}) at ATM={atm} "
+            f"on current expiry -- observed: {_detail_str}"
+        )
+        _reason_clog = (
+            f"low anchor LTP @ATM={atm} (observed: {_detail_str}, need ltp>={ltp_target:.0f} "
+            f"theta>={theta_target:.0f})"
+        )
+        return await self._shift_to_next_week_expiry(_reason_log, _reason_clog)
+
+    async def _shift_to_next_week_expiry(self, reason_log: str, reason_clog: str) -> bool:
+        """Shared shift-execution for the next-week-expiry safety net (2026-08-23
+        original spec: anchor fails the floor at raw ATM; 2026-08-31 direct user
+        extension: ALSO fires when BEGINNING's near/far selection exhausts both
+        candidates with no viable pair -- see _eval_beginning_near_far's own
+        call site. Same sticky-for-the-rest-of-today behavior either way --
+        factored out so both triggers share one implementation instead of two
+        copies that could drift apart."""
+        if self._is_crypto or self._expiry_shifted_low_anchor_ltp:
+            return False
         from data_layer.instrument_registry import REGISTRY
         today = datetime.now(IST).date()
         current = REGISTRY.get_active_expiry(self._underlying, today)
@@ -439,16 +459,13 @@ class EntryMixin:
         next_expiry = next_exps[0]
 
         logger.info(
-            "SellStraddle[%s]: anchor LTP below floor (ltp≥%.0f theta≥%.0f) at ATM=%d on current "
-            "expiry %s -- observed: %s -- shifting to next expiry %s for the REST OF TODAY (user "
+            "SellStraddle[%s]: %s -- shifting to next expiry %s for the REST OF TODAY (user "
             "spec: sticky once shifted).",
-            self._underlying, ltp_target, theta_target, atm, current.isoformat(), _detail_str,
-            next_expiry.isoformat(),
+            self._underlying, reason_log, next_expiry.isoformat(),
         )
         self._clog.info(
-            "EXPIRY-SHIFT low anchor LTP @ATM=%d on %s (observed: %s, need ltp>=%.0f theta>=%.0f) "
-            "-> %s (sticky for today)",
-            atm, current.isoformat(), _detail_str, ltp_target, theta_target, next_expiry.isoformat(),
+            "EXPIRY-SHIFT %s -> %s (sticky for today)",
+            reason_clog, next_expiry.isoformat(),
         )
         self._entry_expiry_date = next_expiry
         self._expiry_shifted_low_anchor_ltp = True
@@ -635,6 +652,22 @@ class EntryMixin:
             })
 
         if not candidates:
+            # 2026-08-31, direct user spec: "when we jump to the OTM and the pair
+            # we are looking for is not available due to threshold, we will jump
+            # to next week" -- same next-week-expiry safety net the raw-anchor-
+            # fails-floor case already uses (_maybe_shift_expiry_for_low_anchor_
+            # ltp), now ALSO firing when BOTH near and far exhaust their own
+            # 1-OTM-shift + partner search with nothing viable on either side.
+            # Only fires once both candidates have genuinely been tried and
+            # both come up empty this same cycle -- a single candidate failing
+            # while the other still has a live shot is NOT enough (the other
+            # candidate might still find a real pair).
+            await self._shift_to_next_week_expiry(
+                f"BEGINNING near/far selection exhausted -- no viable pair on either "
+                f"side (ltp≥{ltp_target:.0f} theta≥{theta_target:.0f} offset={offset})",
+                f"BEGINNING near/far exhausted, no pair either side (need ltp>={ltp_target:.0f} "
+                f"theta>={theta_target:.0f} offset={offset})",
+            )
             return  # both NO-PAIR, already logged above
 
         passing = [c for c in candidates if c["passed"]]

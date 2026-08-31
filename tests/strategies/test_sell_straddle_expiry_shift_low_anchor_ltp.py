@@ -247,6 +247,70 @@ def test_reset_session_clears_the_sticky_flag():
 
 # ── _eval_ruleset integration: skip selection the cycle a shift happens ─────
 
+def test_beginning_shifts_to_next_week_when_near_and_far_both_exhausted(monkeypatch):
+    """2026-08-31, direct user spec: 'when we jump to the OTM and the pair we
+    are looking for is not available due to threshold, we will jump to next
+    week' -- same next-week safety net the raw-anchor-fails-floor case
+    already uses, now ALSO firing when BEGINNING's near/far selection tries
+    both candidates (each with its own 1-OTM shift + partner search) and
+    BOTH come up with no viable pair.
+
+    Seeds REGISTRY expiries relative to REAL today (not the file's other
+    hardcoded CURRENT_EXPIRY/NEXT_EXPIRY, which are fixed past dates and
+    already the cause of this file's 3 other, pre-existing/unrelated
+    failures -- REGISTRY.get_active_expiry resolves against the real wall-
+    clock date, so a fixed past date no longer round-trips.)"""
+    from datetime import timedelta
+    today = datetime.now(IST).date()
+    _today_expiry = today + timedelta(days=1)
+    _today_next_expiry = today + timedelta(days=8)
+    s = _strategy(spot=24512.0, entry_expiry=_today_expiry)
+    # _strategy() itself seeds the file's own stale hardcoded dates -- override
+    # AFTER construction so this test's own dynamic dates actually stick.
+    REGISTRY._expiries["NIFTY"] = [_today_expiry, _today_next_expiry]
+    # Sparse strike_prem: only the two ATM anchor strikes have any data at
+    # all -- no partner candidates exist anywhere, so select_balanced_pair_at
+    # must return None for BOTH near(24500) and far(24550).
+    s._strike_prem = {
+        (24500, "CE"): {"ltp": 184.25, "atp": 180.0},
+        (24500, "PE"): {"ltp": 133.75, "atp": 130.0},
+    }
+    s._entry_basis = "ltp"
+    s._balance_ratio = 1.0
+
+    asyncio.run(s._eval_beginning_near_far(
+        datetime.now(IST), "entry_rules_beginning", [], step=50.0, offset=7,
+        ltp_target=50.0, theta_target=0.0, variable_strikes=False, balance_ratio=1.0,
+    ))
+
+    assert s._expiry_shifted_low_anchor_ltp is True
+    assert s._entry_expiry_date == _today_next_expiry
+    assert s._strike_prem == {}   # cleared by the shift, same as the original trigger
+
+
+def test_beginning_does_not_shift_when_at_least_one_candidate_finds_a_pair():
+    """Only ONE of near/far needs a viable pair (even if it fails entry
+    rules, e.g. SLOPE) for the shift to NOT fire -- exhaustion means neither
+    candidate found ANY pair at all, not that neither one traded."""
+    s = _strategy(spot=24512.0)
+    s._strike_prem = {
+        (24500, "CE"): {"ltp": 184.25, "atp": 180.0},
+        (24500, "PE"): {"ltp": 133.75, "atp": 130.0},
+        (24450, "CE"): {"ltp": 210.0, "atp": 205.0},   # near's 1-OTM anchor shift target
+        (24550, "PE"): {"ltp": 90.0, "atp": 88.0},     # a real partner candidate for near
+    }
+    s._entry_basis = "ltp"
+    s._balance_ratio = 1.0
+
+    asyncio.run(s._eval_beginning_near_far(
+        datetime.now(IST), "entry_rules_beginning", [], step=50.0, offset=7,
+        ltp_target=50.0, theta_target=0.0, variable_strikes=False, balance_ratio=1.0,
+    ))
+
+    assert s._expiry_shifted_low_anchor_ltp is False
+    assert s._entry_expiry_date == CURRENT_EXPIRY
+
+
 def test_eval_ruleset_skips_selection_on_the_shift_cycle():
     s = _strategy()
     s._strike_prem = _low_anchor_strike_prem()
