@@ -723,6 +723,9 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
             f"→ rollover, 70% roll-protect)",
             f"║ DAY-LOW REVERSAL EXIT: {'ON' if self._day_low_exit_enabled else 'OFF'} "
             f"(freeze@{self._day_low_freeze_time.strftime('%H:%M')}, exit on retest of frozen day-low)",
+            f"║ POST-15:00 R1 EXIT: {'ON' if self._post1500_exit_enabled else 'OFF'} "
+            f"(arms on day-low retest or profit@15:15+, then per-leg R1 close, other leg runs solo)",
+            f"║ SHADOW VWAP (log-only): {'ON' if self._shadow_vwap_enabled else 'OFF'}",
             # 2026-08-26 fix (user request): hedge_carry_enabled was invisible in this banner --
             # no way to tell from the log alone whether a book's EOD hedge-and-carry behavior is
             # armed for the day without grepping config directly. precheck lead is the new
