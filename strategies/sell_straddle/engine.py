@@ -319,6 +319,19 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                         "on the positions data directory NOW.",
                         self._underlying, _cid, _bid,
                     )
+                    # 2026-08-31, direct user spec: this critical alert used to go ONLY
+                    # to the module-level logger (pm2's stdout capture, erasable by
+                    # `pm2 flush`) -- never to self._clog, which is a dedicated rotating
+                    # file per binding that pm2 flush cannot touch. Mirror it so this
+                    # exact evidence survives independently of pm2's log lifecycle (real
+                    # incident: investigating a missing-after-restart position turned
+                    # into a dead end because the only copy of this diagnostic had
+                    # already been flushed away).
+                    self._clog.critical(
+                        "POSITION PERSIST FAILED TWICE -- on-disk state may be STALE/"
+                        "DESYNCED from the real in-memory position. Check disk space/"
+                        "permissions NOW."
+                    )
                 self.notify_position_update(self._position.to_dict(), force=True)
             else:
                 # 2026-08-06 DIAGNOSTIC (temporary): a real, freshly-filled position has
@@ -330,12 +343,21 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                 # exact caller directly instead of another round of guessing. Remove
                 # once root-caused.
                 import traceback
+                _stack = "".join(traceback.format_stack(limit=10))
                 logger.warning(
                     "SellStraddle[%s|%s|%s]: _persist() CLEARING position store "
                     "(self._position=%r) -- call stack:\n%s",
                     self._underlying, getattr(self, "_client_id", "") or "-",
                     getattr(self, "_binding_id", "") or "-", self._position,
-                    "".join(traceback.format_stack(limit=10)),
+                    _stack,
+                )
+                # 2026-08-31: mirrored to self._clog (see the PERSIST FAILED TWICE
+                # comment above for why -- this exact diagnostic branch is THE one a
+                # 2026-08-31 investigation needed and couldn't find, because the only
+                # copy lived in the pm2-managed log a `pm2 flush` had already erased.
+                self._clog.warning(
+                    "_persist() CLEARING position store (self._position=%r) -- "
+                    "call stack:\n%s", self._position, _stack,
                 )
                 _ok = self.clear(self._persist_key)
                 if not _ok:
@@ -350,9 +372,17 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                         self._underlying, getattr(self, "_client_id", "") or "-",
                         getattr(self, "_binding_id", "") or "-",
                     )
+                    self._clog.critical(
+                        "POSITION CLEAR FAILED TWICE -- a stale 'still open' file may "
+                        "be left on disk. Check disk space/permissions NOW."
+                    )
                 self.notify_position_update(None, force=True)
         except Exception as exc:
             logger.warning("SellStraddle[%s]: persist failed: %s", self._underlying, exc)
+            try:
+                self._clog.warning("persist failed: %s", exc)
+            except Exception:
+                pass
         self._persist_session()
 
     def _persist_session(self) -> None:
