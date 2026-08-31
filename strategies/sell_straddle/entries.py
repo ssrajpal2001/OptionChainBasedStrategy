@@ -470,6 +470,30 @@ class EntryMixin:
         self._entry_expiry_date = next_expiry
         self._expiry_shifted_low_anchor_ltp = True
         self._strike_prem.clear()
+        # 2026-08-31 CRITICAL FIX (real incident, live NIFTY): self._pool_engine
+        # (the REAL VWAP/SLOPE/RSI/ROC source every entry rule reads, NOT just
+        # the shadow-VWAP diagnostic) had no reset here -- its per-(strike,side)
+        # bar series is keyed by strike NUMBER alone, which repeats across
+        # different weekly contracts. Post-shift, it kept blending the OLD
+        # (current-week) contract's price history with the NEW (next-week)
+        # contract's incoming ticks under the same key, corrupting SLOPE/VWAP
+        # for every strike -- confirmed live: the shadow-VWAP comparison log
+        # showed a ~77pt gap between the real broker ATP (already reflecting
+        # the new contract) and the pool-engine-derived value (still anchored
+        # to the old contract's much lower premium) immediately after a shift.
+        # Reinitializing fresh here (same rsi_len/roc_len/maxlen the existing
+        # instance was built with) is the same "start clean on a genuine
+        # instrument change" precedent self._strike_prem.clear() already sets
+        # two lines above -- the pool engine is exactly as instrument-specific.
+        from strategies.pool_indicator_engine import PoolIndicatorEngine
+        _old = self._pool_engine
+        self._pool_engine = PoolIndicatorEngine(
+            rsi_len=_old._rsi_len, roc_len=_old._roc_len, maxlen=_old._maxlen)
+        self._clog.info(
+            "EXPIRY-SHIFT: pool indicator engine (VWAP/SLOPE/RSI/ROC) reset fresh for the "
+            "new expiry -- prevents old-contract price history from blending into new-"
+            "contract ticks under the same strike numbers."
+        )
         await self._subscribe_expiry_window(next_expiry)
         return True
 

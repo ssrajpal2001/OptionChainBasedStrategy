@@ -123,6 +123,39 @@ def test_shift_clears_strike_prem_cache():
     assert s._strike_prem == {}
 
 
+def test_shift_resets_pool_engine():
+    """2026-08-31 CRITICAL FIX, real incident: self._pool_engine (the REAL
+    VWAP/SLOPE/RSI/ROC source every entry rule reads) was never reset on a
+    shift -- its per-(strike,side) series is keyed by strike NUMBER alone,
+    which repeats across different weekly contracts, so it kept blending
+    the OLD contract's price history into the NEW contract's incoming ticks
+    under the same key. Confirmed live via the shadow-VWAP diagnostic
+    (~77pt gap between the real broker ATP, already on the new contract,
+    and the pool-engine-derived value, still anchored to the old one)."""
+    from datetime import timedelta
+    today = datetime.now(IST).date()
+    _today_expiry = today + timedelta(days=1)
+    _today_next_expiry = today + timedelta(days=8)
+    s = _strategy(entry_expiry=_today_expiry)
+    REGISTRY._expiries["NIFTY"] = [_today_expiry, _today_next_expiry]
+    s._strike_prem = _low_anchor_strike_prem()
+
+    # Seed the pool engine with data as if strike 24500 CE had been ticking
+    # all day on the OLD (current-week) contract.
+    s._pool_engine.update_tick(24500, "CE", ltp=184.25, atp=180.0)
+    old_engine_id = id(s._pool_engine)
+    assert s._pool_engine._latest.get((24500, "CE")) is not None
+
+    shifted = asyncio.run(s._maybe_shift_expiry_for_low_anchor_ltp(ltp_target=50.0, theta_target=0.0))
+
+    assert shifted is True
+    assert id(s._pool_engine) != old_engine_id, "must be a genuinely fresh instance, not the same one cleared in place"
+    assert s._pool_engine._latest == {}, "old contract's price history must not survive the shift"
+    # Same rsi_len/roc_len/maxlen the original instance was built with.
+    assert s._pool_engine._rsi_len == 14
+    assert s._pool_engine._roc_len == 10
+
+
 def test_no_shift_once_already_shifted_today():
     s = _strategy()
     s._strike_prem = _low_anchor_strike_prem()
