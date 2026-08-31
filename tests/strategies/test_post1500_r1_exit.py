@@ -23,7 +23,7 @@ covered elsewhere (e.g. test_confirm_model_redesign.py); these tests are
 about the state machine deciding WHEN to call it and how the position reacts.
 """
 import asyncio
-from datetime import time as dtime
+from datetime import datetime, time as dtime
 from unittest.mock import ANY, AsyncMock
 
 from config.global_config import GlobalConfig
@@ -306,3 +306,218 @@ def test_both_legs_closing_independently_finalizes_the_position():
             break
 
     assert s._stop_for_day is True or s._position is None or s._position.pe_leg_closed
+
+
+# ── 2026-08-31: exhaustive single-leg-mode invariant matrix ────────────────
+#
+# Direct user request after the day-low incident: prove this "under no
+# conditions", not just the one condition that actually broke. Once a leg
+# has closed via post1500, EVERY other exit mechanism -- day%, ITM-gate
+# (+70% roll-protect), hedge-cumulative-profit-close, day-low, ratio-exit,
+# LTP-decay, scalable TSL, exit_rules, VWAP-rise -- must be completely
+# unreachable, no matter how aggressively each is configured to want to
+# fire. Each test below "traps" the functions that mechanism would call if
+# it ran (raises if called) and configures ONLY that one mechanism to be
+# maximally aggressive, with every other mechanism left at its safe/off
+# default -- isolating exactly one potential leak at a time.
+
+def _trap(name):
+    async def _boom(*a, **k):
+        raise AssertionError(f"{name} must NEVER be reached once a leg has closed (single-leg mode)")
+    return _boom
+
+
+def _single_leg_position(ce_ltp=20.0, pe_ltp=0.0, ce_strike=24000, pe_strike=24000,
+                          ce_entry=20.0, pe_entry=20.0) -> StraddlePosition:
+    pos = StraddlePosition(
+        underlying="NIFTY", atm_at_entry=24000, entry_spot=24000,
+        ce_leg=StraddleLeg("CE", ce_strike, ce_entry, ce_ltp),
+        pe_leg=StraddleLeg("PE", pe_strike, pe_entry, pe_ltp),
+        net_credit=ce_entry + pe_entry, status="open",
+    )
+    pos.pe_leg_closed = True   # PE already closed independently -- CE survives alone
+    return pos
+
+
+def _armed_post1500_state(s, pos):
+    """Minimal armed post1500 state so the surviving leg's own R1 watch is
+    the only thing that legitimately runs -- matches what _check_exits()
+    expects to already exist once single-leg (set by an earlier tick's
+    _check_post1500_r1_exit call in real operation)."""
+    from strategies.d1_trap_option.support_resistance import SupportResistanceCalculator
+    s._post1500_exit_enabled = True
+    s._post1500_pair = (int(pos.ce_leg.strike), int(pos.pe_leg.strike))
+    s._post1500_armed = True
+    s._post1500_armed_reason = "day_low"
+    s._post1500_leg_closed = {"CE": False, "PE": True}
+    s._post1500_calc = {"CE": SupportResistanceCalculator(), "PE": SupportResistanceCalculator()}
+    s._post1500_bar_acc = {}
+
+
+def _run_single_leg_check(s, pos):
+    import strategies.sell_straddle.exits as exits_mod
+    now = datetime.now(exits_mod.IST).replace(hour=15, minute=20, second=0, microsecond=0)
+    _orig = exits_mod.datetime
+    class _Fixed(_orig):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+    exits_mod.datetime = _Fixed
+    try:
+        asyncio.run(s._check_exits())
+    finally:
+        exits_mod.datetime = _orig
+
+
+def test_single_leg_mode_blocks_day_profit_target():
+    s = _strategy()
+    pos = _single_leg_position()
+    s._position = pos
+    _armed_post1500_state(s, pos)
+    s._day_profit_target_pct = 1.0   # trivially satisfied -- would fire instantly if reached
+    s._initial_net_credit = 40.0
+    s._session_realized_pnl_pts = 100.0   # way past any profit target
+    s._close_position = _trap("day_profit_target -> _close_position")
+    s._close_position_and_hedge = _trap("day_profit_target -> _close_position_and_hedge")
+    _run_single_leg_check(s, pos)
+    assert s._position is not None and s._position.status == "open"
+
+
+def test_single_leg_mode_blocks_day_loss_sl():
+    s = _strategy()
+    pos = _single_leg_position(ce_ltp=999.0, ce_entry=20.0)   # deep running loss
+    s._position = pos
+    _armed_post1500_state(s, pos)
+    s._day_loss_sl_pct = 1.0
+    s._initial_net_credit = 40.0
+    s._close_position = _trap("day_loss_sl -> _close_position")
+    s._close_position_and_hedge = _trap("day_loss_sl -> _close_position_and_hedge")
+    _run_single_leg_check(s, pos)
+    assert s._position is not None and s._position.status == "open"
+
+
+def test_single_leg_mode_blocks_itm_pair_gate():
+    s = _strategy()
+    # Both strikes ITM relative to spot (CE strike < spot, PE strike > spot) --
+    # exactly the shape itm_pair_gate looks for.
+    pos = _single_leg_position(ce_strike=23900, pe_strike=24100)
+    s._position = pos
+    s._spot = 24000.0
+    _armed_post1500_state(s, pos)
+    s._itm_pair_gate_enabled = True
+    s._itm_pair_gate_min_strike_gap = 50.0
+    s._itm_pair_gate_profit_inr = 0.0   # any profit clears it instantly
+    s._check_itm_pair_gate = _trap("itm_pair_gate")
+    s._check_itm_roll_protection = _trap("itm_roll_protection")
+    _run_single_leg_check(s, pos)
+    assert s._position is not None and s._position.status == "open"
+
+
+def test_single_leg_mode_blocks_hedge_cumulative_profit_close():
+    s = _strategy()
+    pos = _single_leg_position()
+    pos.is_hedged_positional = True   # would normally route into the hedge-profit check
+    s._position = pos
+    _armed_post1500_state(s, pos)
+    s._check_hedge_cumulative_profit_close = _trap("hedge_cumulative_profit_close")
+    s._close_hedge_legs = _trap("close_hedge_legs (same-strike-collision path)")
+    _run_single_leg_check(s, pos)
+    assert s._position is not None and s._position.status == "open"
+
+
+def test_single_leg_mode_blocks_ratio_exit():
+    s = _strategy()
+    # min/max ratio far past any threshold.
+    pos = _single_leg_position(ce_ltp=500.0, pe_ltp=0.0)
+    s._position = pos
+    _armed_post1500_state(s, pos)
+    s._ratio_threshold = 1.01
+    s._single_side_roll = _trap("ratio_exit -> _single_side_roll")
+    _run_single_leg_check(s, pos)
+    assert s._position is not None and s._position.status == "open"
+
+
+def test_single_leg_mode_blocks_ltp_decay():
+    s = _strategy()
+    pos = _single_leg_position(ce_ltp=1.0)   # far below any decay floor
+    s._position = pos
+    _armed_post1500_state(s, pos)
+    s._ltp_decay_enabled = True
+    s._ltp_exit_min = 500.0
+    s._single_side_roll = _trap("ltp_decay -> _single_side_roll")
+    _run_single_leg_check(s, pos)
+    assert s._position is not None and s._position.status == "open"
+
+
+def test_single_leg_mode_blocks_scalable_tsl():
+    s = _strategy()
+    pos = _single_leg_position(ce_ltp=1.0, ce_entry=500.0)   # deep profit
+    s._position = pos
+    _armed_post1500_state(s, pos)
+    s._tsl_enabled = True
+    s._tsl_base_profit_rs = 1.0
+    s._tsl_base_lock_rs = 0.0
+    s._close_position = _trap("scalable_tsl -> _close_position")
+    s._close_position_and_hedge = _trap("scalable_tsl -> _close_position_and_hedge")
+    _run_single_leg_check(s, pos)
+    assert s._position is not None and s._position.status == "open"
+
+
+def test_single_leg_mode_blocks_exit_rules():
+    s = _strategy()
+    pos = _single_leg_position()
+    s._position = pos
+    _armed_post1500_state(s, pos)
+    # A trivially-always-true rule set (RSI > -1 on any timeframe).
+    s._exit_rules = [{"indicator": "RSI", "op": ">", "value": -1.0, "tf": 1}]
+    s._single_side_roll = _trap("exit_rules -> _single_side_roll")
+    _run_single_leg_check(s, pos)
+    assert s._position is not None and s._position.status == "open"
+
+
+def test_single_leg_mode_blocks_vwap_rise():
+    s = _strategy()
+    pos = _single_leg_position()
+    s._position = pos
+    _armed_post1500_state(s, pos)
+    s._vwap_rise_enabled = True
+    s._vwap_rise_threshold = 0.0001   # trivially cleared
+    s._single_side_roll = _trap("vwap_rise -> _single_side_roll")
+    _run_single_leg_check(s, pos)
+    assert s._position is not None and s._position.status == "open"
+
+
+def test_single_leg_mode_blocks_everything_simultaneously():
+    """Kitchen-sink: every mechanism above configured maximally aggressive
+    AT THE SAME TIME, single-leg mode active -- the strongest possible
+    version of "under no conditions"."""
+    s = _strategy()
+    pos = _single_leg_position(ce_strike=23900, pe_strike=24100, ce_ltp=999.0, ce_entry=20.0)
+    s._position = pos
+    s._spot = 24000.0
+    _armed_post1500_state(s, pos)
+    s._day_profit_target_pct = 1.0
+    s._day_loss_sl_pct = 1.0
+    s._initial_net_credit = 40.0
+    s._session_realized_pnl_pts = 100.0
+    s._itm_pair_gate_enabled = True
+    s._itm_pair_gate_min_strike_gap = 50.0
+    s._itm_pair_gate_profit_inr = 0.0
+    s._ratio_threshold = 1.01
+    s._ltp_decay_enabled = True
+    s._ltp_exit_min = 500.0
+    s._tsl_enabled = True
+    s._tsl_base_profit_rs = 1.0
+    s._tsl_base_lock_rs = 0.0
+    s._exit_rules = [{"indicator": "RSI", "op": ">", "value": -1.0, "tf": 1}]
+    s._vwap_rise_enabled = True
+    s._vwap_rise_threshold = 0.0001
+    pos.is_hedged_positional = True
+
+    for _name in ("_close_position", "_close_position_and_hedge", "_single_side_roll",
+                  "_check_itm_pair_gate", "_check_itm_roll_protection",
+                  "_check_hedge_cumulative_profit_close", "_close_hedge_legs"):
+        setattr(s, _name, _trap(_name))
+
+    _run_single_leg_check(s, pos)
+    assert s._position is not None and s._position.status == "open"
