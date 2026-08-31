@@ -88,15 +88,23 @@ class ExitMixin:
         since it's derived from real historical data, not accumulated live
         state.
 
-        Combines CE.low + PE.low minute-by-minute (aligned by timestamp) --
-        direct user instruction (2026-08-21), overriding this function's own
-        prior CLOSE-based design (2026-08-19): "we want the low value not the
-        close value." Explicitly flagged to the user and confirmed: this can
-        combine two price extremes that occurred at different moments within
-        the same minute (CE's low at :05, PE's low at :47, say), producing a
-        floor the real combined premium may never have touched at any single
-        instant -- accepted tradeoff, the user's own informed choice for
-        their strategy.
+        Combines CE.close + PE.close minute-by-minute (aligned by timestamp)
+        -- CLOSE (= LTP, "last traded"), matching how the live tracker itself
+        already reads a position's value everywhere else (ce_ltp+pe_ltp).
+
+        2026-08-31 CRITICAL FIX, direct user spec + real-data verification:
+        this briefly used CE.low+PE.low instead (2026-08-21 direct user
+        instruction: "we want the low value not the close value"), on the
+        reasoning that the low-of-candle was a stricter/safer floor. Verified
+        live against real data that this was wrong in practice: CE24250's own
+        candle-low (80.15) and PE24100's own candle-low (92.0) occurred
+        nearly 4.5 hours apart (10:12 vs 14:46) -- the low-based per-minute
+        sum found its minimum (198.65) at 09:15, a value the real combined
+        premium never actually traded at. Direct comparison against a live
+        LTP-based straddle chart (Sensibull) showed the REAL observed low was
+        ~225.60 around 11:50-11:53 -- an independent REST re-fetch of the
+        same two legs' CLOSE prices reproduced that almost exactly (225.60 @
+        11:53). Reverted to CLOSE, matching the ORIGINAL 2026-08-19 design.
 
         Returns float('inf') on ANY failure (crypto, no token, no data, no
         overlapping minutes, network error) -- caller falls back to the
@@ -134,22 +142,39 @@ class ExitMixin:
             def _hm(ts_str: str):
                 t = datetime.fromisoformat(ts_str)
                 return (t.hour, t.minute), t.time()
-            pe_low_by_hm = {}
+            # 2026-08-31 CRITICAL FIX, direct user spec + real-data verification:
+            # reverted from CE.low+PE.low back to CE.close+PE.close. The
+            # 2026-08-21 low-based instruction ("we want the low value not the
+            # close value") produced a THEORETICAL floor that can be lower than
+            # any value the combined premium ever actually traded at -- verified
+            # live today: CE24250's own low (80.15) hit at 10:12, PE24100's own
+            # low (92.0) hit at 14:46, nearly 4.5 hours apart. The low-based
+            # per-minute-sum method found its minimum (198.65) at 09:15 -- a
+            # value that direct comparison against a real LTP-based straddle
+            # chart (Sensibull) showed was never the actual observed low; the
+            # REAL low the user saw on their live chart was ~225.60 around
+            # 11:50-11:53, which an independent REST re-fetch of the same two
+            # legs' CLOSE prices reproduced almost exactly (225.60 @ 11:53).
+            # CLOSE (= LTP, "last traded") is what a real trader's chart plots
+            # and what the live tracker itself already uses elsewhere
+            # (ce_ltp+pe_ltp) -- matches the ORIGINAL 2026-08-19 design this
+            # function had before the since-reverted 2026-08-21 change.
+            pe_close_by_hm = {}
             for b in pe_bars:
                 (hm, t) = _hm(b["ts"])
                 if t <= cutoff:
-                    pe_low_by_hm[hm] = float(b["low"])
+                    pe_close_by_hm[hm] = float(b["close"])
             combined = []
             for b in ce_bars:
                 (hm, t) = _hm(b["ts"])
-                if t <= cutoff and hm in pe_low_by_hm:
-                    combined.append(float(b["low"]) + pe_low_by_hm[hm])
+                if t <= cutoff and hm in pe_close_by_hm:
+                    combined.append(float(b["close"]) + pe_close_by_hm[hm])
             if not combined:
                 return float("inf")
             _low = min(combined)
             self._clog.info(
                 "SellStraddle[%s]: DAY-LOW ONE-TIME CALC — fetched %d aligned 1m bars "
-                "(CE.low+PE.low, up to %s) for CE%d/PE%d, low=%.2f.",
+                "(CE.close+PE.close, up to %s) for CE%d/PE%d, low=%.2f.",
                 self._underlying, len(combined), cutoff.strftime("%H:%M"),
                 int(ce_strike), int(pe_strike), _low,
             )
