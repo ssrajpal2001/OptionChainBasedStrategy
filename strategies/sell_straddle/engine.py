@@ -1562,6 +1562,18 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                     _atm = int(round(_atm_src / _step) * _step) if _atm_src > 0 else 0
                     self._clog.info("OPT_TICKS: %d option ticks/60s  ATM=%d  CE%d=%.2f PE%d=%.2f",
                                     _tick_count, _atm, _atm, self._ce_ltp, _atm, self._pe_ltp)
+                    if self._uses_mean_atm:
+                        # 2026-08-31, direct user request: spot/futures/mean were never
+                        # actually printed anywhere -- only the resulting ATM (OPT_TICKS
+                        # above), which meant verifying "did the futures mean genuinely
+                        # apply" required back-solving futures price from spot+ATM by
+                        # hand. Log all three inputs directly, same 60s cadence as
+                        # OPT_TICKS/SHADOW_VWAP.
+                        self._clog.info(
+                            "FUTURES_ATM spot=%.2f futures=%.2f mean=%.2f -> ATM=%d "
+                            "(futures_spot=0.00 means no futures tick has arrived yet)",
+                            self._spot, self._futures_spot, _atm_src, _atm,
+                        )
                     if self._shadow_vwap_enabled and _atm > 0:
                         _ce_shadow = self._shadow_vwap.get((_atm, "CE"), {})
                         _pe_shadow = self._shadow_vwap.get((_atm, "PE"), {})
