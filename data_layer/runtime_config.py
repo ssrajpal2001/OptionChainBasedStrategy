@@ -62,12 +62,14 @@ _SS_INDEX_DEFAULT: Dict[str, Any] = {
     "day_low_freeze_time": "15:00",
     # Post-15:00 per-leg R1 exit (2026-08-28): replaces day_low_exit's own
     # "close both legs" action with an independent per-leg R1 watch for a
-    # binding that opts into this instead. Opt-in, unvalidated -- default OFF.
-    "post1500_exit_enabled": False,
+    # binding that opts into this instead. 2026-08-31, direct user spec:
+    # default ON (was OFF at initial ship) -- still fully toggleable off
+    # per index from the admin Guardrails tab.
+    "post1500_exit_enabled": True,
     # Shadow VWAP (2026-08-28): log-only self-computed VWAP, run in parallel
     # with the real broker-ATP VWAP for after-market comparison. Never
-    # affects any trading decision. Opt-in, default OFF.
-    "shadow_vwap_enabled": False,
+    # affects any trading decision. 2026-08-31, direct user spec: default ON.
+    "shadow_vwap_enabled": True,
     "entry_rules_beginning": [],
     "entry_rules_reentry":   [],
     "exit_rules":            [],
@@ -264,12 +266,23 @@ class RuntimeConfig:
 
     @staticmethod
     def index_section(index: str, strategy: str) -> Dict[str, Any]:
-        """Return per-index strategy config, falling back to defaults."""
+        """Return per-index strategy config, DEEP-MERGED over defaults.
+
+        2026-08-31 fix (real bug found while adding post1500_exit_enabled/
+        shadow_vwap_enabled): this used to be `stored or defaults` -- for any
+        index that ALREADY has a saved config (e.g. NIFTY/SENSEX, both
+        actively configured), that returned the stored dict WHOLESALE,
+        silently dropping any key added to _SS_INDEX_DEFAULT after that
+        config was first saved. A new opt-in flag could never actually
+        default ON for an already-configured index -- its key just wasn't in
+        the stored dict, and the caller's own `.get(key, False)` fallback
+        won regardless of what _SS_INDEX_DEFAULT said. get_all_indices()
+        already deep-merges correctly; this now matches it -- stored values
+        always win, missing keys fall back to the real default."""
         _ensure_loaded()
-        return copy.deepcopy(
-            _live.get("indices", {}).get(index, {}).get(strategy, {})
-            or _build_index_defaults().get(index, {}).get(strategy, {})
-        )
+        defaults = _build_index_defaults().get(index, {}).get(strategy, {})
+        stored = _live.get("indices", {}).get(index, {}).get(strategy, {})
+        return _deep_merge(defaults, stored) if stored else copy.deepcopy(defaults)
 
     @staticmethod
     def get_all_indices() -> Dict[str, Any]:

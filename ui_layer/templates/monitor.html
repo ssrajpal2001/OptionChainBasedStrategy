@@ -2011,7 +2011,7 @@ document.addEventListener('alpine:init', () => {
         tsl_scalable:  { enabled: false, basis: 'ltp', base_profit: 3000, base_lock: 1500, step_profit: 1000, step_lock: 500 },
         itm_pair_gate_enabled: true,
         day_low_exit_enabled: false, day_low_freeze_time: '15:00',
-        post1500_exit_enabled: false, shadow_vwap_enabled: false,
+        post1500_exit_enabled: true, shadow_vwap_enabled: true,
         ratio_exit:    { enabled: false, threshold: 3.0, max_entry_ratio: 0 },
         ltp_decay:     { enabled: false, ltp_exit_min: 20.0 },
         vwap_rise_sl:  { enabled: false, tf: 1, threshold: 1.0 },
@@ -2053,8 +2053,8 @@ document.addEventListener('alpine:init', () => {
       if (ss.itm_pair_gate_enabled === undefined) ss.itm_pair_gate_enabled = true;
       if (ss.day_low_exit_enabled === undefined) ss.day_low_exit_enabled = false;
       if (ss.day_low_freeze_time === undefined) ss.day_low_freeze_time = '15:00';
-      if (ss.post1500_exit_enabled === undefined) ss.post1500_exit_enabled = false;
-      if (ss.shadow_vwap_enabled === undefined) ss.shadow_vwap_enabled = false;
+      if (ss.post1500_exit_enabled === undefined) ss.post1500_exit_enabled = true;
+      if (ss.shadow_vwap_enabled === undefined) ss.shadow_vwap_enabled = true;
       // Migrate legacy tf-multiplier → direct minutes (× 5) if the new field is absent.
       if (ss.sl_cooldown_minutes === undefined)
         ss.sl_cooldown_minutes = (ss.sl_cooldown_tf_multiplier !== undefined ? ss.sl_cooldown_tf_multiplier * 5 : 5);

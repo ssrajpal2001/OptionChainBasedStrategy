@@ -247,13 +247,13 @@ def load_sell_straddle_config(
     # full state machine. Opt-in, default OFF -- must not silently change
     # behavior for an existing live deployment (e.g. day_low_exit_enabled
     # stays fully intact/unchanged for anyone not opting into this).
-    post1500_exit_enabled = bool(ss.get("post1500_exit_enabled", False))
+    post1500_exit_enabled = bool(ss.get("post1500_exit_enabled", True))
 
     # Shadow VWAP (2026-08-28, direct user spec): runs a second, self-computed
     # VWAP in parallel with the live broker-ATP VWAP that actually drives every
     # decision -- purely logged for after-market comparison, NEVER read by any
     # decision path. Opt-in, default OFF.
-    shadow_vwap_enabled = bool(ss.get("shadow_vwap_enabled", False))
+    shadow_vwap_enabled = bool(ss.get("shadow_vwap_enabled", True))
 
     same_day_expiry_enabled = bool(ss.get("same_day_expiry_enabled", False))
 

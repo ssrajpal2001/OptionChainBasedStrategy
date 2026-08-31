@@ -61,6 +61,11 @@ def _strategy():
     s._day_profit_target_pct = 0.0
     s._day_loss_sl_pct = 0.0
     s._ratio_threshold = 999.0
+    # 2026-08-31: post1500_exit_enabled now defaults ON (direct user spec)
+    # and shares the SAME frozen-low tracking block as day_low_exit_enabled
+    # -- this file tests day_low_exit_enabled in isolation, so force
+    # post1500 off here (it has its own dedicated test file).
+    s._post1500_exit_enabled = False
     # No REST calc result by default -- degrades to "freeze at the current
     # tick's own value", matching every test below unless overridden.
     s._compute_day_low_for_pair = AsyncMock(return_value=float("inf"))

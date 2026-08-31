@@ -91,9 +91,22 @@ def _spy_close_position(s):
     return calls
 
 
-def test_disabled_by_default_no_watch_no_close():
+def test_defaults_on_via_runtime_config(monkeypatch):
+    """2026-08-31, direct user spec: both post1500_exit_enabled and
+    shadow_vwap_enabled now default ON globally (index_section() deep-merges
+    _SS_INDEX_DEFAULT over any stored per-index config, so a brand-new
+    index with nothing stored yet -- or an already-configured one missing
+    this newer key -- both pick up the True default)."""
+    from data_layer.runtime_config import RuntimeConfig
+    s = SellStraddleStrategy(EventBus(), cfg=GlobalConfig(), underlying="NIFTY")
+    assert s._post1500_exit_enabled is True
+    assert s._shadow_vwap_enabled is True
+    assert RuntimeConfig.index_section("NIFTY", "sell_straddle")["post1500_exit_enabled"] is True
+
+
+def test_when_explicitly_disabled_no_watch_no_close():
     s = _strategy()
-    assert s._post1500_exit_enabled is False
+    s._post1500_exit_enabled = False
     s._position = _position(30.0, 20.0)
     close_calls = _spy_close_leg(s)
     asyncio.run(s._check_exits())
