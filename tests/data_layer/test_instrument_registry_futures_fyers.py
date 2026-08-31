@@ -98,6 +98,64 @@ def test_resolve_futures_key_picks_near_month_when_multiple_expiries_present():
         _MASTER_CACHE.pop(f"NSE:{today.isoformat()}", None)
 
 
+def test_resolve_futures_key_never_re_resolves_while_cached_contract_still_valid():
+    """A second call on a LATER day, while the cached contract hasn't expired
+    yet, must be a cheap no-op (no re-scan of the master JSON needed)."""
+    reg = InstrumentRegistry()
+    day1 = date(2026, 8, 26)
+    _seed_master_cache("NSE", day1, [
+        {"instrument_key": "NSE_FO|99999", "trading_symbol": "NIFTY26SEPFUT",
+         "strike_price": 0, "expiry": "2026-09-24", "underlying_symbol": "NIFTY",
+         "instrument_type": "FUT"},
+    ])
+    try:
+        reg._resolve_futures_key("NIFTY", day1, [])
+        assert reg.get_futures_upstox("NIFTY") == "NSE_FO|99999"
+
+        # A later day, well before the cached contract's own 2026-09-24 expiry --
+        # no cache seeded for THIS day, so if it tried to re-resolve it would
+        # crash on a missing master-JSON download. Must stay cached instead.
+        day2 = date(2026, 9, 1)
+        reg._resolve_futures_key("NIFTY", day2, [])
+        assert reg.get_futures_upstox("NIFTY") == "NSE_FO|99999"
+    finally:
+        _MASTER_CACHE.pop(f"NSE:{day1.isoformat()}", None)
+
+
+def test_resolve_futures_key_re_resolves_once_cached_contract_has_expired():
+    """2026-08-31 fix -- the real gap: load_sync() is only ever called ONCE
+    at process startup (run_system.py), so a long-running process crossing a
+    monthly futures rollover with the old `resolve once, cache forever` guard
+    would silently keep computing off a dead, expired contract forever. Once
+    the cached contract's own expiry has passed, the NEXT call must re-scan
+    and pick up the new near-month contract."""
+    reg = InstrumentRegistry()
+    day1 = date(2026, 8, 26)
+    _seed_master_cache("NSE", day1, [
+        {"instrument_key": "NSE_FO|99999", "trading_symbol": "NIFTY26SEPFUT",
+         "strike_price": 0, "expiry": "2026-09-24", "underlying_symbol": "NIFTY",
+         "instrument_type": "FUT"},
+    ])
+    try:
+        reg._resolve_futures_key("NIFTY", day1, [])
+        assert reg.get_futures_upstox("NIFTY") == "NSE_FO|99999"
+
+        # A day AFTER the Sep contract's own expiry -- must re-resolve to the
+        # new near-month (Oct) contract, not keep serving the dead Sep one.
+        day2 = date(2026, 9, 25)
+        _seed_master_cache("NSE", day2, [
+            {"instrument_key": "NSE_FO|22222", "trading_symbol": "NIFTY26OCTFUT",
+             "strike_price": 0, "expiry": "2026-10-29", "underlying_symbol": "NIFTY",
+             "instrument_type": "FUT"},
+        ])
+        reg._resolve_futures_key("NIFTY", day2, [])
+        assert reg.get_futures_upstox("NIFTY") == "NSE_FO|22222"
+        assert reg._futures_expiry["NIFTY"] == date(2026, 10, 29)
+    finally:
+        _MASTER_CACHE.pop(f"NSE:{day1.isoformat()}", None)
+        _MASTER_CACHE.pop(f"NSE:{date(2026, 9, 25).isoformat()}", None)
+
+
 def test_resolve_futures_key_no_op_for_mcx_underlyings():
     """MCX underlyings are resolved entirely by _load_mcx -- _resolve_futures_key
     must remain a no-op for them, unchanged."""

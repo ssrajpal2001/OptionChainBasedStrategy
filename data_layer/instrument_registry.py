@@ -258,7 +258,25 @@ class InstrumentRegistry:
         Now derives the Fyers symbol the same way _load_mcx already does for
         commodities (yy + 3-letter month + "FUT"), with the correct NSE/BSE
         exchange prefix."""
-        if underlying.upper() in _MCX_UNDERLYINGS or underlying in self._futures_upstox:
+        if underlying.upper() in _MCX_UNDERLYINGS:
+            return
+        # 2026-08-31 fix (real gap found before first-ever activation of
+        # GlobalConfig.futures_atm_underlyings in production): this used to
+        # be a plain `underlying in self._futures_upstox` guard -- resolve
+        # ONCE per process lifetime, cached forever, never re-checked
+        # against the current date. load_sync() itself is only ever called
+        # ONCE at process startup (run_system.py), not on any daily loop --
+        # unlike the options-contract load (weeks_ahead=8 covers ~2 months
+        # of weekly expiries in that one call), the futures key is a SINGLE
+        # near-month contract. A process that stays up past that contract's
+        # own expiry (monthly rollover) without a restart would keep
+        # computing the mean-ATM off a dead, frozen futures LTP forever,
+        # with nothing to ever notice or self-correct. Now only skips
+        # re-resolution when the cached contract is still genuinely valid
+        # for TODAY -- an expired cached contract (or no cache yet) always
+        # re-resolves, correctly picking up the new near-month contract.
+        _cached_expiry = self._futures_expiry.get(underlying)
+        if underlying in self._futures_upstox and _cached_expiry is not None and _cached_expiry >= today:
             return
         import gzip, json
         from urllib.request import urlopen, Request
