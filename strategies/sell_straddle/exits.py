@@ -1336,6 +1336,34 @@ class ExitMixin:
             else:
                 return
 
+        # 2026-08-31 CRITICAL FIX (real incident, live NIFTY): once EITHER leg
+        # has closed independently via the post-15:00 R1 mechanic, EVERY check
+        # below this point (hedge/day%/ITM-gate/day-low/ratio/ltp-decay/TSL/
+        # exit_rules/vwap_rise) must be skipped -- direct user confirmation:
+        # "will not consider these exits when 1 leg is open, only R1 logic
+        # will survive and EOD." This guard used to live further down, AFTER
+        # the day-low block -- which meant day-low itself was NOT protected:
+        # the instant a leg closed, pos.current_value correctly dropped to
+        # just the surviving leg's own (much smaller) value, which is almost
+        # always below a frozen threshold that was computed for BOTH legs
+        # combined -- so day_low_exit_enabled's own "close both" action fired
+        # on the very next tick and closed the surviving leg too, using a
+        # threshold that was never meant to apply to a single leg. Confirmed
+        # live: PE closed via post1500_r1_breach at 15:15:28.096, and
+        # DAY-LOW REVERSAL EXIT closed the surviving CE leg five milliseconds
+        # later using the two-leg frozen value (198.65) against the now-
+        # single-leg current_value (104.40). Moved to the TOP of the ladder
+        # (right after EOD + the roll-in-progress/post-restore guards, which
+        # are data-validity/concurrency guards that must still apply
+        # regardless of leg state) so it protects EVERY check, not just the
+        # ones that happened to be coded after the old location. Still calls
+        # _check_post1500_r1_exit for the surviving leg's own R1 watch --
+        # EOD square-off (already checked above, unconditionally, before this
+        # point) remains its only other backstop.
+        if self._post1500_exit_enabled and (pos.ce_leg_closed or pos.pe_leg_closed):
+            await self._check_post1500_r1_exit(pos, now)
+            return
+
         # 1b. HEDGE CUMULATIVE PROFIT CLOSE (2026-08-24, user spec): while a hedge
         # is standing, checked every tick (not just EOD) -- see
         # _check_hedge_cumulative_profit_close's own docstring for the full

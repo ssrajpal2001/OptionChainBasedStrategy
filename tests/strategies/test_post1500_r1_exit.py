@@ -190,6 +190,60 @@ def test_per_leg_independent_r1_breach_closes_only_that_leg():
         assert s._position.pe_leg_closed is False, "surviving leg must stay open"
 
 
+def test_day_low_reversal_never_fires_on_a_surviving_single_leg():
+    """2026-08-31 CRITICAL FIX, real incident, live NIFTY: with BOTH
+    day_low_exit_enabled and post1500_exit_enabled ON, PE closed via
+    post1500_r1_breach at 15:15:28.096 -- five milliseconds later,
+    DAY-LOW REVERSAL EXIT fired and closed the surviving CE leg too, using
+    the frozen TWO-LEG value (198.65) against the now-SINGLE-LEG
+    current_value (104.40, since one leg just closed and current_value
+    naturally reflects only what's left). The single-leg-mode skip guard
+    used to live AFTER the day-low block, so day-low itself was never
+    protected. This test reproduces the exact numbers from that incident:
+    a leg already closed on a prior tick, frozen=198.65, surviving leg
+    alone worth ~104.40 (well under the two-leg frozen threshold) -- and
+    asserts the position is NEVER closed via day-low once single-leg."""
+    s = _strategy()
+    s._day_low_exit_enabled = True
+    s._post1500_exit_enabled = True
+    s._session_min_straddle_frozen = 198.65
+    s._day_low_freeze_time = dtime(15, 0)
+
+    s._position = _position(104.40, 0.0, ce_entry=94.40)   # CE survives, PE already closed
+    s._position.pe_leg.close_time = "2026-08-31T15:15:28"
+    s._position.pe_leg_closed = True
+    s._day_low_tracked_pair = (int(s._position.ce_leg.strike), int(s._position.pe_leg.strike))
+    s._post1500_pair = s._day_low_tracked_pair
+    s._post1500_armed = True
+    s._post1500_leg_closed = {"CE": False, "PE": True}
+    from strategies.d1_trap_option.support_resistance import SupportResistanceCalculator
+    s._post1500_calc = {"CE": SupportResistanceCalculator(), "PE": SupportResistanceCalculator()}
+    s._post1500_bar_acc = {}
+
+    close_position_calls = _spy_close_position(s)
+
+    import strategies.sell_straddle.exits as exits_mod
+    from datetime import datetime
+    now = datetime.now(exits_mod.IST).replace(hour=15, minute=15, second=30, microsecond=0)
+    _orig_now = exits_mod.datetime
+    class _FixedDatetime(_orig_now):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+    exits_mod.datetime = _FixedDatetime
+    try:
+        asyncio.run(s._check_exits())
+    finally:
+        exits_mod.datetime = _orig_now
+
+    assert close_position_calls == [], (
+        "day-low reversal (or any full-close path) must NEVER fire once a leg has "
+        "already closed independently -- only R1/EOD apply to the surviving leg"
+    )
+    assert s._position is not None and s._position.status == "open"
+    assert s._position.ce_leg_closed is False, "surviving CE leg must still be open"
+
+
 def test_eod_close_of_surviving_leg_uses_close_leg_not_close_position():
     """The critical safety guard: once one leg is closed via this mechanic,
     EOD square-off must route through _close_leg for the survivor only --
