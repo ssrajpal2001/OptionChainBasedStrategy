@@ -60,6 +60,14 @@ _SS_INDEX_DEFAULT: Dict[str, Any] = {
     # to that frozen low. Opt-in, unvalidated -- default OFF.
     "day_low_exit_enabled": False,
     "day_low_freeze_time": "15:00",
+    # Post-15:00 per-leg R1 exit (2026-08-28): replaces day_low_exit's own
+    # "close both legs" action with an independent per-leg R1 watch for a
+    # binding that opts into this instead. Opt-in, unvalidated -- default OFF.
+    "post1500_exit_enabled": False,
+    # Shadow VWAP (2026-08-28): log-only self-computed VWAP, run in parallel
+    # with the real broker-ATP VWAP for after-market comparison. Never
+    # affects any trading decision. Opt-in, default OFF.
+    "shadow_vwap_enabled": False,
     "entry_rules_beginning": [],
     "entry_rules_reentry":   [],
     "exit_rules":            [],

@@ -2011,6 +2011,7 @@ document.addEventListener('alpine:init', () => {
         tsl_scalable:  { enabled: false, basis: 'ltp', base_profit: 3000, base_lock: 1500, step_profit: 1000, step_lock: 500 },
         itm_pair_gate_enabled: true,
         day_low_exit_enabled: false, day_low_freeze_time: '15:00',
+        post1500_exit_enabled: false, shadow_vwap_enabled: false,
         ratio_exit:    { enabled: false, threshold: 3.0, max_entry_ratio: 0 },
         ltp_decay:     { enabled: false, ltp_exit_min: 20.0 },
         vwap_rise_sl:  { enabled: false, tf: 1, threshold: 1.0 },
@@ -2052,6 +2053,8 @@ document.addEventListener('alpine:init', () => {
       if (ss.itm_pair_gate_enabled === undefined) ss.itm_pair_gate_enabled = true;
       if (ss.day_low_exit_enabled === undefined) ss.day_low_exit_enabled = false;
       if (ss.day_low_freeze_time === undefined) ss.day_low_freeze_time = '15:00';
+      if (ss.post1500_exit_enabled === undefined) ss.post1500_exit_enabled = false;
+      if (ss.shadow_vwap_enabled === undefined) ss.shadow_vwap_enabled = false;
       // Migrate legacy tf-multiplier → direct minutes (× 5) if the new field is absent.
       if (ss.sl_cooldown_minutes === undefined)
         ss.sl_cooldown_minutes = (ss.sl_cooldown_tf_multiplier !== undefined ? ss.sl_cooldown_tf_multiplier * 5 : 5);
@@ -5107,6 +5110,38 @@ function amoTest() {
                          x-model="indexConfig[adminSelectedIndex].sell_straddle.day_low_freeze_time">
                   <span class="font-mono text-xs" style="color:var(--t-muted)">tracks the day's lowest CE+PE combined premium from entry to this time, then closes full &amp; stops for the day the moment the rate returns to that low</span>
                 </div>
+              </div>
+
+              <!-- Post-15:00 Per-Leg R1 Exit (2026-08-28) -->
+              <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
+                <div class="flex items-center justify-between mb-2">
+                  <span class="font-display font-bold text-xs" style="color:var(--t-amber)">POST-15:00 PER-LEG R1 EXIT
+                    <span style="color:var(--t-muted);font-weight:400"> — replaces Day-Low Reversal Exit's "close both legs" action with an independent per-leg R1 watch</span>
+                  </span>
+                  <label class="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" x-model="indexConfig[adminSelectedIndex].sell_straddle.post1500_exit_enabled" class="accent-yellow-400">
+                    <span class="font-mono text-xs"
+                          x-text="indexConfig[adminSelectedIndex].sell_straddle.post1500_exit_enabled?'ON':'OFF'"
+                          :style="`color:${indexConfig[adminSelectedIndex].sell_straddle.post1500_exit_enabled?'var(--t-amber)':'var(--t-muted)'}`"></span>
+                  </label>
+                </div>
+                <p class="font-mono text-xs" style="color:var(--t-muted)">From 15:00: arms when the rate hits the day-low (above) OR at/after 15:15 if the overall day P&amp;L is positive. Once armed, each leg closes independently the instant its own 1-min R1 breaches — the other leg keeps running solo on its own R1 until EOD. Uses the SAME frozen day-low value as the card above; turn ON only ONE of the two "close both" vs "per-leg" actions for a given binding.</p>
+              </div>
+
+              <!-- Shadow VWAP (2026-08-28) -->
+              <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
+                <div class="flex items-center justify-between mb-2">
+                  <span class="font-display font-bold text-xs" style="color:var(--t-amber)">SHADOW VWAP
+                    <span style="color:var(--t-muted);font-weight:400"> — log-only self-computed VWAP, run in parallel with the real broker-ATP VWAP for after-market comparison</span>
+                  </span>
+                  <label class="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" x-model="indexConfig[adminSelectedIndex].sell_straddle.shadow_vwap_enabled" class="accent-yellow-400">
+                    <span class="font-mono text-xs"
+                          x-text="indexConfig[adminSelectedIndex].sell_straddle.shadow_vwap_enabled?'ON':'OFF'"
+                          :style="`color:${indexConfig[adminSelectedIndex].sell_straddle.shadow_vwap_enabled?'var(--t-amber)':'var(--t-muted)'}`"></span>
+                  </label>
+                </div>
+                <p class="font-mono text-xs" style="color:var(--t-muted)">NEVER affects any live trading decision — purely logs cum(LTP×volume)/cum(volume) per strike every 60s next to the real ATP VWAP in this binding's own log file, for reviewing after market close which VWAP source is better.</p>
               </div>
 
               <!-- Ratio Exit -->
