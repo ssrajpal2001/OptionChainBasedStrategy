@@ -618,106 +618,76 @@ class EntryMixin:
         self, now: datetime, rule_key: str, rules: list, step: float, offset: int,
         ltp_target: float, theta_target: float, variable_strikes: bool, balance_ratio: float,
     ) -> None:
-        """BEGINNING entry (2026-08-05, user-specified): instead of rounding spot to one
-        nearest strike, evaluate the two strikes that actually bracket spot --
-        near = floor(spot/step)*step, far = near+step -- as two independent anchor
-        candidates, each via the same anchor+partner balanced-pair search RE-ENTRY
-        uses (select_balanced_pair_at). Entry criteria (SLOPE etc.) is checked on
-        BOTH resulting pairs. If both pass, the max/min-premium ratio (the same
-        ratio concept used as the _max_entry_ratio safety gate right before entry)
-        decides between them -- lower ratio (more balanced) wins. If only one
-        passes, take it directly. If neither passes, no trade this cycle -- exactly
-        like today, BEGINNING keeps retrying every eligible cycle regardless."""
+        """BEGINNING entry. 2026-09-01, direct user spec: replaced the prior
+        near/far dual-bracket approach (floor-round + floor-round+step, tried
+        as two independent candidates, tie-broken by premium-ratio balance)
+        with a SINGLE nearest-round ATM anchor -- atm = round(spot/step)*step,
+        the same rounding convention already used everywhere else in this file
+        (raw-anchor fallback, RE-ENTRY, scan_pool) -- then the existing 1-OTM
+        shift + anchor/partner balanced-pair search runs once against that one
+        anchor, same as before. This removes the near/far bracket + ratio
+        tie-break entirely; there is now exactly one candidate per cycle."""
         from strategies.sell_straddle.selection import select_balanced_pair_at
 
-        # 2026-08-26, direct user spec: near/far bracket the MEAN-of-spot-and-futures
-        # reference (self._atm_ref -- falls back to plain self._spot for any underlying
-        # not in cfg.futures_atm_underlyings, so this is unchanged there).
+        # 2026-08-26, direct user spec: anchor is the MEAN-of-spot-and-futures
+        # reference (self._atm_ref -- falls back to plain self._spot for any
+        # underlying not in cfg.futures_atm_underlyings, so this is unchanged
+        # there). 2026-09-01: nearest-round, not floor.
         _atm_src = self._atm_ref if self._atm_ref > 0 else self._spot
-        near = int(_atm_src // step) * int(step) if _atm_src > 0 and step > 0 else 0
-        far = near + int(step)
+        atm = int(round(_atm_src / step) * step) if _atm_src > 0 and step > 0 else 0
 
-        candidates: list = []
-        for label, atm in (("near", near), ("far", far)):
-            _trace: list = []
-            # 2026-08-20 user spec: anchor SIDE decision stays at raw ATM, but the
-            # anchor's own strike used for pairing shifts 1 step further OTM (BEGINNING
-            # only -- RE-ENTRY keeps anchor_otm_steps=0/unshifted).
-            # 2026-08-26, direct user confirmation: intrinsic/time-value stripping
-            # (anchor tv, partner tv, the floor's theta check) is ALSO computed off
-            # the mean reference (_atm_src), not real spot -- "for theta we need to
-            # subtract from the mean value to get intrinsic and time value both."
-            sel = select_balanced_pair_at(
-                self._strike_prem, atm, _atm_src, step, offset, ltp_target, trace=_trace,
-                entry_basis=self._entry_basis, theta_target=theta_target,
-                variable_strikes=variable_strikes, balance_ratio=balance_ratio,
-                anchor_otm_steps=1,
-            )
-            for _ln in _trace:
-                self._clog.info("SELECT %s | [%s@%d] %s", self._underlying, label, atm, _ln)
-            if not sel:
-                self._clog.info(
-                    "EVAL %s [%s] NO-PAIR @ %s(%d) — spot=%.2f (ltp≥%.0f theta≥%.0f offset=%d)",
-                    self._underlying, rule_key, label, atm, self._spot, ltp_target, theta_target, offset,
-                )
-                continue
-            ce_strike, pe_strike, ce_ltp, pe_ltp = sel
-            ind_by_tf = self._ind_by_tf(ce_strike, pe_strike, rules)
-            passed, reason = _eval_rules(rules, ind_by_tf)
+        _trace: list = []
+        # 2026-08-20 user spec: anchor SIDE decision stays at raw ATM, but the
+        # anchor's own strike used for pairing shifts 1 step further OTM (BEGINNING
+        # only -- RE-ENTRY keeps anchor_otm_steps=0/unshifted).
+        # 2026-08-26, direct user confirmation: intrinsic/time-value stripping
+        # (anchor tv, partner tv, the floor's theta check) is ALSO computed off
+        # the mean reference (_atm_src), not real spot -- "for theta we need to
+        # subtract from the mean value to get intrinsic and time value both."
+        sel = select_balanced_pair_at(
+            self._strike_prem, atm, _atm_src, step, offset, ltp_target, trace=_trace,
+            entry_basis=self._entry_basis, theta_target=theta_target,
+            variable_strikes=variable_strikes, balance_ratio=balance_ratio,
+            anchor_otm_steps=1,
+        )
+        for _ln in _trace:
+            self._clog.info("SELECT %s | [atm@%d] %s", self._underlying, atm, _ln)
+        if not sel:
             self._clog.info(
-                "EVAL %s [%s/beginning] %s(%d) sell CE%d=%.2f + PE%d=%.2f credit=%.2f | rules: %s | result=%s",
-                self._underlying, rule_key, label, atm, ce_strike, ce_ltp, pe_strike, pe_ltp,
-                ce_ltp + pe_ltp, reason, "PASS" if passed else "BLOCK",
+                "EVAL %s [%s] NO-PAIR @ atm(%d) — spot=%.2f (ltp≥%.0f theta≥%.0f offset=%d)",
+                self._underlying, rule_key, atm, self._spot, ltp_target, theta_target, offset,
             )
-            candidates.append({
-                "label": label, "ce_strike": ce_strike, "pe_strike": pe_strike,
-                "ce_ltp": ce_ltp, "pe_ltp": pe_ltp, "ind_by_tf": ind_by_tf,
-                "passed": passed, "reason": reason,
-            })
-
-        if not candidates:
             # 2026-08-31, direct user spec: "when we jump to the OTM and the pair
             # we are looking for is not available due to threshold, we will jump
             # to next week" -- same next-week-expiry safety net the raw-anchor-
             # fails-floor case already uses (_maybe_shift_expiry_for_low_anchor_
-            # ltp), now ALSO firing when BOTH near and far exhaust their own
-            # 1-OTM-shift + partner search with nothing viable on either side.
-            # Only fires once both candidates have genuinely been tried and
-            # both come up empty this same cycle -- a single candidate failing
-            # while the other still has a live shot is NOT enough (the other
-            # candidate might still find a real pair).
+            # ltp). 2026-09-01: now fires as soon as the single anchor's own
+            # 1-OTM-shift + partner search comes up empty (there is only one
+            # candidate now, so this is the equivalent trigger point to the old
+            # "both near and far exhausted" condition).
             await self._shift_to_next_week_expiry(
-                f"BEGINNING near/far selection exhausted -- no viable pair on either "
-                f"side (ltp≥{ltp_target:.0f} theta≥{theta_target:.0f} offset={offset})",
-                f"BEGINNING near/far exhausted, no pair either side (need ltp>={ltp_target:.0f} "
+                f"BEGINNING selection exhausted -- no viable pair @ atm({atm}) "
+                f"(ltp≥{ltp_target:.0f} theta≥{theta_target:.0f} offset={offset})",
+                f"BEGINNING exhausted, no pair @ atm({atm}) (need ltp>={ltp_target:.0f} "
                 f"theta>={theta_target:.0f} offset={offset})",
             )
-            return  # both NO-PAIR, already logged above
+            return
 
-        passing = [c for c in candidates if c["passed"]]
-        if not passing:
-            return  # both evaluated, neither passed entry criteria -- already logged above
-
-        def _ratio(c: dict) -> float:
-            hi, lo = max(c["ce_ltp"], c["pe_ltp"]), min(c["ce_ltp"], c["pe_ltp"])
-            return (hi / lo) if lo > 0 else float("inf")
-
-        if len(passing) == 1:
-            chosen = passing[0]
-        else:
-            chosen = min(passing, key=_ratio)
+        ce_strike, pe_strike, ce_ltp, pe_ltp = sel
+        ind_by_tf = self._ind_by_tf(ce_strike, pe_strike, rules)
+        passed, reason = _eval_rules(rules, ind_by_tf)
+        if not passed:
             self._clog.info(
-                "EVAL %s [%s] BOTH near/far pairs passed entry criteria — "
-                "%s=CE%d/PE%d(ratio=%.3fx) vs %s=CE%d/PE%d(ratio=%.3fx) -> choosing %s (lower ratio)",
-                self._underlying, rule_key,
-                passing[0]["label"], passing[0]["ce_strike"], passing[0]["pe_strike"], _ratio(passing[0]),
-                passing[1]["label"], passing[1]["ce_strike"], passing[1]["pe_strike"], _ratio(passing[1]),
-                chosen["label"],
+                "EVAL %s [%s/beginning] atm(%d) sell CE%d=%.2f + PE%d=%.2f credit=%.2f | "
+                "rules: %s | result=BLOCK",
+                self._underlying, rule_key, atm, ce_strike, ce_ltp, pe_strike, pe_ltp,
+                ce_ltp + pe_ltp, reason,
             )
+            return
 
         await self._finalize_entry_decision(
-            now, rule_key, "beginning", chosen["ce_strike"], chosen["pe_strike"],
-            chosen["ce_ltp"], chosen["pe_ltp"], chosen["ind_by_tf"], chosen["passed"], chosen["reason"],
+            now, rule_key, "beginning", ce_strike, pe_strike,
+            ce_ltp, pe_ltp, ind_by_tf, passed, reason,
             ltp_target, theta_target, offset,
         )
 
