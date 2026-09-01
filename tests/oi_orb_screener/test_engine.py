@@ -375,7 +375,14 @@ async def test_run_today_pipeline_retries_build_shortlist_on_transient_failure(m
     """2026-08-24, confirmed live on EC2: a fresh NSESession's first request
     burst can hit a short-lived Akamai throttle that clears moments later.
     Without a retry, that single transient failure silently kills the whole
-    trading day (the daily pipeline only runs once per calendar day)."""
+    trading day (the daily pipeline only runs once per calendar day).
+
+    2026-09-01: build_shortlist's 3rd (successful) attempt returns an EMPTY
+    shortlist -- since the empty-shortlist fix below now falls through into
+    the real polling loop instead of returning, this test must stop that
+    loop itself (real production paces it with a real asyncio.sleep between
+    iterations; only the test's OWN asyncio.sleep mock made an unbounded
+    loop unsafe here)."""
     bus = _FakeBus()
     book = _make_book(bus)
     book._screener_cfg["IGNORE_TIME_WINDOWS"] = True
@@ -388,9 +395,15 @@ async def test_run_today_pipeline_retries_build_shortlist_on_transient_failure(m
     monkeypatch.setattr(screener, "build_shortlist",
                          lambda nse, cfg: _flaky_build_shortlist_sync(nse, cfg, calls))
 
+    def _stop_after_one_poll(nse):
+        book._running = False   # exit the polling loop after this single iteration
+        raise RuntimeError("stop the test here, no real network call")
+    monkeypatch.setattr(screener, "fetch_fno_price_universe", _stop_after_one_poll)
+
     await book._run_today_pipeline()
 
     assert calls["n"] == 3   # 2 failures + 1 success, never hit the max-attempts cap
+    assert book._shortlist_symbols == []   # the successful attempt's shortlist was empty
 
 
 def _flaky_build_shortlist_sync(nse, cfg, calls):
@@ -422,6 +435,57 @@ async def test_run_today_pipeline_gives_up_after_max_attempts(monkeypatch):
     from strategies.oi_orb_screener.engine import _BUILD_SHORTLIST_MAX_ATTEMPTS
     assert calls["n"] == _BUILD_SHORTLIST_MAX_ATTEMPTS
     assert book._shortlist_symbols == []
+
+
+@pytest.mark.asyncio
+async def test_empty_morning_shortlist_still_reaches_afternoon_scan(monkeypatch):
+    """2026-09-01 CRITICAL FIX, real incident: an empty morning shortlist used
+    to `return` out of _run_today_pipeline() entirely, so the polling loop
+    below -- the ONLY place _maybe_run_afternoon_scan() is ever called -- was
+    never reached. Since _daily_loop() only calls _run_today_pipeline() once
+    per calendar day, two_session_scan_enabled could never actually rescue a
+    day that started empty, which is exactly the scenario it exists for.
+
+    Real incident: 2026-09-01, NIFTY flat (-0.18%) at 09:25 -> morning
+    shortlist empty -> book went silent all day even though real candidates
+    (HEROMOTOCO/BAJAJ-AUTO/ADANIENSOL/MARUTI/KALYANKJIL/POLYCAB/KEI) existed
+    by 12:51 and two_session_scan_enabled was explicitly on.
+
+    This test proves the fix: build_shortlist returns empty on the morning
+    call, and the very next thing the polling loop does is call
+    _maybe_run_afternoon_scan -- confirmed here by making THAT call itself
+    the thing that stops the loop and recording that it happened."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._screener_cfg["IGNORE_TIME_WINDOWS"] = True
+    book._running = True
+
+    monkeypatch.setattr(screener, "NSESession", _FakeNSESession)
+    monkeypatch.setattr(asyncio, "sleep", _async_return(None))
+
+    import pandas as pd
+    monkeypatch.setattr(screener, "build_shortlist", lambda nse, cfg: (pd.DataFrame(), -0.18))
+
+    afternoon_scan_calls = {"n": 0}
+    _orig_maybe_run_afternoon_scan = book._maybe_run_afternoon_scan
+
+    async def _spy_afternoon_scan(now, cfg):
+        afternoon_scan_calls["n"] += 1
+        book._running = False   # stop the loop right after the first real call
+        return await _orig_maybe_run_afternoon_scan(now, cfg)
+    book._maybe_run_afternoon_scan = _spy_afternoon_scan
+
+    def _fetch_universe_noop(nse):
+        return pd.DataFrame(columns=["symbol", "lastPrice", "pChange"])
+    monkeypatch.setattr(screener, "fetch_fno_price_universe", _fetch_universe_noop)
+
+    await book._run_today_pipeline()
+
+    assert book._shortlist_symbols == []   # morning found nothing, as before
+    assert afternoon_scan_calls["n"] >= 1, (
+        "the empty-morning-shortlist path must still reach the polling loop "
+        "so _maybe_run_afternoon_scan() gets a real chance to run"
+    )
 
 
 # ── Two-session scan (2026-08-27, direct user spec): session 1 is a single

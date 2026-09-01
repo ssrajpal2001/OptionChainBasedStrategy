@@ -71,7 +71,9 @@ CONFIG = {
     # at SCAN_START (09:26) -- whichever stocks qualify AT THAT MOMENT get
     # added; no further morning scanning. Session 2 ("afternoon") re-runs
     # the scan periodically between AFTERNOON_SCAN_START (12:00) and
-    # AFTERNOON_SCAN_END (13:00), ADDING any newly-qualifying stock to the
+    # AFTERNOON_SCAN_END -- 2026-09-01, direct user spec: raised from 13:00 to
+    # 15:00 to match ENTRY_WINDOW_END (no reason to stop rescanning while
+    # entries can still fire) -- ADDING any newly-qualifying stock to the
     # existing shortlist (never dropping one already being watched). NO
     # scanning happens outside these two windows -- entry evaluation (VWAP
     # retest) for whatever's already shortlisted keeps running continuously
@@ -93,7 +95,7 @@ CONFIG = {
     "RANK_TOP_N": 10,
     "TWO_SESSION_SCAN_ENABLED": True,
     "AFTERNOON_SCAN_START": "12:00",
-    "AFTERNOON_SCAN_END": "13:00",
+    "AFTERNOON_SCAN_END": "15:00",
     "AFTERNOON_SCAN_INTERVAL_SEC": 300.0,
     "ENTRY_WINDOW_START": "09:26",
     # 2026-08-27, direct user spec: "if that stock does not hit vwap till

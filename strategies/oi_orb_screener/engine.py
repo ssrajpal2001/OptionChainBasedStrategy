@@ -206,7 +206,10 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         # qualifying stock. No scanning happens outside these two windows.
         two_session_scan_enabled: bool = True,
         afternoon_scan_start: str = "12:00",
-        afternoon_scan_end: str = "13:00",
+        # 2026-09-01, direct user spec: raised from 13:00 to 15:00 to match
+        # entry_window_end -- no reason to stop rescanning while entries can
+        # still fire.
+        afternoon_scan_end: str = "15:00",
         afternoon_scan_interval_sec: float = 300.0,
         # 2026-08-25, direct user spec: five additive, independently-
         # toggleable filters (see filters.py's own module docstring for the
@@ -900,89 +903,109 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             return
 
         if shortlist is None or shortlist.empty:
-            self._clog.info("OiOrb[%s/%s]: no candidates passed the filters today (NIFTY pChange %+.2f%%).",
+            # 2026-09-01 CRITICAL FIX, real incident: this used to `return` here,
+            # which meant the polling `while` loop below -- the ONLY place
+            # _maybe_run_afternoon_scan() ever gets called -- was never reached.
+            # _daily_loop() only calls _run_today_pipeline() once per calendar
+            # day, so a morning that started empty had ZERO path to ever find
+            # afternoon candidates, no matter what two_session_scan_enabled said.
+            # Real incident, 2026-09-01: NIFTY flat (-0.18%) at 09:25 -> morning
+            # shortlist empty -> book went silent for the rest of the day, EVEN
+            # THOUGH 7 real candidates (HEROMOTOCO/BAJAJ-AUTO/ADANIENSOL/MARUTI/
+            # KALYANKJIL/POLYCAB/KEI) existed by 12:51 and two_session_scan_enabled
+            # was explicitly turned on for exactly this scenario. Fixed: fall
+            # through into the polling loop with an empty shortlist instead of
+            # returning -- the loop's own shortlist-dependent work (heartbeat,
+            # chain subscriptions, ORB tracking) is naturally a no-op on an empty
+            # list, but _maybe_run_afternoon_scan() now gets its real chance to
+            # run every cycle and populate self._shortlist_symbols later in the day.
+            self._clog.info("OiOrb[%s/%s]: no candidates passed the filters today (NIFTY pChange %+.2f%%) "
+                             "-- still entering the monitor loop so an afternoon rescan (if enabled) can "
+                             "find candidates later.",
                              self._client_id, self._binding_id, nifty_pchange)
             await asyncio.to_thread(store.record_scan, self._client_id, self._binding_id,
                                      nifty_pchange, "no_candidates")
-            return
+            self._shortlist_symbols = []
+            self._prev_close_map = {}
+            self._shortlist_pchange = {}
+        else:
+            self._shortlist_symbols = shortlist["symbol"].tolist()
+            self._prev_close_map = (shortlist.set_index("symbol")["previousClose"].to_dict()
+                                     if "previousClose" in shortlist.columns else {})
+            # pChange sign tells you which side of the regime table each stock is
+            # even before any ORB level exists -- bullish (pChange>0) watches for
+            # a CALL on ORB-high breakout, bearish (pChange<0) watches for a PUT
+            # on ORB-low breakdown. Surfaced in monitoring_state() so the
+            # dashboard panel isn't just "ORB pending" with zero directional
+            # signal while ORB levels are still empty/pending.
+            self._shortlist_pchange = (shortlist.set_index("symbol")["pChange"].to_dict()
+                                        if "pChange" in shortlist.columns else {})
+            self._clog.info("OiOrb[%s/%s]: shortlist ready (%d): %s",
+                             self._client_id, self._binding_id, len(self._shortlist_symbols),
+                             ", ".join(f"{s}({self._shortlist_pchange.get(s, 0):+.2f}%)"
+                                       for s in self._shortlist_symbols))
 
-        self._shortlist_symbols = shortlist["symbol"].tolist()
-        self._prev_close_map = (shortlist.set_index("symbol")["previousClose"].to_dict()
-                                 if "previousClose" in shortlist.columns else {})
-        # pChange sign tells you which side of the regime table each stock is
-        # even before any ORB level exists -- bullish (pChange>0) watches for
-        # a CALL on ORB-high breakout, bearish (pChange<0) watches for a PUT
-        # on ORB-low breakdown. Surfaced in monitoring_state() so the
-        # dashboard panel isn't just "ORB pending" with zero directional
-        # signal while ORB levels are still empty/pending.
-        self._shortlist_pchange = (shortlist.set_index("symbol")["pChange"].to_dict()
-                                    if "pChange" in shortlist.columns else {})
-        self._clog.info("OiOrb[%s/%s]: shortlist ready (%d): %s",
-                         self._client_id, self._binding_id, len(self._shortlist_symbols),
-                         ", ".join(f"{s}({self._shortlist_pchange.get(s, 0):+.2f}%)"
-                                   for s in self._shortlist_symbols))
-
-        await asyncio.to_thread(store.record_scan, self._client_id, self._binding_id, nifty_pchange, "ok")
-        sl_indexed = shortlist.set_index("symbol")
-        shortlist_rows = []
-        for sym in self._shortlist_symbols:
-            row = sl_indexed.loc[sym] if sym in sl_indexed.index else None
-            shortlist_rows.append({
-                "symbol": sym,
-                "price_change_pct": self._shortlist_pchange.get(sym),
-                "oi_spurt_pct": (float(row["oi_spurt_pct"])
-                                 if row is not None and "oi_spurt_pct" in shortlist.columns else None),
-                "score": float(row["score"]) if row is not None and "score" in shortlist.columns else None,
-                "side_bias": "bullish" if self._shortlist_pchange.get(sym, 0) > 0 else "bearish",
-            })
-        await asyncio.to_thread(store.record_shortlist, self._client_id, self._binding_id, shortlist_rows)
-
-        # 2026-08-25: build a live option-chain tracker for each shortlisted
-        # stock, regardless of whether any of the 3 chain-dependent filters
-        # (oi_wall/distance_to_wall/pcr) are currently enabled as a real
-        # gate -- all 5 filters must have real data to compare, per direct
-        # user spec ("run parallel... own log file... compare tomorrow").
-        # Best-effort per stock: a failure here must never abort the whole
-        # day's pipeline, it just leaves that stock's chain-dependent
-        # filters reporting "unavailable" (which never blocks on its own).
-        #
-        # SAFETY CAP, direct user spec 2026-08-25: this app's WS feed
-        # subscription is a SINGLE SHARED budget across every strategy
-        # (~50 symbols/connection, see data_layer/global_feeder.py's
-        # _WS_SYMBOL_LIMIT -- exceeding it doesn't error, the broker
-        # SILENTLY DROPS the excess, which could starve a completely
-        # different strategy's ticks, not just this one's). Each chain is
-        # ~(2*chain_depth+1)*2 symbols -- watching every shortlisted stock
-        # unbounded could add 50-100+ new subscriptions on a busy day. Cap
-        # to the first chain_watch_max_stocks (by shortlist rank, i.e. the
-        # highest-scored candidates) until this strategy gets its own
-        # dedicated feeder connection (a separate broker account/token,
-        # mirroring the existing upstox2-for-CrudeOil precedent) -- not
-        # built yet, needs a real credential provisioned first.
-        watch_list = self._shortlist_symbols[: self._chain_watch_max_stocks]
-        if len(self._shortlist_symbols) > len(watch_list):
-            self._clog.warning(
-                "OiOrb[%s/%s]: chain_watch_max_stocks=%d -- only watching %s for the OI-wall/"
-                "distance/PCR filters, skipping %s (shared WS subscription budget, ~50/connection "
-                "cap). OI-Spurt/price-move/volume/OI-ROC filters are unaffected for the skipped ones.",
-                self._client_id, self._binding_id, self._chain_watch_max_stocks, watch_list,
-                [s for s in self._shortlist_symbols if s not in watch_list],
-            )
-        for sym in watch_list:
-            try:
+            await asyncio.to_thread(store.record_scan, self._client_id, self._binding_id, nifty_pchange, "ok")
+            sl_indexed = shortlist.set_index("symbol")
+            shortlist_rows = []
+            for sym in self._shortlist_symbols:
                 row = sl_indexed.loc[sym] if sym in sl_indexed.index else None
-                spot = float(row["lastPrice"]) if row is not None and "lastPrice" in shortlist.columns else 0.0
-                await self._ensure_chain_subscription(sym, spot)
-            except Exception:
-                self._clog.exception("OiOrb[%s/%s]: chain subscription setup failed for %s "
-                                      "(chain-dependent filters will report unavailable for it).",
-                                      self._client_id, self._binding_id, sym)
+                shortlist_rows.append({
+                    "symbol": sym,
+                    "price_change_pct": self._shortlist_pchange.get(sym),
+                    "oi_spurt_pct": (float(row["oi_spurt_pct"])
+                                     if row is not None and "oi_spurt_pct" in shortlist.columns else None),
+                    "score": float(row["score"]) if row is not None and "score" in shortlist.columns else None,
+                    "side_bias": "bullish" if self._shortlist_pchange.get(sym, 0) > 0 else "bearish",
+                })
+            await asyncio.to_thread(store.record_shortlist, self._client_id, self._binding_id, shortlist_rows)
 
-        await asyncio.to_thread(screener.backfill_orb_from_yahoo, self._bars, self._shortlist_symbols, cfg)
-        # 2026-08-27: VWAP is now the entry trigger (see below) AND the SL reference --
-        # backfilled the same way ORB/SMA already are, real 09:15-start basis instead of
-        # starting cold from whatever time live polling first begins.
-        await asyncio.to_thread(screener.backfill_vwap_from_yahoo, self._vwap, self._shortlist_symbols, cfg)
+            # 2026-08-25: build a live option-chain tracker for each shortlisted
+            # stock, regardless of whether any of the 3 chain-dependent filters
+            # (oi_wall/distance_to_wall/pcr) are currently enabled as a real
+            # gate -- all 5 filters must have real data to compare, per direct
+            # user spec ("run parallel... own log file... compare tomorrow").
+            # Best-effort per stock: a failure here must never abort the whole
+            # day's pipeline, it just leaves that stock's chain-dependent
+            # filters reporting "unavailable" (which never blocks on its own).
+            #
+            # SAFETY CAP, direct user spec 2026-08-25: this app's WS feed
+            # subscription is a SINGLE SHARED budget across every strategy
+            # (~50 symbols/connection, see data_layer/global_feeder.py's
+            # _WS_SYMBOL_LIMIT -- exceeding it doesn't error, the broker
+            # SILENTLY DROPS the excess, which could starve a completely
+            # different strategy's ticks, not just this one's). Each chain is
+            # ~(2*chain_depth+1)*2 symbols -- watching every shortlisted stock
+            # unbounded could add 50-100+ new subscriptions on a busy day. Cap
+            # to the first chain_watch_max_stocks (by shortlist rank, i.e. the
+            # highest-scored candidates) until this strategy gets its own
+            # dedicated feeder connection (a separate broker account/token,
+            # mirroring the existing upstox2-for-CrudeOil precedent) -- not
+            # built yet, needs a real credential provisioned first.
+            watch_list = self._shortlist_symbols[: self._chain_watch_max_stocks]
+            if len(self._shortlist_symbols) > len(watch_list):
+                self._clog.warning(
+                    "OiOrb[%s/%s]: chain_watch_max_stocks=%d -- only watching %s for the OI-wall/"
+                    "distance/PCR filters, skipping %s (shared WS subscription budget, ~50/connection "
+                    "cap). OI-Spurt/price-move/volume/OI-ROC filters are unaffected for the skipped ones.",
+                    self._client_id, self._binding_id, self._chain_watch_max_stocks, watch_list,
+                    [s for s in self._shortlist_symbols if s not in watch_list],
+                )
+            for sym in watch_list:
+                try:
+                    row = sl_indexed.loc[sym] if sym in sl_indexed.index else None
+                    spot = float(row["lastPrice"]) if row is not None and "lastPrice" in shortlist.columns else 0.0
+                    await self._ensure_chain_subscription(sym, spot)
+                except Exception:
+                    self._clog.exception("OiOrb[%s/%s]: chain subscription setup failed for %s "
+                                          "(chain-dependent filters will report unavailable for it).",
+                                          self._client_id, self._binding_id, sym)
+
+            await asyncio.to_thread(screener.backfill_orb_from_yahoo, self._bars, self._shortlist_symbols, cfg)
+            # 2026-08-27: VWAP is now the entry trigger (see below) AND the SL reference --
+            # backfilled the same way ORB/SMA already are, real 09:15-start basis instead of
+            # starting cold from whatever time live polling first begins.
+            await asyncio.to_thread(screener.backfill_vwap_from_yahoo, self._vwap, self._shortlist_symbols, cfg)
 
         # 2026-08-27: MAX_MONITOR_MINUTES used to be this loop's own outer deadline, but a
         # position can now stay open (and needs live VWAP updates for its own SL) all the

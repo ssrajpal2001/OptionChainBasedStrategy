@@ -52,12 +52,14 @@ _DEFAULT_PARAMS = {
     # point-in-time scan at scan_start (09:26) -- whichever stocks qualify AT
     # THAT MOMENT get added, no further morning scanning. Session 2 re-runs
     # the scan periodically between afternoon_scan_start (12:00) and
-    # afternoon_scan_end (13:00), ADDING any newly-qualifying stock. No
+    # afternoon_scan_end -- 2026-09-01, direct user spec: raised from 13:00 to
+    # 15:00 to match entry_window_end below (no reason to stop rescanning
+    # while entries can still fire), ADDING any newly-qualifying stock. No
     # scanning happens outside these two windows. Both default ON.
     "scan_start": "09:26",
     "two_session_scan_enabled": True,
     "afternoon_scan_start": "12:00",
-    "afternoon_scan_end": "13:00",
+    "afternoon_scan_end": "15:00",
     "afternoon_scan_interval_sec": 300.0,
     "entry_window_start": "09:26",
     # direct user spec: "if that stock does not hit vwap till 15.00 it will
