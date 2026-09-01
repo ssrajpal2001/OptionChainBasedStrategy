@@ -1766,7 +1766,26 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         own history): NO exit check at all until the parallel 3-min ladder
         has produced a genuine R1/S1 value -- a naive fallback to
         entry_price would create a zero-risk stop that fires on the very
-        next tick."""
+        next tick.
+
+        2026-09-01 CRITICAL FIX, real incident: a genuine R1/S1 value can
+        exist within 1-2 three-minute bars of entry, but SupportResistance
+        Calculator itself flags a freshly-seeded level `is_established:
+        False` until a LATER bar actually confirms it as real structure --
+        an unconfirmed level is essentially the extreme of the first couple
+        bars since entry, not a real swing point, and stopped out two REAL
+        live trades within 2-4 minutes of entry on ordinary noise (ITC:
+        entered 13:33:11, TSL level {low:267.6,high:267.95} (0.35pts wide,
+        is_established=False) hit at 13:37:30 on a 0.15% underlying
+        pullback; ASHOKLEY: same shape, stopped in under 2 minutes). Same
+        root-cause CLASS as the earlier OI-Flow fix (a bare single-touch
+        swing pivot with no confirmation, fixed there via pool_swing_low's
+        2+-touch requirement) -- here, simply requiring is_established
+        before a level is eligible to trigger an exit is enough, since
+        _check_hard_risk_cap's own independent Rs2000/lot backstop already
+        protects every position on every option tick regardless of whether
+        this structural TSL has armed yet -- a position is never genuinely
+        naked while waiting for a level to establish."""
         from strategies.liquidity_trap.detector import BarAccumulator as _TrapAcc
 
         pos = self._positions.get(sym)
@@ -1787,6 +1806,8 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         level = sr.get("S1") if side == "CALL" else sr.get("R1")
         if level is None:
             return   # cold-start -- no exit check until a real ladder value exists
+        if not level.get("is_established"):
+            return   # level exists but isn't confirmed yet -- hard risk cap still protects
         breach = (ltp <= level["low"]) if side == "CALL" else (ltp >= level["high"])
         if not breach:
             return

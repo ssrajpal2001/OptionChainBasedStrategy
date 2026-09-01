@@ -1490,3 +1490,115 @@ def test_heartbeat_no_op_with_no_parts():
     book._clog.info = lambda *a, **k: calls.append(a)
     book._maybe_log_heartbeat([])
     assert calls == []
+
+
+# ── trap TSL: unconfirmed levels must not trigger an exit (2026-09-01 fix) ──
+# Real incident: ITC entered 13:33:11, TSL level {low:267.6,high:267.95}
+# (is_established=False) hit at 13:37:30 on a 0.15% underlying pullback --
+# same shape on ASHOKLEY, stopped under 2 minutes after entry. Both levels
+# were the extreme of just 1-2 three-minute bars since entry, not real
+# structure. _check_hard_risk_cap's independent Rs2000/lot backstop still
+# protects the position the whole time this gate is waiting.
+
+class _FakeSRCalc:
+    """Stand-in for SupportResistanceCalculator -- returns a fixed,
+    caller-controlled S1/R1 level regardless of what bars get fed in,
+    so the test can isolate the is_established gate itself."""
+    def __init__(self, level: dict, key: str):
+        self._level = level
+        self._key = key
+
+    def process_straddle_candle(self, sym, bar):
+        pass
+
+    def get_calculated_sr_state(self, sym):
+        return {"sr_levels": {self._key: self._level}}
+
+
+def _rig_trap_tsl(book, sym, side, level, key, entry_price=100.0, qty=10):
+    from strategies.liquidity_trap.detector import BarAccumulator as _TrapAcc
+    book._positions[sym] = {
+        "contract": type("C", (), {"option_type": "CE" if side == "CALL" else "PE", "strike": 100,
+                                     "expiry": date(2026, 9, 29)})(),
+        "qty": qty, "entry_price": entry_price, "paper_mode": True,
+        "opened_at": datetime.now(IST), "sl_mechanic": "trap",
+    }
+    book._trap_tsl_calc[sym] = _FakeSRCalc(level, key)
+    book._trap_tsl_acc[sym] = _TrapAcc(timeframe_min=3)
+    book._trap_tsl_fed_bars[sym] = 0
+
+
+@pytest.mark.asyncio
+async def test_unestablished_level_does_not_trigger_exit(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    level = {"low": 267.6, "high": 267.95, "is_established": False}
+    _rig_trap_tsl(book, "ITC", "CALL", level, "S1")
+
+    closed = []
+    async def _fake_emit_close(sym, pos, reason):
+        closed.append((sym, reason))
+    book._emit_close = _fake_emit_close
+
+    # underlying breaches the level's low (267.50 < 267.6) -- same real numbers as the incident
+    await book._trap_update_tsl_and_check_exit("ITC", "CALL", 267.50, datetime.now(IST))
+
+    assert closed == [], "an unconfirmed (is_established=False) level must not trigger the TSL"
+    assert "ITC" not in book._eod_closing
+
+
+@pytest.mark.asyncio
+async def test_established_level_still_triggers_exit(monkeypatch):
+    """The gate must not block genuine, confirmed breaches -- only unconfirmed ones."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    level = {"low": 267.6, "high": 267.95, "is_established": True}
+    _rig_trap_tsl(book, "ITC", "CALL", level, "S1")
+
+    closed = []
+    async def _fake_emit_close(sym, pos, reason):
+        closed.append((sym, reason))
+    book._emit_close = _fake_emit_close
+
+    await book._trap_update_tsl_and_check_exit("ITC", "CALL", 267.50, datetime.now(IST))
+
+    assert closed == [("ITC", "trap_tsl")]
+    assert "ITC" in book._eod_closing
+
+
+@pytest.mark.asyncio
+async def test_unestablished_level_no_breach_also_no_exit(monkeypatch):
+    """Sanity: the gate itself isn't what's suppressing the exit above --
+    confirm a price that doesn't even breach the level correctly no-ops too."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    level = {"low": 267.6, "high": 267.95, "is_established": True}
+    _rig_trap_tsl(book, "ITC", "CALL", level, "S1")
+
+    closed = []
+    async def _fake_emit_close(sym, pos, reason):
+        closed.append((sym, reason))
+    book._emit_close = _fake_emit_close
+
+    await book._trap_update_tsl_and_check_exit("ITC", "CALL", 268.50, datetime.now(IST))  # above the low, no breach
+
+    assert closed == []
+    assert "ITC" not in book._eod_closing
+
+
+@pytest.mark.asyncio
+async def test_put_side_uses_r1_and_same_established_gate(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    level = {"low": 169.32, "high": 169.61, "is_established": False}
+    _rig_trap_tsl(book, "ASHOKLEY", "PUT", level, "R1")
+
+    closed = []
+    async def _fake_emit_close(sym, pos, reason):
+        closed.append((sym, reason))
+    book._emit_close = _fake_emit_close
+
+    # PUT breaches on ltp >= level["high"] -- same real numbers as the ASHOKLEY incident
+    await book._trap_update_tsl_and_check_exit("ASHOKLEY", "PUT", 169.61, datetime.now(IST))
+
+    assert closed == [], "unconfirmed R1 must not trigger the PUT-side TSL either"
