@@ -795,9 +795,29 @@ class ExitMixin:
         never touched by the real EOD close path at all. If hedging isn't
         eligible/needed (feature off, cumulative P&L not negative, or the
         hedge build itself fails), this is a no-op and the real squareoff
-        check later runs exactly as before."""
+        check later runs exactly as before.
+
+        2026-09-02 CRITICAL FIX, real incident: this only checked
+        is_hedged_positional -- not single-leg mode (pos.ce_leg_closed /
+        pe_leg_closed). _eod_close_or_hedge (the REAL EOD decision, one
+        minute later) already treats single-leg mode as always going
+        straight to a surviving-leg-only close, never hedge-eligible -- but
+        this earlier precheck didn't know that, so on 2026-09-01 it built a
+        genuine 2-leg hedge (CE24250@43.70 + PE23750@42.45) for a position
+        whose PE side had already closed via the post-15:00 R1 mechanic one
+        minute earlier, leaving only CE24100 as the real sold leg. One
+        minute later _eod_close_or_hedge correctly closed just the surviving
+        CE leg and finalized the position -- but _close_surviving_leg_and_
+        finalize has no concept of hedge legs, so the freshly-bought hedge
+        pair was left completely orphaned (no P&L tracking, no exit plan).
+        Manually closed by the user; see also the defensive backstop added
+        to _close_surviving_leg_and_finalize itself, in case a hedge is ever
+        already standing when single-leg mode kicks in (e.g. carried in from
+        a prior day) rather than freshly built here."""
         if pos.is_hedged_positional:
             return
+        if pos.ce_leg_closed or pos.pe_leg_closed:
+            return   # single-leg mode is always a surviving-leg-only close -- never hedge-eligible
         started = await self._hedge_or_roll_if_eligible(pos, now)
         if started:
             logger.info(
@@ -1765,10 +1785,22 @@ class ExitMixin:
         dual-leg _close_position order), then finalize the position exactly
         like a normal full close. The already-closed leg's P&L was booked into
         self._session_realized_pnl_pts once already, at the time IT closed --
-        do not add pos.realized_pnl again here."""
+        do not add pos.realized_pnl again here.
+
+        2026-09-02 CRITICAL FIX, real incident: this had no concept of hedge
+        legs, unlike every other full-close path (_close_position_and_hedge).
+        _maybe_prehedge itself is now gated against ever building a hedge in
+        single-leg mode (see its own docstring), but this is the defensive
+        backstop for the case a hedge is ALREADY standing when single-leg
+        mode kicks in regardless (e.g. carried in from a prior day's EOD
+        hedge-and-carry, then post1500 R1 closes one leg the next session)
+        -- without this, the hedge legs would be silently orphaned the same
+        way the 2026-09-01 incident orphaned a freshly-built one."""
         pos = self._position
         if not pos:
             return
+        if pos.is_hedged_positional:
+            await self._close_hedge_legs(pos, reason)
         surviving = "PE" if pos.ce_leg_closed else "CE"
         if getattr(pos, f"{surviving.lower()}_leg_closed"):
             # Both sides already closed (shouldn't reach here -- _check_post1500_r1_exit

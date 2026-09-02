@@ -1006,3 +1006,118 @@ def test_maybe_try_entry_routes_to_hedge_roll_completion_when_pending():
 
         assert len(called) == 1
     asyncio.run(run())
+
+
+# ── 2026-09-02 CRITICAL FIX, real incident: _maybe_prehedge built a genuine
+# 2-leg hedge for a position whose PE side had already closed via the
+# post-15:00 R1 mechanic one minute earlier -- _eod_close_or_hedge (the real
+# EOD decision) already knew single-leg mode is never hedge-eligible, but
+# the earlier prehedge precheck didn't share that guard. One minute later
+# the surviving CE leg closed and finalized the position, leaving the
+# freshly-bought hedge pair (CE24250, PE23750) completely orphaned -- no
+# P&L tracking, no exit plan. Fixed two ways: (1) _maybe_prehedge now also
+# skips single-leg-mode positions, and (2) _close_surviving_leg_and_finalize
+# is now hedge-aware as a defensive backstop, same as every other full-close
+# path already is via _close_position_and_hedge. ──────────────────────────
+
+def test_maybe_prehedge_skips_when_ce_leg_already_closed():
+    async def run():
+        s = _make()
+        s._hedge_carry_enabled = True
+        s._position.ce_leg_closed = True   # single-leg mode: only PE still open
+        calls = _stub_dispatch(s, {
+            ("BUY", "CE", 24500): _fill("BUY", "CE", 24500, 60.0),
+            ("BUY", "PE", 23500): _fill("BUY", "PE", 23500, 55.0),
+        })
+
+        await s._maybe_prehedge(s._position, datetime.datetime.now(IST))
+
+        assert calls == [], "single-leg mode must never build a hedge, even in the early prehedge check"
+        assert s._position.is_hedged_positional is False
+    asyncio.run(run())
+
+
+def test_maybe_prehedge_skips_when_pe_leg_already_closed():
+    async def run():
+        s = _make()
+        s._hedge_carry_enabled = True
+        s._position.pe_leg_closed = True   # single-leg mode: only CE still open
+        calls = _stub_dispatch(s, {
+            ("BUY", "CE", 24500): _fill("BUY", "CE", 24500, 60.0),
+            ("BUY", "PE", 23500): _fill("BUY", "PE", 23500, 55.0),
+        })
+
+        await s._maybe_prehedge(s._position, datetime.datetime.now(IST))
+
+        assert calls == []
+        assert s._position.is_hedged_positional is False
+    asyncio.run(run())
+
+
+def test_maybe_prehedge_still_hedges_normally_when_both_legs_open():
+    """Sanity: the new guard must not block the ordinary, still-valid
+    both-legs-open prehedge path."""
+    async def run():
+        s = _make()
+        s._hedge_carry_enabled = True
+        calls = _stub_dispatch(s, {
+            ("BUY", "CE", 24500): _fill("BUY", "CE", 24500, 60.0),
+            ("BUY", "PE", 23500): _fill("BUY", "PE", 23500, 55.0),
+        })
+
+        await s._maybe_prehedge(s._position, datetime.datetime.now(IST))
+
+        assert ("BUY", "CE", 24500) in calls
+        assert ("BUY", "PE", 23500) in calls
+        assert s._position.is_hedged_positional is True
+    asyncio.run(run())
+
+
+def test_close_surviving_leg_and_finalize_closes_hedge_legs_too():
+    """Defensive backstop: if a hedge is somehow already standing when
+    single-leg mode kicks in (e.g. carried in from a prior day), the hedge
+    legs must be closed alongside the surviving leg, not orphaned."""
+    async def run():
+        s = _make()
+        s._position.ce_leg_closed = True   # PE is the surviving leg
+        s._position.hedge_ce_leg = StraddleLeg("CE", 24500, 60.0, 60.0)
+        s._position.hedge_pe_leg = StraddleLeg("PE", 23500, 55.0, 55.0)
+        s._position.is_hedged_positional = True
+        sell_calls = _stub_dispatch(s, {
+            ("SELL", "CE", 24500): _fill("SELL", "CE", 24500, 65.0),
+            ("SELL", "PE", 23500): _fill("SELL", "PE", 23500, 50.0),
+        })
+
+        async def _fake_close_leg(side, reason, now):
+            leg = s._position.pe_leg if side == "PE" else s._position.ce_leg
+            leg.close_time = now
+            return SimpleNamespace(close_aborted=False)
+        s._close_leg = _fake_close_leg
+
+        await s._close_surviving_leg_and_finalize("eod_squareoff")
+
+        assert ("SELL", "CE", 24500) in sell_calls
+        assert ("SELL", "PE", 23500) in sell_calls
+        assert s._position is None   # position finalized as normal
+    asyncio.run(run())
+
+
+def test_close_surviving_leg_and_finalize_no_hedge_calls_when_not_hedged():
+    """Sanity: the new hedge-close call must not fire for the ordinary,
+    never-hedged single-leg case that was already working correctly."""
+    async def run():
+        s = _make()
+        s._position.ce_leg_closed = True
+        assert s._position.is_hedged_positional is False
+        calls = _stub_dispatch(s, {})
+
+        async def _fake_close_leg(side, reason, now):
+            leg = s._position.pe_leg if side == "PE" else s._position.ce_leg
+            leg.close_time = now
+            return SimpleNamespace(close_aborted=False)
+        s._close_leg = _fake_close_leg
+
+        await s._close_surviving_leg_and_finalize("eod_squareoff")
+
+        assert calls == []
+    asyncio.run(run())
