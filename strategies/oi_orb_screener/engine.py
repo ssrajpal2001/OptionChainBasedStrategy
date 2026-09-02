@@ -364,7 +364,10 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._trap_tsl_acc: Dict[str, "object"] = {}
         self._trap_tsl_fed_bars: Dict[str, int] = {}
         # 2026-09-02, opt-in immediate-entry alternate mode -- see
-        # _immediate_check_entry's own docstring.
+        # _immediate_check_entry's own docstring. Hybrid stop: fixed ORB
+        # floor (self._orb_frozen) from the instant entry fires, tightened
+        # to a 15-min S1/R1 ladder once one establishes -- the ladder state
+        # below is keyed the same way the 3-min trap TSL's own ladder is.
         self._immediate_tsl_calc: Dict[str, "object"] = {}
         self._immediate_tsl_acc: Dict[str, "object"] = {}
         self._immediate_tsl_fed_bars: Dict[str, int] = {}
@@ -1806,7 +1809,18 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
 
         Returns True exactly once per (sym, side) -- caller's own
         self._already_fired set (same one _trap_check_entry's caller uses)
-        prevents a re-fire on a later tick."""
+        prevents a re-fire on a later tick.
+
+        2026-09-02, direct user spec: risk is a HYBRID, not either concept
+        alone -- the INITIAL SL is the fixed ORB(09:15-09:25) extreme
+        (self._orb_frozen[sym]), protecting the position immediately from
+        the moment it enters (no warm-up gap at all, unlike the 3-min trap
+        TSL which has none until its own ladder produces a first value).
+        Once the parallel 15-min S1(long)/R1(short) ladder produces a
+        genuine ESTABLISHED level, the stop RATCHETS to it if -- and only
+        if -- that level is tighter (closer to price) than the ORB floor;
+        it never loosens back past the ORB extreme. See
+        _immediate_update_tsl_and_check_exit for the actual ratchet logic."""
         if sym in self._immediate_tsl_calc:
             return False   # already fired for this symbol this session
         if self._orb_frozen.get(sym) is None:
@@ -1816,57 +1830,73 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._immediate_tsl_calc[sym] = SupportResistanceCalculator()
         self._immediate_tsl_acc[sym] = _TrapAcc(timeframe_min=15)
         self._immediate_tsl_fed_bars[sym] = 0
+        orb_h, orb_l = self._orb_frozen[sym]
         self._clog.info(
             "OiOrb[%s/%s]: %s IMMEDIATE ORB ENTRY (%s) -- skipping zone/retest wait, entering "
-            "now that ORB has frozen; 15-min S1/R1 TSL ladder starting fresh from here.",
+            "now that ORB has frozen; initial SL = ORB %s (09:15-09:25) = %.2f, will tighten to "
+            "the 15-min S1/R1 ladder once it establishes a level closer than that.",
             self._client_id, self._binding_id, sym, side,
+            "low" if side == "CALL" else "high", orb_l if side == "CALL" else orb_h,
         )
         return True
 
     async def _immediate_update_tsl_and_check_exit(self, sym: str, side: str, ltp: float, ts: datetime) -> None:
-        """15-minute S1(long)/R1(short) trailing stop for an immediate_15m-
-        tagged position (2026-09-02, direct user spec) -- same mechanic and
-        same is_established gate as _trap_update_tsl_and_check_exit (see
-        that method's own docstring for the real 2026-09-01 incident that
-        motivated the gate), just on a slower 15-min ladder to match this
-        mode's wider, immediate-entry risk profile instead of the 3-min
-        ladder's tighter one. Cold-start safety identical: no exit check at
-        all until a genuine, ESTABLISHED R1/S1 value exists."""
+        """Hybrid stop for an immediate_15m-tagged position (2026-09-02,
+        direct user spec): starts at the fixed ORB(09:15-09:25) extreme
+        (self._orb_frozen[sym] -- day-low for a CALL, day-high for a PUT),
+        protecting the position from the instant it enters. In parallel, a
+        15-min S1(CALL)/R1(PUT) ladder (same SupportResistanceCalculator
+        mechanic and is_established gate as the 3-min trap TSL) builds up;
+        the moment it produces a genuinely ESTABLISHED level, the effective
+        stop RATCHETS to it if that level is tighter (closer to current
+        price) than the ORB floor -- ratchet only, the ORB floor is never
+        given back even if the 15-min level is somehow looser."""
         pos = self._positions.get(sym)
         if pos is None or sym in self._eod_closing:
             return
+        orb_lvl = self._orb_frozen.get(sym)
+        if orb_lvl is None:
+            return   # defensive -- shouldn't happen, ORB must already be frozen to have entered
+        orb_h, orb_l = orb_lvl
+        sl_level = orb_l if side == "CALL" else orb_h
+
         from strategies.liquidity_trap.detector import BarAccumulator as _TrapAcc
         acc = self._immediate_tsl_acc.setdefault(sym, _TrapAcc(timeframe_min=15))
         acc.on_tick(ts, ltp)
         calc = self._immediate_tsl_calc.get(sym)
-        if calc is None:
-            return   # no ladder ever started for this position (shouldn't happen -- defensive)
+        if calc is not None:
+            fed = self._immediate_tsl_fed_bars.get(sym, 0)
+            for b in acc.bars[fed:]:
+                calc.process_straddle_candle(sym, {"timestamp": b.ts, "high": b.high, "low": b.low, "duration": 15})
+            self._immediate_tsl_fed_bars[sym] = len(acc.bars)
 
-        fed = self._immediate_tsl_fed_bars.get(sym, 0)
-        for b in acc.bars[fed:]:
-            calc.process_straddle_candle(sym, {"timestamp": b.ts, "high": b.high, "low": b.low, "duration": 15})
-        self._immediate_tsl_fed_bars[sym] = len(acc.bars)
+            sr = calc.get_calculated_sr_state(sym).get("sr_levels", {})
+            level = sr.get("S1") if side == "CALL" else sr.get("R1")
+            if level is not None and level.get("is_established"):
+                ladder_level = level["low"] if side == "CALL" else level["high"]
+                # Ratchet only -- a CALL's stop only ever moves UP (tighter),
+                # a PUT's stop only ever moves DOWN (tighter). Never looser
+                # than the ORB floor either direction.
+                if side == "CALL" and ladder_level > sl_level:
+                    sl_level = ladder_level
+                elif side == "PUT" and ladder_level < sl_level:
+                    sl_level = ladder_level
 
-        sr = calc.get_calculated_sr_state(sym).get("sr_levels", {})
-        level = sr.get("S1") if side == "CALL" else sr.get("R1")
-        if level is None:
-            return   # cold-start -- no exit check until a real ladder value exists
-        if not level.get("is_established"):
-            return   # level exists but isn't confirmed yet -- hard risk cap still protects
-        breach = (ltp <= level["low"]) if side == "CALL" else (ltp >= level["high"])
+        breach = (ltp <= sl_level) if side == "CALL" else (ltp >= sl_level)
         if not breach:
             return
         self._eod_closing.add(sym)
         self._clog.info(
-            "OiOrb[%s/%s]: %s IMMEDIATE-MODE 15m TSL HIT -- underlying_ltp=%.2f level=%.2f side=%s -- closing.",
-            self._client_id, self._binding_id, sym, ltp,
-            level["low"] if side == "CALL" else level["high"], side,
+            "OiOrb[%s/%s]: %s IMMEDIATE-MODE HYBRID SL HIT -- underlying_ltp=%.2f level=%.2f "
+            "(orb_floor=%.2f) side=%s -- closing.",
+            self._client_id, self._binding_id, sym, ltp, sl_level,
+            orb_l if side == "CALL" else orb_h, side,
         )
         await asyncio.to_thread(
             store.log_signal_event, self._client_id, self._binding_id, sym,
-            "immediate_15m_tsl_triggered",
-            detail=f"underlying_ltp={ltp:.2f} level={level}")
-        await self._emit_close(sym, pos, "immediate_15m_tsl")
+            "immediate_hybrid_sl_triggered",
+            detail=f"underlying_ltp={ltp:.2f} sl_level={sl_level:.2f}")
+        await self._emit_close(sym, pos, "immediate_hybrid_sl")
 
     async def _trap_update_tsl_and_check_exit(self, sym: str, side: str, ltp: float, ts: datetime) -> None:
         """Parallel 3-min S1(long)/R1(short) trailing stop for a trap-

@@ -1622,7 +1622,9 @@ async def test_put_side_uses_r1_and_same_established_gate(monkeypatch):
 
 # ── 2026-09-02 opt-in immediate-entry alternate mode ────────────────────────
 # Skips the zone/retest wait entirely, entering the instant ORB freezes, with
-# a 15-min S1/R1 TSL (same is_established gate as the 3-min trap TSL).
+# a HYBRID stop: fixed ORB(09:15-09:25) extreme protects from entry, ratchets
+# tighter to a 15-min S1/R1 ladder once that ladder establishes a genuine
+# level closer than the ORB floor (never loosens past the floor either way).
 
 def test_immediate_check_entry_fires_once_orb_frozen():
     bus = _FakeBus()
@@ -1671,9 +1673,12 @@ def _rig_immediate_tsl(book, sym, side, level, key, entry_price=100.0, qty=10):
 
 
 @pytest.mark.asyncio
-async def test_immediate_tsl_unestablished_level_does_not_trigger_exit():
+async def test_immediate_hybrid_uses_orb_floor_when_ladder_unestablished():
+    """An unconfirmed 15-min level must be ignored entirely -- the stop
+    stays at the ORB floor, which itself still protects the position."""
     bus = _FakeBus()
     book = _make_book(bus)
+    book._orb_frozen["ITC"] = (267.25, 261.5)   # CALL -> floor is 261.5
     level = {"low": 267.6, "high": 267.95, "is_established": False}
     _rig_immediate_tsl(book, "ITC", "CALL", level, "S1")
 
@@ -1682,16 +1687,27 @@ async def test_immediate_tsl_unestablished_level_does_not_trigger_exit():
         closed.append((sym, reason))
     book._emit_close = _fake_emit_close
 
+    # Above the unestablished ladder level's own low (267.6) but nowhere
+    # near the ORB floor (261.5) -- must NOT fire, since the ladder level
+    # was never confirmed and the ORB floor alone is what's active.
     await book._immediate_update_tsl_and_check_exit("ITC", "CALL", 267.50, datetime.now(IST))
+    assert closed == [], "an unconfirmed 15-min level must never itself trigger the stop"
 
-    assert closed == [], "an unconfirmed 15-min level must not trigger the immediate-mode TSL either"
+    # The ORB floor itself still protects the position.
+    await book._immediate_update_tsl_and_check_exit("ITC", "CALL", 261.50, datetime.now(IST))
+    assert closed == [("ITC", "immediate_hybrid_sl")]
+    assert "ITC" in book._eod_closing
 
 
 @pytest.mark.asyncio
-async def test_immediate_tsl_established_level_triggers_exit():
+async def test_immediate_hybrid_ratchets_tighter_once_ladder_established():
+    """A genuinely established 15-min level, tighter than the ORB floor,
+    must tighten the effective stop -- firing at the ladder level, not
+    waiting all the way down to the (looser) ORB floor."""
     bus = _FakeBus()
     book = _make_book(bus)
-    level = {"low": 267.6, "high": 267.95, "is_established": True}
+    book._orb_frozen["ITC"] = (267.25, 261.5)   # CALL -> floor is 261.5
+    level = {"low": 265.0, "high": 267.95, "is_established": True}   # tighter than 261.5
     _rig_immediate_tsl(book, "ITC", "CALL", level, "S1")
 
     closed = []
@@ -1699,10 +1715,53 @@ async def test_immediate_tsl_established_level_triggers_exit():
         closed.append((sym, reason))
     book._emit_close = _fake_emit_close
 
-    await book._immediate_update_tsl_and_check_exit("ITC", "CALL", 267.50, datetime.now(IST))
+    # Below the established ladder level (265.0) but still above the ORB
+    # floor (261.5) -- must fire, since the ladder has tightened the stop.
+    await book._immediate_update_tsl_and_check_exit("ITC", "CALL", 264.80, datetime.now(IST))
 
-    assert closed == [("ITC", "immediate_15m_tsl")]
+    assert closed == [("ITC", "immediate_hybrid_sl")]
     assert "ITC" in book._eod_closing
+
+
+@pytest.mark.asyncio
+async def test_immediate_hybrid_never_loosens_past_orb_floor():
+    """A defensive case: an established ladder level that is somehow LOOSER
+    than the ORB floor must never widen the stop -- the ORB floor is the
+    permanent minimum protection."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._orb_frozen["ITC"] = (267.25, 261.5)   # CALL -> floor is 261.5
+    level = {"low": 258.0, "high": 267.95, "is_established": True}   # looser than 261.5
+    _rig_immediate_tsl(book, "ITC", "CALL", level, "S1")
+
+    closed = []
+    async def _fake_emit_close(sym, pos, reason):
+        closed.append((sym, reason))
+    book._emit_close = _fake_emit_close
+
+    # Between the (looser) ladder level and the (tighter) ORB floor -- must
+    # fire at the ORB floor, since the stop never widens past it.
+    await book._immediate_update_tsl_and_check_exit("ITC", "CALL", 260.00, datetime.now(IST))
+
+    assert closed == [("ITC", "immediate_hybrid_sl")]
+
+
+@pytest.mark.asyncio
+async def test_immediate_hybrid_put_side_same_ratchet_logic():
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._orb_frozen["ASHOKLEY"] = (169.61, 165.00)   # PUT -> floor is 169.61
+    level = {"low": 160.0, "high": 168.0, "is_established": True}   # tighter than 169.61
+    _rig_immediate_tsl(book, "ASHOKLEY", "PUT", level, "R1")
+
+    closed = []
+    async def _fake_emit_close(sym, pos, reason):
+        closed.append((sym, reason))
+    book._emit_close = _fake_emit_close
+
+    await book._immediate_update_tsl_and_check_exit("ASHOKLEY", "PUT", 168.20, datetime.now(IST))
+
+    assert closed == [("ASHOKLEY", "immediate_hybrid_sl")]
 
 
 @pytest.mark.asyncio
