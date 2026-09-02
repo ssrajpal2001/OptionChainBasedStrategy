@@ -1563,7 +1563,25 @@ class ExitMixin:
                     self._underlying, now.strftime("%H:%M"),
                     _pair_id[0], _pair_id[1], self._session_min_straddle_frozen,
                 )
-            if (self._day_low_exit_enabled and self._session_min_straddle_frozen is not None
+            # 2026-09-02 CRITICAL FIX, real incident: this block's own comment
+            # above (2026-08-28) already documents the intent -- "post1500_exit_
+            # enabled REPLACES day_low_exit's own 'close both legs' action" --
+            # but the gate below never actually enforced that when a binding had
+            # BOTH flags on simultaneously (this NIFTY binding did). day_low_exit
+            # ran first in the ladder and unconditionally closed both legs the
+            # instant the frozen low was touched, so post1500's per-leg R1 watch
+            # (section 2c-2, right below) never got a chance to arm or run at
+            # all. Real incident, 2026-09-02: day-low fired at 15:00:00 and
+            # closed the whole position (net +11.00pts, itself a clean exit) --
+            # but per direct user spec, that should have been post1500's per-leg
+            # R1 watch arming instead, not an immediate both-legs close. Fixed:
+            # day_low's own close action now explicitly stands down whenever
+            # post1500_exit_enabled is also on -- post1500 is authoritative for
+            # any binding that has both configured, matching the comment's own
+            # stated intent. Tracking/freeze computation above is UNCHANGED --
+            # post1500 still needs that same frozen value for its own arm check.
+            if (self._day_low_exit_enabled and not self._post1500_exit_enabled
+                    and self._session_min_straddle_frozen is not None
                     and _cv <= self._session_min_straddle_frozen):
                 self._clog.info(
                     "SellStraddle[%s]: DAY-LOW REVERSAL EXIT — CE%d/PE%d rate=%.2f "

@@ -319,3 +319,50 @@ def test_pair_starting_after_freeze_time_computes_immediately_using_now_as_cutof
     s._position = _position(25.0, 25.0)   # 50 -- retests the computed low
     asyncio.run(s._check_exits())
     assert close_calls == ["day_low_reversal_exit"]
+
+
+# ── 2026-09-02 CRITICAL FIX: post1500_exit_enabled must be authoritative when
+# a binding has BOTH flags on (real incident -- a NIFTY binding had both
+# day_low_exit_enabled and post1500_exit_enabled True; day_low's own "close
+# both legs" fired at the freeze tick before post1500's per-leg R1 watch ever
+# got a chance to arm, contradicting this feature's own documented intent
+# that post1500 REPLACES day_low's blunt close). day_low's own close action
+# must now stand down whenever post1500_exit_enabled is also on -- tracking/
+# freeze computation is unaffected, only the CLOSE action is gated. ─────────
+
+def test_day_low_close_stands_down_when_post1500_also_enabled():
+    s = _strategy()
+    s._day_low_exit_enabled = True
+    s._post1500_exit_enabled = True   # both on -- the real incident's config
+    s._day_low_freeze_time = dtime(0, 0)
+    s._defer_exit = lambda reason, now: True
+    close_calls = _spy_close(s)
+    s._compute_day_low_for_pair = AsyncMock(return_value=50.0)
+
+    s._position = _position(30.0, 20.0)   # current_value = 50, matches the computed low exactly --
+                                            # would have self-fired same-tick if day_low were solely enabled
+    asyncio.run(s._check_exits())
+
+    assert close_calls == [], (
+        "day_low_exit's own 'close both legs' action must not fire when post1500_exit_enabled "
+        "is also on -- post1500's per-leg R1 watch is authoritative for this combination"
+    )
+    # the frozen-low value must still get computed -- post1500 needs it for its own arm check
+    assert s._session_min_straddle_frozen == 50.0
+
+
+def test_day_low_close_still_fires_when_post1500_disabled():
+    """Sanity: the new guard must not break the ordinary, still-valid
+    day-low-only configuration (post1500 off)."""
+    s = _strategy()
+    s._day_low_exit_enabled = True
+    s._post1500_exit_enabled = False
+    s._day_low_freeze_time = dtime(0, 0)
+    s._defer_exit = lambda reason, now: True
+    close_calls = _spy_close(s)
+    s._compute_day_low_for_pair = AsyncMock(return_value=50.0)
+
+    s._position = _position(30.0, 20.0)
+    asyncio.run(s._check_exits())
+
+    assert close_calls == ["day_low_reversal_exit"]
