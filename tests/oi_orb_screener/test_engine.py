@@ -454,11 +454,27 @@ async def test_empty_morning_shortlist_still_reaches_afternoon_scan(monkeypatch)
     This test proves the fix: build_shortlist returns empty on the morning
     call, and the very next thing the polling loop does is call
     _maybe_run_afternoon_scan -- confirmed here by making THAT call itself
-    the thing that stops the loop and recording that it happened."""
+    the thing that stops the loop and recording that it happened.
+
+    2026-09-02 fix: the polling loop's own hard-stop check (`datetime.now(IST)
+    .time() < _hard_stop_time`, _hard_stop_time=15:20) used the REAL wall
+    clock -- this test failed with zero calls whenever actually run after
+    15:20 IST, nothing to do with any code regression. Pins engine.py's own
+    `datetime.now()` to a fixed mid-day time so the test is deterministic
+    regardless of when it's actually run."""
     bus = _FakeBus()
     book = _make_book(bus)
     book._screener_cfg["IGNORE_TIME_WINDOWS"] = True
     book._running = True
+
+    import strategies.oi_orb_screener.engine as _engine_mod
+    from datetime import datetime as _dt, date as _date, time as _dtime
+    _fixed_now = _dt(2026, 9, 2, 13, 0, 0, tzinfo=_engine_mod.IST)
+    class _FixedDT(_dt):
+        @classmethod
+        def now(cls, tz=None):
+            return _fixed_now
+    monkeypatch.setattr(_engine_mod, "datetime", _FixedDT)
 
     monkeypatch.setattr(screener, "NSESession", _FakeNSESession)
     monkeypatch.setattr(asyncio, "sleep", _async_return(None))
@@ -1602,3 +1618,128 @@ async def test_put_side_uses_r1_and_same_established_gate(monkeypatch):
     await book._trap_update_tsl_and_check_exit("ASHOKLEY", "PUT", 169.61, datetime.now(IST))
 
     assert closed == [], "unconfirmed R1 must not trigger the PUT-side TSL either"
+
+
+# ── 2026-09-02 opt-in immediate-entry alternate mode ────────────────────────
+# Skips the zone/retest wait entirely, entering the instant ORB freezes, with
+# a 15-min S1/R1 TSL (same is_established gate as the 3-min trap TSL).
+
+def test_immediate_check_entry_fires_once_orb_frozen():
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._orb_frozen["ITC"] = (267.25, 261.5)
+
+    fired = book._immediate_check_entry("ITC", "CALL", datetime.now(IST))
+
+    assert fired is True
+    assert "ITC" in book._immediate_tsl_calc
+    assert "ITC" in book._immediate_tsl_acc
+
+
+def test_immediate_check_entry_false_before_orb_frozen():
+    bus = _FakeBus()
+    book = _make_book(bus)
+    # ORB never frozen for this symbol
+    fired = book._immediate_check_entry("ITC", "CALL", datetime.now(IST))
+    assert fired is False
+    assert "ITC" not in book._immediate_tsl_calc
+
+
+def test_immediate_check_entry_does_not_refire():
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._orb_frozen["ITC"] = (267.25, 261.5)
+
+    first = book._immediate_check_entry("ITC", "CALL", datetime.now(IST))
+    second = book._immediate_check_entry("ITC", "CALL", datetime.now(IST))
+
+    assert first is True
+    assert second is False
+
+
+def _rig_immediate_tsl(book, sym, side, level, key, entry_price=100.0, qty=10):
+    from strategies.liquidity_trap.detector import BarAccumulator as _TrapAcc
+    book._positions[sym] = {
+        "contract": type("C", (), {"option_type": "CE" if side == "CALL" else "PE", "strike": 100,
+                                     "expiry": date(2026, 9, 29)})(),
+        "qty": qty, "entry_price": entry_price, "paper_mode": True,
+        "opened_at": datetime.now(IST), "sl_mechanic": "immediate_15m",
+    }
+    book._immediate_tsl_calc[sym] = _FakeSRCalc(level, key)
+    book._immediate_tsl_acc[sym] = _TrapAcc(timeframe_min=15)
+    book._immediate_tsl_fed_bars[sym] = 0
+
+
+@pytest.mark.asyncio
+async def test_immediate_tsl_unestablished_level_does_not_trigger_exit():
+    bus = _FakeBus()
+    book = _make_book(bus)
+    level = {"low": 267.6, "high": 267.95, "is_established": False}
+    _rig_immediate_tsl(book, "ITC", "CALL", level, "S1")
+
+    closed = []
+    async def _fake_emit_close(sym, pos, reason):
+        closed.append((sym, reason))
+    book._emit_close = _fake_emit_close
+
+    await book._immediate_update_tsl_and_check_exit("ITC", "CALL", 267.50, datetime.now(IST))
+
+    assert closed == [], "an unconfirmed 15-min level must not trigger the immediate-mode TSL either"
+
+
+@pytest.mark.asyncio
+async def test_immediate_tsl_established_level_triggers_exit():
+    bus = _FakeBus()
+    book = _make_book(bus)
+    level = {"low": 267.6, "high": 267.95, "is_established": True}
+    _rig_immediate_tsl(book, "ITC", "CALL", level, "S1")
+
+    closed = []
+    async def _fake_emit_close(sym, pos, reason):
+        closed.append((sym, reason))
+    book._emit_close = _fake_emit_close
+
+    await book._immediate_update_tsl_and_check_exit("ITC", "CALL", 267.50, datetime.now(IST))
+
+    assert closed == [("ITC", "immediate_15m_tsl")]
+    assert "ITC" in book._eod_closing
+
+
+@pytest.mark.asyncio
+async def test_on_fill_tags_immediate_15m_when_reason_is_immediate_orb_entry(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    contract = _contract("ITC", 270, "CE")
+    eid = "evt1"
+    book._pending_fills[eid] = {
+        "symbol": "ITC", "contract": contract, "qty": 375,
+        "entry_price": 10.0, "reason": "immediate_orb_entry",
+    }
+    fill = OiOrbFillEvent(
+        client_id=_TEST_CLIENT_ID, binding_id=_TEST_BINDING_ID, event_id=eid,
+        action="BUY", underlying="ITC", option_type="CE", strike=270,
+        qty=375, fill_price=10.0, paper_mode=True,
+    )
+    await book._on_fill(fill)
+
+    assert book._positions["ITC"]["sl_mechanic"] == "immediate_15m"
+
+
+@pytest.mark.asyncio
+async def test_on_fill_tags_trap_when_reason_is_trap_retest(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    contract = _contract("ITC", 270, "CE")
+    eid = "evt2"
+    book._pending_fills[eid] = {
+        "symbol": "ITC", "contract": contract, "qty": 375,
+        "entry_price": 10.0, "reason": "trap_retest",
+    }
+    fill = OiOrbFillEvent(
+        client_id=_TEST_CLIENT_ID, binding_id=_TEST_BINDING_ID, event_id=eid,
+        action="BUY", underlying="ITC", option_type="CE", strike=270,
+        qty=375, fill_price=10.0, paper_mode=True,
+    )
+    await book._on_fill(fill)
+
+    assert book._positions["ITC"]["sl_mechanic"] == "trap"

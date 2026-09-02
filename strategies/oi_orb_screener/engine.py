@@ -211,6 +211,11 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         # still fire.
         afternoon_scan_end: str = "15:00",
         afternoon_scan_interval_sec: float = 300.0,
+        # 2026-09-02, opt-in alternate entry mode -- see _immediate_check_
+        # entry's own docstring. Default OFF; the existing zone/retest trap
+        # mechanic remains the default for every deployment unless this is
+        # explicitly turned on.
+        immediate_entry_enabled: bool = False,
         # 2026-08-25, direct user spec: five additive, independently-
         # toggleable filters (see filters.py's own module docstring for the
         # real incident this addresses -- SAIL fired a CALL breakout right
@@ -280,6 +285,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._screener_cfg["AFTERNOON_SCAN_START"] = afternoon_scan_start
         self._screener_cfg["AFTERNOON_SCAN_END"] = afternoon_scan_end
         self._screener_cfg["AFTERNOON_SCAN_INTERVAL_SEC"] = afternoon_scan_interval_sec
+        self._screener_cfg["IMMEDIATE_ENTRY_ENABLED"] = immediate_entry_enabled
         self._screener_cfg["RR_MULTIPLE"] = rr_multiple
 
         # ── 5 additive filters: config + one dedicated log file each ────
@@ -357,6 +363,11 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._trap_tsl_calc: Dict[str, "object"] = {}
         self._trap_tsl_acc: Dict[str, "object"] = {}
         self._trap_tsl_fed_bars: Dict[str, int] = {}
+        # 2026-09-02, opt-in immediate-entry alternate mode -- see
+        # _immediate_check_entry's own docstring.
+        self._immediate_tsl_calc: Dict[str, "object"] = {}
+        self._immediate_tsl_acc: Dict[str, "object"] = {}
+        self._immediate_tsl_fed_bars: Dict[str, int] = {}
 
         # ── contract/feed/position state, keyed by stock symbol ────────
         self._pending_contracts: Dict[str, "stock_resolve.ResolvedContract"] = {}
@@ -439,6 +450,11 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._trap_tsl_calc = {}
         self._trap_tsl_acc = {}
         self._trap_tsl_fed_bars = {}
+        # 2026-09-02, opt-in immediate-entry alternate mode -- see
+        # _immediate_check_entry's own docstring.
+        self._immediate_tsl_calc = {}
+        self._immediate_tsl_acc = {}
+        self._immediate_tsl_fed_bars = {}
         self._afternoon_scan_last_ts = 0.0
         # 2026-08-30, direct user spec: OI-change rank tracking (09:16-09:30
         # poll window) -- see _rank_tracking_loop's own docstring.
@@ -1119,15 +1135,24 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             # position regardless of the entry window/regime state above --
             # an open position's own exit tracking must never pause just
             # because new entries aren't being evaluated right now.
+            # 2026-09-02: "immediate_15m"-tagged positions get their own
+            # parallel 15-min S1/R1 TSL instead.
             for sym, pos in list(self._positions.items()):
-                if pos.get("sl_mechanic") != "trap" or sym not in live.index:
+                if sym not in live.index:
+                    continue
+                mech = pos.get("sl_mechanic")
+                if mech not in ("trap", "immediate_15m"):
                     continue
                 side = screener.side_from_pchange(self._shortlist_pchange.get(sym, 0.0))
                 ltp = float(live.loc[sym, "lastPrice"])
-                await self._trap_update_tsl_and_check_exit(sym, side, ltp, now)
+                if mech == "trap":
+                    await self._trap_update_tsl_and_check_exit(sym, side, ltp, now)
+                else:
+                    await self._immediate_update_tsl_and_check_exit(sym, side, ltp, now)
 
             entry_window_open = cfg.get("IGNORE_TIME_WINDOWS") or (
                 cfg["ENTRY_WINDOW_START"] <= now_key < cfg["ENTRY_WINDOW_END"])
+            immediate_entry_on = cfg.get("IMMEDIATE_ENTRY_ENABLED", False)
             if self._regime is not None and entry_window_open:
                 regime_filter_on = cfg.get("REGIME_FILTER_ENABLED", True)
                 for sym in self._shortlist_symbols:
@@ -1139,17 +1164,23 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                     if not screener.side_allowed_by_regime(side, self._regime, regime_filter_on):
                         continue
                     ltp = float(live.loc[sym, "lastPrice"])
-                    fire = self._trap_check_entry(sym, side, ltp, now)
+                    if immediate_entry_on:
+                        fire = self._immediate_check_entry(sym, side, now)
+                        reason = "immediate_orb_entry"
+                    else:
+                        fire = self._trap_check_entry(sym, side, ltp, now)
+                        reason = "trap_retest"
                     if not fire:
                         continue
                     self._already_fired.add((sym, side))
                     orb_lvl = self._orb_frozen.get(sym, (0.0, 0.0))
-                    sig = screener.Signal(symbol=sym, side=side, reason="trap_retest",
+                    sig = screener.Signal(symbol=sym, side=side, reason=reason,
                                           trigger_price=ltp, orb_high=orb_lvl[0], orb_low=orb_lvl[1],
                                           ts=now.strftime("%H:%M:%S"))
                     self._clog.info(
-                        "OiOrb[%s/%s]: SIGNAL %s BUY %s TRAP-RETEST ltp=%.2f reason=%s",
+                        "OiOrb[%s/%s]: SIGNAL %s BUY %s %s ltp=%.2f reason=%s",
                         self._client_id, self._binding_id, sig.symbol, sig.side,
+                        "IMMEDIATE-ORB" if immediate_entry_on else "TRAP-RETEST",
                         sig.trigger_price, sig.reason)
                     await asyncio.to_thread(
                         store.log_signal_event, self._client_id, self._binding_id, sig.symbol,
@@ -1753,6 +1784,90 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             return True
         return False
 
+    def _immediate_check_entry(self, sym: str, side: str, ts: datetime) -> bool:
+        """2026-09-02, opt-in alternate entry mode (immediate_entry_enabled,
+        default False): skips the zone-detection + retest wait _trap_check_
+        entry uses entirely -- fires the instant ORB has frozen for this
+        symbol (self._orb_frozen already set by the poll loop above), no
+        further confirmation. Real-data comparison (2026-09-02, both a
+        simple ORB-extreme-as-SL proxy and this exact 15-min S1/R1 TSL
+        simulated against real intraday bars for that day's actual
+        shortlist) showed the zone/retest wait was costing genuine moves on
+        fast movers -- by the time the ladder confirmed, the move was often
+        already largely spent (see e.g. VOLTAS/KEI that day: entered late
+        via trap_retest and lost, vs. an immediate-at-ORB-freeze entry that
+        would have caught the same move early and profited). Single-day
+        evidence only -- true historical backtesting isn't possible for
+        this OI-based signal (Upstox's historical-candle API has no intraday
+        OI field, same structural limitation OI-Flow already has), so this
+        stays opt-in and should be watched over real forward days before
+        trusting it broadly, same graduation discipline as every other
+        strategy addition in this codebase.
+
+        Returns True exactly once per (sym, side) -- caller's own
+        self._already_fired set (same one _trap_check_entry's caller uses)
+        prevents a re-fire on a later tick."""
+        if sym in self._immediate_tsl_calc:
+            return False   # already fired for this symbol this session
+        if self._orb_frozen.get(sym) is None:
+            return False   # ORB hasn't frozen for this symbol yet
+        from strategies.d1_trap_option.support_resistance import SupportResistanceCalculator
+        from strategies.liquidity_trap.detector import BarAccumulator as _TrapAcc
+        self._immediate_tsl_calc[sym] = SupportResistanceCalculator()
+        self._immediate_tsl_acc[sym] = _TrapAcc(timeframe_min=15)
+        self._immediate_tsl_fed_bars[sym] = 0
+        self._clog.info(
+            "OiOrb[%s/%s]: %s IMMEDIATE ORB ENTRY (%s) -- skipping zone/retest wait, entering "
+            "now that ORB has frozen; 15-min S1/R1 TSL ladder starting fresh from here.",
+            self._client_id, self._binding_id, sym, side,
+        )
+        return True
+
+    async def _immediate_update_tsl_and_check_exit(self, sym: str, side: str, ltp: float, ts: datetime) -> None:
+        """15-minute S1(long)/R1(short) trailing stop for an immediate_15m-
+        tagged position (2026-09-02, direct user spec) -- same mechanic and
+        same is_established gate as _trap_update_tsl_and_check_exit (see
+        that method's own docstring for the real 2026-09-01 incident that
+        motivated the gate), just on a slower 15-min ladder to match this
+        mode's wider, immediate-entry risk profile instead of the 3-min
+        ladder's tighter one. Cold-start safety identical: no exit check at
+        all until a genuine, ESTABLISHED R1/S1 value exists."""
+        pos = self._positions.get(sym)
+        if pos is None or sym in self._eod_closing:
+            return
+        from strategies.liquidity_trap.detector import BarAccumulator as _TrapAcc
+        acc = self._immediate_tsl_acc.setdefault(sym, _TrapAcc(timeframe_min=15))
+        acc.on_tick(ts, ltp)
+        calc = self._immediate_tsl_calc.get(sym)
+        if calc is None:
+            return   # no ladder ever started for this position (shouldn't happen -- defensive)
+
+        fed = self._immediate_tsl_fed_bars.get(sym, 0)
+        for b in acc.bars[fed:]:
+            calc.process_straddle_candle(sym, {"timestamp": b.ts, "high": b.high, "low": b.low, "duration": 15})
+        self._immediate_tsl_fed_bars[sym] = len(acc.bars)
+
+        sr = calc.get_calculated_sr_state(sym).get("sr_levels", {})
+        level = sr.get("S1") if side == "CALL" else sr.get("R1")
+        if level is None:
+            return   # cold-start -- no exit check until a real ladder value exists
+        if not level.get("is_established"):
+            return   # level exists but isn't confirmed yet -- hard risk cap still protects
+        breach = (ltp <= level["low"]) if side == "CALL" else (ltp >= level["high"])
+        if not breach:
+            return
+        self._eod_closing.add(sym)
+        self._clog.info(
+            "OiOrb[%s/%s]: %s IMMEDIATE-MODE 15m TSL HIT -- underlying_ltp=%.2f level=%.2f side=%s -- closing.",
+            self._client_id, self._binding_id, sym, ltp,
+            level["low"] if side == "CALL" else level["high"], side,
+        )
+        await asyncio.to_thread(
+            store.log_signal_event, self._client_id, self._binding_id, sym,
+            "immediate_15m_tsl_triggered",
+            detail=f"underlying_ltp={ltp:.2f} level={level}")
+        await self._emit_close(sym, pos, "immediate_15m_tsl")
+
     async def _trap_update_tsl_and_check_exit(self, sym: str, side: str, ltp: float, ts: datetime) -> None:
         """Parallel 3-min S1(long)/R1(short) trailing stop for a trap-
         mechanic position (2026-08-31, direct user spec) -- tracks the
@@ -1854,9 +1969,13 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         mechanic's own exit (_trap_update_tsl_and_check_exit) runs off the
         underlying's own poll price, not option ticks, and is called from
         the poll loop instead. Only a restored ("vwap"-tagged) position from
-        before this change still reaches this method."""
+        before this change still reaches this method.
+
+        2026-09-02: same bypass for "immediate_15m"-tagged positions -- that
+        mechanic's own exit (_immediate_update_tsl_and_check_exit) is also
+        driven from the poll loop, off the underlying's own price."""
         pos = self._positions.get(symbol)
-        if pos is not None and pos.get("sl_mechanic") == "trap":
+        if pos is not None and pos.get("sl_mechanic") in ("trap", "immediate_15m"):
             return
         floored_minute = (ts.minute // self._vwap_sl_tf_minutes) * self._vwap_sl_tf_minutes
         key = f"{ts.hour:02d}:{floored_minute:02d}"
@@ -1986,7 +2105,14 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 # mechanic -- _update_option_sl_target_and_check branches on this
                 # tag to route to _trap_update_tsl_and_check_exit instead of the
                 # old option-premium-VWAP SL.
-                "sl_mechanic": "trap",
+                # 2026-09-02, direct user spec: an opt-in alternate entry mode
+                # (immediate_entry_enabled) skips the zone/retest wait entirely
+                # and enters the moment ORB freezes -- tagged "immediate_15m" so
+                # its own 15-min S1/R1 TSL (_immediate_update_tsl_and_check_exit)
+                # is used instead of the 3-min trap ladder. pending["reason"]
+                # carries which entry path actually fired (set by whichever
+                # signal-fire site created this fill).
+                "sl_mechanic": "immediate_15m" if pending.get("reason") == "immediate_orb_entry" else "trap",
             }
             # 2026-08-27, direct user spec: option-premium SL/target tracking starts
             # FRESH the moment the trade starts, not before -- pop any stale state

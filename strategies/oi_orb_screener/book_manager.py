@@ -118,6 +118,16 @@ _DEFAULT_PARAMS = {
     # rr_multiple is a fixed risk-reward target off the currently-armed
     # SL's own points distance from entry -- fresh, unvalidated default.
     "rr_multiple": 2.0,
+    # 2026-09-02, opt-in alternate entry mode -- direct user spec, based on a
+    # real-data comparison the same day showing the zone/retest wait was
+    # costing genuine moves on fast movers (see engine.py's own
+    # _immediate_check_entry docstring for the full real-incident writeup).
+    # Skips the zone/retest confirmation _trap_check_entry uses and enters
+    # the instant ORB freezes for a shortlisted stock, using a slower 15-min
+    # S1/R1 TSL instead of the 3-min ladder to match the wider risk profile.
+    # Default OFF -- unvalidated beyond one real day, same graduation
+    # discipline as every other feature addition in this codebase.
+    "immediate_entry_enabled": False,
 }
 _FLOAT_KEYS = ("oi_spurt_min_pct", "price_move_min_pct", "stock_move_abort_pct",
                "nifty_bullish_pct", "nifty_bearish_pct", "rejection_min_rise_pct",
@@ -178,6 +188,8 @@ class OiOrbScreenerBookManager(StrategyBookManager):
                                                                 _DEFAULT_PARAMS["vwap_cancel_if_unreached"]))
             cfg["two_session_scan_enabled"] = bool(params.get("two_session_scan_enabled",
                                                                 _DEFAULT_PARAMS["two_session_scan_enabled"]))
+            cfg["immediate_entry_enabled"] = bool(params.get("immediate_entry_enabled",
+                                                                _DEFAULT_PARAMS["immediate_entry_enabled"]))
             for k in _FILTER_BOOL_KEYS:
                 cfg[k] = bool(params.get(k, _DEFAULT_PARAMS[k]))
             # Key on the sentinel underlying so this fits the base class's
@@ -233,6 +245,7 @@ class OiOrbScreenerBookManager(StrategyBookManager):
             vwap_cancel_if_unreached=value["vwap_cancel_if_unreached"],
             vwap_sl_tf_minutes=value["vwap_sl_tf_minutes"],
             rr_multiple=value["rr_multiple"],
+            immediate_entry_enabled=value["immediate_entry_enabled"],
         )
         logger.info(
             "OiOrbScreenerBookManager: spawned %s/%s (lots=%d oi_spurt>=%.1f%% price_move>=%.1f%% "
@@ -294,6 +307,7 @@ class OiOrbScreenerBookManager(StrategyBookManager):
             or book._screener_cfg["AFTERNOON_SCAN_START"] != value["afternoon_scan_start"]
             or book._screener_cfg["AFTERNOON_SCAN_END"] != value["afternoon_scan_end"]
             or book._screener_cfg["AFTERNOON_SCAN_INTERVAL_SEC"] != value["afternoon_scan_interval_sec"]
+            or book._screener_cfg["IMMEDIATE_ENTRY_ENABLED"] != value["immediate_entry_enabled"]
         )
 
     def _log_spawned(self, key: tuple, value: dict) -> None:
