@@ -174,3 +174,91 @@ def upstox_totp_login(
     if not access_token:
         raise HeadlessTotpAuthError(f"Upstox: Step 6 failed — access_token missing. data={d6}")
     return access_token
+
+
+def _zerodha_session():
+    """Isolated so tests can monkeypatch it without touching requests."""
+    import requests as _req
+    s = _req.Session()
+    s.headers.update({
+        "X-Kite-Version": "3",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        ),
+    })
+    return s
+
+
+def zerodha_totp_login(
+    api_key: str, api_secret: str, user_id: str, password: str, totp_secret: str,
+) -> str:
+    """
+    Zerodha Kite Connect headless TOTP login: password -> TOTP 2FA ->
+    request_token via redirect -> checksum-signed token exchange.
+    Raises HeadlessTotpAuthError on any failure, naming the step.
+    """
+    import pyotp
+
+    if not all([api_key, api_secret, user_id, password]):
+        raise HeadlessTotpAuthError("Zerodha: api_key, api_secret, user_id, and password are required.")
+    if not totp_secret:
+        raise HeadlessTotpAuthError("Zerodha: totp_secret is required for headless authentication.")
+
+    s = _zerodha_session()
+
+    # Step 0: init OAuth session context
+    s.get("https://kite.zerodha.com/connect/login", params={"v": "3", "api_key": api_key},
+          allow_redirects=True, timeout=15)
+    time.sleep(0.5)
+
+    # Step 1: password login
+    r1 = s.post("https://kite.zerodha.com/api/login",
+                data={"user_id": user_id, "password": password}, timeout=15)
+    d1 = r1.json()
+    if d1.get("status") != "success":
+        raise HeadlessTotpAuthError(f"Zerodha Step 1 (login): {d1.get('message', 'Login failed.')}")
+    request_id = d1["data"]["request_id"]
+    time.sleep(0.5)
+
+    # Step 2: TOTP 2FA
+    totp_clean = totp_secret.upper().replace(" ", "").replace("-", "")
+    try:
+        totp_code = pyotp.TOTP(totp_clean).now()
+    except Exception as exc:
+        raise HeadlessTotpAuthError(f"Zerodha: invalid TOTP secret — {exc}")
+
+    r2 = s.post("https://kite.zerodha.com/api/twofa",
+                data={"user_id": user_id, "request_id": request_id,
+                      "twofa_value": totp_code, "twofa_type": "totp"},
+                allow_redirects=False, timeout=15)
+    try:
+        d2 = r2.json()
+    except Exception:
+        raise HeadlessTotpAuthError(f"Zerodha Step 2 (2FA): non-JSON response (HTTP {r2.status_code})")
+    if d2.get("status") != "success":
+        raise HeadlessTotpAuthError(f"Zerodha Step 2 (2FA): {d2.get('message', '2FA failed.')}")
+    time.sleep(0.5)
+
+    # Step 2b: re-GET the authenticated redirect for request_token
+    r3 = s.get("https://kite.zerodha.com/connect/login", params={"v": "3", "api_key": api_key},
+               allow_redirects=True, timeout=15)
+    qs = parse_qs(urlparse(r3.url).query)
+    request_token = (qs.get("request_token") or [""])[0]
+    if not request_token:
+        raise HeadlessTotpAuthError(
+            f"Zerodha Step 2b (redirect): request_token not in final URL. final_url={r3.url!r}"
+        )
+
+    # Step 3: exchange request_token -> access_token
+    checksum = hashlib.sha256(f"{api_key}{request_token}{api_secret}".encode()).hexdigest()
+    r4 = s.post("https://api.kite.trade/session/token",
+                data={"api_key": api_key, "request_token": request_token, "checksum": checksum},
+                headers={"X-Kite-Version": "3"}, timeout=15)
+    d4 = r4.json()
+    if d4.get("status") != "success":
+        raise HeadlessTotpAuthError(f"Zerodha Step 3 (token exchange): {d4.get('message', 'Token exchange failed.')}")
+    access_token = (d4.get("data") or {}).get("access_token", "")
+    if not access_token:
+        raise HeadlessTotpAuthError(f"Zerodha Step 3: access_token missing in response: {d4}")
+    return access_token
