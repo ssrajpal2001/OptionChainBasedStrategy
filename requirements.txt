@@ -30,6 +30,9 @@ setuptools>=70.0.0
 # TOTP (for Angel One / Fyers 2FA)
 pyotp>=2.9.0
 
+# Fyers headless login only — best-effort, see broker_auth/headless_totp_auth_fyers.py
+playwright>=1.40.0
+
 # Dev / testing
 pytest>=7.4.0
 pytest-asyncio>=0.23.0

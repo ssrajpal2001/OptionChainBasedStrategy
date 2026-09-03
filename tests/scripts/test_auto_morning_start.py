@@ -109,3 +109,44 @@ async def test_pm2_failure_skips_all_downstream_steps(monkeypatch):
     names_ok = {name: ok for name, ok, _ in steps}
     assert names_ok["pm2 start"] is False
     assert "Upstox login" not in names_ok
+
+
+@pytest.mark.asyncio
+async def test_fyers_failure_does_not_block_strategy_resume_step(monkeypatch):
+    import scripts.auto_morning_start as mod
+    from broker_auth.headless_totp_auth_fyers import FyersHeadlessLoginError
+
+    async def fake_start_pm2():
+        return True, ""
+
+    async def fake_wait_health():
+        return True, ""
+
+    def fake_upstox(**kw):
+        return "UPTOKEN"
+
+    def fake_zerodha(**kw):
+        return "ZTOKEN"
+
+    def fake_fyers(**kw):
+        raise FyersHeadlessLoginError("Fyers: Cloudflare challenge page")
+
+    class FakeDB:
+        def get_feeder_creds_sync(self, provider):
+            return {"api_key": "k", "secret": "s", "password": "p", "totp_secret": "JBSWY3DPEHPK3PXP", "client_id": "c"}
+
+        def get_bindings_sync(self, client_id):
+            return [{"binding_id": "SA5770", "provider": "zerodha", "api_key": "zk", "api_secret": "zs", "user_id": "zu"}]
+
+    monkeypatch.setattr(mod, "_start_pm2", fake_start_pm2)
+    monkeypatch.setattr(mod, "_wait_for_dashboard_health", fake_wait_health)
+    monkeypatch.setattr(mod, "upstox_totp_login", fake_upstox)
+    monkeypatch.setattr(mod, "zerodha_totp_login", fake_zerodha)
+    monkeypatch.setattr(mod, "ClientDB", lambda: FakeDB())
+    import broker_auth.headless_totp_auth_fyers as fyers_mod
+    monkeypatch.setattr(fyers_mod, "fyers_totp_login", fake_fyers)
+
+    steps = await mod.run_morning_sequence(dry_run=True, zerodha_client_id="ssrajpal2001")
+    names_ok = {name: ok for name, ok, _ in steps}
+    assert names_ok["Fyers login (best-effort)"] is False
+    assert names_ok["Strategies auto-resume"] is True

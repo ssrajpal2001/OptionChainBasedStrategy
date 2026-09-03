@@ -127,6 +127,23 @@ async def run_morning_sequence(dry_run: bool = False, zerodha_client_id: str = "
     except Exception as exc:
         steps.append(("Zerodha login", False, f"unexpected error: {exc}"))
 
+    # -- Fyers (best-effort — see broker_auth/headless_totp_auth_fyers.py) --
+    try:
+        from broker_auth.headless_totp_auth_fyers import FyersHeadlessLoginError, fyers_totp_login
+        creds = db.get_feeder_creds_sync("fyers") or {}
+        token = await asyncio.to_thread(
+            fyers_totp_login,
+            client_id=creds.get("client_id", ""), app_id=creds.get("api_key", ""),
+            password=creds.get("password", ""), totp_secret=creds.get("totp_secret", ""),
+            pin=creds.get("password", ""),
+        )
+        if not dry_run:
+            now = datetime.now(IST).isoformat()
+            await db.update_feeder_token("fyers", token, generated_at=now)
+        steps.append(("Fyers login (best-effort)", True, ""))
+    except Exception as exc:
+        steps.append(("Fyers login (best-effort)", False, str(exc)))
+
     steps.append((
         "Strategies auto-resume",
         True,
