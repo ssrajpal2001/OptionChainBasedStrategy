@@ -67,12 +67,19 @@ class StraddleBookManager(StrategyBookManager):
             # the position — see SellStraddleStrategy.__init__'s shadow_on_reject
             # docstring and OrderPlacementFailed handling in straddle_bridge.py.
             shadow = False
+            vwap_source_override = None
             try:
                 params = json.loads(d.get("strategy_params") or "{}")
                 shadow = bool(params.get("shadow_on_reject", False))
+                _vs = params.get("vwap_source")
+                if _vs in ("broker_atp", "calculative"):
+                    vwap_source_override = _vs
             except Exception:
                 pass
-            wanted[(cid, bid, und)] = {"lots": lots, "shadow_on_reject": shadow}
+            wanted[(cid, bid, und)] = {
+                "lots": lots, "shadow_on_reject": shadow,
+                "vwap_source_override": vwap_source_override,
+            }
         return wanted
 
     def _spawn_book(self, key, value):
@@ -86,6 +93,7 @@ class StraddleBookManager(StrategyBookManager):
             self._bus, self._cfg, underlying=und,
             lot_multiplier=value["lots"], client_id=cid, binding_id=bid,
             shadow_on_reject=value.get("shadow_on_reject", False),
+            vwap_source_override=value.get("vwap_source_override"),
         )
         book.set_client_db(self._db)
         if self._rebalancer is not None and hasattr(book, "set_rebalancer"):
@@ -97,7 +105,8 @@ class StraddleBookManager(StrategyBookManager):
 
     def _should_respawn(self, book, value):
         return (getattr(book, "_lot_multiplier", 1) != value["lots"]
-                or getattr(book, "_shadow_on_reject", False) != value.get("shadow_on_reject", False))
+                or getattr(book, "_shadow_on_reject", False) != value.get("shadow_on_reject", False)
+                or getattr(book, "_vwap_source_override", None) != value.get("vwap_source_override"))
 
     def _log_spawned(self, key, value):
         logger.info("StraddleBookManager: spawned book %s/%s/%s (lots=%d shadow_on_reject=%s)",

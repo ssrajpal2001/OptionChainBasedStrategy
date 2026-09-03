@@ -6,10 +6,11 @@ from strategies.straddle_book_manager import StraddleBookManager
 
 class _FakeBook:
     def __init__(self, bus, cfg, underlying="NIFTY", lot_multiplier=1, client_id="", binding_id="",
-                 shadow_on_reject=False):
+                 shadow_on_reject=False, vwap_source_override=None):
         self._underlying = underlying; self._client_id = client_id; self._binding_id = binding_id
         self._lot_multiplier = lot_multiplier
         self._shadow_on_reject = shadow_on_reject
+        self._vwap_source_override = vwap_source_override
         self._position = None
         self.started = False; self.stopped = False
     def set_client_db(self, db): self._db = db
@@ -34,7 +35,8 @@ class _DB:
                         "lot_multiplier": d.get("lot_multiplier", 1),
                         "strategy_name": d.get("strategy_name", ""),
                         "is_running": d.get("is_running", 0),
-                        "assigned_instrument": d.get("assigned_instrument", "")
+                        "assigned_instrument": d.get("assigned_instrument", ""),
+                        "strategy_params": d.get("strategy_params", ""),
                     })
         return result
 
@@ -45,9 +47,10 @@ def _mgr(monkeypatch, deps):
                                monitored_indices=["NIFTY", "BANKNIFTY"])
 
 
-def _dep(bid, und="NIFTY", strat="sell_straddle", is_running=1, lot_multiplier=1):
+def _dep(bid, und="NIFTY", strat="sell_straddle", is_running=1, lot_multiplier=1, strategy_params=""):
     return {"binding_id": bid, "strategy_name": strat, "underlying": und,
-            "is_running": is_running, "lot_multiplier": lot_multiplier}
+            "is_running": is_running, "lot_multiplier": lot_multiplier,
+            "strategy_params": strategy_params}
 
 
 def test_only_running_deployments_spawn(monkeypatch):
@@ -112,3 +115,46 @@ def test_spawns_one_book_per_underlying_on_same_binding(monkeypatch):
     assert all(b.started for b in m.books)
     assert m.find("C1", "Z1", "NIFTY") is not None
     assert m.find("C1", "Z1", "CRUDEOIL") is not None
+
+
+def test_vwap_source_override_propagates_per_binding(monkeypatch):
+    """2026-09-03, direct user spec: two bindings under the SAME client,
+    SAME underlying, must be able to run genuinely independent vwap_source
+    values -- the admin/client-level RuntimeConfig resolution alone can't
+    differentiate them (scoped by underlying+client_id, not binding_id), so
+    this must come from each deployment's own strategy_params."""
+    m = _mgr(monkeypatch, {"C1": [
+        _dep("Z1", strategy_params='{"vwap_source": "calculative"}'),
+        _dep("Z2", strategy_params='{}'),
+    ]})
+    m._reconcile()
+    assert m.find("C1", "Z1", "NIFTY")._vwap_source_override == "calculative"
+    assert m.find("C1", "Z2", "NIFTY")._vwap_source_override is None
+
+
+def test_vwap_source_override_invalid_value_ignored(monkeypatch):
+    m = _mgr(monkeypatch, {"C1": [_dep("Z1", strategy_params='{"vwap_source": "nonsense"}')]})
+    m._reconcile()
+    assert m.find("C1", "Z1", "NIFTY")._vwap_source_override is None
+
+
+def test_vwap_source_override_change_triggers_respawn(monkeypatch):
+    db = _DB({"C1": [_dep("Z1", strategy_params='{}')]})
+    monkeypatch.setattr(bm_mod, "SellStraddleStrategy", _FakeBook)
+    m = StraddleBookManager(None, None, db, ["NIFTY"])
+    m._reconcile()
+    original = m.find("C1", "Z1", "NIFTY")
+    assert original._vwap_source_override is None
+
+    db._deps["C1"][0]["strategy_params"] = '{"vwap_source": "calculative"}'
+    # Respawn is staged over two reconcile ticks -- the old book is stopped
+    # and dropped on the first (guaranteeing old and new are never both
+    # alive at once), the replacement spawns on the next.
+    m._reconcile()
+    assert original.stopped is True
+    assert m.find("C1", "Z1", "NIFTY") is None
+    m._reconcile()
+    respawned = m.find("C1", "Z1", "NIFTY")
+    assert respawned is not None
+    assert respawned._vwap_source_override == "calculative"
+    assert respawned is not original

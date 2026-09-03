@@ -407,7 +407,14 @@ class ConfigMixin:
 
         self._post1500_exit_enabled = cfg.post1500_exit_enabled
         self._shadow_vwap_enabled = cfg.shadow_vwap_enabled
-        self._vwap_source = cfg.vwap_source
+        # A per-deployment vwap_source_override (see SellStraddleStrategy.__init__)
+        # wins permanently over the admin/client-level RuntimeConfig value -- this
+        # method re-runs on every periodic config reload, so without this check a
+        # reload would silently clobber the override back to the shared default.
+        if getattr(self, "_vwap_source_override", None):
+            self._vwap_source = self._vwap_source_override
+        else:
+            self._vwap_source = cfg.vwap_source
         if not hasattr(self, "_post1500_pair"):
             self._post1500_pair = None
             self._post1500_armed = False

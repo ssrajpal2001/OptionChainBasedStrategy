@@ -66,6 +66,7 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         client_id: str = "",
         binding_id: str = "",
         shadow_on_reject: bool = False,
+        vwap_source_override: Optional[str] = None,
     ) -> None:
         if cfg is None:
             from config.global_config import GlobalConfig
@@ -86,6 +87,22 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         # confused with a real position: paper_mode=True on every fill this
         # produces, same flag the UI already uses to badge paper trades.
         self._shadow_on_reject = shadow_on_reject
+
+        # 2026-09-03, direct user spec: per-deployment vwap_source override
+        # (strategy_params {"vwap_source": "calculative"|"broker_atp"}), for
+        # running two paper bindings side-by-side on the SAME client and
+        # underlying with genuinely independent VWAP behavior -- the admin/
+        # client-level RuntimeConfig resolution (SellStraddleConfig.
+        # vwap_source, see config.py) is scoped by (underlying, client_id),
+        # NOT binding_id, so it alone cannot differentiate two bindings under
+        # the same client trading the same index. Set once here and never
+        # touched again by the periodic config-apply reload (see ConfigMixin
+        # in config.py, which only assigns self._vwap_source from cfg when
+        # this override is None) -- same pattern shadow_on_reject already
+        # uses to survive config reloads untouched.
+        self._vwap_source_override = (
+            vwap_source_override if vwap_source_override in ("broker_atp", "calculative") else None
+        )
 
         self._position: Optional[StraddlePosition] = None
         self._trades_today: int = 0
