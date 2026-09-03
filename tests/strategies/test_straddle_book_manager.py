@@ -5,9 +5,11 @@ from strategies.straddle_book_manager import StraddleBookManager
 
 
 class _FakeBook:
-    def __init__(self, bus, cfg, underlying="NIFTY", lot_multiplier=1, client_id="", binding_id=""):
+    def __init__(self, bus, cfg, underlying="NIFTY", lot_multiplier=1, client_id="", binding_id="",
+                 shadow_on_reject=False):
         self._underlying = underlying; self._client_id = client_id; self._binding_id = binding_id
         self._lot_multiplier = lot_multiplier
+        self._shadow_on_reject = shadow_on_reject
         self._position = None
         self.started = False; self.stopped = False
     def set_client_db(self, db): self._db = db
@@ -97,3 +99,16 @@ def test_auto_spawn_on_deploy_and_stop_on_remove(monkeypatch):
     m._reconcile()
     assert removed.stopped is True
     assert m.find("C1", "Z1", "NIFTY") is None and m.find("C1", "Z2", "NIFTY") is not None
+
+
+def test_spawns_one_book_per_underlying_on_same_binding(monkeypatch):
+    # Same client/broker can run sell_straddle on NIFTY and CRUDEOIL simultaneously.
+    monkeypatch.setattr(bm_mod, "SellStraddleStrategy", _FakeBook)
+    db = _DB({"C1": [_dep("Z1", und="NIFTY"), _dep("Z1", und="CRUDEOIL")]})
+    m = StraddleBookManager(None, None, db, ["NIFTY", "CRUDEOIL"])
+    m._reconcile()
+    keys = {(b._client_id, b._binding_id, b._underlying) for b in m.books}
+    assert keys == {("C1", "Z1", "NIFTY"), ("C1", "Z1", "CRUDEOIL")}
+    assert all(b.started for b in m.books)
+    assert m.find("C1", "Z1", "NIFTY") is not None
+    assert m.find("C1", "Z1", "CRUDEOIL") is not None

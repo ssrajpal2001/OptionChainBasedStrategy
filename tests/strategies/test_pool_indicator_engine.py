@@ -5,14 +5,61 @@ def test_pair_indicators_combined_close_and_vwap():
     eng = PoolIndicatorEngine(rsi_len=14, roc_len=10)
     # (ce_ltp, ce_atp, pe_ltp, pe_atp) per 1-min bar
     bars = [(50, 49, 40, 39), (51, 50, 41, 40), (52, 51, 42, 41)]
-    for cl, ca, pl, pa in bars:
+    # minute >= _SESSION_START_MIN (555 = 9:15) -- VWAP/SLOPE are LIVE-only by
+    # design (2026-08-19 Seed VWAP Contamination fix); commit_bar()'s default
+    # auto-increment starts at minute=0, which the same live/seed boundary
+    # would treat as pre-session seed data and correctly omit slope/vwap for.
+    for i, (cl, ca, pl, pa) in enumerate(bars):
         eng.update_tick(100, "CE", cl, ca)
         eng.update_tick(100, "PE", pl, pa)
-        eng.commit_bar()
+        eng.commit_bar(minute=555 + i)
     ind = eng.pair_indicators(100, 100)
     assert ind["close"] == 52 + 42
     assert ind["vwap"] == 51 + 41
     assert round(ind["slope"], 6) == round((51 + 41) - (50 + 40), 6)
+
+
+# 2026-08-25 CRITICAL FIX regression: real incident, a client rule referencing
+# SLOPE>SLOPE_PREV(1m) could never fire on ANY session (confirmed live, N/A for
+# over an hour of fully-warmed operation) because pair_indicators()/
+# pair_indicators_tf() never returned a "slope_prev" key at all.
+
+def test_pair_indicators_slope_prev_absent_with_only_two_bars():
+    eng = PoolIndicatorEngine(rsi_len=14, roc_len=10)
+    bars = [(50, 49, 40, 39), (51, 50, 41, 40)]
+    for i, (cl, ca, pl, pa) in enumerate(bars):
+        eng.update_tick(100, "CE", cl, ca)
+        eng.update_tick(100, "PE", pl, pa)
+        eng.commit_bar(minute=555 + i)
+    ind = eng.pair_indicators(100, 100)
+    assert "slope" in ind
+    assert "slope_prev" not in ind   # needs a 3rd bar -- must not fabricate one
+
+
+def test_pair_indicators_slope_prev_present_with_three_bars():
+    eng = PoolIndicatorEngine(rsi_len=14, roc_len=10)
+    # combined vwap per bar: 89, 91, 96, 92
+    bars = [(50, 49, 40, 40), (51, 50, 41, 41), (52, 51, 46, 45), (53, 52, 41, 40)]
+    for i, (cl, ca, pl, pa) in enumerate(bars):
+        eng.update_tick(100, "CE", cl, ca)
+        eng.update_tick(100, "PE", pl, pa)
+        eng.commit_bar(minute=555 + i)
+    ind = eng.pair_indicators(100, 100)
+    # vwaps: 89, 91, 96, 92 -> slope = 92-96=-4, slope_prev = 96-91=5
+    assert round(ind["slope"], 6) == -4.0
+    assert round(ind["slope_prev"], 6) == 5.0
+
+
+def test_pair_indicators_tf_slope_prev_present_with_three_tf_bars():
+    eng = PoolIndicatorEngine(rsi_len=14, roc_len=10)
+    bars = [(50, 49, 40, 40), (51, 50, 41, 41), (52, 51, 46, 45), (53, 52, 41, 40)]
+    for i, (cl, ca, pl, pa) in enumerate(bars):
+        eng.update_tick(100, "CE", cl, ca)
+        eng.update_tick(100, "PE", pl, pa)
+        eng.commit_bar(minute=555 + i)
+    ind = eng.pair_indicators_tf(100, 100, tf=1)   # tf<=1 delegates to pair_indicators
+    assert round(ind["slope"], 6) == -4.0
+    assert round(ind["slope_prev"], 6) == 5.0
 
 def test_pair_atp_fresh_true_when_both_recent():
     eng = PoolIndicatorEngine(rsi_len=14, roc_len=10)
@@ -120,14 +167,15 @@ def test_slope_and_vwap_ignore_seed_atp_contamination():
     eng = PoolIndicatorEngine(rsi_len=14, roc_len=10)
     eng.seed_strike(100, "CE", closes=[60] * 20, atps=[1000] * 20)
     eng.seed_strike(100, "PE", closes=[40] * 20, atps=[1000] * 20)
-    # one LIVE bar -> slope unavailable (only 1 live atp), NOT a seed->live jump
+    # one LIVE bar (minute >= _SESSION_START_MIN=555, i.e. 9:15) -> slope
+    # unavailable (only 1 live atp), NOT a seed->live jump
     eng.update_tick(100, "CE", 60, 50); eng.update_tick(100, "PE", 40, 50)
-    eng.commit_bar(minute=540)
+    eng.commit_bar(minute=555)
     ind1 = eng.pair_indicators(100, 100)
     assert "slope" not in ind1
     # second LIVE bar -> slope from LIVE atps only
     eng.update_tick(100, "CE", 61, 52); eng.update_tick(100, "PE", 41, 52)
-    eng.commit_bar(minute=541)
+    eng.commit_bar(minute=556)
     ind2 = eng.pair_indicators(100, 100)
     assert "slope" in ind2
     assert abs(ind2["slope"] - ((52 + 52) - (50 + 50))) < 1e-9   # = 4, not ~ -1900
@@ -150,3 +198,57 @@ def test_tf_vwap_slope_live_only_rsi_seeded():
     assert ind["vwap"] < 200
     assert "slope" in ind and abs(ind["slope"]) < 50   # small live delta, not a seed jump
     assert "rsi" in ind                                # seed-warmed
+
+
+# ── persistence (2026-08-21) -- restart-proofing VWAP/SLOPE, NOT REST-seeding ─
+
+def test_to_dict_load_dict_round_trip_preserves_indicators():
+    """The core requirement: an engine restored from a snapshot must produce
+    IDENTICAL pair_indicators() output to the original -- proves this is a
+    faithful restore of the same live data, not a lossy/altered one."""
+    eng = PoolIndicatorEngine(rsi_len=3, roc_len=3)
+    for i, m in enumerate(range(555, 562)):   # >= _SESSION_START_MIN (555) -- genuinely live
+        eng.update_tick(100, "CE", 60 + i, 50 + i)
+        eng.update_tick(100, "PE", 40 + i, 30 + i)
+        eng.commit_bar(minute=m)
+    original = eng.pair_indicators(100, 100)
+    assert original is not None and "slope" in original and "rsi" in original
+
+    snapshot = eng.to_dict()
+    restored = PoolIndicatorEngine(rsi_len=3, roc_len=3)
+    restored.load_dict(snapshot)
+
+    assert restored.pair_indicators(100, 100) == original
+
+
+def test_load_dict_preserves_live_vs_seed_minute_boundary():
+    """A restored engine must still correctly separate seed (negative
+    minute) bars from live (>= _SESSION_START_MIN) bars for VWAP/SLOPE --
+    this is the exact invariant the 2026-08-19 'Seed VWAP Contamination' fix
+    depends on; a persistence bug that lost minute indices would silently
+    reintroduce that bug on every restart."""
+    eng = PoolIndicatorEngine(rsi_len=3, roc_len=3)
+    eng.seed_strike(100, "CE", closes=[60] * 10, atps=[1000] * 10)   # seed -- huge fake ATP
+    eng.seed_strike(100, "PE", closes=[40] * 10, atps=[1000] * 10)
+    for i, m in enumerate(range(555, 558)):
+        eng.update_tick(100, "CE", 60 + i, 50 + i)   # real, small live ATP
+        eng.update_tick(100, "PE", 40, 50)
+        eng.commit_bar(minute=m)
+
+    restored = PoolIndicatorEngine(rsi_len=3, roc_len=3)
+    restored.load_dict(eng.to_dict())
+    ind = restored.pair_indicators(100, 100)
+    assert ind is not None
+    assert ind["vwap"] < 200, "restored VWAP must still be live-only (~100), not ~2000 from seeds"
+
+
+def test_load_dict_tolerates_malformed_snapshot():
+    eng = PoolIndicatorEngine()
+    eng.load_dict({"closes": {"not-a-valid-key": [1, 2, 3]}, "mins": {"100|CE": ["bad", "data"]}})
+    assert eng.pair_indicators(100, 100) is None   # nothing usable survived, no crash
+
+
+def test_load_dict_empty_snapshot_is_a_noop():
+    eng = PoolIndicatorEngine()
+    eng.load_dict({})
+    assert eng.pair_indicators(100, 100) is None

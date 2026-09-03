@@ -39,30 +39,34 @@ def _json_path(deploy_id: str) -> Path:
 # ── Save ─────────────────────────────────────────────────────────────────────
 
 def save_deployment_json(
-    deploy_id:      str,
-    client_id:      str,
-    binding_id:     str,
-    strategy_name:  str,
-    underlying:     str,
-    lot_multiplier: float,
-    max_profit_rs:  float,
-    max_sl_rs:      float,
-    squareoff_time: str,
+    deploy_id:       str,
+    client_id:       str,
+    binding_id:      str,
+    strategy_name:   str,
+    underlying:      str,
+    lot_multiplier:  float,
+    max_profit_rs:   float,
+    max_sl_rs:       float,
+    squareoff_time:  str,
+    product_type:    str = "MIS",
+    strategy_params: str = "{}",
 ) -> None:
     """Write deployment config to JSON file alongside the SQLite record."""
     _ensure_dir()
     payload = {
-        "deploy_id":      deploy_id,
-        "client_id":      client_id,
-        "binding_id":     binding_id,
-        "strategy_name":  strategy_name,
-        "underlying":     underlying,
-        "lot_multiplier": lot_multiplier,
-        "max_profit_rs":  max_profit_rs,
-        "max_sl_rs":      max_sl_rs,
-        "squareoff_time": squareoff_time,
-        "is_active":      True,
-        "saved_at":       datetime.now(IST).isoformat(),
+        "deploy_id":       deploy_id,
+        "client_id":       client_id,
+        "binding_id":      binding_id,
+        "strategy_name":   strategy_name,
+        "underlying":      underlying,
+        "lot_multiplier":  lot_multiplier,
+        "max_profit_rs":   max_profit_rs,
+        "max_sl_rs":       max_sl_rs,
+        "squareoff_time":  squareoff_time,
+        "product_type":    product_type,
+        "strategy_params": strategy_params,
+        "is_active":       True,
+        "saved_at":        datetime.now(IST).isoformat(),
     }
     path = _json_path(deploy_id)
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -119,6 +123,11 @@ def apply_deployment_to_runtime_config(deploy: Dict[str, Any]) -> None:
     Push deployment thresholds into RuntimeConfig so running strategy
     immediately picks up the new lot size, profit target and SL.
     Called by the engine hot-reload on engine-start.
+
+    NOTE: Timing fields (entry_start, entry_end, squareoff_time) are intentionally
+    NOT applied from the deployment record. They must always come from the per-index
+    JSON config so an index like BTC (16:30 sq-off) is never overwritten by a stale
+    deployment that carried another index's timing (e.g. NIFTY 15:20).
     """
     from data_layer.runtime_config import RuntimeConfig
 
@@ -128,16 +137,26 @@ def apply_deployment_to_runtime_config(deploy: Dict[str, Any]) -> None:
 
     if deploy.get("lot_multiplier"):
         patch["lot_multiplier"] = float(deploy["lot_multiplier"])
-    if deploy.get("squareoff_time"):
-        patch["squareoff_time"] = str(deploy["squareoff_time"])
     if deploy.get("max_profit_rs") and float(deploy["max_profit_rs"]) > 0:
         patch["capital_deployed_inr"] = float(deploy["max_profit_rs"]) * 100 / 30  # rough
     if deploy.get("max_sl_rs") and float(deploy["max_sl_rs"]) > 0:
         patch["max_sl_rs"] = float(deploy["max_sl_rs"])
+
+    # Timing is controlled by the per-index JSON config, not deployment records.
+    _ignored_timing = {
+        k: str(deploy[k]) for k in ("squareoff_time", "entry_start", "entry_end")
+        if deploy.get(k)
+    }
 
     if patch:
         RuntimeConfig.update({"indices": {underlying: {strategy: patch}}})
         logger.info(
             "DeploymentStore: applied to RuntimeConfig — %s/%s %s",
             underlying, strategy, patch,
+        )
+    if _ignored_timing:
+        logger.info(
+            "DeploymentStore: ignored timing fields from deployment — %s/%s %s "
+            "(use per-index JSON config instead).",
+            underlying, strategy, _ignored_timing,
         )

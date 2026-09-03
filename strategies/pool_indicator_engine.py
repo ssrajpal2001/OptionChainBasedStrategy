@@ -4,6 +4,7 @@ on demand — independent of the active position. Pure + unit-testable; the stra
 ticks/bars and (later) seeds prev-day history."""
 from __future__ import annotations
 
+import logging
 import time
 from collections import deque
 from typing import Dict, Optional, Tuple
@@ -12,7 +13,14 @@ import numpy as np
 
 from matrix_engine.indicators import rsi as _rsi
 
+_log = logging.getLogger(__name__)
+
 Key = Tuple[int, str]
+
+# First minute of the regular NSE/BSE session (09:15 IST). Pre-open option ticks
+# (09:00–09:14) are committed with positive minute indices (540–554) and must NOT
+# count as live bars for SLOPE — that would give a false pre-open→session delta.
+_SESSION_START_MIN: int = 9 * 60 + 15  # 555
 
 
 class PoolIndicatorEngine:
@@ -60,6 +68,10 @@ class PoolIndicatorEngine:
             md = self._mins.setdefault(k, deque(maxlen=self._maxlen))
             m = minute if minute is not None else ((md[-1] + 1) if md else 0)
             md.append(int(m))
+            if _log.isEnabledFor(logging.DEBUG):
+                _log.debug("POOL-BAR %s%s ltp=%.2f atp=%.2f bars=%d",
+                           k[0], k[1], ltp, atp,
+                           len(self._closes.get(k, [])))
 
     def seed_strike(self, strike: int, side: str, closes: list, atps: list) -> None:
         """Prefill the rolling series from historical bars (oldest-first) so RSI/ROC are valid
@@ -107,7 +119,8 @@ class PoolIndicatorEngine:
         return True
 
     def pair_indicators(self, ce_strike: int, pe_strike: int,
-                        stale_sec: float = 0.0) -> Optional[Dict[str, float]]:
+                        stale_sec: float = 0.0,
+                        session_start_min: Optional[int] = None) -> Optional[Dict[str, float]]:
         ce, pe = self._key(ce_strike, "CE"), self._key(pe_strike, "PE")
         if ce not in self._latest or pe not in self._latest:
             return None
@@ -118,19 +131,37 @@ class PoolIndicatorEngine:
         ind: Dict[str, float] = {"close": ce_ltp + pe_ltp, "vwap": ce_atp + pe_atp}
         # Freshness flag for callers/logs (diagnoses TF1/TF2 divergence & frozen illiquid legs).
         ind["stale_atp"] = 0.0 if self.pair_atp_fresh(ce_strike, pe_strike, stale_sec) else 1.0
-        # SLOPE (VWAP delta) is INTRADAY — it must use LIVE bars only. Seed bars carry prev-day
-        # ATP; mixing seed→live makes the first live slope a huge jump across the day boundary
-        # (a false SLOPE, and a contaminated session_min_vwap → false vwap_rise_sl). Seeds are for
-        # RSI/ROC closes only. Live bars have minute index >= 0; seeds use negative indices.
+        # SLOPE (VWAP delta) is INTRADAY — it must use POST-SESSION bars only.
+        # Seeds (negative minute index) and PRE-OPEN bars are excluded via a floor minute.
+        # Pre-open bars have positive minute indices so `m >= 0` incorrectly included them, causing
+        # SLOPE to compare pre-open ATP vs the first live bar → false SLOPE → early trade.
+        # `session_start_min` defaults to the fixed 09:15 market-open constant, but callers that
+        # know their own configured entry_start (e.g. SellStraddle, when entry_start is later than
+        # market open) should pass that instead — otherwise a candle that closed BEFORE the
+        # strategy's own entry window opened can still count as the first of the 2 bars SLOPE
+        # needs (2026-08-20 fix: a deployment with entry_start=09:16 was getting a valid SLOPE at
+        # 09:16:05 off the pre-entry-start 09:15 bar, one full candle earlier than intended).
+        _floor_min = _SESSION_START_MIN if session_start_min is None else int(session_start_min)
         ca, pa = self._atps.get(ce), self._atps.get(pe)
         cm, pm = self._mins.get(ce), self._mins.get(pe)
-        ca_live = [a for a, m in zip(ca, cm) if m >= 0] if (ca and cm) else []
-        pa_live = [a for a, m in zip(pa, pm) if m >= 0] if (pa and pm) else []
+        ca_live = [a for a, m in zip(ca, cm) if m >= _floor_min] if (ca and cm) else []
+        pa_live = [a for a, m in zip(pa, pm) if m >= _floor_min] if (pa and pm) else []
         if len(ca_live) >= 2 and len(pa_live) >= 2:
             _curr = ca_live[-1] + pa_live[-1]
             _prev = ca_live[-2] + pa_live[-2]
             ind["slope"] = _curr - _prev
             ind["vwap_prev"] = _prev   # exposed so logs can show prev->curr VWAP (verify slope)
+            # 2026-08-25 fix, real incident: SLOPE>SLOPE_PREV(1m) is a valid dynamic-exit rule
+            # (client rule-builder config) but this function never returned a "slope_prev" key at
+            # all -- the rule evaluator (strategies/core/rule_evaluator.py) always saw None for it,
+            # so that AND-condition could never pass, permanently, on any session (confirmed live:
+            # N/A for over an hour of fully-warmed operation, not a restart/warm-up artifact).
+            # slope_prev = the PRIOR candle's own slope (one bar further back than "slope" itself),
+            # i.e. is VWAP decay accelerating or decelerating -- needs one more historical point
+            # than "slope" alone, so it becomes available one candle later in the session.
+            if len(ca_live) >= 3 and len(pa_live) >= 3:
+                _prev2 = ca_live[-3] + pa_live[-3]
+                ind["slope_prev"] = _prev - _prev2
         cc, pc = self._closes.get(ce), self._closes.get(pe)
         if cc and pc:
             n = min(len(cc), len(pc))
@@ -141,6 +172,84 @@ class PoolIndicatorEngine:
                 ref = combined[-self._roc_len - 1]
                 ind["roc"] = float((combined[-1] - ref) / ref * 100.0)
         return ind
+
+    # ── persistence (2026-08-21) ─────────────────────────────────────────────
+    # VWAP/SLOPE are deliberately NEVER REST-seeded (the 2026-08-19 "Seed VWAP
+    # Contamination" fix -- a real prior bug where REST-seeded bars poisoned
+    # the intraday VWAP/SLOPE baseline). Persisting+restoring the engine's own
+    # already-correctly-computed live bars is NOT the same thing as REST-
+    # seeding: it's the exact same live data surviving a process restart, not
+    # a different data source with different characteristics being fed in.
+    # The original minute indices are preserved verbatim, so the seed-vs-live
+    # boundary (m >= _SESSION_START_MIN / g >= 0) that pair_indicators()/
+    # pair_indicators_tf() already rely on stays exactly as correct after a
+    # restore as it was before the restart.
+    #
+    # Callers are responsible for only restoring a SAME-TRADING-DAY snapshot
+    # (VWAP/SLOPE are inherently intraday) -- this class has no day-awareness
+    # of its own, matching its own pure/generic design; see
+    # SellStraddleStrategy._restore_pool_engine()'s own session-day check.
+
+    def to_dict(self) -> dict:
+        """Serializable snapshot of the full rolling series + latest tick per
+        key."""
+        def _enc(d: Dict[Key, deque]) -> dict:
+            return {f"{k[0]}|{k[1]}": list(v) for k, v in d.items()}
+        return {
+            "closes": _enc(self._closes),
+            "atps": _enc(self._atps),
+            "mins": _enc(self._mins),
+            "latest": {f"{k[0]}|{k[1]}": list(v) for k, v in self._latest.items()},
+        }
+
+    def load_dict(self, data: dict) -> None:
+        """Restore from a to_dict() snapshot. Tolerates malformed/partial
+        entries (skips them individually) rather than failing the whole
+        restore."""
+        def _parse_key(s: str) -> Optional[Key]:
+            try:
+                strike_str, side = s.rsplit("|", 1)
+                return (int(strike_str), side)
+            except Exception:
+                return None
+
+        def _dec(raw: dict) -> Dict[Key, deque]:
+            out: Dict[Key, deque] = {}
+            for s, values in (raw or {}).items():
+                k = _parse_key(s)
+                if k is None:
+                    continue
+                try:
+                    out[k] = deque((float(x) for x in values), maxlen=self._maxlen)
+                except Exception:
+                    continue
+            return out
+
+        self._closes = _dec(data.get("closes"))
+        self._atps = _dec(data.get("atps"))
+        # mins are ints, not floats -- decode separately.
+        mins_raw = (data or {}).get("mins") or {}
+        mins: Dict[Key, deque] = {}
+        for s, values in mins_raw.items():
+            k = _parse_key(s)
+            if k is None:
+                continue
+            try:
+                mins[k] = deque((int(x) for x in values), maxlen=self._maxlen)
+            except Exception:
+                continue
+        self._mins = mins
+        latest_raw = (data or {}).get("latest") or {}
+        latest: Dict[Key, Tuple[float, float]] = {}
+        for s, pair in latest_raw.items():
+            k = _parse_key(s)
+            if k is None:
+                continue
+            try:
+                latest[k] = (float(pair[0]), float(pair[1]))
+            except Exception:
+                continue
+        self._latest = latest
 
     def _tf_groups(self, key: Key, tf: int):
         """Resample a leg's 1-min (minute, close, atp) to tf-minute candles.
@@ -193,6 +302,9 @@ class PoolIndicatorEngine:
         if len(vwaps) >= 2:
             ind["slope"] = vwaps[-1] - vwaps[-2]
             ind["vwap_prev"] = vwaps[-2]   # exposed so logs can show prev->curr VWAP (verify slope)
+            # 2026-08-25 fix -- same gap as pair_indicators() above, same rationale.
+            if len(vwaps) >= 3:
+                ind["slope_prev"] = vwaps[-2] - vwaps[-3]
         n = len(closes)
         if n >= self._rsi_len + 1:
             ind["rsi"] = float(_rsi(np.array(closes, dtype=np.float64)))

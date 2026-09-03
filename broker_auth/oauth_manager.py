@@ -154,11 +154,19 @@ def _dhan_auth_url(app_id: str, app_secret: str, dhan_client_id: str) -> str:
             headers={"app_id": app_id, "app_secret": app_secret, "Content-Type": "application/json"},
             timeout=10,
         )
-        data = r.json() if r.ok else {}
+        try:
+            data = r.json()
+        except ValueError:
+            data = {}
         consent_id = data.get("consentAppId", "")
         if consent_id:
             return f"https://auth.dhan.co/login/consentApp-login?consentAppId={consent_id}"
-        logger.error("[OAuth] Dhan generate-consent response: %s", data)
+        # Previously discarded the actual failure reason whenever r.ok was False
+        # (data = {} unconditionally) -- logged an uninformative "response: {}" with
+        # no way to tell a bad-credentials 401 from a malformed-request 400 from a
+        # transient 5xx. Now always logs status + raw body.
+        logger.error("[OAuth] Dhan generate-consent FAILED status=%s body=%s",
+                     r.status_code, r.text[:500])
         return ""
     except Exception as exc:
         logger.error("[OAuth] Dhan generate-consent error: %s", exc)

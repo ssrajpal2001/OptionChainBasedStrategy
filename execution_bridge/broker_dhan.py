@@ -75,7 +75,7 @@ class DhanBroker(BaseBroker):
             try:
                 _r = await asyncio.to_thread(
                     lambda: _req.get(
-                        "https://api.dhanhq.com/v2/fundlimit",
+                        "https://api.dhan.co/v2/fundlimit",
                         headers={"access-token": self._b.access_token,
                                  "client-id": dhan_client_id,
                                  "Content-Type": "application/json"},
@@ -246,7 +246,7 @@ class DhanBroker(BaseBroker):
             dhan_client_id = self._b.client_code or self._b.user_id
             r = await asyncio.to_thread(
                 lambda: requests.get(
-                    "https://api.dhanhq.com/v2/fundlimit",
+                    "https://api.dhan.co/v2/fundlimit",
                     headers={
                         "access-token": self._b.access_token,
                         "client-id":    dhan_client_id,

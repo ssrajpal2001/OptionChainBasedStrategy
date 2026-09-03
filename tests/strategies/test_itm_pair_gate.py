@@ -1,0 +1,133 @@
+"""strategies/sell_straddle/exits.py's step-8 ITM pair gate call -- 2026-07-21
+critical bugfix: the per-tick exit-check loop only called _check_itm_pair_gate
+(rolling.py, the ONLY code path that can actually close the position on this
+gate) when `self._itm_gate_armed` was already True. But `_itm_gate_armed` is
+ONLY ever set True *inside* _check_itm_pair_gate itself. Since the other call
+site (rolling.py, after a rollover) never fires on a session with zero
+rollovers, the gate could never arm itself and the real close never ran --
+even though exits.py's separate, display-only _build_exit_criteria kept
+logging "ITMgate ... ✓HIT -> EXIT:ITMgate" every cycle, misleadingly implying
+an exit had happened. Confirmed live: NIFTY straddle held both-ITM at
+cumulative ₹530+ (well above the ₹500 threshold) for many minutes without
+ever closing, on a session with no prior rollover."""
+import asyncio
+import datetime
+from unittest.mock import AsyncMock
+
+from data_layer.base_feeder import EventBus
+from config.global_config import IST, GlobalConfig
+from execution_bridge.straddle_bridge import StraddleFillEvent
+from strategies.sell_straddle import SellStraddleStrategy, StraddlePosition, StraddleLeg
+
+
+def _gated_strategy(bus):
+    s = SellStraddleStrategy(bus, cfg=GlobalConfig(), underlying="NIFTY")
+
+    # _close_position now WAITS for the bridge to confirm the EXIT fill before finalizing
+    # (2026-08-04 fail-loud fix). Simulate an always-available broker: immediately hand back a
+    # confirmed fill through the real _on_fill path whenever an order is emitted.
+    async def _auto_confirm_emit(ev):
+        if ev.action == "EXIT":
+            s._on_fill(StraddleFillEvent(
+                action="EXIT", underlying=ev.underlying, atm=ev.atm,
+                ce_strike=ev.ce_strike, pe_strike=ev.pe_strike,
+                ce_fill=ev.ce_ltp, pe_fill=ev.pe_ltp,
+                client_id="C", binding_id="B", event_id=ev.event_id, legs=ev.legs,
+            ))
+    s._emit_order = _auto_confirm_emit
+
+    s._lot_size = 75
+    s._lot_multiplier = 1
+    s._spot = 24000.0
+    s._force_exit = datetime.time(23, 59)   # never past EOD square-off in this test
+    s._ltp_decay_enabled = False
+    s._tsl_enabled = False
+    s._vwap_rise_enabled = False
+    s._exit_rules = []
+    s._day_profit_target_pct = 0.0
+    s._day_loss_sl_pct = 0.0
+    s._ratio_threshold = 999.0
+    s._itm_pair_gate_enabled = True
+    s._itm_pair_gate_profit_inr = 500.0
+    assert s._itm_gate_armed is False   # never armed -- no rollover has happened
+    s._position = StraddlePosition(
+        underlying="NIFTY", atm_at_entry=24000, entry_spot=24000,
+        ce_leg=StraddleLeg("CE", 23900, 60.0, 30.0),   # ITM: strike < spot
+        pe_leg=StraddleLeg("PE", 24200, 40.0, 20.0),   # ITM: strike > spot
+        net_credit=100.0, status="open",
+    )
+    # unrealized_pnl = net_credit(100) - current_value(30+20=50) = 50 pts
+    # pnl_rs = 50 * 75 * 1 = 3750, well above the 500 threshold.
+    return s
+
+
+def test_itm_pair_gate_closes_on_first_cycle_with_no_prior_rollover():
+    """The exact live bug: gate must be able to arm AND close itself the very
+    first time it's ever evaluated, without requiring a rollover to have
+    happened first."""
+    async def run():
+        bus = EventBus()
+        s = _gated_strategy(bus)
+        s._close_position = AsyncMock(wraps=s._close_position)
+        await s._check_exits()
+        s._close_position.assert_awaited_once_with("itm_pair_gate_profit")
+        assert s._position is None   # _close_position clears it synchronously
+    asyncio.run(run())
+
+
+def test_itm_pair_gate_arms_then_holds_below_threshold():
+    """Below-threshold both-ITM must arm the gate (so the NEXT cycle can act)
+    but must not close yet."""
+    async def run():
+        bus = EventBus()
+        s = _gated_strategy(bus)
+        s._itm_pair_gate_profit_inr = 10_000.0   # far above the 3750 available
+        s._close_position = AsyncMock(wraps=s._close_position)
+        await s._check_exits()
+        s._close_position.assert_not_awaited()
+        assert s._itm_gate_armed is True
+        assert s._position is not None and s._position.status == "open"
+    asyncio.run(run())
+
+
+def test_itm_pair_gate_reentrant_call_from_roll_tail_is_a_noop():
+    """2026-08-06 CRITICAL FIX regression test. _single_side_roll's own tail
+    unconditionally re-calls _check_itm_pair_gate after every successful
+    roll. When the roll reason is itm_pair_gate_profit_rollover, that
+    reentrant call used to see the same still-both-ITM, still-over-threshold
+    pair and try to roll AGAIN with the identical reason -- but the 60s
+    per-reason throttle (just set by the roll still unwinding) blocked it,
+    and the resulting False was misread as "no partner found", triggering an
+    immediate close-both-and-restart right after the roll that just
+    succeeded: 4 real orders instead of 2.
+
+    Simulate this exactly: mock _single_side_roll to behave like the real
+    one's tail -- call self._check_itm_pair_gate(now) again BEFORE
+    returning. With the fix, that reentrant call must be a clean no-op:
+    _single_side_roll must be invoked exactly once, and _close_position
+    must never fire."""
+    async def run():
+        bus = EventBus()
+        s = _gated_strategy(bus)
+        s._close_position = AsyncMock(wraps=s._close_position)
+
+        call_count = {"n": 0}
+        real_check = s._check_itm_pair_gate
+
+        async def _fake_single_side_roll(now, reason):
+            call_count["n"] += 1
+            # Simulate _single_side_roll's real tail: re-call the gate check
+            # BEFORE returning, from within the same still-over-threshold state.
+            await real_check(now)
+            return True  # simulate a successful roll
+
+        s._single_side_roll = _fake_single_side_roll
+
+        await s._check_itm_pair_gate(datetime.datetime.now(IST))
+
+        assert call_count["n"] == 1, (
+            f"_single_side_roll was invoked {call_count['n']} times -- the reentrant "
+            "call from the simulated roll tail was NOT treated as a no-op."
+        )
+        s._close_position.assert_not_awaited()
+    asyncio.run(run())

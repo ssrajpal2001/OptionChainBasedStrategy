@@ -102,7 +102,9 @@ CREATE TABLE IF NOT EXISTS strategy_deployments (
     lot_multiplier     REAL NOT NULL DEFAULT 1.0,
     max_profit_rs      REAL NOT NULL DEFAULT 0.0,
     max_sl_rs          REAL NOT NULL DEFAULT 0.0,
-    squareoff_time     TEXT NOT NULL DEFAULT '15:15',
+    squareoff_time     TEXT NOT NULL DEFAULT '15:20',
+    product_type       TEXT NOT NULL DEFAULT 'MIS',      -- "MIS" | "NRML" -- broker margin choice ONLY
+    carry_forward      INTEGER NOT NULL DEFAULT 0,       -- 0=same-day close (default) | 1=hold across days (own SL/TSL/target)
     is_active          INTEGER DEFAULT 1,
     is_running         INTEGER DEFAULT 0,   -- per-strategy Start/Stop toggle (0 = deployed but stopped)
     expiry_mode        TEXT NOT NULL DEFAULT 'current',  -- current|next_week|monthly|<date YYYY-MM-DD>
@@ -163,6 +165,8 @@ CREATE TABLE IF NOT EXISTS system_feeder_creds (
     client_id_enc      TEXT DEFAULT '',
     api_key_enc        TEXT DEFAULT '',
     secret_enc         TEXT DEFAULT '',
+    password_enc       TEXT DEFAULT '',
+    totp_secret_enc    TEXT DEFAULT '',
     access_token       TEXT DEFAULT '',
     token_generated_at TEXT DEFAULT '',
     token_expiry_at    TEXT DEFAULT '',
@@ -217,6 +221,19 @@ CREATE TABLE IF NOT EXISTS password_resets (
     expires_at  TEXT    NOT NULL,
     used        INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS client_events (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_id      TEXT    NOT NULL,
+    binding_id     TEXT    NOT NULL DEFAULT '',
+    strategy_name  TEXT    NOT NULL DEFAULT '',
+    ts             TEXT    NOT NULL,
+    severity       TEXT    NOT NULL,   -- INFO | WARNING | CRITICAL
+    source         TEXT    NOT NULL,   -- broker | strategy
+    message        TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_client_events_client_ts ON client_events(client_id, ts);
+CREATE INDEX IF NOT EXISTS idx_client_events_ts         ON client_events(ts);
 """
 
 
@@ -268,9 +285,28 @@ class ClientDB:
         )
 
     async def upsert_client(self, client_id: str, **kwargs) -> None:
-        """Partial update of any client columns."""
+        """Partial update of any client columns.
+
+        Column NAMES (not values) get interpolated into the SQL string below
+        -- `?` placeholders can only parameterize values, never identifiers.
+        Every caller in this codebase currently passes literal kwargs, except
+        one (dashboard_server.py's kill_broker endpoint, which builds a key
+        from a URL path parameter: f"trade_enabled_{binding_id}"). That call
+        site is presently gated by an earlier 404 check that rejects any
+        binding_id not matching a real running worker, but a gate elsewhere
+        in the code is not the same guarantee as this method being safe on
+        its own -- a future refactor could loosen or remove that check
+        without anyone realizing this method would then accept raw SQL
+        column-name injection. Enforce a strict safe-identifier allowlist
+        here, once, so this method can never be the injection vector
+        regardless of what any current or future caller passes.
+        """
+        import re as _re
         now = datetime.now(IST).isoformat()
         kwargs["updated_at"] = now
+        for k in kwargs:
+            if not _re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", k):
+                raise ValueError(f"upsert_client: refusing unsafe column name {k!r}")
         sets = ", ".join(f"{k} = ?" for k in kwargs)
         vals = list(kwargs.values()) + [client_id]
         await asyncio.to_thread(
@@ -486,6 +522,17 @@ class ClientDB:
             (1 if enabled else 0, client_id, binding_id),
         )
 
+    async def set_binding_password_totp(
+        self, client_id: str, binding_id: str, password: str, totp_secret: str,
+    ) -> None:
+        """Store password/TOTP secret for a broker binding's headless login (e.g. Zerodha)."""
+        await asyncio.to_thread(
+            self._exec,
+            "UPDATE broker_bindings SET password_enc=?, totp_secret_enc=? "
+            "WHERE client_id=? AND binding_id=?",
+            (_encode_cred(password), _encode_cred(totp_secret), client_id, binding_id),
+        )
+
     async def set_trading_mode(
         self, client_id: str, binding_id: str, mode: str
     ) -> None:
@@ -552,14 +599,17 @@ class ClientDB:
 
     async def save_deployment(
         self,
-        client_id:      str,
-        binding_id:     str,
-        strategy_name:  str,
-        underlying:     str,
-        lot_multiplier: float,
-        max_profit_rs:  float,
-        max_sl_rs:      float,
-        squareoff_time: str,
+        client_id:       str,
+        binding_id:      str,
+        strategy_name:   str,
+        underlying:      str,
+        lot_multiplier:  float,
+        max_profit_rs:   float,
+        max_sl_rs:       float,
+        squareoff_time:  str,
+        product_type:    str = "MIS",
+        strategy_params: str = "{}",
+        carry_forward:   bool = False,
     ) -> str:
         """Upsert a strategy deployment config. Returns the deploy_id."""
         deploy_id = f"{client_id}_{binding_id}_{strategy_name}_{underlying}"
@@ -568,19 +618,23 @@ class ClientDB:
             self._exec,
             """INSERT INTO strategy_deployments
                (deploy_id, client_id, binding_id, strategy_name, underlying,
-                lot_multiplier, max_profit_rs, max_sl_rs, squareoff_time,
-                is_active, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,1,?,?)
+                lot_multiplier, max_profit_rs, max_sl_rs, squareoff_time, product_type,
+                strategy_params, carry_forward, is_active, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)
                ON CONFLICT(deploy_id) DO UPDATE SET
                  underlying=excluded.underlying,
                  lot_multiplier=excluded.lot_multiplier,
                  max_profit_rs=excluded.max_profit_rs,
                  max_sl_rs=excluded.max_sl_rs,
                  squareoff_time=excluded.squareoff_time,
+                 product_type=excluded.product_type,
+                 strategy_params=excluded.strategy_params,
+                 carry_forward=excluded.carry_forward,
                  is_active=1,
                  updated_at=excluded.updated_at""",
             (deploy_id, client_id, binding_id, strategy_name, underlying,
-             lot_multiplier, max_profit_rs, max_sl_rs, squareoff_time, now, now),
+             lot_multiplier, max_profit_rs, max_sl_rs, squareoff_time, product_type,
+             strategy_params, int(bool(carry_forward)), now, now),
         )
         logger.info(
             "ClientDB: deployment saved — %s [%s/%s %s %s lots=%.1f]",
@@ -701,36 +755,47 @@ class ClientDB:
 
     async def upsert_feeder_creds(
         self,
-        provider:  str,
-        client_id: str = "",
-        api_key:   str = "",
-        secret:    str = "",
+        provider:    str,
+        client_id:   str = "",
+        api_key:     str = "",
+        secret:      str = "",
+        password:    str = "",
+        totp_secret: str = "",
     ) -> None:
         """
         Persist admin feeder credentials (XOR-obfuscated).
-        Only client_id (broker user ID), api_key, and secret are stored.
-        Passwords, PINs, and TOTP secrets are NOT accepted.
+        password/totp_secret exist ONLY to support the unattended headless
+        TOTP login used by scripts/auto_morning_start.py (see
+        broker_auth/headless_totp_auth.py) -- never used by the interactive
+        OAuth dashboard flow.
         """
         logger.info(
-            "[DB] upsert_feeder_creds provider=%s client_id_present=%s api_key_present=%s secret_present=%s",
+            "[DB] upsert_feeder_creds provider=%s client_id_present=%s api_key_present=%s "
+            "secret_present=%s password_present=%s totp_present=%s",
             provider, bool(client_id), bool(api_key), bool(secret),
+            bool(password), bool(totp_secret),
         )
         now = datetime.now(IST).isoformat()
         await asyncio.to_thread(
             self._exec,
             """INSERT INTO system_feeder_creds
-               (provider, client_id_enc, api_key_enc, secret_enc, updated_at)
-               VALUES (?,?,?,?,?)
+               (provider, client_id_enc, api_key_enc, secret_enc, password_enc,
+                totp_secret_enc, updated_at)
+               VALUES (?,?,?,?,?,?,?)
                ON CONFLICT(provider) DO UPDATE SET
-                 client_id_enc = CASE WHEN excluded.client_id_enc != '' THEN excluded.client_id_enc ELSE client_id_enc END,
-                 api_key_enc   = CASE WHEN excluded.api_key_enc   != '' THEN excluded.api_key_enc   ELSE api_key_enc   END,
-                 secret_enc    = CASE WHEN excluded.secret_enc    != '' THEN excluded.secret_enc    ELSE secret_enc    END,
-                 updated_at    = excluded.updated_at""",
+                 client_id_enc   = CASE WHEN excluded.client_id_enc   != '' THEN excluded.client_id_enc   ELSE client_id_enc   END,
+                 api_key_enc     = CASE WHEN excluded.api_key_enc     != '' THEN excluded.api_key_enc     ELSE api_key_enc     END,
+                 secret_enc      = CASE WHEN excluded.secret_enc      != '' THEN excluded.secret_enc      ELSE secret_enc      END,
+                 password_enc    = CASE WHEN excluded.password_enc    != '' THEN excluded.password_enc    ELSE password_enc    END,
+                 totp_secret_enc = CASE WHEN excluded.totp_secret_enc != '' THEN excluded.totp_secret_enc ELSE totp_secret_enc END,
+                 updated_at      = excluded.updated_at""",
             (
                 provider,
                 _encode_cred(client_id),
                 _encode_cred(api_key),
                 _encode_cred(secret),
+                _encode_cred(password),
+                _encode_cred(totp_secret),
                 now,
             ),
         )
@@ -739,7 +804,7 @@ class ClientDB:
         """
         Return system feeder credentials for a provider with fields decoded.
         Returns None if no record exists.
-        Only client_id, api_key, secret, and token fields are returned.
+        Includes password and totp_secret for headless TOTP login automation.
         """
         try:
             con = sqlite3.connect(self._db_path)
@@ -756,6 +821,8 @@ class ClientDB:
                 "client_id":          _decode_cred(r.get("client_id_enc", "")),
                 "api_key":            _decode_cred(r.get("api_key_enc", "")),
                 "secret":             _decode_cred(r.get("secret_enc", "")),
+                "password":           _decode_cred(r.get("password_enc", "")),
+                "totp_secret":        _decode_cred(r.get("totp_secret_enc", "")),
                 "access_token":       r.get("access_token", ""),
                 "token_generated_at": r.get("token_generated_at", ""),
                 "token_expiry_at":    r.get("token_expiry_at", ""),
@@ -916,6 +983,64 @@ class ClientDB:
             (key, value),
         )
 
+    async def set_setting_sync(self, key: str, value: str) -> None:
+        """Persist a system setting with XOR+PBKDF2 obfuscation (upsert).
+
+        Named set_setting_sync for consistency with get_setting_sync, but is
+        actually async. Use for storing secrets (e.g., Gmail app passwords).
+        """
+        encoded_value = _encode_cred(value)
+        logger.info("[DB] set_setting_sync %s=%r (encoded)", key, encoded_value[:80] if encoded_value else "")
+        await asyncio.to_thread(
+            self._exec,
+            "INSERT INTO system_settings (key, value) VALUES (?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, encoded_value),
+        )
+
+    # ── Client/broker/strategy events (admin monitoring) ──────────────────────────
+
+    async def record_client_event(
+        self,
+        client_id: str,
+        binding_id: str = "",
+        strategy_name: str = "",
+        severity: str = "WARNING",
+        source: str = "strategy",
+        message: str = "",
+    ) -> None:
+        """Persist one admin-visible event (broker or strategy error/notice)."""
+        now = datetime.now(IST).isoformat()
+        await asyncio.to_thread(
+            self._exec,
+            """INSERT INTO client_events
+               (client_id, binding_id, strategy_name, ts, severity, source, message)
+               VALUES (?,?,?,?,?,?,?)""",
+            (client_id, binding_id, strategy_name, now, severity, source, message),
+        )
+
+    def get_client_events_sync(
+        self, client_id: str = "", limit: int = 50
+    ) -> List[dict]:
+        """Most-recent-first event feed, optionally filtered to one client_id."""
+        con = sqlite3.connect(self._db_path)
+        con.row_factory = sqlite3.Row
+        try:
+            if client_id:
+                rows = con.execute(
+                    "SELECT * FROM client_events WHERE client_id = ? "
+                    "ORDER BY id DESC LIMIT ?",
+                    (client_id, limit),
+                ).fetchall()
+            else:
+                rows = con.execute(
+                    "SELECT * FROM client_events ORDER BY id DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            con.close()
+
     # ── Admin password (DB-stored, avoids server restart on change) ──────────────
 
     def get_admin_password_hash_sync(self) -> str:
@@ -982,7 +1107,7 @@ class ClientDB:
             rows = con.execute(
                 """
                 SELECT c.client_id, d.binding_id, d.underlying, d.lot_multiplier,
-                       d.strategy_name, d.is_running
+                       d.strategy_name, d.is_running, d.strategy_params
                 FROM clients c
                 JOIN strategy_deployments d ON c.client_id = d.client_id
                 WHERE c.is_active = 1
@@ -996,27 +1121,67 @@ class ClientDB:
             logger.error("get_running_straddle_deployments_sync: %s", exc)
             return []
 
-    def get_running_trap_deployments_sync(self) -> list[dict]:
-        """Single JOIN: all active trap_scanner deployments across active clients."""
+    def get_running_deployments_by_strategy_sync(self, strategy_name: str) -> list[dict]:
+        """Generalized (2026-07-19) version of get_running_straddle_deployments_sync
+        — parameterized by strategy_name so any new strategy (v4_cascade, etc.) can
+        query its own deployment topology without a bespoke per-strategy method."""
         try:
             con = sqlite3.connect(self._db_path)
             con.row_factory = sqlite3.Row
             rows = con.execute(
                 """
                 SELECT c.client_id, d.binding_id, d.underlying, d.lot_multiplier,
-                       d.strategy_name, d.is_active
+                       d.strategy_name, d.is_running, d.product_type,
+                       COALESCE(d.strategy_params, '{}') AS strategy_params
                 FROM clients c
                 JOIN strategy_deployments d ON c.client_id = d.client_id
                 WHERE c.is_active = 1
-                  AND d.strategy_name = 'trap_scanner'
-                  AND d.is_active = 1
-                """
+                  AND d.strategy_name = ?
+                  AND d.is_running = 1
+                """,
+                (strategy_name,),
             ).fetchall()
             con.close()
             return [dict(r) for r in rows]
         except Exception as exc:
-            logger.error("get_running_trap_deployments_sync: %s", exc)
+            logger.error("get_running_deployments_by_strategy_sync(%s): %s", strategy_name, exc)
             return []
+
+    def get_deployments_by_strategy_sync(self, strategy_name: str) -> list[dict]:
+        """ALL active deployments (running or not) for a strategy name, across every
+        client — for an admin config panel to list which (client, binding) instances
+        of a strategy exist, regardless of whether they're currently turned on."""
+        try:
+            con = sqlite3.connect(self._db_path)
+            con.row_factory = sqlite3.Row
+            rows = con.execute(
+                """
+                SELECT d.deploy_id, c.client_id, d.binding_id, d.underlying,
+                       d.lot_multiplier, d.is_running, d.product_type,
+                       COALESCE(d.strategy_params, '{}') AS strategy_params
+                FROM clients c
+                JOIN strategy_deployments d ON c.client_id = d.client_id
+                WHERE c.is_active = 1
+                  AND d.strategy_name = ?
+                  AND d.is_active = 1
+                """,
+                (strategy_name,),
+            ).fetchall()
+            con.close()
+            return [dict(r) for r in rows]
+        except Exception as exc:
+            logger.error("get_deployments_by_strategy_sync(%s): %s", strategy_name, exc)
+            return []
+
+    async def set_deployment_strategy_params(self, deploy_id: str, strategy_params: str) -> None:
+        """Admin-facing: overwrite a deployment's strategy_params JSON directly by
+        deploy_id (no client_id check — this is called from an admin-gated endpoint,
+        unlike the client-facing per-client setters elsewhere in this class)."""
+        await asyncio.to_thread(
+            self._exec,
+            "UPDATE strategy_deployments SET strategy_params=?, updated_at=? WHERE deploy_id=?",
+            (strategy_params, datetime.now(IST).isoformat(), deploy_id),
+        )
 
     # ── Boot-time bulk load ───────────────────────────────────────────────────
 
@@ -1209,6 +1374,22 @@ class ClientDB:
 
     def _create_tables(self) -> None:
         con = sqlite3.connect(self._db_path)
+        # WAL mode is a persistent, on-disk DB-file setting (not per-connection) --
+        # set once here at boot and every one of the many ad-hoc sqlite3.connect()
+        # calls scattered through this module (reads + the write helper alike)
+        # benefits from it for the DB's lifetime. Default rollback-journal mode
+        # takes an exclusive lock on the whole file for the duration of any write,
+        # serializing every concurrent client/strategy/binding's DB access against
+        # each other -- a real contention risk at multi-tenant commercial scale.
+        # WAL lets readers proceed concurrently with a single writer. busy_timeout
+        # gives a writer that does hit contention a real retry window instead of
+        # immediately raising "database is locked".
+        try:
+            con.execute("PRAGMA journal_mode=WAL")
+            con.execute("PRAGMA busy_timeout=5000")
+        except sqlite3.Error as exc:
+            logger.warning("ClientDB: could not enable WAL mode (%s) -- falling back to "
+                            "default journal mode, contention risk under concurrent load.", exc)
         con.executescript(_DDL)
         # Additive migrations: add columns that may not exist in older DBs
         for migration in (
@@ -1227,6 +1408,18 @@ class ClientDB:
             "ALTER TABLE broker_bindings ADD COLUMN password_enc TEXT DEFAULT ''",
             "ALTER TABLE broker_bindings ADD COLUMN totp_secret_enc TEXT DEFAULT ''",
             "ALTER TABLE strategy_deployments ADD COLUMN expiry_mode TEXT DEFAULT 'current'",
+            "ALTER TABLE strategy_deployments ADD COLUMN product_type TEXT DEFAULT 'MIS'",
+            "ALTER TABLE strategy_deployments ADD COLUMN strategy_params TEXT DEFAULT '{}'",
+            # 2026-08-04: carry_forward is INDEPENDENT of product_type (MIS/NRML is a
+            # broker margin choice; carry_forward is "does the strategy itself force-
+            # close today or let the position ride to its own SL/TSL/target across
+            # days"). Previously conflated -- BearTrap treated product_type as if
+            # choosing NRML also meant carry-forward, but its EOD force-close fires
+            # unconditionally regardless, so NRML never actually did anything.
+            # Defaults to 0 (same-day close) for every strategy.
+            "ALTER TABLE strategy_deployments ADD COLUMN carry_forward INTEGER DEFAULT 0",
+            "ALTER TABLE system_feeder_creds ADD COLUMN password_enc TEXT DEFAULT ''",
+            "ALTER TABLE system_feeder_creds ADD COLUMN totp_secret_enc TEXT DEFAULT ''",
         ):
             try:
                 con.execute(migration)
@@ -1236,39 +1429,6 @@ class ClientDB:
                     pass   # idempotent migration — column already exists
                 else:
                     raise
-
-
-        # Security migration: drop password_enc / totp_secret_enc from system_feeder_creds
-        existing_fc_cols = {row[1] for row in con.execute("PRAGMA table_info(system_feeder_creds)").fetchall()}
-        if "password_enc" in existing_fc_cols or "totp_secret_enc" in existing_fc_cols:
-            logger.info("ClientDB: migrating system_feeder_creds — dropping password/totp columns")
-            try:
-                con.executescript("""
-                    BEGIN;
-                    ALTER TABLE system_feeder_creds RENAME TO system_feeder_creds_old;
-                    CREATE TABLE system_feeder_creds (
-                        provider           TEXT PRIMARY KEY,
-                        client_id_enc      TEXT DEFAULT '',
-                        api_key_enc        TEXT DEFAULT '',
-                        secret_enc         TEXT DEFAULT '',
-                        access_token       TEXT DEFAULT '',
-                        token_generated_at TEXT DEFAULT '',
-                        token_expiry_at    TEXT DEFAULT '',
-                        updated_at         TEXT NOT NULL
-                    );
-                    INSERT INTO system_feeder_creds
-                        (provider, client_id_enc, api_key_enc, secret_enc,
-                         access_token, token_generated_at, token_expiry_at, updated_at)
-                    SELECT
-                        provider, client_id_enc, api_key_enc, secret_enc,
-                        access_token, token_generated_at, token_expiry_at, updated_at
-                    FROM system_feeder_creds_old;
-                    DROP TABLE system_feeder_creds_old;
-                    COMMIT;
-                """)
-                logger.info("ClientDB: system_feeder_creds migration complete.")
-            except Exception as exc:
-                logger.error("ClientDB: system_feeder_creds migration FAILED: %s", exc)
 
         con.close()
 

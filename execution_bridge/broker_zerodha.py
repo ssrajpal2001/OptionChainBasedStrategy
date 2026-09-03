@@ -198,15 +198,22 @@ class ZerodhaBroker(BaseBroker):
                        if req.side == OrderSide.BUY
                        else kite.TRANSACTION_TYPE_SELL)
         # Product precedence (per client requirement — deployment-driven):
-        #   1. The CLIENT's explicit choice on THIS binding (deployment screen) — AUTHORITATIVE.
-        #   2. Else the ORDER's product (per-strategy default from the bridge), if valid MIS/NRML.
+        #   1. The ORDER's product (resolved by the strategy bridge from THIS
+        #      deployment's own product_type — see straddle_bridge.py/d1_trap_bridge.py)
+        #      — AUTHORITATIVE, if valid MIS/NRML.
+        #   2. Else the binding's own explicit product_type (a client could set this
+        #      without ever having deployed anything yet).
         #   3. Else the binding's inferred default.
-        # So the client picks MIS/NRML/carry per deployment, and that drives the order.
+        # 2026-08-04 fix: this was backwards -- self._product_explicit is True
+        # whenever the BINDING has ANY product_type at all (defaults to "MIS"), so
+        # the binding's stale/default value was silently overriding every
+        # deployment's actual NRML/MIS choice, 100% of the time. A client selecting
+        # NRML per-deployment had that choice completely ignored at order placement.
         _req_prod = (getattr(req, "product", "") or "").strip().upper()
-        if getattr(self, "_product_explicit", False):
-            _prod_str = self._product
-        elif _req_prod in ("MIS", "NRML"):
+        if _req_prod in ("MIS", "NRML"):
             _prod_str = _req_prod
+        elif getattr(self, "_product_explicit", False):
+            _prod_str = self._product
         else:
             _prod_str = self._product
         product = kite.PRODUCT_NRML if _prod_str == "NRML" else kite.PRODUCT_MIS

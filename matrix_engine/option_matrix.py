@@ -23,6 +23,7 @@ import numpy as np
 
 from config.global_config import IST, Topic, GlobalConfig
 from data_layer.base_feeder import EventBus, OptionTick, IndexTick
+from data_layer.instrument_registry import REGISTRY
 
 logger = logging.getLogger(__name__)
 
@@ -266,9 +267,48 @@ class OptionMatrixEngine:
                 tick: IndexTick = await asyncio.wait_for(self._idx_queue.get(), timeout=1.0)
             except asyncio.TimeoutError:
                 continue
+            # 2026-08-26 fix: a futures_atm underlying (e.g. NIFTY) now publishes TWO
+            # IndexTick streams for the same symbol (source="spot"/"futures" -- see
+            # GlobalConfig.futures_atm_underlyings). The OI/PCR ChainSnapshot's own
+            # spot tracking (OI-Flow's wall/proximity/PCR gates, the dashboard OI
+            # panel) must track REAL spot only, never a futures tick mixed in.
+            if getattr(tick, "source", "spot") != "spot":
+                continue
             mat = self._matrices.get(tick.symbol)
-            if mat:
-                mat.on_spot_tick(tick.ltp)
+            if mat is None:
+                continue
+            if not mat.is_initialized():
+                self._lazy_initialize(tick.symbol, tick.ltp, mat)
+            mat.on_spot_tick(tick.ltp)
+
+    def _lazy_initialize(self, underlying: str, spot: float, mat: "OptionMatrix") -> None:
+        """CRITICAL FIX (2026-08-13, found live in production): initialize()
+        above was designed to be called externally once a caller knew
+        spot+expiry, but confirmed via a repo-wide search that NOTHING in
+        this codebase ever actually calls it -- zero callers anywhere
+        outside this file's own definition. That means OptionMatrix._snap
+        stayed None forever for every underlying, on_option_tick() always
+        returned False (its very first check is `if self._snap is None:
+        return False`), and Topic.MATRIX_SNAPSHOT had never been published
+        at all, for any underlying, regardless of real tick volume --
+        confirmed live: NIFTY was receiving ~1600 real option ticks/min
+        (per SellStraddle's own independent consumption of the same
+        Topic.OPTION_TICK stream) while OI-Flow sat on WAIT for over an
+        hour because it depends entirely on this snapshot. Self-initializes
+        from the first real INDEX_TICK instead of waiting for an external
+        caller that doesn't exist, resolving the active expiry via the same
+        REGISTRY every other live consumer in this codebase already uses."""
+        if spot <= 0:
+            return
+        expiry = REGISTRY.get_active_expiry(underlying, date.today())
+        if expiry is None:
+            return   # registry not loaded yet -- retry on the next index tick
+        mat.initialize(spot, expiry)
+        logger.info(
+            "OptionMatrixEngine: [%s] self-initialized ATM chain (spot=%.2f expiry=%s) -- "
+            "was never externally initialized before this fix (see _lazy_initialize docstring).",
+            underlying, spot, expiry,
+        )
 
     def get_snapshot(self, underlying: str) -> Optional[ChainSnapshot]:
         mat = self._matrices.get(underlying)

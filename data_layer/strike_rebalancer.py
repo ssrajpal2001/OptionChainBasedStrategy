@@ -36,7 +36,7 @@ import asyncio
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, time
+from datetime import datetime, time, date
 from typing import Dict, Optional, Set
 
 from config.global_config import IST, Topic, SysEvent, GlobalConfig
@@ -104,9 +104,21 @@ class StrikeRebalancer:
         """Allow the full ATM±chain_depth subscription for this underlying.
         Called by sell_straddle / iron_condor books when they are active.
         Without this call the rebalancer only subscribes pinned strikes (trap scanner legs)
-        and NOT the full ATM window — saves WS slots for inactive indices."""
-        if underlying in self._state:
-            self._state[underlying].chain_enabled = True
+        and NOT the full ATM window — saves WS slots for inactive indices.
+
+        If the initial subscription has already fired (market opened before this call),
+        we schedule an immediate ATM chain subscription so a late-spawning book still
+        gets its option ticks without waiting for the next ATM drift rebalance.
+        """
+        if underlying not in self._state:
+            return
+        st = self._state[underlying]
+        st.chain_enabled = True
+        # If initial_subscribe already ran (open_atm is set), the ATM chain was skipped
+        # because chain_enabled was False at that time.  Schedule a catch-up subscribe now.
+        if st.open_atm is not None and st.current_atm is not None:
+            step = self._cfg.exchange.strike_steps.get(underlying, 50.0)
+            asyncio.ensure_future(self._catchup_chain_subscribe(underlying, st.current_atm, step, st))
 
     def pin_strike(self, underlying: str, strike: float) -> None:
         """
@@ -139,6 +151,13 @@ class StrikeRebalancer:
         st = self._state.get(underlying)
         return set(st.pinned_strikes) if st else set()
 
+    async def fetch_option_chain(self, underlying_key: str, expiry_date: date) -> Optional[Dict]:
+        """Delegate to the wrapped feeder, if it supports on-demand option-chain fetch."""
+        feeder = getattr(self, "_feeder", None)
+        if feeder and hasattr(feeder, "fetch_option_chain"):
+            return await feeder.fetch_option_chain(underlying_key, expiry_date)
+        return None
+
     def active_strikes(self, underlying: str) -> Set[float]:
         """Return a copy of the full active (subscribed) set for an underlying."""
         st = self._state.get(underlying)
@@ -146,6 +165,34 @@ class StrikeRebalancer:
 
     def rebalance_stats(self) -> Dict[str, int]:
         return {u: s.rebalance_count for u, s in self._state.items()}
+
+    def _effective_chain_depth(self, underlying: str) -> int:
+        """ATM window depth actually used for the WS subscription.
+
+        2026-08-26 fix (real incident): SellStraddle's own admin panel exposes
+        pool_otm_depth/pool_itm_depth -- the search radius select_balanced_pair_at
+        uses when hunting for a partner strike. Raising that from 5 to 7 in the UI
+        had ZERO effect: strikes beyond ATM+/-self._cfg.chain_depth (a separate,
+        hardcoded global default of 4) never get a live quote subscribed at all,
+        so the search loop silently found nothing past +/-4 no matter what it was
+        told to search (confirmed live: banner showed pool_offset=+/-7, but the
+        actual partner-candidate trace only ever showed strikes within ATM+/-4).
+        Now takes the max of chain_depth and whatever sell_straddle's own admin
+        panel has configured for THIS underlying, so a wider search radius
+        actually gets the WS subscription window it needs to find anything there.
+        Deliberately scoped per-underlying (reads RuntimeConfig fresh, not cached)
+        so widening NIFTY's search depth doesn't also widen SENSEX's WS footprint
+        if SENSEX was never asked to search wider -- keeps the shared ~50/connection
+        WS budget from being spent on indices that don't need it."""
+        base = int(self._cfg.chain_depth)
+        try:
+            from data_layer.runtime_config import RuntimeConfig
+            ss = RuntimeConfig.index_section(underlying, "sell_straddle")
+            otm = int(ss.get("pool_otm_depth", 0) or 0)
+            itm = int(ss.get("pool_itm_depth", 0) or 0)
+            return max(base, otm, itm)
+        except Exception:
+            return base
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -230,6 +277,16 @@ class StrikeRebalancer:
     # ── Tick handler ──────────────────────────────────────────────────────────
 
     async def _on_tick(self, tick: IndexTick) -> None:
+        # 2026-08-26 fix: a futures_atm underlying (e.g. NIFTY) now publishes TWO
+        # IndexTick streams for the same symbol (source="spot"/"futures" -- see
+        # GlobalConfig.futures_atm_underlyings). Strike subscription/rebalancing is
+        # SHARED platform infrastructure every strategy in the process depends on --
+        # it must always track the REAL spot ATM, never the futures price (which can
+        # sit 100+ points away), or it would see spot/futures interleaved as wild
+        # "drift" and rebalance/resubscribe strikes off the wrong anchor. Only
+        # SellStraddle itself is meant to consume the futures-sourced tick.
+        if getattr(tick, "source", "spot") != "spot":
+            return
         underlying = tick.symbol
         if underlying not in self._state:
             return
@@ -300,7 +357,7 @@ class StrikeRebalancer:
         step: float,
         state: _UnderlyingState,
     ) -> None:
-        depth = self._cfg.chain_depth
+        depth = self._effective_chain_depth(underlying)
         if state.chain_enabled:
             window = set(_strike_window(atm, step, depth))
         else:
@@ -322,6 +379,32 @@ class StrikeRebalancer:
             underlying, len(state.active_strikes), len(window), len(state.pinned_strikes),
         )
 
+    async def _catchup_chain_subscribe(
+        self,
+        underlying: str,
+        atm: float,
+        step: float,
+        state: _UnderlyingState,
+    ) -> None:
+        """Subscribe ATM±chain_depth window for an index whose enable_chain() was called AFTER
+        the initial_subscribe already fired.  Only adds strikes not already subscribed."""
+        depth = self._effective_chain_depth(underlying)
+        window = set(_strike_window(atm, step, depth))
+        to_sub = window - state.active_strikes
+        if not to_sub:
+            return
+        tokens = self._strikes_to_tokens(underlying, list(to_sub))
+        if tokens and self._feeder is not None:
+            try:
+                await self._feeder.subscribe_tokens(tokens)
+                state.active_strikes |= to_sub
+                logger.info(
+                    "StrikeRebalancer: [%s] catch-up subscribed %d ATM chain strikes (ATM=%.0f).",
+                    underlying, len(to_sub), atm,
+                )
+            except Exception as exc:
+                logger.warning("StrikeRebalancer: [%s] catch-up subscribe error: %s", underlying, exc)
+
     async def _rebalance(
         self,
         underlying: str,
@@ -329,7 +412,7 @@ class StrikeRebalancer:
         step: float,
         state: _UnderlyingState,
     ) -> None:
-        depth = self._cfg.chain_depth
+        depth = self._effective_chain_depth(underlying)
         old_active = state.active_strikes           # current subscribed set
         new_window = set(_strike_window(new_atm, step, depth))
 
@@ -380,6 +463,11 @@ class StrikeRebalancer:
         Falls back to internal canonical format if registry not loaded.
         """
         from data_layer.instrument_registry import REGISTRY, next_expiry as _next_expiry
+
+        if self._cfg and self._cfg.exchange.is_crypto(underlying):
+            # Crypto (Delta) option ticks come directly from DeltaChainManager;
+            # do not build Upstox/Fyers tokens.
+            return []
 
         today  = datetime.now(IST).date()
         expiry = _next_expiry(underlying, today)

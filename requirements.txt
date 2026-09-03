@@ -16,6 +16,10 @@ zstandard>=0.22.0        # Compressed data storage
 # Optional: timezone support (for market hours guard)
 tzdata>=2024.1            # Required on Windows for zoneinfo
 
+# fyers-apiv3 internally imports pkg_resources, which is no longer bundled
+# with Python 3.12+. Install setuptools before the broker SDKs.
+setuptools>=70.0.0
+
 # Optional broker libraries (install the one matching your provider)
 # NorenRestApiPy>=1.0.20     # Shoonya / Finvasia — pip install NorenRestApiPy
 # smartapi-python>=1.3.4     # Angel One      — pip install smartapi-python
@@ -25,6 +29,9 @@ tzdata>=2024.1            # Required on Windows for zoneinfo
 
 # TOTP (for Angel One / Fyers 2FA)
 pyotp>=2.9.0
+
+# Fyers headless login only — best-effort, see broker_auth/headless_totp_auth_fyers.py
+playwright>=1.40.0
 
 # Dev / testing
 pytest>=7.4.0

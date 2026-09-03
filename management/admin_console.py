@@ -96,10 +96,22 @@ class AdminConsole:
                 ),
                 name="dashboard_server",
             )
+            def _dashboard_done(task: asyncio.Task) -> None:
+                if task.cancelled():
+                    return
+                exc = task.exception()
+                if exc:
+                    logger.exception("Dashboard server task crashed: %s", exc)
+
+            self._dashboard_task.add_done_callback(_dashboard_done)
             print(
                 f"\n[Dashboard] http://{self._dashboard_host}:{self._dashboard_port}  "
                 f"(WebSocket: ws://{self._dashboard_host}:{self._dashboard_port}/ws)\n",
                 flush=True,
+            )
+            logger.info(
+                "Dashboard starting on http://%s:%d",
+                self._dashboard_host, self._dashboard_port,
             )
 
         print("\n[AdminConsole] Ready.  Type 'help' for commands.\n", flush=True)

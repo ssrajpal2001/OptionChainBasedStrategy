@@ -187,6 +187,11 @@ class GapHandler:
     # ── Tick handler ──────────────────────────────────────────────────────────
 
     async def _on_tick(self, tick: IndexTick) -> None:
+        # 2026-08-26 fix: a futures_atm underlying now publishes TWO IndexTick
+        # streams for the same symbol (source="spot"/"futures") -- gap detection
+        # must anchor on REAL spot only, never a futures tick.
+        if getattr(tick, "source", "spot") != "spot":
+            return
         underlying = tick.symbol
         if underlying not in self._state:
             return

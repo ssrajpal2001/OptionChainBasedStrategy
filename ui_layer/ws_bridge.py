@@ -63,16 +63,18 @@ class WsBridge:
         self._bus = bus
         self._cfg = cfg
         self._connections: Set[Any] = set()
+        self._conn_meta: Dict[Any, dict] = {}   # ws -> {client_id, role}
         self._running = False
         self._stats_providers: Dict[str, Callable[[], Any]] = {}
 
         # Subscribe once — queues are drained by independent sub-loops
-        self._tick_q   = bus.subscribe(Topic.INDEX_TICK)
-        self._snap_q   = bus.subscribe(Topic.MATRIX_SNAPSHOT)
-        self._fill_q   = bus.subscribe(Topic.ORDER_FILL)
-        self._sys_q    = bus.subscribe(Topic.SYSTEM_EVENT)
-        self._option_q = bus.subscribe(Topic.OPTION_TICK)
-        self._audit_q  = bus.subscribe(Topic.EXIT_AUDIT)
+        self._tick_q      = bus.subscribe(Topic.INDEX_TICK)
+        self._snap_q      = bus.subscribe(Topic.MATRIX_SNAPSHOT)
+        self._fill_q      = bus.subscribe(Topic.ORDER_FILL)
+        self._sys_q       = bus.subscribe(Topic.SYSTEM_EVENT)
+        self._option_q    = bus.subscribe(Topic.OPTION_TICK)
+        self._audit_q     = bus.subscribe(Topic.EXIT_AUDIT)
+        self._pos_q       = bus.subscribe(Topic.POSITION_UPDATE)
 
         # Per-underlying spot cache (updated by _tick_loop) — used to flag ATM strikes
         self._spot_cache: Dict[str, float] = {}
@@ -90,12 +92,15 @@ class WsBridge:
 
     # ── Connection management ─────────────────────────────────────────────────
 
-    def add_connection(self, ws: Any) -> None:
+    def add_connection(self, ws: Any, client_id: str = "", role: str = "") -> None:
         self._connections.add(ws)
-        logger.debug("WsBridge: client connected (%d total).", len(self._connections))
+        self._conn_meta[ws] = {"client_id": client_id or "", "role": role or ""}
+        logger.debug("WsBridge: client connected (%d total) cid=%s role=%s.",
+                     len(self._connections), client_id, role)
 
     def remove_connection(self, ws: Any) -> None:
         self._connections.discard(ws)
+        self._conn_meta.pop(ws, None)
         logger.debug("WsBridge: client disconnected (%d total).", len(self._connections))
 
     def register_stats_provider(self, name: str, fn: Callable[[], Any]) -> None:
@@ -108,13 +113,33 @@ class WsBridge:
 
     # ── Broadcast ────────────────────────────────────────────────────────────
 
+    def _allowed(self, ws: Any, payload: dict) -> bool:
+        """Return True if ``ws`` may receive ``payload``.
+
+        Client-scoped events (position_update, fill) are filtered so a client
+        browser only sees its own data. Admins see everything. Market data
+        (tick, snapshot) is broadcast to all connections.
+        """
+        meta = self._conn_meta.get(ws)
+        if not meta:
+            return True
+        role = meta.get("role", "")
+        if role == "admin":
+            return True
+        ptype = payload.get("type", "")
+        if ptype in ("position_update", "fill"):
+            return meta.get("client_id") == payload.get("client_id")
+        return True
+
     async def broadcast(self, payload: dict) -> None:
-        """Send JSON payload to all connected browsers; prune dead connections."""
+        """Send JSON payload to allowed connected browsers; prune dead connections."""
         if not self._connections:
             return
         text = json.dumps(payload, default=str)
         dead: Set[Any] = set()
         for ws in list(self._connections):
+            if not self._allowed(ws, payload):
+                continue
             try:
                 await ws.send_text(text)
             except Exception:
@@ -136,6 +161,7 @@ class WsBridge:
                 self._heartbeat_loop(),
                 self._option_loop(),
                 self._exit_audit_loop(),
+                self._position_update_loop(),
             )
         except asyncio.CancelledError:
             pass
@@ -150,6 +176,19 @@ class WsBridge:
             try:
                 tick: IndexTick = await asyncio.wait_for(self._tick_q.get(), timeout=1.0)
             except asyncio.TimeoutError:
+                continue
+            # 2026-08-26 fix: a futures_atm underlying (e.g. NIFTY) now publishes TWO
+            # IndexTick streams for the same symbol (source="spot" and source="futures"
+            # -- see GlobalConfig.futures_atm_underlyings / global_feeder.py). This
+            # generic dashboard broadcast (the "Market Overview" SPOT PRICE/ATM STRIKE
+            # card, and the index RSI/EMA/ADX aggregation below) is a REAL-SPOT-only
+            # display -- SellStraddle's own mean-ATM is a strategy-internal concept
+            # shown separately on its own card. Without this filter, a futures tick
+            # would silently overwrite the "spot" cache/broadcast with the futures
+            # price (confirmed live: SPOT PRICE showing ~24467 while real spot was
+            # ~24289) and corrupt the index-level RSI/EMA/ADX candle series by mixing
+            # two different price series into one.
+            if getattr(tick, "source", "spot") != "spot":
                 continue
             try:
                 self._spot_cache[tick.symbol] = tick.ltp
@@ -398,6 +437,19 @@ class WsBridge:
                     await self.broadcast(ev)
             except Exception as exc:
                 logger.debug("WsBridge._exit_audit_loop: %s", exc)
+
+    async def _position_update_loop(self) -> None:
+        """Forward strategy position-update snapshots to the UI in real time."""
+        while self._running:
+            try:
+                ev = await asyncio.wait_for(self._pos_q.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
+            try:
+                if isinstance(ev, dict):
+                    await self.broadcast(ev)
+            except Exception as exc:
+                logger.debug("WsBridge._position_update_loop: %s", exc)
 
     async def _heartbeat_loop(self) -> None:
         """Broadcast worker stats and client summaries every HEARTBEAT_INTERVAL seconds."""

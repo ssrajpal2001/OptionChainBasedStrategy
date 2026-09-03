@@ -6,8 +6,8 @@ Holds the immutable trade-signal value objects shared across the system
 parallel worker pool import SignalPackage from here.
 
 The legacy ConfluenceEngine + BaseStrategy ABC (the A/B/C confluence path) were
-removed — the three live strategies (SellStraddle, IronCondor, TrapScanner) emit
-their own order events directly and do not go through this module.
+removed — SellStraddle emits its own order events directly and does not go
+through this module. IronCondor and TrapScanner were removed 2026-07-18.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum, auto
+from typing import Optional
 
 from config.global_config import IST
 
@@ -29,9 +30,8 @@ class Direction(Enum):
 
 
 class StrategyID(Enum):
-    TRAP_SCANNER = "TrapScanner"
     SELL_STRADDLE = "SellStraddle"
-    IRON_CONDOR = "IronCondor"
+    V4_CASCADE = "V4Cascade"
 
 
 @dataclass(frozen=True)
@@ -48,13 +48,30 @@ class SignalPackage:
     confidence: float             # 0.0 – 1.0
     timestamp: datetime = field(default_factory=lambda: datetime.now(IST))
     notes: str = ""
+    # 2026-07-19 — option-premium-denominated risk (v4_cascade): when
+    # populated, is_valid()/rr_ratio use THESE instead of the spot-based
+    # fields above, since v4_cascade's real risk lives on the tracking
+    # contract's own premium (HTF/MTF zone structure), not a fabricated
+    # spot-equivalent. None for strategies (e.g. sell_straddle) that don't
+    # set them — behavior is unchanged for those.
+    premium_entry: Optional[float] = None
+    premium_sl: Optional[float] = None
+    premium_target: Optional[float] = None
+
+    @property
+    def _uses_premium_risk(self) -> bool:
+        return self.premium_entry is not None and self.premium_sl is not None and self.premium_target is not None
 
     @property
     def risk(self) -> float:
+        if self._uses_premium_risk:
+            return abs(self.premium_entry - self.premium_sl)
         return abs(self.entry_spot - self.stop_spot)
 
     @property
     def reward(self) -> float:
+        if self._uses_premium_risk:
+            return abs(self.premium_target - self.premium_entry)
         return abs(self.target_spot - self.entry_spot)
 
     @property

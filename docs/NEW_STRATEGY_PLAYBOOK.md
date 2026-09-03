@@ -74,14 +74,81 @@ Copy the **per-binding book pattern** already used by `sell_straddle` + `trap_sc
    `strategies/trap_book_manager.py` almost verbatim. Reconciles DB deployments every 5s,
    spawns a book when a deployment is `is_running=1`, stops it on un-deploy, re-spawns on
    lot/expiry change.
-3. **Wire it in `run_system.py`** — instantiate the manager, `set_rebalancer`, add
-   `asyncio.create_task(manager.run())` under `if "<name>" in _enabled_strats`, and stop it in
-   shutdown. (See how `trap_scanner_manager` is wired.)
+3. **Register it in `strategies/registry.py`** — add an entry to `STRATEGY_REGISTRY`
+   instead of editing `run_system.py`:
+
+   ```python
+   from strategies.my_strategy import MyBookManager
+
+   STRATEGY_REGISTRY = {
+       # ... existing entries ...
+       "my_strategy": {
+           "manager_class": MyBookManager,
+           "per_binding": True,
+       },
+   }
+   ```
+
+   `run_system.py` will automatically construct the manager when `--strategies my_strategy`
+   is enabled, wire the rebalancer/feeder, start its `run()` task, and stop it on shutdown.
 4. **Execution** — reuse `execution_bridge`. If your order shape matches straddle/IC, reuse
    their bridge; otherwise add a thin bridge that listens on a new `Topic.*_ORDER_REQUEST` and
    calls `router`/broker `place_order` → `get_order_status` (mirror `ic_bridge`).
 
 That's it — feed, auth, registry, broker routing, persistence, dashboard plumbing are inherited.
+
+---
+
+## Adding a 4th strategy — minimal skeleton
+
+Create a new sub-package (this is documentation/example only; it is **not** registered by
+default):
+
+`strategies/my_strategy/__init__.py`:
+```python
+from strategies.my_strategy.book_manager import MyBookManager
+from strategies.my_strategy.engine import MyStrategy
+
+__all__ = ["MyBookManager", "MyStrategy"]
+```
+
+`strategies/my_strategy/engine.py`:
+```python
+from strategies.core.base_book import AbstractStrategyBook
+
+class MyStrategy(AbstractStrategyBook):
+    """One independent trading book per (client, binding, underlying)."""
+
+    def reset_session(self) -> None:
+        pass
+
+    async def _tick_loop(self):
+        # consume Topic.INDEX_TICK via self._subscribe(Topic.INDEX_TICK)
+        pass
+```
+
+`strategies/my_strategy/book_manager.py`:
+```python
+from strategies.core.book_manager import StrategyBookManager
+from strategies.my_strategy.engine import MyStrategy
+
+class MyBookManager(StrategyBookManager):
+    def _wanted(self):
+        # Query client_db for running deployments of this strategy
+        return {}
+
+    def _spawn_book(self, key, value):
+        client_id, binding_id, underlying = key
+        return MyStrategy(self._bus, self._cfg,
+                          underlying=underlying,
+                          client_id=client_id,
+                          binding_id=binding_id)
+```
+
+Then register it in `strategies/registry.py` as shown above and run with
+`--strategies my_strategy`.
+
+> For a concrete, importable example see `strategies/sample_strategy/`.
 
 ---
 
@@ -99,6 +166,7 @@ That's it — feed, auth, registry, broker routing, persistence, dashboard plumb
 | Multi-broker order routing + fills | `execution_bridge/` (`ExecutionRouter`, `*_bridge`) |
 | Clients / bindings / deployments / creds | `data_layer/client_db.py` |
 | Per-binding lifecycle template | `strategies/trap_book_manager.py` |
+| Per-index lifecycle wrapper | `strategies/core/per_index_manager.py` |
 | Terminal/Trade gate template | `TrapScannerEngine._can_trade()` |
 | Backtest data fetch (Upstox 1m) | `scripts/nifty_backtest.py` (`_fetch_1m`, `_option_key`, `_resample`, `_mkt_hours`) |
 
@@ -115,14 +183,16 @@ That's it — feed, auth, registry, broker routing, persistence, dashboard plumb
 > `(client,binding)` only), `client_db`, and — if I use VWAP/SLOPE/RSI/ROC —
 > `pool_indicator_engine`. Follow the **per-binding book pattern**: one `<NAME>Engine` per
 > `(client,binding,index)` + a `<NAME>BookManager` copied from `trap_book_manager.py`, gated by
-> `_can_trade()` (terminal+trade ON). Only 3 strategies exist today (sell_straddle,
-> iron_condor, trap_scanner) — add mine as a 4th the same way; don't touch the others.
+> `_can_trade()` (terminal+trade ON). Register the new strategy in `strategies/registry.py`; do
+> not hard-code it in `run_system.py`. Only the existing strategies are live by default — add
+> mine as an optional registered strategy.
 >
 > The strategy logic is: **<describe entry / exit / strike selection / timeframe here>**.
 >
-> Deliver: `strategies/<name>_engine.py`, `strategies/<name>_book_manager.py`, run_system
-> wiring under `--strategies <name>`, a thin execution bridge if needed, and unit tests. Then
-> a backtest script under `scripts/` reusing `nifty_backtest`'s fetch helpers.
+> Deliver: `strategies/<name>/__init__.py`, `strategies/<name>/engine.py`,
+> `strategies/<name>/book_manager.py`, registration in `strategies/registry.py`, a thin
+> execution bridge if needed, and unit tests. Then a backtest script under `scripts/` reusing
+> `nifty_backtest`'s fetch helpers.
 
 Fill in `<NAME>` and the logic line; everything else is boilerplate the session inherits.
 

@@ -12,7 +12,6 @@ Usage:
 
     # Per-index config (new, rule-builder based):
     ss_cfg = RuntimeConfig.index_section("NIFTY", "sell_straddle")
-    ic_cfg = RuntimeConfig.index_section("NIFTY", "iron_condor")
 
     RuntimeConfig.update(patch_dict)                       # flat section update
     RuntimeConfig.set_index_section("NIFTY", "sell_straddle", data)  # per-index
@@ -33,8 +32,8 @@ _CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "strategy_c
 # ── Per-index sell_straddle defaults ─────────────────────────────────────────
 _SS_INDEX_DEFAULT: Dict[str, Any] = {
     "entry_start":           "09:20",
-    "entry_end":             "15:15",
-    "squareoff_time":        "15:15",
+    "entry_end":             "15:20",
+    "squareoff_time":        "15:20",
     "entry_workflow_mode":   "hybrid",       # hybrid | beginning_only | reentry_only
     # Pre-entry LTP filter: BOTH CE and PE must individually be >= ltp_target.
     # 0 = disabled. sell_v3 default is 50.0; set to 0 until admin configures per index.
@@ -43,21 +42,41 @@ _SS_INDEX_DEFAULT: Dict[str, Any] = {
     # Set trail_lock_pct = 0 to disable. Values are percentages (divided by 100 in strategy).
     "trail_lock_pct":        20.0,
     "trail_floor_pct":       10.0,
-    "pool_itm_depth":        4,
-    "pool_otm_depth":        4,
+    # 2026-08-24, user spec: widened from 4 to 5 -- both the BEGINNING/re-entry
+    # partner-search radius (select_balanced_pair_at's `offset` -- see
+    # strategies/sell_straddle/entries.py's _eval_ruleset, which derives it as
+    # max(pool_itm_depth, pool_otm_depth)) and the live-quote subscription
+    # window (pool_strike_set) read these same two keys. NIFTY and SENSEX
+    # already carry an explicit 5/5 override in the per-index config; this
+    # changes the DEFAULT so any other index or a brand-new deployment
+    # inherits 5/5 too, instead of needing a manual override to match.
+    "pool_itm_depth":        5,
+    "pool_otm_depth":        5,
+    "roll_max_itm_steps":    5,
+    "itm_pair_gate_enabled": True,
+    "itm_pair_gate_profit_inr": 500.0,
+    # Day-low reversal exit: tracks the day's lowest CE+PE combined premium from
+    # entry to day_low_freeze_time, then exits full the moment the rate returns
+    # to that frozen low. Opt-in, unvalidated -- default OFF.
+    "day_low_exit_enabled": False,
+    "day_low_freeze_time": "15:00",
+    # Post-15:00 per-leg R1 exit (2026-08-28): replaces day_low_exit's own
+    # "close both legs" action with an independent per-leg R1 watch for a
+    # binding that opts into this instead. 2026-08-31, direct user spec:
+    # default ON (was OFF at initial ship) -- still fully toggleable off
+    # per index from the admin Guardrails tab.
+    "post1500_exit_enabled": True,
+    # Shadow VWAP (2026-08-28): log-only self-computed VWAP, run in parallel
+    # with the real broker-ATP VWAP for after-market comparison. Never
+    # affects any trading decision. 2026-08-31, direct user spec: default ON.
+    "shadow_vwap_enabled": True,
     "entry_rules_beginning": [],
     "entry_rules_reentry":   [],
     "exit_rules":            [],
-    "profit_target_enabled": True,
-    "profit_pct":            30.0,   # per-trade target as % of credit
-    "sl_enabled":            True,
-    "sl_pct":                200.0,
     # Day-level % guardrails (% of initial net credit). 0 = disabled.
     "profit_target_pct":     0.0,    # stop for day when session P&L ≥ X% of credit
     "loss_sl_pct":           0.0,    # stop for day when session loss ≥ X% of credit
     "tsl_enabled":           False,
-    "trail_lock_pct":        20.0,
-    "trail_floor_pct":       10.0,
     "tsl_scalable": {
         "enabled":      False,
         "base_profit":  3000,
@@ -65,10 +84,6 @@ _SS_INDEX_DEFAULT: Dict[str, Any] = {
         "step_profit":  1000,
         "step_lock":    500,
     },
-    # ROC guardrail: exit if ROC-of-combined-premium exceeds bounds (pts)
-    "guardrail_roc": {"enabled": False, "tf": 15, "length": 9, "target": 20.0, "stoploss": -40.0},
-    # Session P&L guardrail (points): optional per-day overrides in per_day section
-    "guardrail_pnl": {"enabled": False, "target_pts": 100.0, "stoploss_pts": -60.0},
     # Ratio exit: exit when max(CE_ltp, PE_ltp) / min(CE_ltp, PE_ltp) >= threshold
     "ratio_exit":    {"enabled": False, "threshold": 3.0},
     # LTP decay: smart-roll or exit when either leg LTP decays below ltp_exit_min
@@ -91,36 +106,11 @@ _SS_INDEX_DEFAULT: Dict[str, Any] = {
     },
 }
 
-# ── Per-index iron_condor defaults — matches old repo iron_condor_manager.py ──
-# Entry is purely time-gated; NO RSI/ADX filter.
-# P&L targets are in ₹, not %; roll side on ratio breach instead of full exit.
-_IC_BASE_DEFAULT: Dict[str, Any] = {
-    "enabled":                  True,
-    "start_time":               "09:16",
-    "squareoff_time":           "15:15",
-    "entry_day":                "daily",     # daily | monday | monday,thursday
-    "product_type":             "MIS",
-    "lot_size":                 65,
-    "strike_step":              50,
-    "max_adjustments_per_side": 3,
-    "roll_step_pts":            5,
-    "profit_target_inr":        5000.0,      # ₹ profit to exit all 4 legs
-    "stoploss_inr":             2000.0,      # ₹ loss to exit all 4 legs
-    "ratio_exit_threshold":     3.0,         # short_call_ltp/short_put_ltp ratio to roll
-}
-
-_IC_STRIKE_DEFAULTS: Dict[str, Dict[str, float]] = {
-    "NIFTY":      {"short_leg_otm_pts": 200.0, "long_leg_otm_pts": 300.0},
-    "BANKNIFTY":  {"short_leg_otm_pts": 400.0, "long_leg_otm_pts": 600.0},
-    "FINNIFTY":   {"short_leg_otm_pts": 200.0, "long_leg_otm_pts": 300.0},
-    "SENSEX":     {"short_leg_otm_pts": 500.0, "long_leg_otm_pts": 750.0},
-    "MIDCPNIFTY": {"short_leg_otm_pts": 150.0, "long_leg_otm_pts": 250.0},
-    "CRUDEOIL":   {"short_leg_otm_pts": 100.0, "long_leg_otm_pts": 200.0},
-}
-
 # MCX commodities trade the evening session — different hours/lots/strikes.
 _MCX_INDICES = {"CRUDEOIL", "CRUDEOILM", "NATURALGAS"}
-_ALL_INDICES = ["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY", "CRUDEOIL"]
+# Crypto (Delta Exchange India) — daily options, 24/7/365, 17:30 IST rollover.
+_CRYPTO_INDICES = {"BTC", "ETH"}
+_ALL_INDICES = ["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY", "CRUDEOIL", "BTC", "ETH"]
 
 
 def _ss_index_default(index: str) -> Dict[str, Any]:
@@ -128,15 +118,9 @@ def _ss_index_default(index: str) -> Dict[str, Any]:
     if index.upper() in _MCX_INDICES:
         # MCX session: start 09:00, NO new trade after 23:15, square off 23:30.
         base.update({"entry_start": "09:00", "entry_end": "23:15", "squareoff_time": "23:30"})
-    return base
-
-
-def _ic_index_default(index: str) -> Dict[str, Any]:
-    strikes = _IC_STRIKE_DEFAULTS.get(index, {"short_leg_otm_pts": 200.0, "long_leg_otm_pts": 300.0})
-    base = {**_IC_BASE_DEFAULT, **strikes}
-    if index.upper() in _MCX_INDICES:
-        base.update({"start_time": "09:00", "squareoff_time": "23:30",
-                     "strike_step": 100, "lot_size": 100})
+    elif index.upper() in _CRYPTO_INDICES:
+        # Delta crypto daily options: entry after 17:30 rollover sleep, run through 16:30 next day.
+        base.update({"entry_start": "18:30", "entry_end": "16:30", "squareoff_time": "16:30"})
     return base
 
 
@@ -144,7 +128,6 @@ def _build_index_defaults() -> Dict[str, Any]:
     return {
         idx: {
             "sell_straddle": _ss_index_default(idx),
-            "iron_condor":   _ic_index_default(idx),
         }
         for idx in _ALL_INDICES
     }
@@ -153,7 +136,7 @@ _DEFAULTS: Dict[str, Any] = {
     "rms": {
         "max_drawdown_pct":       5.0,
         "order_throttle_per_sec": 5,
-        "squareoff_time":         "15:15",
+        "squareoff_time":         "15:20",
         "distance_filter_pct":    5.0,
     },
     "indicators": {
@@ -165,21 +148,10 @@ _DEFAULTS: Dict[str, Any] = {
         "htf_minutes":  75,
         "ltf_minutes":  5,
     },
-    # Legacy flat section — use indices[idx][iron_condor] for per-index config
-    "iron_condor": {
-        "enabled": True, "start_time": "09:16", "squareoff_time": "15:15",
-        "entry_day": "daily", "product_type": "MIS", "lot_size": 65, "strike_step": 50,
-        "max_adjustments_per_side": 3, "roll_step_pts": 5,
-        "profit_target_inr": 5000.0, "stoploss_inr": 2000.0,
-        "ratio_exit_threshold": 3.0,
-    },
     "sell_straddle": {
         "entry_start":              "09:20",
-        "entry_end":                "15:15",
-        "squareoff_time":           "15:15",
-        # Per-TRADE exit thresholds (% of credit collected on this trade)
-        "profit_pct":               30.0,   # exit this trade when it reaches 30% of its credit
-        "sl_pct":                   200.0,  # hard SL: exit when loss = 2× credit
+        "entry_end":                "15:20",
+        "squareoff_time":           "15:20",
         "trail_lock_pct":           20.0,
         "trail_floor_pct":          10.0,
         # DAY-LEVEL % guardrails (% of initial net credit — fires stop_for_day)
@@ -294,12 +266,23 @@ class RuntimeConfig:
 
     @staticmethod
     def index_section(index: str, strategy: str) -> Dict[str, Any]:
-        """Return per-index strategy config, falling back to defaults."""
+        """Return per-index strategy config, DEEP-MERGED over defaults.
+
+        2026-08-31 fix (real bug found while adding post1500_exit_enabled/
+        shadow_vwap_enabled): this used to be `stored or defaults` -- for any
+        index that ALREADY has a saved config (e.g. NIFTY/SENSEX, both
+        actively configured), that returned the stored dict WHOLESALE,
+        silently dropping any key added to _SS_INDEX_DEFAULT after that
+        config was first saved. A new opt-in flag could never actually
+        default ON for an already-configured index -- its key just wasn't in
+        the stored dict, and the caller's own `.get(key, False)` fallback
+        won regardless of what _SS_INDEX_DEFAULT said. get_all_indices()
+        already deep-merges correctly; this now matches it -- stored values
+        always win, missing keys fall back to the real default."""
         _ensure_loaded()
-        return copy.deepcopy(
-            _live.get("indices", {}).get(index, {}).get(strategy, {})
-            or _build_index_defaults().get(index, {}).get(strategy, {})
-        )
+        defaults = _build_index_defaults().get(index, {}).get(strategy, {})
+        stored = _live.get("indices", {}).get(index, {}).get(strategy, {})
+        return _deep_merge(defaults, stored) if stored else copy.deepcopy(defaults)
 
     @staticmethod
     def get_all_indices() -> Dict[str, Any]:
@@ -313,10 +296,6 @@ class RuntimeConfig:
                 "sell_straddle": _deep_merge(
                     defaults[idx]["sell_straddle"],
                     stored.get(idx, {}).get("sell_straddle", {}),
-                ),
-                "iron_condor": _deep_merge(
-                    defaults[idx]["iron_condor"],
-                    stored.get(idx, {}).get("iron_condor", {}),
                 ),
             }
         return result
@@ -354,7 +333,7 @@ def validate_index_section(index: str, section: str, raw: dict) -> None:
 
     @staticmethod
     def set_index_config(index: str, data: Dict[str, Any]) -> None:
-        """Persist full per-index config (sell_straddle + iron_condor together)."""
+        """Persist full per-index config (sell_straddle)."""
         global _live
         _ensure_loaded()
         _live.setdefault("indices", {})[index] = data

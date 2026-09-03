@@ -1,0 +1,907 @@
+"""
+strategies/fno_positional/book.py — FnO Positional Option Buyer
+
+Manages up to MAX_SLOTS concurrent long-option positions on NSE FnO stocks.
+Signals come from backtest/fno_scanner/scan_live.scan() — bear-trap zones
+generate CE buys, bull-trap zones generate PE buys.
+
+Entry mechanics
+---------------
+- Run scan at startup (once, before market open).  TRIGGERED signals enter at
+  market open (9:16–9:30 IST); APPROACHING signals enter when spot touches the
+  entry_line intraday.
+- Orders published to Topic.FNO_ORDER_REQUEST → picked up by FnOExecutionBridge.
+
+Position monitoring
+-------------------
+- Polls spot + option LTP via Upstox REST every POLL_INTERVAL seconds.
+- SL condition is spot-based (not option premium): spot ≤ spot_sl (CE) or
+  spot ≥ spot_sl (PE).
+- On SL hit: close position, trigger rescan to fill the vacant slot.
+- On T1 hit: alert published to dashboard; manual hedge decision v1.
+- EOD 15:20 IST: force-close all remaining open positions.
+
+Persistence: state is saved to data/fno_positions.json after every change so
+a quick pm2-restart can recover in-flight positions without re-entering.
+"""
+from __future__ import annotations
+
+import asyncio
+import gzip
+import json
+import logging
+import uuid
+from dataclasses import asdict, dataclass, field
+from datetime import date, datetime, time
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from config.global_config import IST, Topic
+from utils.logging_utils import make_strategy_logger
+from data_layer.instrument_registry import REGISTRY
+from data_layer.historical_candles import fetch_upstox_daily
+from data_layer.oi_buildup import classify_oi_buildup, oi_agreement
+
+logger = logging.getLogger(__name__)
+
+ROOT           = Path(__file__).resolve().parents[2]
+POSITIONS_PATH = ROOT / "data" / "fno_positions.json"
+
+MAX_SLOTS        = 2
+POLL_INTERVAL    = 30          # seconds between REST LTP polls
+ENTRY_TIME_START   = time(9, 15)
+ENTRY_TIME_END     = time(14, 30)   # positional — enter any time a zone fires during the day
+MARKET_OPEN        = time(9, 15)
+MARKET_CLOSE       = time(15, 30)
+EXPIRY_WEEK_DAYS   = 7   # close position when ≤7 days left on expiry
+GAP_SKIP_PCT       = 2.5 # skip entry if spot gapped >2.5% from entry_line
+# Breakeven trail trigger — fraction of entry->T1 distance spot must cover
+# before SL moves to breakeven. 2026-08-03: backtested 30/40/50/60/70% across
+# all 207 FnO stocks (scripts/d1trap_fno_breakeven_trail_sweep.py) — 30% won
+# on both PF and aggregate return vs the prior 50% (faster capital turnover:
+# freeing a stock's slot sooner lets more signals get taken in the same
+# window, since per-trade edge is roughly flat across all trigger levels).
+TRAIL_TRIGGER_PCT  = 0.3
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Instrument-master cache (shared across books; refreshed once per day)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_MASTER_CACHE: Dict[str, Any] = {}   # {"instruments": [...], "date": date}
+
+
+def _get_master(token: str) -> list:
+    """Return cached NSE instrument master, refreshing if it's from a previous day."""
+    today = date.today()
+    if _MASTER_CACHE.get("date") == today and _MASTER_CACHE.get("instruments"):
+        return _MASTER_CACHE["instruments"]
+    try:
+        from curl_cffi import requests as cc
+        url = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz"
+        r = cc.get(url, impersonate="chrome131", timeout=30)
+        instruments = json.loads(gzip.decompress(r.content))
+        _MASTER_CACHE["instruments"] = instruments
+        _MASTER_CACHE["date"] = today
+        logger.info("FnO: instrument master refreshed — %d entries", len(instruments))
+        return instruments
+    except Exception as exc:
+        logger.warning("FnO: could not fetch instrument master: %s", exc)
+        return _MASTER_CACHE.get("instruments", [])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Symbol helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def zerodha_monthly_symbol(symbol: str, strike: int, direction: str, expiry_str: str) -> str:
+    """Zerodha NFO monthly option symbol.
+
+    Zerodha format: {SYMBOL}{YY}{MON}{STRIKE}{CE|PE}
+    expiry_str format: "28 AUG 26"  → year_code="26", month="AUG"
+    e.g. RELIANCE26AUG1280CE
+    """
+    parts = expiry_str.upper().split()   # ["28", "AUG", "26"]
+    yy  = parts[2] if len(parts) >= 3 else "26"
+    mon = parts[1] if len(parts) >= 2 else "AUG"
+    return f"{symbol.upper()}{yy}{mon}{int(strike)}{direction.upper()}"
+
+
+def resolve_option_key(instruments: list, symbol: str, strike: int,
+                       direction: str, expiry_str: str) -> tuple:
+    """Find Upstox NSE_FO instrument_key for a given option contract.
+
+    First tries an exact match on trading_symbol; falls back to nearest available
+    strike for the same symbol/direction/expiry.
+
+    Returns (instrument_key, resolved_strike) -- resolved_strike may differ from
+    the requested `strike` when the fallback snapped to the nearest REAL listed
+    strike (e.g. a coarse-strike-step stock like PAGEIND where a naive 100pt-step
+    guess doesn't correspond to an actual contract). 2026-08-04 fix: previously
+    only the key was returned, so a caller building a SEPARATE broker symbol
+    (zerodha_monthly_symbol) kept using the original, possibly-nonexistent
+    strike even after this function silently snapped to a different real one --
+    the Upstox LTP tracked one strike while the Zerodha order targeted another,
+    and Zerodha correctly rejected it ("instrument... does not exist").
+    ("", 0) if nothing resolves.
+    """
+    target = f"{symbol.upper()} {int(strike)} {direction.upper()} {expiry_str.upper()}"
+    for inst in instruments:
+        if inst.get("segment") != "NSE_FO":
+            continue
+        if inst.get("trading_symbol", "").upper() == target:
+            return inst.get("instrument_key", ""), int(strike)
+
+    # Nearest-strike fallback
+    try:
+        parts  = expiry_str.upper().split()
+        exp_dt = datetime.strptime(f"{parts[0]} {parts[1]} {parts[2]}", "%d %b %y").date()
+    except Exception:
+        return "", 0
+
+    candidates = []
+    for inst in instruments:
+        if inst.get("segment") != "NSE_FO":
+            continue
+        if inst.get("instrument_type", "").upper() != direction.upper():
+            continue
+        ts = inst.get("trading_symbol", "")
+        p  = ts.split()
+        if len(p) < 6 or p[0].upper() != symbol.upper():
+            continue
+        try:
+            ed = datetime.strptime(f"{p[3]} {p[4]} {p[5]}", "%d %b %y").date()
+            if ed == exp_dt:
+                candidates.append((abs(int(float(p[1])) - strike),
+                                   int(float(p[1])),
+                                   inst.get("instrument_key", "")))
+        except Exception:
+            continue
+    if candidates:
+        candidates.sort()
+        logger.info("FnO: nearest strike %d (target=%d) key=%s",
+                    candidates[0][1], strike, candidates[0][2])
+        return candidates[0][2], candidates[0][1]
+    return "", 0
+
+
+def resolve_lot_size(instruments: list, option_key: str) -> int:
+    for inst in instruments:
+        if inst.get("instrument_key") == option_key:
+            return int(inst.get("lot_size") or 1)
+    return 1
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Position record
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class FnOPosition:
+    slot_id:              str
+    symbol:               str
+    direction:            str            # "CE" | "PE"
+    spot_instrument_key:  str
+    option_instrument_key: str
+    broker_symbol:        str            # Zerodha NFO symbol e.g. "RELIANCE26AUG1280CE"
+    strike:               int
+    expiry_str:           str
+    lot_size:             int
+    qty:                  int
+    spot_entry:           float
+    spot_sl:              float
+    day_t1:               float
+    entry_ltp:            float  = 0.0
+    current_spot:         float  = 0.0
+    current_ltp:          float  = 0.0
+    entry_order_id:       str    = ""
+    exit_order_id:        str    = ""
+    status:               str    = "PENDING"
+    open_time:            str    = ""
+    close_time:           str    = ""
+    close_reason:         str    = ""
+    t1_alerted:           bool   = False  # Day T1 alert already fired -- position stays
+                                           # OPEN either way (T1 is alert-only, no auto-close);
+                                           # this is a dedup flag, NOT a close record. Was
+                                           # previously (mis)stored in close_reason, which made
+                                           # an open position with pnl<0 look like a booked loss.
+    pnl:                  float  = 0.0
+    client_id:            str    = ""
+    binding_id:           str    = ""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Book
+# ─────────────────────────────────────────────────────────────────────────────
+
+class FnOPositionalBook:
+    """One independent FnO positional scanner per (client, binding) deployment."""
+
+    def __init__(
+        self,
+        bus,
+        upstox_token: str,
+        client_id: str,
+        binding_id: str,
+        mode: str = "paper",
+        max_slots: int = MAX_SLOTS,
+    ):
+        self._bus        = bus
+        self._token      = upstox_token
+        self._client_id  = client_id
+        self._binding_id = binding_id
+        self._mode       = mode
+        self._max_slots  = max_slots
+        self._positions: List[FnOPosition] = []
+        self._pending:   list              = []    # Signal objects waiting for entry
+        self._scan_done  = False
+        self._running    = False
+        self._task: Optional[asyncio.Task] = None
+        self._instruments: list            = []    # cached NSE master
+        # 2026-08-04: live spot ticks via Fyers (subscribe_fno_equity/EQUITY_TICK)
+        # instead of REST-polling every watchlist stock every 30s -- see
+        # _subscribe_watchlist_spot / _equity_tick_loop. Falls back to REST
+        # (_fetch_ltp) for any symbol not yet warm in this cache (e.g. right
+        # after a fresh subscribe, before the first tick arrives).
+        self._equity_ltp: Dict[str, float] = {}
+        self._equity_tick_task: Optional[asyncio.Task] = None
+        # (symbol, direction) pairs stopped out today — excluded from re-entry so a
+        # rescan can't immediately re-fire the same already-invalidated signal.
+        # See 2026-08-05 incident: a stale (2-day-old) APPROACHING signal whose spot
+        # had already moved past hard_sl before entry caused an infinite
+        # enter→instant-SL→rescan→re-enter loop, 6 real orders/min on one stock.
+        self._blocked_today: set = set()
+
+        date_str = datetime.now(IST).strftime("%Y%m%d")
+        self._log = make_strategy_logger(
+            f"fno_{client_id}_{binding_id}_{date_str}",
+            log_dir="logs/clients",
+        )
+
+    # ── Lifecycle ─────────────────────────────────────────────────────────────
+
+    def start(self) -> None:
+        self._running = True
+        self._load_positions()
+        # Kick off the main loop as an asyncio task; instrument master fetch happens
+        # inside _main_loop before the first scan so start() stays synchronous (the
+        # base class _reconcile() calls book.start() without await).
+        self._task = asyncio.create_task(self._startup_and_loop(), name=f"fno_{self._client_id}_{self._binding_id}")
+        self._equity_tick_task = asyncio.create_task(
+            self._equity_tick_loop(), name=f"fno_{self._client_id}_{self._binding_id}_ticks")
+        self._log.info("FnOBook[%s/%s]: started (mode=%s, max_slots=%d)",
+                       self._client_id, self._binding_id, self._mode, self._max_slots)
+
+    async def _startup_and_loop(self) -> None:
+        """Fetch instrument master then run the main loop. Called as a task by start()."""
+        try:
+            self._instruments = await asyncio.to_thread(_get_master, self._token)
+        except Exception as exc:
+            self._log.warning("FnOBook[%s/%s]: instrument master fetch failed: %s — proceeding without pre-warm",
+                              self._client_id, self._binding_id, exc)
+        await self._main_loop()
+
+    async def stop(self) -> None:
+        self._running = False
+        if self._task and not self._task.done():
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+        if self._equity_tick_task and not self._equity_tick_task.done():
+            self._equity_tick_task.cancel()
+            try:
+                await self._equity_tick_task
+            except asyncio.CancelledError:
+                pass
+
+    # ── Persistence ───────────────────────────────────────────────────────────
+
+    def _load_positions(self) -> None:
+        if not POSITIONS_PATH.exists():
+            return
+        try:
+            raw = json.loads(POSITIONS_PATH.read_text(encoding="utf-8"))
+            all_pos = [FnOPosition(**p) for p in raw.get("positions", [])]
+            # Restore only positions owned by this book that are not closed
+            self._positions = [
+                p for p in all_pos
+                if p.client_id == self._client_id
+                and p.binding_id == self._binding_id
+                and p.status not in ("CLOSED",)
+            ]
+            self._log.info("FnOBook[%s/%s]: restored %d positions",
+                           self._client_id, self._binding_id, len(self._positions))
+        except Exception as exc:
+            self._log.warning("FnOBook: restore failed: %s", exc)
+
+    def _save_positions(self) -> None:
+        try:
+            # Merge with positions from other books (different client/binding)
+            existing: list = []
+            if POSITIONS_PATH.exists():
+                raw = json.loads(POSITIONS_PATH.read_text(encoding="utf-8"))
+                existing = [
+                    p for p in raw.get("positions", [])
+                    if not (p.get("client_id") == self._client_id
+                            and p.get("binding_id") == self._binding_id)
+                ]
+            merged = existing + [asdict(p) for p in self._positions]
+            POSITIONS_PATH.write_text(json.dumps({
+                "positions":  merged,
+                "updated_at": datetime.now(IST).isoformat(),
+            }, indent=2), encoding="utf-8")
+        except Exception as exc:
+            self._log.warning("FnOBook: save failed: %s", exc)
+
+    # ── Main loop ─────────────────────────────────────────────────────────────
+
+    async def _main_loop(self) -> None:
+        _last_reset_date = None
+        while self._running:
+            now        = datetime.now(IST)
+            t          = now.time()
+            today_date = now.date()
+
+            # Daily reset — once per day after market close
+            if t >= MARKET_CLOSE and _last_reset_date != today_date:
+                self._scan_done     = False
+                self._pending       = []
+                _last_reset_date    = today_date
+
+            # Run scan once per day before entry window
+            if not self._scan_done and t >= time(9, 0):
+                await self._run_scan()
+                self._scan_done = True
+
+            # Entry window: check both TRIGGERED and APPROACHING signals all day.
+            # TRIGGERED = zone broken on D1 (enter with gap filter).
+            # APPROACHING = zone not yet hit, enter when intraday price reaches entry_line.
+            if ENTRY_TIME_START <= t <= ENTRY_TIME_END:
+                await self._try_enter_triggered()
+                await self._try_enter_approaching()
+
+            # Monitor open positions during market hours
+            if self._open_positions and MARKET_OPEN <= t <= MARKET_CLOSE:
+                await self._poll_and_monitor()
+
+            # Positional exit: close positions in last week of expiry
+            if self._open_positions and MARKET_OPEN <= t <= time(15, 15):
+                await self._check_expiry_exit()
+
+            await asyncio.sleep(POLL_INTERVAL)
+
+    # ── Live spot ticks (2026-08-04) ────────────────────────────────────────
+    # Only today's watchlist (~30 stocks, not the full ~200-stock universe) is
+    # subscribed for live ticks -- small enough to mirror on BOTH Upstox
+    # (register_extra_spot_keys) and Fyers (subscribe_fno_equity), same
+    # active-passive redundancy as everything else in this system (if one
+    # provider drops, the other already has the same data flowing). Falls
+    # back to the old REST _fetch_ltp for any symbol not yet warm in the
+    # cache (e.g. immediately after subscribing, before the first tick).
+
+    def _subscribe_watchlist_spot(self, signals) -> None:
+        feeder = getattr(self._bus, "_global_feeder", None)
+        if feeder is None:
+            self._log.warning("FnOBook: no _global_feeder on bus — spot ticks will stay REST-polled")
+            return
+        upstox_map = {}
+        fyers_n = 0
+        for sig in signals:
+            symbol = sig.symbol
+            upstox_key = getattr(sig, "upstox_key", "") or ""
+            if upstox_key:
+                upstox_map[upstox_key] = symbol
+            try:
+                feeder.subscribe_fno_equity(f"NSE:{symbol}-EQ", symbol)
+                fyers_n += 1
+            except Exception as exc:
+                self._log.debug("FnOBook: subscribe_fno_equity(%s) failed: %s", symbol, exc)
+        if upstox_map and hasattr(feeder, "register_extra_spot_keys"):
+            feeder.register_extra_spot_keys(upstox_map)
+        self._log.info("FnOBook[%s/%s]: subscribed %d watchlist stocks for live spot "
+                       "(upstox=%d, fyers=%d)", self._client_id, self._binding_id,
+                       len(signals), len(upstox_map), fyers_n)
+
+    async def _equity_tick_loop(self) -> None:
+        q = self._bus.subscribe(Topic.INDEX_TICK)
+        while self._running:
+            try:
+                tick = await q.get()
+            except asyncio.CancelledError:
+                break
+            ltp = getattr(tick, "ltp", 0.0)
+            symbol = getattr(tick, "symbol", "")
+            if symbol and ltp:
+                self._equity_ltp[symbol] = float(ltp)
+
+    async def _spot_ltp(self, symbol: str, instrument_key: str) -> float:
+        """Live tick cache first, REST fallback (covers pre-first-tick / a
+        symbol somehow missing from the watchlist subscribe)."""
+        cached = self._equity_ltp.get(symbol, 0.0)
+        if cached > 0:
+            return cached
+        return await self._fetch_ltp(instrument_key)
+
+    # ── Scan ─────────────────────────────────────────────────────────────────
+
+    async def _run_scan(self) -> None:
+        # 2026-08-03: reads the offline/nightly scan output (data/fno_positional_watchlist.json,
+        # written by `scan_live.py --save --out data/fno_positional_watchlist.json --top-n 30`
+        # run after market close) instead of scanning the full ~200-stock FnO universe live —
+        # a full live scan is impractical during market hours and (see below) was also broken.
+        # Previously this called scan_live.scan() live, which returns (signals, universe) — a
+        # 2-tuple — but the old code assigned that straight to `signals` and iterated it as the
+        # signal list, raising AttributeError on the first list comprehension every single call.
+        # That means the daily scan never actually completed and self._pending was never
+        # populated in production — this book has never entered a trade until this fix.
+        self._log.info("FnOBook[%s/%s]: loading offline watchlist...", self._client_id, self._binding_id)
+        try:
+            from backtest.fno_scanner.scan_live import load_watchlist
+            signals = await asyncio.to_thread(load_watchlist)
+        except Exception as exc:
+            self._log.error("FnOBook: watchlist load failed: %s", exc)
+            return
+        if not signals:
+            self._log.warning("FnOBook[%s/%s]: watchlist empty — run "
+                              "scan_live.py --save --out data/fno_positional_watchlist.json "
+                              "--top-n 30 after market close", self._client_id, self._binding_id)
+            return
+        self._subscribe_watchlist_spot(signals)
+        triggered   = sorted([s for s in signals if s.status == "TRIGGERED"],
+                              key=lambda s: s.rr, reverse=True)
+        approaching = sorted([s for s in signals if s.status == "APPROACHING"],
+                              key=lambda s: abs(s.dist_pct))
+        self._pending = triggered + approaching
+        self._log.info("FnOBook[%s/%s]: %d triggered, %d approaching",
+                       self._client_id, self._binding_id, len(triggered), len(approaching))
+
+    # ── Entry ─────────────────────────────────────────────────────────────────
+
+    def _already_sl_side(self, sig, spot: float) -> bool:
+        """True if entering right now would open a position already past its own
+        hard_sl — i.e. the zone is stale/blown and the SL would fire on the very
+        next poll. Applies regardless of which path (TRIGGERED/APPROACHING) found
+        the signal; a scan-file zone can go stale (nightly scan not re-run,
+        overnight gap, etc.) between when it was written and when it's acted on."""
+        return (
+            (sig.direction == "CE" and spot <= sig.hard_sl) or
+            (sig.direction == "PE" and spot >= sig.hard_sl)
+        )
+
+    def _log_entry_decision(self, sig, spot: float, concept: str, oi_note: str = "") -> None:
+        """Full WHY narrative for a real entry decision -- zone boundaries, when it
+        was locked, when/why it triggered now, and the R:R that justified taking it.
+        Logged once, right before the order is dispatched, so a trade can be
+        explained from the log alone without cross-referencing the scan output.
+        oi_note (see _check_oi_buildup) is purely informational -- it never
+        affects whether this entry happens, only what gets logged about it."""
+        _zone = (f"[{sig.zone_lo:.2f}, {sig.zone_hi:.2f}]" if sig.zone_lo > 0 and sig.zone_hi > 0
+                 else "(zone bounds unavailable -- pre-2026-08-06 watchlist file)")
+        if concept == "TRIGGERED":
+            _why = "zone was already retested as of yesterday's close (BTST setup)"
+        else:
+            _why = (f"spot just touched entry_line (spot={spot:.2f} vs entry_line={sig.entry_line:.2f}, "
+                     f"{sig.dist_pct:.2f}% away)")
+        self._log.info(
+            "FnOBook[%s/%s]: ENTRY DECISION %s %s [%s] — %s | zone %s locked %s (age=%dd) | "
+            "entry_line=%.2f hard_sl=%.2f day_t1=%.2f | zone R:R=%.2f BTST R:R=%.2f | %s | %s",
+            self._client_id, self._binding_id, sig.symbol, sig.direction, concept, _why,
+            _zone, sig.lock_date, sig.zone_age, sig.entry_line, sig.hard_sl, sig.day_t1,
+            sig.rr, sig.btst_rr, f"expiry={sig.expiry}" if sig.expiry else "", oi_note,
+        )
+
+    async def _check_oi_buildup(self, sig) -> str:
+        """Best-effort futures OI-buildup confirmation note -- diagnostic only,
+        NEVER blocks or delays entry. Classifies the underlying's near-month
+        futures OI (day-over-day) into LONG_BUILDUP/SHORT_BUILDUP/SHORT_COVERING/
+        LONG_UNWINDING and checks whether it agrees with the trade's direction
+        (CE=bullish, PE=bearish). Buildup can lag a zone touch by hours or days,
+        so this is only ever a log note, never a gate -- see CLAUDE.md/session
+        note on why OI is confirmation-only here, not a filter.
+        Any failure (no futures key resolvable, Upstox call fails, <2 daily
+        candles) degrades to a plain 'unavailable' note rather than raising."""
+        try:
+            await asyncio.to_thread(REGISTRY.load_futures_only_sync, sig.symbol)
+            fut_key = REGISTRY.get_futures_upstox(sig.symbol)
+            if not fut_key:
+                return "OI: unavailable (no futures key resolved)"
+            candles = await fetch_upstox_daily(fut_key, self._token, lookback_days=5)
+            if len(candles) < 2:
+                return "OI: unavailable (insufficient daily candles)"
+            prev, curr = candles[-2], candles[-1]
+            buildup = classify_oi_buildup(prev["close"], curr["close"], prev["oi"], curr["oi"])
+            agreement = oi_agreement(sig.direction, buildup)
+            return f"OI: {buildup} ({agreement} {sig.direction} thesis)"
+        except Exception as exc:
+            return f"OI: unavailable ({exc})"
+
+    async def _try_enter_triggered(self) -> None:
+        free = self._max_slots - len(self._open_positions)
+        if free <= 0:
+            return
+        for sig in list(self._pending):
+            if free <= 0:
+                break
+            if sig.status != "TRIGGERED":
+                continue
+            key = (sig.symbol, sig.direction)
+            if key in self._blocked_today:
+                self._pending.remove(sig)
+                continue
+            # Gap filter: if spot has moved >GAP_SKIP_PCT% from entry_line since
+            # yesterday's close, the zone is blown — skip this signal entirely.
+            spot_key = getattr(sig, "upstox_key", "") or self._spot_key(sig.symbol)
+            if spot_key:
+                spot = await self._spot_ltp(sig.symbol, spot_key)
+                if spot > 0:
+                    gap_pct = abs(spot - sig.entry_line) / sig.entry_line * 100
+                    if gap_pct > GAP_SKIP_PCT or self._already_sl_side(sig, spot):
+                        self._log.warning(
+                            "FnOBook: SKIP %s %s — gap %.1f%% from zone %.1f (spot=%.1f, "
+                            "hard_sl=%.1f) — stale/blown zone, would enter already past SL",
+                            sig.symbol, sig.direction, gap_pct, sig.entry_line, spot, sig.hard_sl,
+                        )
+                        self._pending.remove(sig)
+                        self._blocked_today.add(key)
+                        continue
+            self._pending.remove(sig)
+            oi_note = await self._check_oi_buildup(sig)
+            self._log_entry_decision(sig, spot if spot_key else 0.0, "TRIGGERED", oi_note)
+            await self._open_position(sig)
+            free -= 1
+
+    async def _try_enter_approaching(self) -> None:
+        free = self._max_slots - len(self._open_positions)
+        if free <= 0 or not self._pending:
+            return
+        for sig in list(self._pending):
+            if free <= 0:
+                break
+            if sig.status != "APPROACHING":
+                continue
+            key = (sig.symbol, sig.direction)
+            if key in self._blocked_today:
+                self._pending.remove(sig)
+                continue
+            spot_key = getattr(sig, "upstox_key", "") or self._spot_key(sig.symbol)
+            spot = await self._spot_ltp(sig.symbol, spot_key)
+            if spot <= 0:
+                continue
+            touched = (
+                (sig.direction == "CE" and spot <= sig.entry_line * 1.002) or
+                (sig.direction == "PE" and spot >= sig.entry_line * 0.998)
+            )
+            if touched and self._already_sl_side(sig, spot):
+                self._log.warning(
+                    "FnOBook: SKIP %s %s — spot=%.1f already past hard_sl=%.1f "
+                    "(stale zone: entry_line=%.1f) — refusing to enter pre-stopped",
+                    sig.symbol, sig.direction, spot, sig.hard_sl, sig.entry_line,
+                )
+                self._pending.remove(sig)
+                self._blocked_today.add(key)
+                continue
+            if touched:
+                self._pending.remove(sig)
+                oi_note = await self._check_oi_buildup(sig)
+                self._log_entry_decision(sig, spot, "APPROACHING", oi_note)
+                await self._open_position(sig)
+                free -= 1
+
+    async def _open_position(self, sig) -> None:
+        # 2026-08-03: was hardcoded to the old 30-stock TOP_30_STOCKS dict, so
+        # any signal for one of the ~177 other FnO stocks silently failed
+        # entry ("unknown symbol"). The watchlist JSON now carries each
+        # stock's real upstox_key (resolved from the full instrument master
+        # at scan time), so any FnO stock can actually be traded.
+        spot_key = getattr(sig, "upstox_key", "") or ""
+        if not spot_key:
+            self._log.warning("FnOBook: no upstox_key for %s — skip", sig.symbol)
+            return
+
+        # Resolve option instrument key and broker symbol -- use the RESOLVED
+        # strike (may differ from sig.suggested_strike on a coarse-strike-step
+        # stock where the fallback snapped to the nearest real listed contract)
+        # for BOTH the Upstox key lookup and the Zerodha symbol, so they always
+        # refer to the same actual contract. Previously the Zerodha symbol kept
+        # using the original guessed strike even when Upstox silently resolved
+        # to a different one -- Zerodha then correctly rejected the mismatched,
+        # nonexistent contract (confirmed live on PAGEIND, 2026-08-04).
+        opt_key, resolved_strike = await asyncio.to_thread(
+            resolve_option_key,
+            self._instruments, sig.symbol, sig.suggested_strike, sig.direction, sig.expiry,
+        )
+        if not opt_key:
+            self._log.warning("FnOBook: could not resolve option key for %s %d %s %s",
+                              sig.symbol, sig.suggested_strike, sig.direction, sig.expiry)
+            return
+        if resolved_strike != sig.suggested_strike:
+            self._log.info("FnOBook: %s strike snapped %d -> %d (nearest real listed contract)",
+                           sig.symbol, sig.suggested_strike, resolved_strike)
+
+        lot_size  = await asyncio.to_thread(resolve_lot_size, self._instruments, opt_key)
+        zerodha_s = zerodha_monthly_symbol(sig.symbol, resolved_strike, sig.direction, sig.expiry)
+        qty       = max(1, 1) * lot_size   # 1 lot
+
+        # Fetch current LTPs for fill reference
+        spot_ltp = await self._fetch_ltp(spot_key) or sig.entry_line
+        opt_ltp  = await self._fetch_ltp(opt_key)  or 0.0
+
+        pos = FnOPosition(
+            slot_id=f"fno_{sig.symbol}_{sig.direction}_{uuid.uuid4().hex[:6]}",
+            symbol=sig.symbol,
+            direction=sig.direction,
+            spot_instrument_key=spot_key,
+            option_instrument_key=opt_key,
+            broker_symbol=zerodha_s,
+            strike=resolved_strike,
+            expiry_str=sig.expiry,
+            lot_size=lot_size,
+            qty=qty,
+            spot_entry=spot_ltp,
+            spot_sl=sig.hard_sl,
+            day_t1=sig.day_t1,
+            current_spot=spot_ltp,
+            current_ltp=opt_ltp,
+            status="ENTRY_PLACED",
+            open_time=datetime.now(IST).isoformat(),
+            client_id=self._client_id,
+            binding_id=self._binding_id,
+        )
+
+        order_id = await self._place_order("BUY", pos, opt_ltp)
+        if order_id:
+            pos.entry_order_id = order_id
+            pos.entry_ltp      = opt_ltp
+            pos.status         = "OPEN"
+            self._log.info("FnOBook[%s/%s]: ENTRY %s %s %d %s  ltp=%.2f  sl=%.1f  t1=%.1f",
+                           self._client_id, self._binding_id,
+                           sig.symbol, sig.direction, sig.suggested_strike, sig.expiry,
+                           opt_ltp, sig.hard_sl, sig.day_t1)
+        else:
+            pos.status       = "CLOSED"
+            pos.close_reason = "entry_failed"
+
+        self._positions.append(pos)
+        self._save_positions()
+        await self._bus.publish(Topic.SYSTEM_EVENT, {"type": "fno_entry", "pos": asdict(pos)})
+
+    # ── Monitor ───────────────────────────────────────────────────────────────
+
+    async def _poll_and_monitor(self) -> None:
+        for pos in list(self._open_positions):
+            spot = await self._fetch_ltp(pos.spot_instrument_key)
+            opt  = await self._fetch_ltp(pos.option_instrument_key)
+
+            if spot > 0:
+                pos.current_spot = spot
+            if opt  > 0:
+                pos.current_ltp  = opt
+            if pos.entry_ltp > 0 and opt > 0:
+                pos.pnl = (opt - pos.entry_ltp) * pos.qty
+
+            # Breakeven trail: once spot has moved >= TRAIL_TRIGGER_PCT of entry->T1, protect at entry.
+            if spot > 0 and pos.spot_entry > 0 and pos.day_t1 > 0:
+                _range = abs(pos.day_t1 - pos.spot_entry)
+                _progress = abs(spot - pos.spot_entry)
+                if _range > 0 and _progress >= TRAIL_TRIGGER_PCT * _range:
+                    if pos.direction == "CE" and pos.spot_sl < pos.spot_entry:
+                        pos.spot_sl = pos.spot_entry
+                        self._log.info(
+                            "FnOBook[%s/%s]: TRAIL→BREAKEVEN %s  sl=%.1f (was below entry=%.1f)",
+                            self._client_id, self._binding_id, pos.symbol,
+                            pos.spot_sl, pos.spot_entry,
+                        )
+                    elif pos.direction == "PE" and pos.spot_sl > pos.spot_entry:
+                        pos.spot_sl = pos.spot_entry
+                        self._log.info(
+                            "FnOBook[%s/%s]: TRAIL→BREAKEVEN %s  sl=%.1f (was above entry=%.1f)",
+                            self._client_id, self._binding_id, pos.symbol,
+                            pos.spot_sl, pos.spot_entry,
+                        )
+
+            sl_hit = (
+                (pos.direction == "CE" and spot > 0 and spot <= pos.spot_sl) or
+                (pos.direction == "PE" and spot > 0 and spot >= pos.spot_sl)
+            )
+            t1_hit = (
+                (pos.direction == "CE" and spot > 0 and spot >= pos.day_t1) or
+                (pos.direction == "PE" and spot > 0 and spot <= pos.day_t1)
+            )
+
+            if sl_hit:
+                self._log.warning("FnOBook[%s/%s]: SL HIT %s  spot=%.1f <= sl=%.1f",
+                                  self._client_id, self._binding_id, pos.symbol, spot, pos.spot_sl)
+                self._blocked_today.add((pos.symbol, pos.direction))
+                await self._close_position(pos, "sl_hit")
+                await self._rescan_and_refill()
+
+            elif t1_hit and not pos.t1_alerted:
+                self._log.info("FnOBook[%s/%s]: T1 HIT %s  spot=%.1f >= t1=%.1f",
+                               self._client_id, self._binding_id, pos.symbol, spot, pos.day_t1)
+                pos.t1_alerted = True
+                await self._bus.publish(Topic.SYSTEM_EVENT, {
+                    "type":      "fno_t1_alert",
+                    "client_id": self._client_id,
+                    "binding_id":self._binding_id,
+                    "symbol":    pos.symbol,
+                    "direction": pos.direction,
+                    "strike":    pos.strike,
+                    "expiry":    pos.expiry_str,
+                    "spot":      spot,
+                    "t1":        pos.day_t1,
+                    "message":   (f"{pos.symbol} {pos.direction}: Day T1 {pos.day_t1:.1f} hit "
+                                  f"at {spot:.1f} — add hedge "
+                                  f"{pos.strike} {'PE' if pos.direction == 'CE' else 'CE'} {pos.expiry_str}"),
+                })
+
+        self._save_positions()
+
+    async def _close_position(self, pos: FnOPosition, reason: str) -> None:
+        order_id = await self._place_order("SELL", pos, pos.current_ltp)
+        pos.exit_order_id = order_id or ""
+        pos.status        = "CLOSED"
+        pos.close_reason  = reason
+        pos.close_time    = datetime.now(IST).isoformat()
+        if pos.entry_ltp > 0 and pos.current_ltp > 0:
+            pos.pnl = (pos.current_ltp - pos.entry_ltp) * pos.qty
+        self._log.info("FnOBook[%s/%s]: EXIT %s reason=%s pnl=%.2f",
+                       self._client_id, self._binding_id, pos.symbol, reason, pos.pnl)
+        try:
+            from data_layer import trade_history as _th
+            instrument = f"{pos.symbol} {pos.strike} {pos.direction}"
+            _th.record(
+                client_id=   self._client_id,
+                strategy=    "fno_positional",
+                instrument=  instrument,
+                entry_price= pos.entry_ltp,
+                exit_price=  pos.current_ltp,
+                exit_reason= reason,
+                pnl=         pos.pnl,
+                binding_id=  self._binding_id,
+                ts=          pos.close_time,
+            )
+        except Exception as _he:
+            self._log.warning("FnOBook: history record failed: %s", _he)
+        await self._bus.publish(Topic.SYSTEM_EVENT, {
+            "type":       "fno_exit",
+            "client_id":  self._client_id,
+            "binding_id": self._binding_id,
+            "symbol":     pos.symbol,
+            "direction":  pos.direction,
+            "reason":     reason,
+            "pnl":        pos.pnl,
+        })
+
+    async def _force_close_all(self) -> None:
+        self._log.info("FnOBook[%s/%s]: EOD force-close", self._client_id, self._binding_id)
+        for pos in list(self._open_positions):
+            await self._close_position(pos, "eod")
+        self._save_positions()
+
+    async def _rescan_and_refill(self) -> None:
+        await self._run_scan()
+        await self._try_enter_triggered()
+
+    # ── Order placement ───────────────────────────────────────────────────────
+
+    async def _place_order(self, side: str, pos: FnOPosition, price_hint: float) -> Optional[str]:
+        """Publish FnOOrderEvent; bridge handles broker call and replies via fill queue."""
+        from execution_bridge.fno_bridge import FnOOrderEvent
+        event_id = uuid.uuid4().hex
+        ev = FnOOrderEvent(
+            action=        "ENTRY" if side == "BUY" else "EXIT",
+            symbol=        pos.symbol,
+            direction=     pos.direction,
+            strike=        pos.strike,
+            expiry_str=    pos.expiry_str,
+            broker_symbol= pos.broker_symbol,
+            qty=           pos.qty,
+            price_hint=    price_hint,
+            client_id=     self._client_id,
+            binding_id=    self._binding_id,
+            event_id=      event_id,
+            mode=          self._mode,
+        )
+        # Subscribe a per-event reply queue BEFORE publishing to avoid race
+        fill_q = self._bus.subscribe(Topic.FNO_ORDER_FILL)
+        await self._bus.publish(Topic.FNO_ORDER_REQUEST, ev)
+        try:
+            deadline = 15.0
+            while deadline > 0:
+                try:
+                    fill = await asyncio.wait_for(fill_q.get(), timeout=2.0)
+                    if getattr(fill, "event_id", None) == event_id:
+                        if getattr(fill, "order_failed", False):
+                            return None
+                        return fill.order_id
+                    # Not our fill — put it back (EventBus doesn't support unget; accept the drop)
+                    deadline -= 2.0
+                except asyncio.TimeoutError:
+                    deadline -= 2.0
+        except Exception as exc:
+            self._log.error("FnOBook: order wait error: %s", exc)
+        return None
+
+    # ── Upstox REST LTP poll ──────────────────────────────────────────────────
+
+    async def _fetch_ltp(self, instrument_key: str) -> float:
+        if not instrument_key:
+            return 0.0
+        return await asyncio.to_thread(self._fetch_ltp_sync, instrument_key)
+
+    def _fetch_ltp_sync(self, instrument_key: str) -> float:
+        try:
+            import requests
+            r = requests.get(
+                f"https://api.upstox.com/v2/market-quote/ltp?instrument_key={instrument_key}",
+                headers={"Authorization": f"Bearer {self._token}", "Accept": "application/json"},
+                timeout=5,
+            )
+            if r.status_code == 200:
+                quotes = r.json().get("data", {})
+                for v in quotes.values():
+                    return float(v.get("last_price", 0) or 0)
+        except Exception as exc:
+            self._log.debug("FnOBook: LTP poll error %s: %s", instrument_key, exc)
+        return 0.0
+
+    def _spot_key(self, symbol: str) -> str:
+        from backtest.fno_scanner.backtest import TOP_30_STOCKS
+        return TOP_30_STOCKS.get(symbol, "")
+
+    # ── Expiry-week exit ──────────────────────────────────────────────────────
+
+    async def _check_expiry_exit(self) -> None:
+        """Close positions that are within EXPIRY_WEEK_DAYS of their expiry."""
+        today = datetime.now(IST).date()
+        closed_any = False
+        for pos in list(self._open_positions):
+            try:
+                exp_date = datetime.strptime(pos.expiry_str, "%d %b %y").date()
+                days_left = (exp_date - today).days
+                if days_left <= EXPIRY_WEEK_DAYS:
+                    self._log.info(
+                        "FnOBook[%s/%s]: EXPIRY WEEK exit %s  days_left=%d  expiry=%s",
+                        self._client_id, self._binding_id, pos.symbol, days_left, pos.expiry_str,
+                    )
+                    await self._close_position(pos, "expiry_week")
+                    closed_any = True
+            except Exception as exc:
+                self._log.warning("FnOBook: expiry check error for %s: %s", pos.symbol, exc)
+        if closed_any:
+            self._save_positions()
+
+    # ── Accessors ─────────────────────────────────────────────────────────────
+
+    @property
+    def _open_positions(self) -> List[FnOPosition]:
+        return [p for p in self._positions if p.status in ("ENTRY_PLACED", "OPEN")]
+
+    def get_state(self) -> dict:
+        return {
+            "client_id":    self._client_id,
+            "binding_id":   self._binding_id,
+            "mode":         self._mode,
+            "max_slots":    self._max_slots,
+            "open_count":   len(self._open_positions),
+            "pending_count":len(self._pending),
+            "pending":      [
+                {
+                    "symbol":     sig.symbol,
+                    "direction":  sig.direction,
+                    "status":     sig.status,
+                    "entry_line": round(sig.entry_line, 2),
+                    "hard_sl":    round(sig.hard_sl, 2),
+                    "day_t1":     round(sig.day_t1, 2),
+                    "dist_pct":   round(sig.dist_pct, 2),
+                    "btst_rr":    round(sig.btst_rr, 2),
+                    "strike":     sig.suggested_strike,
+                    "expiry":     sig.expiry,
+                    "blocked":    (sig.symbol, sig.direction) in self._blocked_today,
+                }
+                for sig in self._pending
+            ],
+            "positions":    [asdict(p) for p in self._positions],
+        }

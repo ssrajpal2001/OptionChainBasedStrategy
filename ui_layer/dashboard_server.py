@@ -38,8 +38,10 @@ import asyncio
 import hmac
 import logging
 import os
+import shlex
+import subprocess
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from config.global_config import IST, Topic, SysEvent
 from data_layer.base_feeder import EventBus
@@ -51,6 +53,30 @@ logger = logging.getLogger(__name__)
 from broker_auth.headless_auth import _ist_eod
 
 
+def _ensure_alert_wav() -> None:
+    """Generate ui_layer/static/alert.wav (440 Hz beep, 0.4s) if missing."""
+    import wave, struct, math
+    path = os.path.join(os.path.dirname(__file__), "static", "alert.wav")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    if os.path.exists(path):
+        return
+    sample_rate = 44100
+    duration    = 0.4
+    freq        = 440.0
+    n_samples   = int(sample_rate * duration)
+    with wave.open(path, "w") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        for i in range(n_samples):
+            val = int(32767 * 0.5 * math.sin(2 * math.pi * freq * i / sample_rate))
+            wf.writeframes(struct.pack("<h", val))
+    logger.info("Generated alert.wav at %s", path)
+
+
+_ensure_alert_wav()
+
+
 def _base_url(request) -> str:
     """Return the public base URL, respecting X-Forwarded-Proto from nginx."""
     scheme = request.headers.get("x-forwarded-proto") or request.url.scheme
@@ -59,13 +85,14 @@ def _base_url(request) -> str:
     return f"{scheme}://{host}"
 
 
-async def _start_feeder_stream(feeder, provider: str, api_key: str, token: str, client_db=None) -> None:
+async def _start_feeder_stream(feeder, provider: str, api_key: str, token: str, client_db=None, cfg=None) -> None:
     """
     Switch GlobalFeeder to the given live provider.
 
-    If the OTHER provider also has a fresh token in DB, starts DualFeeder (active-active).
-    Otherwise starts single-provider stream.
-    Upstox is primary; Fyers is backup. Both run in parallel when available.
+    If the configured secondary provider (or any other cached feeder) also has a
+    fresh token in DB, starts a DualFeeder active-passive pair.  Otherwise starts
+    a single-provider stream.  The configured primary always drives prices; the
+    other connected providers are hot standbys.
     """
     if feeder is None:
         logger.warning("[Feeder/Toggle] GlobalFeeder not wired — cannot start stream.")
@@ -73,31 +100,45 @@ async def _start_feeder_stream(feeder, provider: str, api_key: str, token: str, 
 
     from broker_auth.headless_auth import _token_is_fresh
 
-    current_creds = {"api_key": api_key, "access_token": token}
-    other = "fyers" if provider == "upstox" else "upstox"
+    primary   = (getattr(cfg, "primary_feeder_provider", "upstox") or "upstox").lower() if cfg else "upstox"
+    secondary = (getattr(cfg, "secondary_feeder_provider", "fyers") or "none").lower() if cfg else "fyers"
+    if secondary in ("none", primary):
+        secondary = ""
 
-    # Check if the other provider also has a valid token
-    other_creds: dict = {}
-    if client_db is not None:
-        other_row = client_db.get_feeder_creds_sync(other) or {}
-        other_token = other_row.get("access_token", "")
-        other_api_key = other_row.get("api_key", "")
-        other_gen_at = other_row.get("token_generated_at", "")
-        other_exp_at = other_row.get("token_expiry_at", "")
-        if other_token and _token_is_fresh(other_gen_at, other_exp_at):
-            other_creds = {"api_key": other_api_key, "access_token": other_token}
+    def _load_creds(p: str) -> dict:
+        row = client_db.get_feeder_creds_sync(p) or {} if client_db is not None else {}
+        if not row.get("access_token"):
+            return {}
+        if not _token_is_fresh(row.get("token_generated_at", ""), row.get("token_expiry_at", "")):
+            # Allow the explicit toggle to attempt with a possibly-stale token
+            pass
+        return {
+            "api_key": row.get("api_key", ""),
+            "access_token": row.get("access_token", ""),
+        }
+
+    creds_map: dict = {}
+    # Always include the provider that was just toggled on.
+    if provider and token:
+        creds_map[provider] = {"api_key": api_key, "access_token": token}
+
+    # Add the configured primary + secondary if they have tokens.
+    for p in {primary, secondary}:
+        if p and p not in creds_map:
+            c = _load_creds(p)
+            if c:
+                creds_map[p] = c
 
     try:
-        if other_creds:
-            # Both providers have valid tokens → active-active DualFeeder
-            upstox_creds = current_creds if provider == "upstox" else other_creds
-            fyers_creds  = current_creds if provider == "fyers"  else other_creds
-            await feeder.start_dual(upstox_creds, fyers_creds)
-            logger.info("[Feeder/Toggle] DUAL stream started (upstox primary + fyers backup).")
+        if len(creds_map) >= 2:
+            await feeder.start_providers(creds_map)
+            logger.info("[Feeder/Toggle] DUAL stream started — providers=%s.", list(creds_map.keys()))
+        elif creds_map:
+            p, c = next(iter(creds_map.items()))
+            await feeder.start_single(p, c)
+            logger.info("[Feeder/Toggle] [%s] single stream started.", p)
         else:
-            # Only this provider available → single stream
-            await feeder.start_single(provider, current_creds)
-            logger.info("[Feeder/Toggle] [%s] single stream started.", provider)
+            logger.warning("[Feeder/Toggle] No usable credentials — stream not started.")
     except Exception as exc:
         logger.error("[Feeder/Toggle] [%s] stream start failed: %s", provider, exc)
 
@@ -217,36 +258,84 @@ try:
     class _RmsConfigSchema(_PydanticBase):
         max_drawdown_pct:       float = 5.0
         order_throttle_per_sec: int   = 5
-        squareoff_time:         str   = "15:15"
+        squareoff_time:         str   = "15:20"
         distance_filter_pct:    float = 5.0
 
     class _StrategyConfigSchema(_PydanticBase):
-        # Iron Condor (global fallback — per-index config preferred)
-        ic_squareoff_time: str   = "15:15"
-        ic_rsi_min:        float = 40.0
-        ic_rsi_max:        float = 60.0
-        ic_adx_max:        float = 25.0
-        ic_profit_pct:     float = 50.0
-        ic_sl_pct:         float = 200.0
-        ic_nifty_otm:      float = 200.0
-        ic_nifty_wing:     float = 200.0
-        ic_banknifty_otm:  float = 400.0
-        ic_banknifty_wing: float = 500.0
-        ic_finnifty_otm:   float = 200.0
-        ic_finnifty_wing:  float = 200.0
-        ic_sensex_otm:     float = 500.0
-        ic_sensex_wing:    float = 500.0
-        ic_midcp_otm:      float = 150.0
-        ic_midcp_wing:     float = 200.0
         # Sell Straddle (global fallback — per-index config preferred)
         ss_entry_start:    str   = "09:15"
         ss_entry_end:      str   = "12:00"
-        ss_squareoff_time: str   = "15:15"
+        ss_squareoff_time: str   = "15:20"
         ss_max_trades:     int   = 1
 
     class _ChangeAdminPasswordSchema(_PydanticBase):
         current_password: str
         new_password:     str
+
+    class _EditEntryPriceSchema(_PydanticBase):
+        ce_entry_price: Optional[float] = None
+        pe_entry_price: Optional[float] = None
+
+    class _OiOrbConfigSchema(_PydanticBase):
+        # Mirrors strategies/oi_orb_screener/book_manager.py's _DEFAULT_PARAMS —
+        # keep both in sync if a new tunable is added.
+        oi_spurt_min_pct:           float = 7.0
+        price_move_min_pct:        float = 2.0
+        stock_move_abort_pct:      float = 4.0
+        top_n_per_side:            int   = 5
+        poll_seconds:              int   = 20
+        regime_filter_enabled:     bool  = True
+        ignore_time_windows:       bool  = False
+        nifty_bullish_pct:         float = 0.3
+        nifty_bearish_pct:         float = -0.3
+        max_monitor_minutes:       int   = 90
+        rejection_min_rise_pct:    float = 2.0
+        rejection_retrace_fraction: float = 0.5
+        strike_otm_pct:            float = 2.0
+        orb_start:                 str   = "09:15"
+        orb_end:                   str   = "09:25"
+        # 2026-08-27: two scan sessions -- session 1 is a single point-in-time
+        # scan at scan_start (09:26); session 2 re-scans between afternoon_scan_
+        # start/end (12:00-13:00), adding any newly-qualifying stock. Both
+        # sessions' candidates share entry_window_end (15:00) as the "cancel if
+        # VWAP never touched" cutoff -- was 10:30.
+        scan_start:                str   = "09:26"
+        entry_window_start:        str   = "09:26"
+        entry_window_end:          str   = "15:00"
+        two_session_scan_enabled:  bool  = True
+        afternoon_scan_start:      str   = "12:00"
+        afternoon_scan_end:        str   = "13:00"
+        afternoon_scan_interval_sec: float = 300.0
+        # 2026-08-25: five additive, independently-toggleable filters (see
+        # strategies/oi_orb_screener/filters.py). Each *_enabled flag only
+        # controls whether that filter can actually block a trade -- every
+        # filter always evaluates and logs to its own dedicated file
+        # regardless of enabled state.
+        oi_wall_check_enabled:      bool  = False
+        oi_wall_dominance_ratio:    float = 1.5
+        distance_to_wall_enabled:   bool  = False
+        distance_to_wall_min_pct:   float = 1.5
+        pcr_gate_enabled:           bool  = False
+        pcr_max_for_call:           float = 1.2
+        pcr_min_for_put:            float = 0.8
+        volume_confirmation_enabled: bool  = False
+        volume_confirmation_min_ratio: float = 1.5
+        oi_roc_enabled:             bool  = False
+        oi_roc_min_pct:             float = 3.0
+        oi_roc_lookback_sec:        float = 300.0
+        # Shared WS feed subscription is capped ~50 symbols/broker connection
+        # across ALL strategies -- bound chain-watching to the top N shortlisted
+        # stocks so this can't silently starve another strategy's ticks. Raised
+        # to 10 (2026-08-27) now that OI-ORB has its own dedicated upstox2 feeder.
+        chain_watch_max_stocks:    int   = 10
+        # 2026-08-27: VWAP retest entry (replaces the old ORB-breach trigger) +
+        # option-premium SL/target (replaces the old S&R R1/S1/R2/S2 tracker,
+        # "checking for target and SL in stock, change it to the option which
+        # we are taking"). All fresh, unvalidated defaults.
+        vwap_entry_min_gap_pct:    float = 0.15
+        vwap_cancel_if_unreached:  bool  = True
+        vwap_sl_tf_minutes:        int   = 5
+        rr_multiple:               float = 2.0
 
     class _ResetPasswordSchema(_PydanticBase):
         token:        str
@@ -261,6 +350,10 @@ try:
 
     class _ExpiryModeSchema(_PydanticBase):
         expiry_mode: str  # current|next_week|monthly|YYYY-MM-DD
+
+    class _V4LockContractSchema(_PydanticBase):
+        ce_strike: int = 0   # 0 = clear override, revert to auto ATM-200 derivation
+        pe_strike: int = 0   # 0 = clear override, revert to auto ATM+200 derivation
 
     class _SaveUpstoxCredsSchema(_PydanticBase):
         client_id: str = ""
@@ -315,6 +408,13 @@ try:
     class _BrokerModeSchema(_PydanticBase):
         mode: str  # "paper" | "live"
 
+    class _ManualConfirmEntrySchema(_PydanticBase):
+        # 2026-08-23, direct user spec: client-supplied real fill prices when
+        # the broker's own entry confirmation was aborted/timed out -- see
+        # strategies/sell_straddle/entries.py's manual_confirm_entry().
+        ce_ltp: float
+        pe_ltp: float
+
     class _BindingIPSchema(_PydanticBase):
         source_ip:    str = ""   # LOCAL/private IP the bot binds order egress to
         whitelist_ip: str = ""   # PUBLIC IP the client whitelists in their broker
@@ -332,20 +432,33 @@ try:
         index: str  # NIFTY / BANKNIFTY / FINNIFTY
 
     class _StrategySelectionItem(_PydanticBase):
-        strategy: str   # sell_straddle | iron_condor | trap_scanner
+        strategy: str   # sell_straddle
         instrument: str # NIFTY | BANKNIFTY | FINNIFTY | SENSEX | MIDCPNIFTY
 
     class _StrategySelectionsSchema(_PydanticBase):
         selections: list  # List[_StrategySelectionItem]
 
+    class _RiskOverridesSchema(_PydanticBase):
+        overrides: dict  # { field_name: value } per strategy:underlying
+
+    class _FullCleanRestartSchema(_PydanticBase):
+        index:      str  = "NIFTY"
+        strategies: str  = "sell_straddle"
+        port:       int  = 5000
+        log_level:  str  = "INFO"
+        dry_run:    bool = False
+
     class _DeploymentSchema(_PydanticBase):
-        binding_id:     str
-        strategy_name:  str
-        underlying:     str   = "NIFTY"
-        lot_multiplier: float = 1.0
-        max_profit_rs:  float = 0.0
-        max_sl_rs:      float = 0.0
-        squareoff_time: str   = "15:15"
+        binding_id:       str
+        strategy_name:    str
+        underlying:       str   = "NIFTY"
+        lot_multiplier:   float = 1.0
+        max_profit_rs:    float = 0.0
+        max_sl_rs:        float = 0.0
+        squareoff_time:   str   = "15:20"
+        product_type:     str   = "MIS"   # "MIS" | "NRML" — broker margin choice ONLY
+        strategy_params:  str   = "{}"    # JSON — htf/mtf/ltf/itm for Trap Scanner
+        carry_forward:    bool  = False   # independent of product_type — same-day close (default) vs hold across days
 
 
     class _TrapHistoricalReplaySchema(_PydanticBase):
@@ -383,6 +496,12 @@ try:
         gap_dir_filter:  bool  = True        # True = on gap day trade only with gap direction
         require_gap:     bool  = True        # False = cascade on ALL days (no gap filter)
 
+    class _ScannerRunSchema(_PydanticBase):
+        nifty_prox_pct:  float = 1.5
+        stock_prox_pct:  float = 2.0
+        min_rr:          float = 1.5
+        use_nifty_bias:  bool  = False
+
 except ImportError:
     _HAS_FASTAPI = False
 
@@ -401,7 +520,7 @@ _WEEKLY_EXPIRY_WEEKDAY: Dict[str, int] = {
     "BANKNIFTY":   2,   # Wednesday
     "FINNIFTY":    1,   # Tuesday
     "MIDCPNIFTY":  0,   # Monday
-    "SENSEX":      1,   # Tuesday
+    "SENSEX":      4,   # Friday (BSE Sensex weekly options)
 }
 
 _STRIKE_STEPS: Dict[str, int] = {
@@ -603,11 +722,19 @@ class DashboardServer:
         rebalancer=None,  # StrikeRebalancer
         feeder=None,      # GlobalFeeder — optional, for admin feeder management
         risk_manager=None, # RiskManager — optional, for firm risk summary + kill-all
-        iron_condors=None,  # List[IronCondorStrategy]
         sell_straddles=None, # List[SellStraddleStrategy] (legacy per-index; optional)
         straddle_manager=None, # StraddleBookManager — per-binding books (live list + find)
         straddle_bridge=None, # StraddleExecutionBridge — for per-broker square-off on Trade/Terminal OFF
-        trap_scanner_manager=None,  # TrapBookManager — per-binding trap scanner books
+        v4_cascade_manager=None, # V4CascadeBookManager — per-binding books (live list + find)
+        fno_positional_manager=None, # FnOPositionalBookManager — stock positional option books
+        hourly_breakout_manager=None, # HourlyBreakoutBookManager — 1H trap + 5M retest books
+        d1_trap_manager=None,  # D1TrapOptionBookManager — trap scanner (index + FnO)
+        fvg_manager=None,  # FVGBookManager — Fair Value Gap SMC books
+        oi_flow_manager=None,  # OIFlowBookManager — OI-Flow Pre-Breakout books
+        liquidity_sweep_manager=None,  # LiquiditySweepBookManager — Sweep+Displacement+FVG+Retest books
+        liquidity_trap_manager=None,  # LiquidityTrapBookManager — 15m/5m/1m cascade + CHoCH + scale-in books
+        oi_orb_manager=None,  # OiOrbScreenerBookManager — OI-Spurt + ORB screener books (F&O stocks)
+        cag_straddle_manager=None,  # CagStraddleBookManager — 15:00-15:35 R1/S1 breach books
     ) -> None:
         self._bus = bus
         self._cfg = cfg
@@ -616,11 +743,20 @@ class DashboardServer:
         self._rebalancer = rebalancer
         self._feeder = feeder
         self._risk_manager = risk_manager
-        self._iron_condors: list = iron_condors or []
         self._straddle_manager = straddle_manager
         self._sell_straddles_static: list = sell_straddles or []
         self._straddle_bridge = straddle_bridge
-        self._trap_scanner_manager = trap_scanner_manager
+        self._v4_cascade_manager = v4_cascade_manager
+        self._fno_positional_manager = fno_positional_manager
+        self._hourly_breakout_manager = hourly_breakout_manager
+        self._d1_trap_manager = d1_trap_manager
+        self._fvg_manager = fvg_manager
+        self._oi_flow_manager = oi_flow_manager
+        self._liquidity_sweep_manager = liquidity_sweep_manager
+        self._liquidity_trap_manager = liquidity_trap_manager
+        self._oi_orb_manager = oi_orb_manager
+        self._cag_straddle_manager = cag_straddle_manager
+        self._fno_monitor = None          # set via set_fno_monitor()
         self._ws_bridge = WsBridge(bus, cfg=cfg)
         self._uvicorn_server = None
 
@@ -648,13 +784,17 @@ class DashboardServer:
             cfg.rms = {
                 "max_drawdown_pct":       5.0,
                 "order_throttle_per_sec": 5,
-                "squareoff_time":         "15:15",
+                "squareoff_time":         "15:20",
                 "distance_filter_pct":    5.0,
             }
 
     @property
     def ws_bridge(self) -> WsBridge:
         return self._ws_bridge
+
+    def set_fno_monitor(self, monitor) -> None:
+        """Attach a live FnoStockMonitor so alert endpoints can query it."""
+        self._fno_monitor = monitor
 
     # ── FastAPI application ───────────────────────────────────────────────────
 
@@ -670,6 +810,10 @@ class DashboardServer:
             version="2.0.0",
             docs_url="/api/docs",
         )
+        from fastapi.staticfiles import StaticFiles
+        _static_dir = os.path.join(os.path.dirname(__file__), "static")
+        os.makedirs(_static_dir, exist_ok=True)
+        app.mount("/static", StaticFiles(directory=_static_dir), name="static")
         _srv   = self
         bridge = self._ws_bridge
 
@@ -713,7 +857,8 @@ class DashboardServer:
                     "<p>Expected at: " + _MONITOR_HTML + "</p>",
                     status_code=503,
                 )
-            return FileResponse(_MONITOR_HTML, media_type="text/html")
+            return FileResponse(_MONITOR_HTML, media_type="text/html",
+                                headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
 
         @app.get("/backtest", include_in_schema=False)
         async def backtest_ui():
@@ -810,7 +955,7 @@ class DashboardServer:
             htf_min         = int(p.get("htf_min", 15))
             mtf_min         = int(p.get("mtf_min", 5))
             eod_time        = str(p.get("eod_time", "14:00"))
-            sq_off_time     = str(p.get("sq_off_time", "15:15"))
+            sq_off_time     = str(p.get("sq_off_time", "15:20"))
             min_zone_range  = float(p.get("min_zone_range", 30))
             max_trades_side = int(p.get("max_trades_side", 2))
             min_reward      = float(p.get("min_reward", 20))
@@ -974,8 +1119,7 @@ class DashboardServer:
             raise HTTPException(status_code=400, detail="role must be 'admin' or 'client'.")
 
         @app.post("/api/admin/change-password", tags=["Admin"])
-        async def admin_change_password(request: Request, body: _ChangeAdminPasswordSchema):
-            _require_admin(request)
+        async def admin_change_password(body: _ChangeAdminPasswordSchema, _: dict = Depends(_require_admin)):
             current = body.current_password
             new_pwd = body.new_password
             if not current or not new_pwd:
@@ -1003,8 +1147,7 @@ class DashboardServer:
             return {"ok": True}
 
         @app.post("/api/admin/client/{client_id}/reset-token", tags=["Admin"])
-        async def generate_client_reset_token(client_id: str, request: Request):
-            _require_admin(request)
+        async def generate_client_reset_token(client_id: str, _: dict = Depends(_require_admin)):
             if not _srv._client_db:
                 raise HTTPException(status_code=503, detail="DB not available.")
             token = await _srv._client_db.create_reset_token("client", client_id)
@@ -1044,6 +1187,17 @@ class DashboardServer:
         @app.get("/api/broker_status", tags=["Admin"])
         async def api_broker_status(_: dict = Depends(_require_admin)):
             return {"ts": datetime.now(IST).isoformat(), "brokers": _srv._broker_summary()}
+
+        @app.get("/api/admin/events", tags=["Admin"])
+        async def api_admin_events(
+            client_id: str = "", limit: int = 50, _: dict = Depends(_require_admin),
+        ):
+            db = _srv._client_db
+            if db is None:
+                return {"events": []}
+            limit = max(1, min(limit, 500))
+            events = await asyncio.to_thread(db.get_client_events_sync, client_id, limit)
+            return {"events": events}
 
         # ── ADMIN — client lifecycle management ───────────────────────────────
 
@@ -1088,6 +1242,36 @@ class DashboardServer:
             })
             logger.critical("Dashboard: KILL SWITCH activated.")
             return {"ok": True, "message": "KILL SWITCH activated — all clients halted immediately."}
+
+        @app.get("/api/admin/strike_rebalancer_status", tags=["Admin"])
+        async def api_strike_rebalancer_status(_: dict = Depends(_require_admin)):
+            """2026-07-24 diagnostic: real, live ground truth for WHY the feeder's
+            total-subscribed-symbol count is whatever it is, per underlying --
+            replaces reconstructing it from startup-log arithmetic (which proved
+            unreliable: dedup between the ATM chain and pinned strikes, plus
+            per-underlying batching, made the log's incremental "+N" lines hard
+            to attribute correctly by inspection alone)."""
+            if _srv._rebalancer is None:
+                return {"ok": True, "underlyings": {}, "note": "StrikeRebalancer not wired."}
+            out = {}
+            total_active = 0
+            for und, state in _srv._rebalancer._state.items():
+                active = sorted(state.active_strikes)
+                pinned = sorted(state.pinned_strikes)
+                total_active += len(active)
+                out[und] = {
+                    "chain_enabled": state.chain_enabled,
+                    "current_atm": state.current_atm,
+                    "open_atm": state.open_atm,
+                    "chain_depth": _srv._cfg.chain_depth if _srv._cfg else None,
+                    "active_strikes_count": len(active),
+                    "active_strikes": active,
+                    "pinned_strikes_count": len(pinned),
+                    "pinned_strikes": pinned,
+                    "rebalance_count": state.rebalance_count,
+                }
+            return {"ok": True, "underlyings": out,
+                    "total_active_strikes_across_all_underlyings": total_active}
 
         @app.post("/api/rebalance/{underlying}", tags=["Admin"])
         async def api_rebalance(underlying: str, _: dict = Depends(_require_admin)):
@@ -1197,6 +1381,30 @@ class DashboardServer:
                 # full per-provider map
                 "providers": providers_status,
             }
+
+        @app.get("/api/admin/subscribed_keys", tags=["Admin"])
+        async def api_subscribed_keys(_: dict = Depends(_require_admin)):
+            """Raw dump of every instrument key each feeder thinks it has subscribed
+            — added 2026-07-24 to chase a real discrepancy: StrikeRebalancer's own
+            active_strikes accounting (NIFTY 9 + SENSEX 9 strikes = 36 option symbols)
+            doesn't match the ~74 total the UpstoxFeeder log reports subscribed.
+            Upstox keys are opaque numeric instrument_keys (e.g. "NSE_FO|63915") with
+            no local reverse-parser (symbol_translator.py only has forward InternalSymbol
+            -> key conversion; InstrumentRegistry has no reverse lookup either) — so this
+            deliberately does NOT try to decode/group them. Fyers keys ARE human-readable
+            (e.g. "NSE:NIFTY26JUL23650CE") and can be cross-referenced by eye against the
+            active_strikes list from /api/admin/strike_rebalancer_status."""
+            feeder = _srv._feeder
+            dual = getattr(feeder, "_dual_feeder", None) if feeder else None
+            out: dict = {}
+            if dual is not None:
+                for provider, f in dual._feeders.items():
+                    keys = list(getattr(f, "_subscribed_keys", []) or [])
+                    out[provider] = {"count": len(keys), "keys": sorted(keys)}
+            else:
+                keys = list(getattr(feeder, "_subscribed_keys", []) or [])
+                out["single"] = {"count": len(keys), "keys": sorted(keys)}
+            return {"ok": True, "by_provider": out}
 
         @app.get("/api/admin/settings", tags=["Admin"])
         async def api_get_settings(_: dict = Depends(_require_admin)):
@@ -1355,7 +1563,7 @@ class DashboardServer:
                 elapsed = (_time.monotonic() - t0) * 1000
                 if valid:
                     # Token valid — start the live feeder stream
-                    await _start_feeder_stream(_srv._feeder, p, api_key, token, _srv._client_db)
+                    await _start_feeder_stream(_srv._feeder, p, api_key, token, _srv._client_db, _srv._cfg)
                     logger.info(
                         "[Feeder/Toggle] [%s] cached token valid → feeder started in %.1fms", p, elapsed,
                     )
@@ -1956,6 +2164,13 @@ class DashboardServer:
                         cid, bid, _srv._sell_straddles, underlying=und)
                 except Exception as exc:
                     logger.error("deployment_run square-off failed for %s: %s", deploy_id, exc)
+            elif not running and strat == "v4_cascade":
+                book = _srv._find_v4_book(cid, bid, und)
+                if book is not None:
+                    try:
+                        squared = await book.square_off(reason="deployment_stop")
+                    except Exception as exc:
+                        logger.error("v4_cascade square-off failed for %s: %s", deploy_id, exc)
             await _srv._client_db.set_deployment_running(deploy_id, cid, running)
             logger.info("Dashboard: strategy RUN %s → %s (squared=%d)",
                         deploy_id, "ON" if running else "OFF", squared)
@@ -1976,15 +2191,6 @@ class DashboardServer:
             if mode not in valid and not _re.match(r"^\d{4}-\d{2}-\d{2}$", mode):
                 raise HTTPException(400, f"Invalid expiry_mode '{mode}'. Use: current|next_week|monthly|YYYY-MM-DD")
             await _srv._client_db.set_deployment_expiry_mode(deploy_id, cid, mode)
-            # Notify the trap scanner manager to re-init with new expiry
-            if _srv._trap_scanner_manager is not None:
-                try:
-                    dep = next(d for d in deps if d["deploy_id"] == deploy_id)
-                    await _srv._trap_scanner_manager.set_expiry_mode(
-                        dep["client_id"], dep["binding_id"], dep["underlying"], mode
-                    )
-                except Exception as exc:
-                    logger.warning("expiry_mode hot-swap failed: %s", exc)
             return {"ok": True, "deploy_id": deploy_id, "expiry_mode": mode}
 
         @app.get("/api/client/deployment/{deploy_id}/available_expiries", tags=["Client"])
@@ -2080,6 +2286,81 @@ class DashboardServer:
             logger.info("Dashboard: OI window set to ±%d strikes", int(body.n))
             return {"ok": True, "window": int(max(0, body.n))}
 
+        def _all_fno_positional_books():
+            """Both the legacy fno_positional module AND D1TrapFnOSRBook (d1_trap_fno_sr)
+            expose a get_state() in the same shape (2026-08-12) -- combine both managers'
+            books here so this table isn't blind to whichever one a deployment actually
+            uses. hasattr-gated, same pattern as /api/d1trap/zones's monitoring_zones()
+            check, so any future book type without get_state() is silently skipped rather
+            than erroring the whole endpoint."""
+            books = list(getattr(_srv._fno_positional_manager, "books", None) or [])
+            d1_mgr = getattr(_srv, "_d1_trap_manager", None)
+            if d1_mgr is not None:
+                books += [b for b in (d1_mgr.books or []) if hasattr(b, "get_state")]
+            return books
+
+        @app.get("/api/fno/positions", tags=["Admin"])
+        async def api_fno_positions(_: dict = Depends(_require_admin)):
+            """Return all FnO positional book states (open + closed positions)."""
+            books_state = []
+            for book in _all_fno_positional_books():
+                try:
+                    books_state.append(book.get_state())
+                except Exception:
+                    pass
+            return {"ok": True, "books": books_state}
+
+        @app.get("/api/client/fno_positions", tags=["Client"])
+        async def api_client_fno_positions(user: dict = Depends(_require_client)):
+            """Return FnO positional book states for the requesting client."""
+            cid = user.get("client_id", "")
+            books_state = []
+            for book in _all_fno_positional_books():
+                try:
+                    state = book.get_state()
+                    if state.get("client_id") == cid:
+                        books_state.append(state)
+                except Exception:
+                    pass
+            return {"ok": True, "books": books_state}
+
+        @app.post("/api/admin/v4_cascade/force_ingest/{deploy_id}", tags=["Admin"])
+        async def api_admin_v4_force_ingest(deploy_id: str, _: dict = Depends(_require_admin)):
+            """Re-trigger the 3-week deep-history ingestion pipeline on a live
+            v4_cascade book on demand."""
+            parts = deploy_id.split("_")
+            if len(parts) < 3:
+                raise HTTPException(400, f"Malformed deploy_id '{deploy_id}'.")
+            cid, bid, und = parts[0], parts[1], parts[-1]
+            if _srv._v4_cascade_manager is None:
+                raise HTTPException(503, "v4_cascade strategy is not enabled on this instance.")
+            ok = _srv._v4_cascade_manager.force_ingest(cid, bid, und)
+            if not ok:
+                raise HTTPException(404, f"No live v4_cascade book for deploy_id '{deploy_id}'.")
+            return {"ok": True, "deploy_id": deploy_id, "ingest_triggered": True}
+
+        @app.post("/api/admin/deployment/{deploy_id}/v4_cascade/lock_contract", tags=["Admin"])
+        async def api_admin_v4_lock_contract(
+            deploy_id: str, body: _V4LockContractSchema, _: dict = Depends(_require_admin),
+        ):
+            """Manual CE/PE tracking-contract override — bypasses the automatic
+            09:15 ATM-200/ATM+200 derivation. Pass 0 for either field to clear
+            that side's override and revert to auto-derivation. Admin-gated —
+            called from the admin V4 Cascade rule-builder panel with an
+            arbitrary deploy_id, same as force_ingest above."""
+            parts = deploy_id.split("_")
+            if len(parts) < 3:
+                raise HTTPException(400, f"Malformed deploy_id '{deploy_id}'.")
+            cid, bid, und = parts[0], parts[1], parts[-1]
+            book = _srv._find_v4_book(cid, bid, und)
+            if book is None:
+                raise HTTPException(404, "No live v4_cascade book for this deployment.")
+            ce = body.ce_strike or None
+            pe = body.pe_strike or None
+            book.set_locked_strikes(ce, pe)
+            logger.info("Dashboard: v4_cascade lock_contract %s CE=%s PE=%s", deploy_id, ce, pe)
+            return {"ok": True, "deploy_id": deploy_id, "ce_strike": ce, "pe_strike": pe}
+
         # ── CLIENT — 1-min combined-premium chart series (VWAP/RSI/SLOPE) ─────
         @app.get("/api/client/strategy/{deploy_id}/premium_series", tags=["Client"])
         async def api_client_premium_series(
@@ -2096,6 +2377,272 @@ class DashboardServer:
             return {"ok": True, "deploy_id": deploy_id, "underlying": underlying,
                     "series": strat.get_premium_series()}
 
+        # ── CLIENT — manual entry-price confirmation (2026-08-23) ──────────────
+        # "Entry price should come from the broker which is connected to the
+        # client. If broker doesn't send the data we can manually enter the
+        # price in UI and click save..." -- see strategies/sell_straddle/
+        # entries.py's manual_confirm_entry()/discard_aborted_entry() for the
+        # full rationale. deploy_id = {client}_{binding}_{strategy}_{underlying},
+        # same convention as premium_series above. Unlike that read-only
+        # endpoint, these MUTATE money-affecting state, so the deploy_id's own
+        # client segment is explicitly checked against the authenticated
+        # user -- one client must never be able to confirm/discard another
+        # client's pending entry by guessing/passing their deploy_id.
+
+        def _ss_book_for_own_deploy(deploy_id: str, cid: str):
+            parts = deploy_id.split("_")
+            if len(parts) < 3 or parts[0] != cid:
+                raise HTTPException(403, "deploy_id does not belong to the authenticated client.")
+            bid, underlying = parts[1], parts[-1]
+            return _srv._find_ss_book(cid, bid, underlying)
+
+        @app.get("/api/client/strategy/{deploy_id}/sell_straddle/pending_manual_entry", tags=["Client"])
+        async def api_client_pending_manual_entry(
+            deploy_id: str, user: dict = Depends(_require_client),
+        ):
+            cid = user.get("client_id", "")
+            strat = _ss_book_for_own_deploy(deploy_id, cid)
+            pending = getattr(strat, "_last_aborted_entry", None) if strat is not None else None
+            if pending is None:
+                return {"ok": True, "pending": None}
+            return {"ok": True, "pending": {
+                "ce_strike": pending.get("ce_strike"),
+                "pe_strike": pending.get("pe_strike"),
+                "expiry_date": pending["expiry_date"].isoformat() if pending.get("expiry_date") else None,
+                "aborted_at": pending["aborted_at"].isoformat() if pending.get("aborted_at") else None,
+                "reason": pending.get("reason", ""),
+            }}
+
+        @app.post("/api/client/strategy/{deploy_id}/sell_straddle/manual_confirm_entry", tags=["Client"])
+        async def api_client_manual_confirm_entry(
+            deploy_id: str, body: _ManualConfirmEntrySchema, user: dict = Depends(_require_client),
+        ):
+            cid = user.get("client_id", "")
+            strat = _ss_book_for_own_deploy(deploy_id, cid)
+            if strat is None or not hasattr(strat, "manual_confirm_entry"):
+                raise HTTPException(404, "No live sell_straddle book for this deployment.")
+            ok, msg = await strat.manual_confirm_entry(body.ce_ltp, body.pe_ltp)
+            if not ok:
+                raise HTTPException(400, msg)
+            return {"ok": True, "message": msg}
+
+        @app.post("/api/client/strategy/{deploy_id}/sell_straddle/discard_aborted_entry", tags=["Client"])
+        async def api_client_discard_aborted_entry(
+            deploy_id: str, user: dict = Depends(_require_client),
+        ):
+            cid = user.get("client_id", "")
+            strat = _ss_book_for_own_deploy(deploy_id, cid)
+            if strat is None or not hasattr(strat, "discard_aborted_entry"):
+                raise HTTPException(404, "No live sell_straddle book for this deployment.")
+            ok, msg = await strat.discard_aborted_entry()
+            if not ok:
+                raise HTTPException(400, msg)
+            return {"ok": True, "message": msg}
+
+        # ── ADMIN — V4 Cascade: live trap-zone status + active-trade distances ──
+        @app.get("/api/admin/strategy/{deploy_id}/v4_trap_status", tags=["Admin"])
+        async def api_admin_v4_trap_status(
+            deploy_id: str, _: dict = Depends(_require_admin),
+        ):
+            """Every in-flight HTF/MTF setup (Live Trap Status grid) plus the
+            live position's real-time distance to Target A / B1(1:2) / B2(1:3)
+            / SL (active-trade table). Admin-gated — called from the admin V4
+            Cascade rule-builder panel with an arbitrary deploy_id, same as
+            force_ingest above (was previously client-gated, which silently
+            403'd every poll from the admin panel's admin-scoped token)."""
+            parts = deploy_id.split("_")
+            if len(parts) < 3:
+                raise HTTPException(400, f"Malformed deploy_id '{deploy_id}'.")
+            cid, bid, und = parts[0], parts[1], parts[-1]
+            book = _srv._find_v4_book(cid, bid, und)
+            if book is None:
+                return {"ok": True, "deploy_id": deploy_id, "zones": [], "position": None}
+
+            from strategies.v4_cascade.dataclasses import GateState
+            from strategies.v4_cascade.book import _CRYPTO_CONTRACT_VALUE
+            zones = []
+            live_price = getattr(book, "_live_price", {}) or {}
+            _use_pool = bool(getattr(book, "_use_pool_engine", False))
+
+            def _zone_dist(ltp, lo, hi):
+                if not ltp or lo is None or hi is None:
+                    return float("inf")
+                if lo <= ltp <= hi:
+                    return 0.0
+                return min(abs(ltp - lo), abs(ltp - hi))
+
+            if _use_pool:
+                # 2026-07-24: full pool dump (every _ZoneSlot, not just one
+                # "selected" summary) -- this is what the client dashboard's
+                # tracking block deliberately does NOT show (it picks one
+                # nearest-to-price slot per side for a compact card); this
+                # admin endpoint is the place to see everything actually in
+                # the pool at once, sorted nearest-to-price first per side.
+                pe = getattr(book, "_pool_engine", None)
+                for side in ("CE", "PE"):
+                    side_ltp = float(live_price.get(side) or 0.0)
+                    pool = []
+                    if pe is not None:
+                        for _k, _slots in pe._pool.items():
+                            if _k[0] == side:
+                                pool.extend(_slots)
+                    pool.sort(key=lambda s: _zone_dist(side_ltp, s.zone_low, s.zone_high))
+                    for slot in pool:
+                        limit_price = round(slot.zone_low + pe._entry_offset, 2) if pe else None
+                        dist = _zone_dist(side_ltp, slot.zone_low, slot.zone_high)
+                        z = slot.zone
+                        zones.append({
+                            "model": "pool_engine", "side": side, "strike": int(slot.strike),
+                            "state": ("limit_armed" if slot.pending_entry
+                                      else "tracking" if slot.tracking else "zone_found"),
+                            "ref_ts": z.reference_low_ts.isoformat() if z and z.reference_low_ts else None,
+                            "trap_ts": z.lock_ts.isoformat() if z and z.lock_ts else None,
+                            "timeframe": 75,
+                            "zone_low": round(slot.zone_low, 2), "zone_high": round(slot.zone_high, 2),
+                            "limit_entry_price": limit_price,
+                            "live_price": side_ltp or None,
+                            "distance_to_trap": None if dist == float("inf") else round(dist, 2),
+                            "reentry_ts": slot.reentry_ts.isoformat() if slot.reentry_ts else None,
+                            "trigger_ts": slot.trigger_ts.isoformat() if slot.trigger_ts else None,
+                        })
+                index_gate = None
+                pos = book._active_position
+                position = None
+                if pos is not None and pos.is_open:
+                    live_ltp = float(live_price.get(pos.side) or 0.0)
+                    _qty = (pos.t1.qty if pos.t1 else 0) + (pos.t2.qty if pos.t2 else 0)
+                    pnl_pts = (live_ltp - pos.t1.entry_price) if (pos.t1 and live_ltp) else 0.0
+                    _dist_sl = (live_ltp - pos.t1.sl_price) if (pos.t1 and live_ltp) else None
+                    _dist_tgt = (pos.t1.target_price - live_ltp) if (pos.t1 and live_ltp and pos.t1.target_price) else None
+                    position = {
+                        "side": pos.side, "status": pos.status,
+                        "entry_price": pos.t1.entry_price if pos.t1 else None,
+                        "sl_price": pos.t1.sl_price if pos.t1 else None,
+                        "target_price": pos.t1.target_price if pos.t1 else None,
+                        "live_ltp": live_ltp,
+                        "distance_to_sl": _dist_sl,
+                        "distance_to_target": _dist_tgt,
+                        "unrealized_pnl": round(pnl_pts * _qty, 4),
+                        "t1_status": pos.t1.status if pos.t1 else None,
+                        "t2_status": pos.t2.status if pos.t2 else None,
+                        "t2_trail_stop": pos.t2.trail_stop_price if pos.t2 else None,
+                    }
+                return {"ok": True, "deploy_id": deploy_id, "zones": zones, "position": position,
+                        "index_gate": index_gate}
+
+            for side in ("CE", "PE"):
+                scanner = book._engine._scanners.get(side)
+                if scanner is None:
+                    continue
+                side_ltp = float(live_price.get(side) or 0.0)
+                for setup in scanner.setups:
+                    # model discriminator: the new IndexGatedPremiumScanner's
+                    # _PremiumSetup has ONE zone (.zone); the legacy (crypto)
+                    # PremiumGateScanner's _HTFSetup has TWO (.htf_zone/.mtf_zone).
+                    if hasattr(setup, "zone"):
+                        z_obj = setup.zone
+                        target_level = setup.limit_entry_price or (z_obj.entry_line if z_obj else None)
+                        distance = (side_ltp - target_level) if (side_ltp and target_level is not None) else None
+                        z = {
+                            "model": "index_gated", "side": side, "state": setup.state.value,
+                            "ref_ts": setup.ref_ts.isoformat() if setup.ref_ts else None,
+                            "timeframe": setup.timeframe,
+                            "entry": z_obj.entry_line if z_obj else None,
+                            "sl": z_obj.sl_level if z_obj else None,
+                            "zone_low": z_obj.sweep_low if z_obj else None,
+                            "zone_high": z_obj.entry_line if z_obj else None,
+                            "limit_entry_price": setup.limit_entry_price,
+                            "live_price": side_ltp or None,
+                            "distance_to_trap": distance,
+                        }
+                    else:
+                        # "how far is market from the trap" -- distance from the
+                        # live price to whichever level is currently most relevant:
+                        # the pending limit price once armed, else the HTF entry line.
+                        target_level = setup.limit_entry_price or (
+                            setup.htf_zone.entry_line if setup.htf_zone else None)
+                        distance = (side_ltp - target_level) if (side_ltp and target_level is not None) else None
+                        z = {
+                            "model": "legacy_two_stage", "side": side, "state": setup.state.value,
+                            "htf_ref_ts": setup.htf_ref_ts.isoformat() if setup.htf_ref_ts else None,
+                            "htf_entry": setup.htf_zone.entry_line if setup.htf_zone else None,
+                            "htf_sl": setup.htf_zone.sl_level if setup.htf_zone else None,
+                            "mtf_ref_ts": setup.mtf_zone.reference_low_ts.isoformat()
+                                          if setup.mtf_zone and setup.mtf_zone.reference_low_ts else None,
+                            "mtf_entry": setup.mtf_zone.entry_line if setup.mtf_zone else None,
+                            "inner_zone_low": setup.mtf_zone.sweep_low if setup.mtf_zone else None,
+                            "limit_entry_price": setup.limit_entry_price,
+                            "live_price": side_ltp or None,
+                            "distance_to_trap": distance,
+                        }
+                    zones.append(z)
+
+            index_gate = None
+            _sc = getattr(book._engine, "_spot_confirm", None)
+            if _sc is not None:
+                _iz = getattr(_sc, "current_zone", None)
+                index_gate = {
+                    "kind": getattr(_sc.current_kind, "value", str(_sc.current_kind)),
+                    "armed_side": "CE" if _sc.confirms("CE") else ("PE" if _sc.confirms("PE") else None),
+                    "timeframe": 75,
+                    "ref_ts": _iz.reference_low_ts.isoformat() if _iz and _iz.reference_low_ts else None,
+                    "confirmed_ts": _iz.lock_ts.isoformat() if _iz and _iz.lock_ts else None,
+                    "entry_line": _iz.entry_line if _iz else None,
+                    "sl_level": _iz.sl_level if _iz else None,
+                }
+
+            position = None
+            pos = book._engine.position
+            if pos is not None and pos.is_open:
+                live_ltp = 0.0
+                _is_crypto_pos = und.upper() in ("BTC", "ETH")
+                try:
+                    # 2026-07-21 fix: the EXECUTION contract (one strike OTM
+                    # from live spot) is what's actually traded, a DIFFERENT
+                    # instrument than the tracking contract's 5m bars used
+                    # below. Crypto has no separate execution instrument
+                    # (perpetual is both), so it correctly stays on the
+                    # tracking bars.
+                    if not _is_crypto_pos:
+                        live_ltp = float(getattr(book, "_exec_live_price", {}).get(pos.side) or 0.0)
+                    if live_ltp <= 0:
+                        bars = book._bars_5m.get(pos.side) or []
+                        if bars:
+                            live_ltp = float(bars[-1].close)
+                except Exception:
+                    pass
+                # Contract value: BTC=0.001, ETH=0.01 (1 lot = this fraction of
+                # a coin, matches Delta's real contract_value API field and
+                # sell_straddle's same 2026-07-19 convention) -- NIFTY = 1.0.
+                _cv = _CRYPTO_CONTRACT_VALUE.get(und.upper(), 1.0)
+                _qty = (pos.t1.qty if pos.t1 else 0) + (pos.t2.qty if pos.t2 else 0)
+                # crypto PE = short (bull-trap -> bearish); everything else = long.
+                _is_short_pos = und.upper() in ("BTC", "ETH") and pos.side == "PE"
+                if _is_short_pos:
+                    pnl_pts = (pos.t1.entry_price - live_ltp) if (pos.t1 and live_ltp) else 0.0
+                    _dist_sl = (pos.t1.sl_price - live_ltp) if (pos.t1 and live_ltp) else None
+                    _dist_tgt = (live_ltp - pos.t1.target_price) if (pos.t1 and live_ltp) else None
+                else:
+                    pnl_pts = (live_ltp - pos.t1.entry_price) if (pos.t1 and live_ltp) else 0.0
+                    _dist_sl = (live_ltp - pos.t1.sl_price) if (pos.t1 and live_ltp) else None
+                    _dist_tgt = (pos.t1.target_price - live_ltp) if (pos.t1 and live_ltp) else None
+                position = {
+                    "side": pos.side, "status": pos.status,
+                    "entry_price": pos.t1.entry_price if pos.t1 else None,
+                    "sl_price": pos.t1.sl_price if pos.t1 else None,
+                    "target_price": pos.t1.target_price if pos.t1 else None,
+                    "live_ltp": live_ltp,
+                    "distance_to_sl": _dist_sl,
+                    "distance_to_target": _dist_tgt,
+                    "unrealized_pnl": round(pnl_pts * _qty * _cv, 4),
+                    "contract_value": _cv,
+                    "t1_status": pos.t1.status if pos.t1 else None,
+                    "t2_status": pos.t2.status if pos.t2 else None,
+                    "t2_trail_stop": pos.t2.trail_stop_price if pos.t2 else None,
+                }
+            return {"ok": True, "deploy_id": deploy_id, "zones": zones, "position": position,
+                    "index_gate": index_gate}
+
         # ── CLIENT — set target index ─────────────────────────────────────────
 
         @app.post("/api/client/set_index", tags=["Client"])
@@ -2103,7 +2650,7 @@ class DashboardServer:
             body: _SetIndexSchema, user: dict = Depends(_require_client),
         ):
             cid = user.get("client_id", "")
-            allowed = {"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY", "CRUDEOIL", "BTC", "ETH"}
+            allowed = {"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY", "CRUDEOIL", "GOLDM", "BTC", "ETH"}
             idx = body.index.upper()
             if idx not in allowed:
                 raise HTTPException(400, f"Invalid index. Allowed: {sorted(allowed)}")
@@ -2134,8 +2681,8 @@ class DashboardServer:
             body: _StrategySelectionsSchema, user: dict = Depends(_require_client),
         ):
             cid = user.get("client_id", "")
-            allowed_strategies = {"sell_straddle", "iron_condor", "trap_scanner"}
-            allowed_instruments = {"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY", "CRUDEOIL"}
+            allowed_strategies = {"sell_straddle", "v4_cascade", "fno_positional", "hourly_breakout"}
+            allowed_instruments = {"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY", "CRUDEOIL", "GOLDM"}
             import json as _json
             validated = []
             for item in (body.selections or []):
@@ -2146,56 +2693,120 @@ class DashboardServer:
             await _srv._client_db.upsert_client(cid, strategy_selections=_json.dumps(validated))
             return {"ok": True, "saved": len(validated)}
 
+        # ── CLIENT — risk overrides (per-client per-strategy per-index) ────────
+
+        @app.get("/api/client/risk_overrides", tags=["Client"])
+        async def api_client_get_risk_overrides(
+            strategy: str = "sell_straddle",
+            instrument: str = "NIFTY",
+            user: dict = Depends(_require_client),
+        ):
+            cid = user.get("client_id", "")
+            profile = _srv._registry.get(cid) if _srv._registry else None
+            overrides = {}
+            if profile is not None:
+                overrides = getattr(profile, "strategy_risk_overrides", {}).get(f"{strategy}:{instrument}", {})
+
+            admin_defaults: Dict[str, Any] = {}
+            if strategy == "sell_straddle":
+                from strategies.sell_straddle.config import load_sell_straddle_config
+                from dataclasses import fields as _fields
+                from datetime import time as _dtime
+                cfg = load_sell_straddle_config(instrument, _srv._cfg, client_id="")
+                for field in _fields(cfg):
+                    v = getattr(cfg, field.name)
+                    if isinstance(v, _dtime):
+                        v = v.strftime("%H:%M")
+                    admin_defaults[field.name] = v
+
+            return {
+                "ok": True,
+                "strategy": strategy,
+                "instrument": instrument,
+                "admin_defaults": admin_defaults,
+                "client_overrides": overrides,
+            }
+
+        @app.post("/api/client/risk_overrides", tags=["Client"])
+        async def api_client_save_risk_overrides(
+            body: _RiskOverridesSchema,
+            strategy: str = "sell_straddle",
+            instrument: str = "NIFTY",
+            user: dict = Depends(_require_client),
+        ):
+            cid = user.get("client_id", "")
+            profile = _srv._registry.get(cid) if _srv._registry else None
+            if profile is None:
+                raise HTTPException(404, "Client profile not found.")
+            key = f"{strategy}:{instrument}"
+            cleaned: Dict[str, Any] = {}
+            for k, v in (body.overrides or {}).items():
+                if v is None:
+                    continue
+                if isinstance(v, str) and v.strip() == "":
+                    continue
+                cleaned[k] = v
+            profile.strategy_risk_overrides[key] = cleaned
+            _srv._registry.save()
+            return {"ok": True, "strategy": strategy, "instrument": instrument, "saved": cleaned}
+
         # ── CLIENT — positions (live open legs) ───────────────────────────────
 
         @app.get("/api/client/positions", tags=["Client"])
         async def api_client_positions(user: dict = Depends(_require_client)):
             """
             Live open legs per (binding, strategy), read from the GLOBAL strategy
-            instances (_iron_condors / _sell_straddles / trap_scanner books). Positions
+            instances (_sell_straddles books). Positions
             are engine-level (per underlying); we surface them under each of the
             client's deployments so the portal shows the strikes being traded.
             """
             cid = user.get("client_id", "")
             try:
-                deployments = await asyncio.to_thread(_srv._client_db.get_deployments_sync, cid)
+                _all_deps = await asyncio.to_thread(_srv._client_db.get_deployments_sync, cid)
             except Exception:
-                deployments = []
+                _all_deps = []
 
-            def _ic_legs(pos, product="NRML"):
-                out = []
-                for leg in (pos.short_ce, pos.short_pe, pos.long_ce, pos.long_pe):
-                    strike = int(getattr(leg, "strike", 0))
-                    if strike <= 0:
-                        continue
-                    side = getattr(leg, "side", "")
-                    ot   = getattr(leg, "option_type", "")
-                    ep   = float(getattr(leg, "entry_price", 0.0) or 0.0)
-                    ltp  = float(getattr(leg, "ltp", ep) or ep)
-                    ls   = int(getattr(pos, "lot_size", 0) or 0)
-                    qty  = ls * (-1 if side == "sell" else 1)
-                    # sell profits when price falls; buy profits when price rises
-                    pnl = round((ep - ltp) * abs(qty), 2) if side == "sell" else round((ltp - ep) * abs(qty), 2)
-                    out.append({"symbol": f"{pos.underlying} {strike}{ot} {side.upper()}",
-                                "instrument": f"{pos.underlying} {strike} {ot}",
-                                "type": product, "side": side.upper(),
-                                "qty": qty, "lot_size": ls, "lots": 1,
-                                "entry_price": round(ep, 2),
-                                "sell_avg": round(ep, 2) if side == "sell" else 0.0,
-                                "buy_avg":  round(ep, 2) if side != "sell" else 0.0,
-                                "ltp": round(ltp, 2), "pnl": pnl, "mtm": pnl})
-                return out
+            def _is_running(dep: dict) -> bool:
+                return int(dep.get("is_running", 0) or 0) == 1
+
+            def _has_open_position(dep: dict) -> bool:
+                """A stopped deployment may still have a live open position that must be visible."""
+                if _is_running(dep):
+                    return False
+                sname = dep.get("strategy_name", "")
+                underlying = dep.get("underlying") or dep.get("assigned_instrument") or ""
+                bid = dep.get("binding_id", "")
+                if sname == "sell_straddle":
+                    strat = _srv._find_ss_book(cid, bid, underlying)
+                    pos = getattr(strat, "_position", None) if strat else None
+                    return pos is not None and getattr(pos, "status", "") == "open"
+                return False
+
+            # Show running deployments (live cards) OR stopped deployments that still
+            # hold an open position (so the user can monitor/close it).
+            deployments = [d for d in _all_deps if _is_running(d) or _has_open_position(d)]
 
             def _ccy_cv(underlying):
-                """(currency_symbol, contract_value) per exchange. Crypto (Delta) P&L is in USD and
-                each contract is a fraction of a coin (BTC 0.001, ETH 0.01), so the premium-points
-                P&L must be scaled by the contract value to match the Delta app. NSE/MCX = ₹, ×1."""
+                """(currency_symbol, contract_value) per exchange. Crypto (Delta) P&L is in USD
+                and each lot is a fraction of a coin (BTC 0.001, ETH 0.01 — reverted 2026-07-19,
+                same day, later: confirmed correct after all, matches Delta's real contract_value
+                API field), so premium-points P&L is scaled by contract value. NSE/MCX = ₹, ×1."""
                 u = str(underlying).upper()
                 if u == "BTC":
                     return ("$", 0.001)
                 if u == "ETH":
                     return ("$", 0.01)
                 return ("₹", 1.0)
+
+            def _fmt_exp(d):
+                """Format a date/date-like expiry as 09JUL26, or empty if missing/invalid."""
+                if not d:
+                    return ""
+                _mons = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"]
+                try:
+                    return f"{int(d.day)}{_mons[int(d.month)-1]}{str(d.year)[-2:]}"
+                except Exception:
+                    return ""
 
             def _ss_legs(pos, product="MIS"):
                 out = []
@@ -2226,21 +2837,49 @@ class DashboardServer:
                             _exp_lbl = f"{int(_dd)}{_mons[int(_mm)-1]}{_yy}"
                         except Exception:
                             pass
+                    if not _exp_lbl:
+                        _exp_lbl = _fmt_exp(getattr(pos, "expiry_date", None))
                     _instr = f"{pos.underlying} {strike} {ot}" + (f" {_exp_lbl}" if _exp_lbl else "")
+                    _ot = leg.open_time.isoformat(timespec="seconds") if getattr(leg, "open_time", None) else None
                     out.append({"symbol": f"{pos.underlying} {strike}{ot} SELL",
                                 "instrument": _instr,
                                 "type": product, "side": "SELL", "ccy": ccy,
                                 "qty": qty, "lot_size": ls, "lots": 1,
                                 "entry_price": round(ep, 2),
                                 "sell_avg": round(ep, 2), "buy_avg": 0.0,
-                                "ltp": round(_val, 2), "pnl": _pnl, "mtm": _pnl})
+                                "ltp": round(_val, 2), "pnl": _pnl, "mtm": _pnl,
+                                "entry_time": _ot,
+                                "option_type": ot, "underlying": str(pos.underlying)})
+                # 2026-08-27, real user-found incident: the EOD hedge-and-carry BUY legs
+                # (pos.hedge_ce_leg/hedge_pe_leg) were correctly placed at the broker but
+                # never surfaced anywhere in the UI or History -- a real position invisible
+                # to the client. Same shape as the sold legs above, but side="BUY" (long,
+                # qty positive, P&L = current-entry not entry-current).
+                for leg in (getattr(pos, "hedge_ce_leg", None), getattr(pos, "hedge_pe_leg", None)):
+                    if leg is None:
+                        continue
+                    strike = int(getattr(leg, "strike", 0))
+                    if strike <= 0:
+                        continue
+                    ot = getattr(leg, "option_type", "")
+                    ep = float(getattr(leg, "entry_price", 0.0) or 0.0)
+                    ltp = float(getattr(leg, "ltp", ep) or ep)
+                    ls = int(getattr(pos, "lot_size", 0) or 0)
+                    qty = ls  # hedge legs are BOUGHT (long)
+                    _pnl = round((ltp - ep) * abs(qty) * cv, 2)
+                    _exp_lbl = _fmt_exp(getattr(pos, "expiry_date", None))
+                    _instr = f"{pos.underlying} {strike} {ot} HEDGE" + (f" {_exp_lbl}" if _exp_lbl else "")
+                    _ot = leg.open_time.isoformat(timespec="seconds") if getattr(leg, "open_time", None) else None
+                    out.append({"symbol": f"{pos.underlying} {strike}{ot} BUY (HEDGE)",
+                                "instrument": _instr,
+                                "type": product, "side": "BUY", "ccy": ccy,
+                                "qty": qty, "lot_size": ls, "lots": 1,
+                                "entry_price": round(ep, 2),
+                                "sell_avg": 0.0, "buy_avg": round(ep, 2),
+                                "ltp": round(ltp, 2), "pnl": _pnl, "mtm": _pnl,
+                                "entry_time": _ot, "is_hedge": True,
+                                "option_type": ot, "underlying": str(pos.underlying)})
                 return out
-
-            def _find(strategies, underlying):
-                for s in strategies or []:
-                    if getattr(s, "_underlying", None) == underlying:
-                        return s
-                return None
 
             by_broker: dict = {}
             for dep in deployments:
@@ -2252,18 +2891,9 @@ class DashboardServer:
                 tracking = None
                 straddle_info = None   # sell_straddle: total sold, exit-basis, LTP/Theta triplets
                 booked = 0.0   # session realized P&L (₹) — straddle re-entries/rolls booked today
+                pos = None     # active position for extracting top-level entry time
                 try:
-                    if sname == "iron_condor":
-                        strat = _find(getattr(_srv, "_iron_condors", []), underlying)
-                        pos = getattr(strat, "_position", None) if strat else None
-                        if pos and getattr(pos, "status", "open") == "open":
-                            try:
-                                from data_layer.runtime_config import RuntimeConfig as _RC2
-                                _icp = str(_RC2.index_section(underlying, "iron_condor").get("product_type", "NRML")).upper()
-                            except Exception:
-                                _icp = "NRML"
-                            legs = _ic_legs(pos, product=_icp if _icp in ("MIS", "NRML") else "NRML")
-                    elif sname == "sell_straddle":
+                    if sname == "sell_straddle":
                         strat = _srv._find_ss_book(cid, bid, underlying)
                         pos = getattr(strat, "_position", None) if strat else None
                         # Booked = sum of TODAY's closed-trade P&L from the History ledger (the
@@ -2338,7 +2968,7 @@ class DashboardServer:
                                 _lot_sz  = int(getattr(strat, "_lot_size", 1) or 1)
                                 _lot_mul = int(getattr(strat, "_lot_multiplier", 1) or 1)
                                 _qty     = _lot_sz * _lot_mul
-                                # Contract value: BTC=0.001, ETH=0.01, NSE=1.0
+                                # Contract value: BTC=0.001, ETH=0.01, NSE=1.0 (reverted 2026-07-19, same day, later)
                                 _und_u = str(pos.underlying).upper()
                                 _cv = 0.001 if _und_u == "BTC" else (0.01 if _und_u == "ETH" else 1.0)
                                 _qty_cv = _qty * _cv   # actual currency units per premium pt
@@ -2401,13 +3031,587 @@ class DashboardServer:
                                     straddle_info["tsl"] = {"enabled": False}
                                 # Exit eval cache — built every 3s by _check_exits
                                 straddle_info["exit_eval"] = getattr(strat, "_last_exit_eval", None)
+
+                                # Post-15:00 day-low + per-leg R1 (2026-08-28, direct user
+                                # spec): "UI should tell us what situation is there after
+                                # 15:00 hrs, what is the lowest value and what is current
+                                # value and how far is the current LTP from the lowest
+                                # value" + "UI should also show R1 values of the legs in
+                                # position section" + "should also show when only one leg
+                                # is there what is R1". Surfaced whenever EITHER
+                                # day_low_exit_enabled or post1500_exit_enabled is on
+                                # (both share the same one-time frozen-low computation --
+                                # see exits.py's own guard split), so the panel is useful
+                                # even on a binding that hasn't opted into the post-15:00
+                                # per-leg mechanic itself, just the plain day-low feature.
+                                try:
+                                    _frozen = getattr(strat, "_session_min_straddle_frozen", None)
+                                    _dl_on = bool(getattr(strat, "_day_low_exit_enabled", False)) or \
+                                             bool(getattr(strat, "_post1500_exit_enabled", False))
+                                    if _dl_on:
+                                        straddle_info["day_low"] = {
+                                            "enabled": True,
+                                            "freeze_time": getattr(strat, "_day_low_freeze_time", None).strftime("%H:%M")
+                                                            if getattr(strat, "_day_low_freeze_time", None) else "15:00",
+                                            "current": round(_curC, 2),
+                                            "lowest": round(_frozen, 2) if _frozen not in (None, float("inf")) else None,
+                                            "distance": round(_curC - _frozen, 2)
+                                                        if _frozen not in (None, float("inf")) else None,
+                                        }
+                                except Exception:
+                                    pass
+
+                                try:
+                                    _p1500_on = bool(getattr(strat, "_post1500_exit_enabled", False))
+                                    if _p1500_on:
+                                        _armed = bool(getattr(strat, "_post1500_armed", False))
+                                        _armed_reason = getattr(strat, "_post1500_armed_reason", None)
+                                        _calc = getattr(strat, "_post1500_calc", {}) or {}
+                                        _r1_legs = {}
+                                        for _side, _leg in (("CE", pos.ce_leg), ("PE", pos.pe_leg)):
+                                            _leg_closed = bool(getattr(pos, f"{_side.lower()}_leg_closed", False))
+                                            _sr = {}
+                                            if _side in _calc:
+                                                _sr = _calc[_side].get_calculated_sr_state(
+                                                    f"{underlying}_{_side}_P1500").get("sr_levels", {}) or {}
+                                            _r1 = _sr.get("R1")
+                                            _r1_legs[_side] = {
+                                                "closed": _leg_closed,
+                                                "ltp": round(float(_leg.ltp or 0.0), 2),
+                                                "r1": round(float(_r1["high"]), 2) if _r1 else None,
+                                            }
+                                        straddle_info["post1500"] = {
+                                            "enabled": True,
+                                            "armed": _armed,
+                                            "armed_reason": _armed_reason,
+                                            "legs": _r1_legs,
+                                            "single_leg_mode": bool(pos.ce_leg_closed or pos.pe_leg_closed),
+                                        }
+                                except Exception:
+                                    pass
+                    elif sname == "v4_cascade":
+                        book = _srv._find_v4_book(cid, bid, underlying)
+                        if book is not None:
+                            from strategies.v4_cascade.dataclasses import GateState
+                            from strategies.v4_cascade.book import _CRYPTO_CONTRACT_VALUE
+                            # Booked = sum of TODAY's closed-tranche P&L from the History ledger
+                            # (mirrors sell_straddle's booked computation above) -- this was
+                            # previously left at the outer default of 0.0 always, never wired up
+                            # for v4_cascade, so a leg that already closed today (e.g. T1 hit its
+                            # SL while T2 is still running) silently vanished from the dashboard's
+                            # Booked P&L instead of being counted. cascade_bridge._record_history
+                            # already writes pnl in real currency units (₹/$, qty-multiplied), so
+                            # unlike sell_straddle's points-based fallback, no lot_size scaling
+                            # is needed here.
+                            try:
+                                from data_layer import trade_history as _th
+                                _today = datetime.now(IST).date().isoformat()
+                                _recs = _th.load(cid, 500)
+                                booked = round(sum(
+                                    float(r.get("pnl", 0) or 0) for r in _recs
+                                    if str(r.get("ts", ""))[:10] == _today
+                                    and r.get("strategy") == "v4_cascade"
+                                    and str(r.get("instrument", "")).upper() == str(underlying).upper()
+                                    and str(r.get("binding_id", "")) == bid
+                                ), 2)
+                            except Exception:
+                                booked = 0.0
+                            _is_crypto = str(underlying).upper() in ("BTC", "ETH")
+                            live_price = getattr(book, "_live_price", {}) or {}
+                            exec_live_price = getattr(book, "_exec_live_price", {}) or {}
+                            pos = book._active_position
+                            if pos is not None and pos.is_open:
+                                # Crypto trades the underlying's own spot/perpetual price directly —
+                                # there is no option chain for BTC/ETH, so CE/PE here are only the
+                                # engine's internal bear-scan/bull-scan side labels, never real
+                                # strikes; the UI must not present them as option contracts.
+                                _cv = _CRYPTO_CONTRACT_VALUE.get(str(underlying).upper(), 1.0)
+                                ccy = "$" if _is_crypto else "₹"
+                                # crypto PE = short (bull-trap -> bearish); everything else = long.
+                                _is_short_pos = _is_crypto and pos.side == "PE"
+                                for leg in (pos.t1, pos.t2):
+                                    if leg is None or leg.status != "open":
+                                        continue
+                                    # 2026-07-21 fix: while a position is open, the EXECUTION
+                                    # contract (one strike OTM from live spot) is what's actually
+                                    # traded -- a DIFFERENT instrument than the tracking contract
+                                    # (live_price), which is only ever the scanning reference.
+                                    # Crypto has no separate execution instrument (perpetual is
+                                    # both), so it correctly stays on live_price.
+                                    _exec_ltp = exec_live_price.get(pos.side) if not _is_crypto else None
+                                    ltp = float(_exec_ltp or live_price.get(pos.side) or leg.entry_price)
+                                    qty = int(leg.qty)
+                                    _pnl = round(((leg.entry_price - ltp) if _is_short_pos
+                                                  else (ltp - leg.entry_price)) * qty * _cv, 2)
+                                    _instr = (f"{underlying} SPOT {leg.tranche}" if _is_crypto
+                                              else f"{underlying} {int(leg.strike)} {pos.side} {leg.tranche}")
+                                    # sl_price/target_price below are TRACKING-contract-native
+                                    # (the exit logic in engine.py._check_exits deliberately
+                                    # watches the SCANNED contract's own bars against these
+                                    # levels, by design) -- tracking_ltp/tracking_strike/
+                                    # tracking_label surface that context explicitly next to
+                                    # them, so the UI can label them clearly as belonging to
+                                    # the contract being scanned, not the one actually traded.
+                                    # 2026-07-24: was getattr(book, f"_{pos.side.lower()}_strike", 0),
+                                    # which under multi-strike pool-engine scanning is only the
+                                    # FIRST of up to 5 candidates -- if the trade actually fired on
+                                    # candidate #2-5, that read the wrong strike. leg.strike is the
+                                    # TrancheLeg's own real traded strike, always correct.
+                                    _tracking_strike = 0 if _is_crypto else int(leg.strike or 0)
+                                    legs.append({
+                                        "symbol": _instr, "instrument": _instr,
+                                        "type": leg.tranche,
+                                        "side": "SELL" if _is_short_pos else "BUY", "ccy": ccy,
+                                        "qty": qty, "lot_size": 1, "lots": 1,
+                                        "entry_price": round(leg.entry_price, 2),
+                                        "sell_avg": round(leg.entry_price, 2) if _is_short_pos else 0.0,
+                                        "buy_avg": 0.0 if _is_short_pos else round(leg.entry_price, 2),
+                                        "ltp": round(ltp, 2), "pnl": _pnl, "mtm": _pnl,
+                                        "sl_price": round(leg.sl_price, 2) if leg.sl_price else None,
+                                        "target_price": round(leg.target_price, 2) if leg.target_price else None,
+                                        "trail_stop_price": round(leg.trail_stop_price, 2)
+                                                             if leg.trail_stop_price else None,
+                                        "tracking_ltp": round(float(live_price.get(pos.side) or 0.0), 2),
+                                        "tracking_strike": _tracking_strike,
+                                        "tracking_label": ("BEAR" if _is_crypto and pos.side == "CE"
+                                                            else "BULL" if _is_crypto else pos.side),
+                                        "entry_reason": leg.entry_reason or "",
+                                        "entry_time": leg.entry_time.isoformat(timespec="seconds")
+                                                      if leg.entry_time else None,
+                                    })
+                            # 2026-07-21: tracking/scanning info is now ALWAYS built, not just
+                            # when no position is open -- the engine keeps scanning BOTH sides
+                            # continuously even while one side holds a trade (structural flip
+                            # can fire at any time), so hiding it during an open position was
+                            # hiding exactly the info that explains what could flip the trade.
+                            if True:
+                                _use_pool = bool(getattr(book, "_use_pool_engine", False))
+                                _bias = "none"
+                                _sc = None if _use_pool else getattr(book._engine, "_spot_confirm", None)
+                                _index_gate = None
+                                if _sc is not None:
+                                    _bias = getattr(_sc.current_kind, "value", str(_sc.current_kind))
+                                    _iz = getattr(_sc, "current_zone", None)
+                                    _index_gate = {
+                                        "kind": _bias,
+                                        "armed_side": ("CE" if _sc.confirms("CE")
+                                                       else ("PE" if _sc.confirms("PE") else None)),
+                                        "timeframe": 75,
+                                        "ref_ts": (_iz.reference_low_ts.isoformat(timespec="minutes")
+                                                   if _iz and _iz.reference_low_ts else None),
+                                        "confirmed_ts": (_iz.lock_ts.isoformat(timespec="minutes")
+                                                          if _iz and _iz.lock_ts else None),
+                                        "entry_line": (round(_iz.entry_line, 2)
+                                                       if _iz and _iz.entry_line is not None else None),
+                                        "sl_level": (round(_iz.sl_level, 2)
+                                                     if _iz and _iz.sl_level is not None else None),
+                                    }
+                                if _is_crypto:
+                                    _atm, _dte, _offset, _expiry_str = 0, "—", 0, None   # atm filled in below (= live spot)
+                                else:
+                                    _atm = round(float(book._atm_open or 0.0), 2)
+                                    _dte = ((book._expiry - datetime.now(IST).date()).days
+                                            if book._expiry else "—")
+                                    _offset = int(book._tracking_offset)
+                                    _expiry_str = book._expiry.isoformat() if book._expiry else None
+                                # "model" discriminator: crypto keeps the legacy two-stage
+                                # HTF(75m premium)+MTF(5m/15m premium) shape byte-for-byte
+                                # (GateState/PremiumGateScanner, untouched); NIFTY/CRUDEOIL on the
+                                # OLD engine gets the 2026-07-20 Index/Premium-decoupled shape
+                                # (PremiumZoneState/IndexGatedPremiumScanner) plus the index_gate
+                                # block above; NIFTY on the NEW pool engine (2026-07-24) has no
+                                # Index Gate 1 concept at all -- bias/index_gate stay at their
+                                # empty defaults, "pool_engine" tells the frontend not to expect
+                                # them populated.
+                                tracking = {"is_crypto": _is_crypto,
+                                            "model": "pool_engine" if _use_pool else ("legacy" if _is_crypto else "index_gated"),
+                                            "atm": _atm, "dte": _dte, "offset": _offset,
+                                            "expiry": _expiry_str, "phase": "", "bias": _bias,
+                                            "index_gate": _index_gate}
+                                _phases = []
+
+                                def _zone_bounds(z):
+                                    if z is None or z.entry_line is None or z.sweep_low is None:
+                                        return None, None
+                                    return (round(min(z.entry_line, z.sweep_low), 2),
+                                            round(max(z.entry_line, z.sweep_low), 2))
+
+                                if _use_pool:
+                                    # 2026-07-24: pool-engine zone pool (strategies/v4_cascade/
+                                    # pool_engine.py) has no HTF/MTF gate-state-machine at all --
+                                    # each side just has a POOL of concurrently-tracked _ZoneSlot
+                                    # objects. Show whichever zone is CLOSEST to the current live
+                                    # price (0 if price is already inside the zone bounds) -- the
+                                    # zone most likely to actually matter next, regardless of
+                                    # whether it happens to have a pending limit order yet. A
+                                    # zone with a "pending" order that's now far from price (e.g.
+                                    # aged but not yet past the 10-day cutoff) is exactly the
+                                    # stale/misleading case this replaces (confirmed live 2026-07-24
+                                    # -- a ~9-day-old PE zone with limit=58.5 was shown as the
+                                    # headline zone while LTP was 292.2, an ~80% move away and
+                                    # never realistically reachable).
+                                    def _zone_dist(ltp, lo, hi):
+                                        if not ltp or lo is None or hi is None:
+                                            return float("inf")
+                                        if lo <= ltp <= hi:
+                                            return 0.0
+                                        return min(abs(ltp - lo), abs(ltp - hi))
+
+                                    pe = getattr(book, "_pool_engine", None)
+                                    for side, label in (("CE", "CE"), ("PE", "PE")):
+                                        side_ltp = float(live_price.get(side) or 0.0)
+                                        pool = []
+                                        if pe is not None:
+                                            for _k, _slots in pe._pool.items():
+                                                if _k[0] == side:
+                                                    pool.extend(_slots)
+                                        slot = None
+                                        if pool:
+                                            slot = min(pool, key=lambda s: _zone_dist(side_ltp, s.zone_low, s.zone_high))
+                                        if slot is not None:
+                                            zone_low, zone_high = round(slot.zone_low, 2), round(slot.zone_high, 2)
+                                            if slot.pending_entry:
+                                                side_state = "limit_armed"
+                                            elif slot.tracking:
+                                                side_state = "tracking"
+                                            else:
+                                                side_state = "zone_found"
+                                            timeframe = 75
+                                            limit_price = round(slot.zone_low + pe._entry_offset, 2)
+                                            _z = slot.zone
+                                            ref_ts = (_z.reference_low_ts.isoformat(timespec="minutes")
+                                                      if _z and _z.reference_low_ts else None)
+                                            trap_ts = (_z.lock_ts.isoformat(timespec="minutes")
+                                                       if _z and _z.lock_ts else None)
+                                        else:
+                                            zone_low = zone_high = limit_price = timeframe = None
+                                            ref_ts = trap_ts = None
+                                            side_state = "—"
+                                        strike = (int(slot.strike) if slot is not None
+                                                  else int(getattr(book, f"_{side.lower()}_strike", 0) or 0))
+                                        tracking[f"{side.lower()}_label"] = label
+                                        tracking[f"{side.lower()}_strike"] = strike
+                                        tracking[f"{side.lower()}_ltp"] = round(side_ltp, 2)
+                                        tracking[side.lower()] = {
+                                            "state": side_state, "timeframe": timeframe,
+                                            "traps": len(pool),
+                                            "zone_low": zone_low, "zone_high": zone_high,
+                                            "limit_entry_price": limit_price,
+                                            "ref_ts": ref_ts, "trap_ts": trap_ts,
+                                            # 2026-07-24 temporary debug field: every zone
+                                            # currently in this side's pool, not just the
+                                            # selected one, sorted nearest-to-price first --
+                                            # lets the client verify "nearest zone" selection
+                                            # is correct via DevTools without needing a
+                                            # separate admin token. Safe to remove once the
+                                            # nearest-to-price logic is confirmed correct live.
+                                            "all_zones_debug": [
+                                                {
+                                                    "strike": int(s.strike),
+                                                    "zone_low": round(s.zone_low, 2),
+                                                    "zone_high": round(s.zone_high, 2),
+                                                    "distance": (None if _zone_dist(side_ltp, s.zone_low, s.zone_high) == float("inf")
+                                                                 else round(_zone_dist(side_ltp, s.zone_low, s.zone_high), 2)),
+                                                    "pending_entry": s.pending_entry,
+                                                    "tracking": s.tracking,
+                                                    "ref_ts": (s.zone.reference_low_ts.isoformat(timespec="minutes")
+                                                               if s.zone and s.zone.reference_low_ts else None),
+                                                }
+                                                for s in sorted(pool, key=lambda s: _zone_dist(side_ltp, s.zone_low, s.zone_high))
+                                            ],
+                                        }
+                                        _phases.append(side_state)
+                                elif _is_crypto:
+                                    _gate_order = list(GateState)
+                                    _htf_idx = _gate_order.index(GateState.HTF_LOCKED)
+                                    _mtf_idx = _gate_order.index(GateState.MTF_SCANNING_5M)
+                                    for side, label in (("CE", "BEAR"), ("PE", "BULL")):
+                                        scanner = book._engine._scanners.get(side)
+                                        side_ltp = float(live_price.get(side) or 0.0)
+                                        setup = None
+                                        if scanner is not None and scanner.setups:
+                                            # Show the single MOST-RECENTLY-DISCOVERED setup (newest
+                                            # HTF reference candle) -- recomputed fresh every poll,
+                                            # so once that setup gets invalidated (dropped from
+                                            # scanner.setups) this naturally "moves back" to whichever
+                                            # setup is next most recent, with no separate fallback
+                                            # logic needed. Note: this can show a brand-new
+                                            # HTF_LOCKED setup OVER an older one that's already
+                                            # further along (e.g. LIMIT_ARMED, about to actually
+                                            # fire) -- recency, not trade-proximity, is the sort key
+                                            # here, per explicit user choice.
+                                            setup = max(scanner.setups,
+                                                        key=lambda s: s.htf_ref_ts or datetime.min.replace(tzinfo=IST))
+                                        if setup is not None:
+                                            # LOW·HIGH always shows THIS setup's own HTF zone (Gate 1)
+                                            # — never switches to the MTF zone -- so the MTF zone can
+                                            # be shown separately, clearly nested UNDER it (same
+                                            # setup, never a different one), instead of the two being
+                                            # conflated into one column or confused with an unrelated
+                                            # setup's zone.
+                                            level_l, level_h = _zone_bounds(setup.htf_zone)
+                                            if level_l is None:
+                                                level_l = level_h = 0
+                                            mtf_low, mtf_high = _zone_bounds(setup.mtf_zone)
+                                            side_state = setup.state.value
+                                            # HTF/MTF are sequential sub-gates of the SAME setup, not
+                                            # two independent states — once past HTF_LOCKED the HTF
+                                            # column just confirms "locked" and the MTF column
+                                            # carries the actual current phase, so the two columns
+                                            # never show the identical raw value.
+                                            _idx = _gate_order.index(setup.state)
+                                            htf_disp = side_state if _idx < _htf_idx else "locked"
+                                            mtf_disp = side_state if _idx >= _mtf_idx else "—"
+                                            limit_price = (round(setup.limit_entry_price, 2)
+                                                           if setup.limit_entry_price is not None else None)
+                                            mtf_tf = setup.mtf_timeframe
+                                            _hz = setup.htf_zone
+                                            ref_ts = (_hz.reference_low_ts.isoformat(timespec="minutes")
+                                                      if _hz and _hz.reference_low_ts else None)
+                                            trap_ts = (_hz.lock_ts.isoformat(timespec="minutes")
+                                                       if _hz and _hz.lock_ts else None)
+                                        else:
+                                            level_l = level_h = 0
+                                            mtf_low = mtf_high = limit_price = mtf_tf = None
+                                            ref_ts = trap_ts = None
+                                            side_state = htf_disp = mtf_disp = "—"
+                                        strike = round(side_ltp)
+                                        tracking[f"{side.lower()}_label"] = label
+                                        tracking[f"{side.lower()}_strike"] = strike
+                                        tracking[f"{side.lower()}_ltp"] = round(side_ltp, 2)
+                                        tracking[side.lower()] = {
+                                            "htf_state": htf_disp, "mtf_state": mtf_disp,
+                                            "traps": len(scanner.setups) if scanner else 0,
+                                            "mtf_low": mtf_low, "mtf_high": mtf_high, "mtf_timeframe": mtf_tf,
+                                            "limit_entry_price": limit_price,
+                                            "level_l": round(level_l, 2), "level_h": round(level_h, 2),
+                                            "ref_ts": ref_ts, "trap_ts": trap_ts,
+                                        }
+                                        _phases.append(side_state)
+                                else:
+                                    for side, label in (("CE", "CE"), ("PE", "PE")):
+                                        scanner = book._engine._scanners.get(side)
+                                        side_ltp = float(live_price.get(side) or 0.0)
+                                        setup = None
+                                        if scanner is not None and scanner.setups:
+                                            # Same "most-recently-discovered" recency sort as the
+                                            # crypto branch above, on the single (no more HTF/MTF
+                                            # split) zone per setup.
+                                            setup = max(scanner.setups,
+                                                        key=lambda s: s.ref_ts or datetime.min.replace(tzinfo=IST))
+                                        if setup is not None:
+                                            zone_low, zone_high = _zone_bounds(setup.zone)
+                                            if zone_low is None:
+                                                zone_low = zone_high = 0
+                                            side_state = setup.state.value
+                                            timeframe = setup.timeframe
+                                            limit_price = (round(setup.limit_entry_price, 2)
+                                                           if setup.limit_entry_price is not None else None)
+                                            _z = setup.zone
+                                            ref_ts = (_z.reference_low_ts.isoformat(timespec="minutes")
+                                                      if _z and _z.reference_low_ts else None)
+                                            trap_ts = (_z.lock_ts.isoformat(timespec="minutes")
+                                                       if _z and _z.lock_ts else None)
+                                        else:
+                                            zone_low = zone_high = limit_price = timeframe = None
+                                            ref_ts = trap_ts = None
+                                            side_state = "—"
+                                        strike = int(getattr(book, f"_{side.lower()}_strike", 0) or 0)
+                                        tracking[f"{side.lower()}_label"] = label
+                                        tracking[f"{side.lower()}_strike"] = strike
+                                        tracking[f"{side.lower()}_ltp"] = round(side_ltp, 2)
+                                        tracking[side.lower()] = {
+                                            "state": side_state, "timeframe": timeframe,
+                                            "traps": len(scanner.setups) if scanner else 0,
+                                            "zone_low": zone_low, "zone_high": zone_high,
+                                            "limit_entry_price": limit_price,
+                                            "ref_ts": ref_ts, "trap_ts": trap_ts,
+                                        }
+                                        _phases.append(side_state)
+                                tracking["phase"] = "/".join(_phases)
+                                if _is_crypto:
+                                    tracking["atm"] = round(
+                                        float(live_price.get("CE") or live_price.get("PE") or 0.0), 2)
+                    elif sname in ("d1_trap_index", "d1_trap_fno", "d1_trap_option", "d1_trap_bear_only"):
+
+                        def _trap_leg_from_book(tb, dep_product):
+                            """Build a position leg dict from a D1TrapOptionBook with an open position."""
+                            if getattr(tb, "_strategy_name", "") == "d1_trap_bear_only":
+                                st = tb.status()
+                                tp = st.get("position")
+                                if tp is None:
+                                    return None, None
+                                _und = getattr(tb, "_underlying", underlying)
+                                _ep = float(tp.get("entry", 0.0))
+                                _ltp = float(tp.get("ltp") or _ep)
+                                _qty = int(tp.get("qty", 0))
+                                _pnl = round((_ltp - _ep) * _qty, 2)
+                                _instr = f"{_und} {tp.get('strike')} {tp.get('side')}"
+                                leg = {
+                                    "symbol": _instr, "instrument": _instr, "type": dep_product or "MIS",
+                                    "side": "BUY", "ccy": "₹", "qty": _qty, "lot_size": _qty, "lots": 1,
+                                    "entry_price": round(_ep, 2), "sell_avg": 0.0, "buy_avg": round(_ep, 2),
+                                    "ltp": round(_ltp, 2), "pnl": _pnl, "mtm": _pnl,
+                                    "sl_price": round(float(tp.get("sl", 0)), 2),
+                                    "tsl_locked_pct": tp.get("locked_pct", 0.0),
+                                    "direction": "LONG", "underlying": _und,
+                                }
+                                return leg, None
+                            tp = getattr(tb, "_position", None)
+                            if tp is None:
+                                return None, None
+                            _und = getattr(tb, "_underlying", underlying)
+                            _ot = tp.get("option_type", "CE")
+                            _strike = int(tp.get("strike", 0))
+                            _ep = float(tp.get("entry", 0.0))
+                            _ltp = float(getattr(tb, "_last_ltp", _ep) or _ep)
+                            _qty = int(tp.get("qty", 0))
+                            _exp = tp.get("expiry")
+                            _exp_str = _exp.isoformat() if hasattr(_exp, "isoformat") else str(_exp or "")
+                            _pnl = round((_ltp - _ep) * _qty, 2)
+                            _ts = tp.get("entry_ts")
+                            _ts_str = _ts.isoformat(timespec="seconds") if hasattr(_ts, "isoformat") else None
+                            _instr = f"{_und} {_strike} {_ot} {_exp_str[:10] if _exp_str else ''}"
+                            leg = {
+                                "symbol": _instr, "instrument": _instr,
+                                "type": dep_product or "MIS",
+                                "side": "BUY", "ccy": "₹",
+                                "qty": _qty, "lot_size": _qty, "lots": 1,
+                                "entry_price": round(_ep, 2),
+                                "sell_avg": 0.0, "buy_avg": round(_ep, 2),
+                                "ltp": round(_ltp, 2), "pnl": _pnl, "mtm": _pnl,
+                                "sl_price": round(float(tp.get("sl", 0)), 2),
+                                "tsl_level": round(float(tp.get("tsl_level", tp.get("sl", 0))), 2),
+                                "direction": tp.get("direction", ""),
+                                "entry_time": _ts_str,
+                                "underlying": _und,
+                            }
+                            _pos_obj = type("_P", (), {"open_time": _ts, "expiry_date": _exp})()
+                            return leg, _pos_obj
+
+                        def _trap_zone_tracking(tb):
+                            """Build zone-tracking dict from a D1TrapOptionBook's scanner state."""
+                            if getattr(tb, "_strategy_name", "") == "d1_trap_bear_only":
+                                st = tb.status()
+                                mz = tb.monitoring_zones()
+                                tp = st.get("position")
+                                phase = "IN_TRADE" if tp else "SCANNING"
+                                return {
+                                    "strategy": "d1_trap_bear_only",
+                                    "ce_strike": st.get("ce_strike"), "pe_strike": st.get("pe_strike"),
+                                    "spot_open": st.get("spot_open"),
+                                    "selection_reason": st.get("selection_reason"),
+                                    "phase": phase,
+                                    "ce": mz.get("ce"), "pe": mz.get("pe"),
+                                    "position": tp,
+                                    "positions": st.get("positions", []),
+                                    "spot_bias": st.get("spot_bias"), "spot_bias_tf": st.get("spot_bias_tf"),
+                                }
+                            _spot = float(getattr(tb, "_last_spot", 0.0) or 0.0)
+                            _htf_mins = getattr(tb, "_htf_mins", 0)
+                            _mtf_mins = getattr(tb, "_mtf_mins", 60)
+                            _htf_label = "D1" if _htf_mins == 0 else f"{_htf_mins}min"
+                            _mtf_label = f"{_mtf_mins}min"
+                            _monitors_active = [m for m in getattr(tb, "_monitors", [])
+                                                if not m.done and not m.invalid]
+                            _monitoring = [m for m in _monitors_active if m.state == "MONITORING"]
+                            _waiting    = [m for m in _monitors_active if m.state == "WAITING"]
+                            # latest trap = MONITORING zone closest to current spot (most actionable);
+                            # fallback to WAITING zone closest to spot; final fallback = most recent by htf_ref_ts
+                            def _pick_zone(monitors):
+                                if not monitors:
+                                    return None
+                                if _spot > 0:
+                                    return min(monitors, key=lambda m: abs((m.zone_lo + m.zone_hi) / 2 - _spot))
+                                return max(monitors, key=lambda m: m.htf_ref_ts)
+                            _latest = _pick_zone(_monitoring) if _monitoring else _pick_zone(_waiting)
+                            _pending = getattr(tb, "_pending_5m", None)
+                            _tp = getattr(tb, "_position", None)
+
+                            if _tp:
+                                _phase = "IN_TRADE"
+                            elif _pending:
+                                _phase = "PENDING_TRIGGER"
+                            elif _latest and _latest.state == "MONITORING":
+                                _phase = "MONITORING"
+                            elif _latest:
+                                _phase = "WAITING"
+                            else:
+                                _phase = "IDLE"
+
+                            def _ts(dt):
+                                return dt.isoformat(timespec="minutes") if dt and hasattr(dt, "isoformat") else None
+
+                            return {
+                                "htf_tf": _htf_label,
+                                "mtf_tf": _mtf_label,
+                                "spot": round(_spot, 2),
+                                "phase": _phase,
+                                "zones_active": len(_monitoring) + len(_waiting),
+                                "latest_zone": {
+                                    "direction": _latest.direction,
+                                    "zone_lo": round(_latest.zone_lo, 2),
+                                    "zone_hi": round(_latest.zone_hi, 2),
+                                    "state": _latest.state,
+                                    "htf_ref_ts": _ts(_latest.htf_ref_ts),
+                                    "zone_entry_ts": _ts(_latest.zone_entry_ts),
+                                } if _latest else None,
+                                "pending": {
+                                    "direction": _pending.get("direction"),
+                                    "trigger": round(_pending.get("trigger", 0), 2),
+                                    "sl": round(_pending.get("sl", 0), 2),
+                                    "source": _pending.get("source", "C2"),
+                                    "zone_lo": round(_pending.get("zone_lo", 0), 2),
+                                    "zone_hi": round(_pending.get("zone_hi", 0), 2),
+                                } if _pending else None,
+                            }
+
+                        _dep_product = dep.get("product_type") or "MIS"
+                        if underlying in ("ALL_FNO", "WATCHLIST"):
+                            # FnO multi-stock: aggregate legs from all active books for this binding.
+                            # Also build monitoring_books so the UI can show all tracked stocks
+                            # even when no trade is open.
+                            trap_books = _srv._find_trap_books_for_binding(cid, bid)
+                            _monitoring_books = []
+                            for tb in trap_books:
+                                leg, _pos_obj = _trap_leg_from_book(tb, _dep_product)
+                                if leg is not None:
+                                    legs.append(leg)
+                                    if pos is None:
+                                        pos = _pos_obj
+                                _monitoring_books.append(_trap_zone_tracking(tb))
+                            # Sort: IN_TRADE/PENDING first, then MONITORING, then WAITING/IDLE
+                            _phase_order = {"IN_TRADE": 0, "PENDING_TRIGGER": 1, "MONITORING": 2, "WAITING": 3, "IDLE": 4}
+                            _monitoring_books.sort(key=lambda b: (_phase_order.get(b.get("phase", "IDLE"), 5),
+                                                                   b.get("underlying", "")))
+                            tracking["monitoring_books"] = _monitoring_books
+                        else:
+                            # Single underlying: build legs + rich zone tracking
+                            tb = _srv._find_trap_book(cid, bid, underlying)
+                            if tb is not None:
+                                leg, _pos_obj = _trap_leg_from_book(tb, _dep_product)
+                                if leg is not None:
+                                    legs.append(leg)
+                                    pos = _pos_obj
+                                tracking = _trap_zone_tracking(tb)
                 except Exception as exc:
-                    logger.debug("client/positions: %s/%s build error: %s", sname, underlying, exc)
-                by_broker[bid][sname] = {"legs": legs, "pnl": round(sum(l["pnl"] for l in legs), 2),
-                                          "booked": booked, "tracking": tracking,
-                                          "straddle": straddle_info,
-                                          "ccy": (legs[0].get("ccy", "₹") if legs else
-                                                  ("$" if str(underlying).upper() in ("BTC", "ETH") else "₹"))}
+                    logger.warning("client/positions: %s/%s build error: %s", sname, underlying, exc, exc_info=True)
+                _entry_time = (getattr(pos, "open_time", None).isoformat(timespec="seconds")
+                               if pos and getattr(pos, "open_time", None) and hasattr(getattr(pos, "open_time", None), "isoformat")
+                               else (legs[0].get("entry_time") if legs else None))
+                _expiry_date = (getattr(pos, "expiry_date", None).isoformat()
+                                if pos and getattr(pos, "expiry_date", None) and hasattr(getattr(pos, "expiry_date", None), "isoformat")
+                                else None)
+                # Key by deploy_id so multiple deployments of the same strategy on the
+                # same broker (e.g. NIFTY + CRUDEOIL sell_straddle) do not overwrite each other.
+                _deploy_id = dep.get("deploy_id") or f"{cid}_{bid}_{sname}_{underlying}"
+                by_broker[bid][_deploy_id] = {"legs": legs, "pnl": round(sum(l["pnl"] for l in legs), 2),
+                                              "booked": booked, "tracking": tracking,
+                                              "straddle": straddle_info,
+                                              "entry_time": _entry_time,
+                                              "expiry_date": _expiry_date,
+                                              "ccy": (legs[0].get("ccy", "₹") if legs else
+                                                      ("$" if str(underlying).upper() in ("BTC", "ETH") else "₹"))}
             return {"ok": True, "by_broker": by_broker}
 
         # ── CLIENT — history ──────────────────────────────────────────────────
@@ -2423,13 +3627,19 @@ class DashboardServer:
                 "date":        r.get("ts", ""),
                 "strategy":    r.get("strategy", "—"),
                 "instrument":  r.get("instrument", "—"),
+                "binding_id":  r.get("binding_id", ""),
                 "entry_price": r.get("entry_price", "—"),
                 "exit_price":  r.get("exit_price", "—"),
                 "exit_reason": r.get("exit_reason", "—"),
+                "exit_remark": r.get("exit_remark", "—"),
                 "pnl":         float(r.get("pnl", 0)),
                 "legs":        r.get("legs"),   # per-leg detail (side/strike/entry/exit/pnl) if recorded
             } for r in rows]
-            return {"ok": True, "trades": trades}
+            # Also surface currently OPEN positions so the History tab shows the
+            # trade as soon as it starts.  Once closed, the OPEN row disappears and
+            # the persistent closed record takes its place.
+            open_rows = await asyncio.to_thread(_srv._open_history_rows, cid)
+            return {"ok": True, "trades": open_rows + trades}
 
         # ── CLIENT — kill broker ──────────────────────────────────────────────
 
@@ -2535,6 +3745,82 @@ class DashboardServer:
                 "trading_enabled": True,
             }
 
+        @app.post("/api/client/straddle/{binding_id}/{underlying}/edit_entry_price", tags=["Client"])
+        async def api_client_edit_entry_price(
+            binding_id: str, underlying: str,
+            body: _EditEntryPriceSchema,
+            user: dict = Depends(_require_client),
+        ):
+            """Client-facing correction for a live position's entry price when the
+            UI's displayed value diverges from the broker's own confirmed fill
+            (e.g. a real Zerodha fill landed below/above the strategy's own live-LTP
+            estimate at the moment of entry -- see engine.py's _on_fill for the
+            normal, automatic path this is meant to backstop when it's still wrong).
+            Recomputes net_credit and _initial_net_credit (the day%-guardrail
+            denominator) so every downstream calculation uses the corrected number,
+            not just the display. Every edit is logged to client_events (admin Live
+            Alerts panel) since this directly changes real P&L/exit-trigger math."""
+            cid = user.get("client_id", "")
+            if body.ce_entry_price is None and body.pe_entry_price is None:
+                return {"ok": False, "error": "Provide at least one of ce_entry_price/pe_entry_price."}
+            for v in (body.ce_entry_price, body.pe_entry_price):
+                if v is not None and v <= 0:
+                    return {"ok": False, "error": "Entry price must be > 0."}
+
+            book = _srv._find_ss_book(cid, binding_id, underlying.upper())
+            if book is None:
+                return {"ok": False, "error": f"No running position found for {binding_id}/{underlying}."}
+            pos = getattr(book, "_position", None)
+            if pos is None or pos.status != "open":
+                return {"ok": False, "error": "No open position to edit."}
+
+            old_ce, old_pe = pos.ce_leg.entry_price, pos.pe_leg.entry_price
+            old_credit = pos.net_credit
+            if body.ce_entry_price is not None:
+                pos.ce_leg.entry_price = body.ce_entry_price
+            if body.pe_entry_price is not None:
+                pos.pe_leg.entry_price = body.pe_entry_price
+            pos.net_credit = pos.ce_leg.entry_price + pos.pe_leg.entry_price
+            # Shift the day%-guardrail baseline by the exact same delta so a
+            # correction doesn't silently re-baseline the whole day's P&L history --
+            # same "reverse the exact amount" pattern already used for entry-abort
+            # rollback elsewhere in this engine.
+            try:
+                book._initial_net_credit = max(
+                    0.0, float(getattr(book, "_initial_net_credit", 0.0) or 0.0)
+                    + (pos.net_credit - old_credit))
+            except Exception:
+                pass
+            book._persist()
+            book.notify_position_update(pos.to_dict(), force=True)
+
+            msg = (f"Entry price manually corrected by client: "
+                   f"CE {old_ce:.2f}->{pos.ce_leg.entry_price:.2f}, "
+                   f"PE {old_pe:.2f}->{pos.pe_leg.entry_price:.2f}, "
+                   f"credit {old_credit:.2f}->{pos.net_credit:.2f}")
+            logger.warning("EditEntryPrice[%s/%s/%s]: %s", cid, binding_id, underlying, msg)
+            # Also log through the book's own per-underlying rotating log (logs/clients/
+            # ss_{underlying}_{client}_{binding}_{date}.log) -- the general `logger` above
+            # only reaches terminus-out.log, but every other trade-relevant event for this
+            # position already lives in the strategy's own log file, which is where an
+            # operator actually looks first.
+            _clog = getattr(book, "_clog", None)
+            if _clog is not None:
+                try:
+                    _clog.warning("EDIT ENTRY PRICE — %s", msg)
+                except Exception:
+                    pass
+            if _srv._client_db is not None:
+                try:
+                    await _srv._client_db.record_client_event(
+                        client_id=cid, binding_id=binding_id, strategy_name="sell_straddle",
+                        severity="WARNING", source="manual_edit", message=msg,
+                    )
+                except Exception:
+                    logger.exception("EditEntryPrice: failed to record client_event")
+
+            return {"ok": True, "message": "Entry price updated.", "position": pos.to_dict()}
+
         @app.post("/api/client/broker/{binding_id}/stop", tags=["Client"])
         async def api_client_broker_stop(
             binding_id: str, user: dict = Depends(_require_client),
@@ -2575,8 +3861,8 @@ class DashboardServer:
             binding_id: str, body: _BrokerModeSchema, user: dict = Depends(_require_client),
         ):
             cid = user.get("client_id", "")
-            if body.mode not in ("paper", "live"):
-                raise HTTPException(400, "mode must be 'paper' or 'live'.")
+            if body.mode not in ("paper", "paper_route", "live"):
+                raise HTTPException(400, "mode must be 'paper', 'paper_route', or 'live'.")
             await _srv._client_db.set_trading_mode(cid, binding_id, body.mode)
             # Hot-swap the LIVE broker's in-memory mode so the change takes effect WITHOUT a
             # terminal restart (order routing reads DB trading_mode per-order, but keep the broker
@@ -2584,7 +3870,7 @@ class DashboardServer:
             try:
                 broker = ((getattr(_srv._router, "_brokers", None) or {}).get(cid, {}) or {}).get(binding_id)
                 if broker is not None:
-                    broker._trading_mode_raw = "live" if body.mode == "live" else "paper"
+                    broker._trading_mode_raw = body.mode
                     _bind = getattr(broker, "_binding", None) or getattr(broker, "_b", None)
                     if _bind is not None:
                         try:
@@ -2654,6 +3940,7 @@ class DashboardServer:
                     _nb = create_broker(_bb, cid)
                     if await _nb.authenticate():
                         await _srv._client_db.set_terminal_connected(cid, binding_id, True)
+                        await _srv._client_db.set_trade_enabled(cid, binding_id, True)
                         if _srv._router is not None:
                             _srv._router._brokers.setdefault(cid, {})[binding_id] = _nb
                             try:
@@ -2688,6 +3975,7 @@ class DashboardServer:
                     _nb = create_broker(_bb, cid)
                     if await _nb.authenticate():
                         await _srv._client_db.set_terminal_connected(cid, binding_id, True)
+                        await _srv._client_db.set_trade_enabled(cid, binding_id, True)
                         if _srv._router is not None:
                             _srv._router._brokers.setdefault(cid, {})[binding_id] = _nb
                             try:
@@ -2706,6 +3994,7 @@ class DashboardServer:
 
             if ok:
                 await _srv._client_db.set_terminal_connected(cid, binding_id, True)
+                await _srv._client_db.set_trade_enabled(cid, binding_id, True)
                 # CRITICAL: refresh the cached ORDER-ROUTING broker with the just-refreshed
                 # token. The execution broker in _router._brokers is authenticated ONCE at
                 # ExecutionRouter.start(); if the process booted before today's token was
@@ -2904,67 +4193,144 @@ class DashboardServer:
             cid = user.get("client_id", "")
 
             # Validate squareoff time
-            sq = (body.squareoff_time or "15:15").strip()
+            sq = (body.squareoff_time or "15:20").strip()
             try:
                 h, m = sq.split(":")
                 assert 0 <= int(h) <= 23 and 0 <= int(m) <= 59
             except Exception:
                 return {"ok": False, "error": f"Invalid squareoff_time '{sq}'. Use HH:MM format."}
 
-            allowed_strategies = {"sell_straddle", "iron_condor", "trap_scanner"}
+            allowed_strategies = {
+                "sell_straddle", "v4_cascade", "fno_positional", "hourly_breakout",
+                "d1_trap_option", "d1_trap_index", "d1_trap_fno", "d1_trap_bear_only",
+                "d1_trap_sr", "d1_trap_fno_sr",
+                "fvg", "oi_flow", "liquidity_sweep", "liquidity_trap", "oi_orb_screener",
+                "cag_straddle",
+            }
             if body.strategy_name not in allowed_strategies:
                 return {"ok": False, "error": f"Unknown strategy '{body.strategy_name}'."}
 
-            deploy_id = await _srv._client_db.save_deployment(
-                client_id      = cid,
-                binding_id     = body.binding_id,
-                strategy_name  = body.strategy_name,
-                underlying     = body.underlying,
-                lot_multiplier = body.lot_multiplier,
-                max_profit_rs  = body.max_profit_rs,
-                max_sl_rs      = body.max_sl_rs,
-                squareoff_time = sq,
-            )
+            pt = (body.product_type or "MIS").upper()
+            if pt not in ("MIS", "NRML"):
+                # Default product_type by strategy
+                pt = "NRML" if body.strategy_name == "d1_trap_fno" else "MIS"
+
+            # Validate strategy_params JSON
+            import json as _json
+            try:
+                _json.loads(body.strategy_params or "{}")
+                sp = body.strategy_params or "{}"
+            except Exception:
+                sp = "{}"
 
             from data_layer.deployment_store import save_deployment_json, apply_deployment_to_runtime_config
-            save_deployment_json(
-                deploy_id      = deploy_id,
-                client_id      = cid,
-                binding_id     = body.binding_id,
-                strategy_name  = body.strategy_name,
-                underlying     = body.underlying,
-                lot_multiplier = body.lot_multiplier,
-                max_profit_rs  = body.max_profit_rs,
-                max_sl_rs      = body.max_sl_rs,
-                squareoff_time = sq,
-            )
+
+            # Trap Scanner - FnO with ALL_FNO: save ONE sentinel deployment; the book
+            # manager expands it to 30 individual stock books internally when is_running=1.
+            if body.strategy_name == "d1_trap_fno" and body.underlying.upper() in ("ALL_FNO", "FNO_STOCKS", "ALL"):
+                deploy_id = await _srv._client_db.save_deployment(
+                    client_id       = cid,
+                    binding_id      = body.binding_id,
+                    strategy_name   = "d1_trap_fno",
+                    underlying      = "ALL_FNO",
+                    lot_multiplier  = body.lot_multiplier,
+                    max_profit_rs   = body.max_profit_rs,
+                    max_sl_rs       = body.max_sl_rs,
+                    squareoff_time  = "23:59",
+                    product_type    = "NRML",
+                    strategy_params = sp,
+                )
+                save_deployment_json(
+                    deploy_id       = deploy_id,
+                    client_id       = cid,
+                    binding_id      = body.binding_id,
+                    strategy_name   = "d1_trap_fno",
+                    underlying      = "ALL_FNO",
+                    lot_multiplier  = body.lot_multiplier,
+                    max_profit_rs   = body.max_profit_rs,
+                    max_sl_rs       = body.max_sl_rs,
+                    squareoff_time  = "23:59",
+                    product_type    = "NRML",
+                    strategy_params = sp,
+                )
+                logger.info("Deploy FnO: saved ALL_FNO sentinel for %s/%s (manager expands to 30 books)", cid, body.binding_id)
+                return {"ok": True, "deploy_id": deploy_id,
+                        "strategy_name": "d1_trap_fno", "underlying": "ALL_FNO"}
+            else:
+                deploy_id = await _srv._client_db.save_deployment(
+                    client_id       = cid,
+                    binding_id      = body.binding_id,
+                    strategy_name   = body.strategy_name,
+                    underlying      = body.underlying,
+                    lot_multiplier  = body.lot_multiplier,
+                    max_profit_rs   = body.max_profit_rs,
+                    max_sl_rs       = body.max_sl_rs,
+                    squareoff_time  = sq,
+                    product_type    = pt,
+                    strategy_params = sp,
+                    carry_forward   = body.carry_forward,
+                )
+                save_deployment_json(
+                    deploy_id       = deploy_id,
+                    client_id       = cid,
+                    binding_id      = body.binding_id,
+                    strategy_name   = body.strategy_name,
+                    underlying      = body.underlying,
+                    lot_multiplier  = body.lot_multiplier,
+                    max_profit_rs   = body.max_profit_rs,
+                    max_sl_rs       = body.max_sl_rs,
+                    squareoff_time  = sq,
+                    product_type    = pt,
+                    strategy_params = sp,
+                )
+
+                # 2026-08-04: SellStraddle reads squareoff_time from a SEPARATE
+                # per-client mechanism (profile.strategy_risk_overrides, applied by
+                # _apply_client_overrides in strategies/sell_straddle/config.py), not
+                # from strategy_deployments.squareoff_time -- the deploy form's field
+                # is stored above for record-keeping but was never actually read by
+                # this strategy. Mirror it into the mechanism that IS read, so this one
+                # field in the deploy form genuinely controls it end-to-end, instead of
+                # requiring a second edit in the separate Risk Overrides panel.
+                if body.strategy_name == "sell_straddle" and _srv._registry is not None:
+                    try:
+                        profile = _srv._registry.get(cid)
+                        if profile is not None:
+                            key = f"sell_straddle:{body.underlying.upper()}"
+                            existing = dict(profile.strategy_risk_overrides.get(key, {}))
+                            existing["force_exit"] = sq
+                            profile.strategy_risk_overrides[key] = existing
+                            _srv._registry.save()
+                    except Exception as exc:
+                        logger.warning("Deploy: could not mirror squareoff_time into risk overrides: %s", exc)
 
             # If engine is already active for this broker, hot-apply immediately
-            bindings = await asyncio.to_thread(_srv._client_db.get_bindings_safe_sync, cid)
-            b = next((x for x in bindings if x["binding_id"] == body.binding_id), None)
-            hot_applied = False
-            if b and b.get("engine_active"):
-                try:
-                    apply_deployment_to_runtime_config({
-                        "strategy_name": body.strategy_name, "underlying": body.underlying,
-                        "lot_multiplier": body.lot_multiplier, "max_profit_rs": body.max_profit_rs,
-                        "max_sl_rs": body.max_sl_rs, "squareoff_time": sq,
-                    })
-                    hot_applied = True
-                except Exception as exc:
-                    logger.warning("Deploy hot-apply failed: %s", exc)
+                # If engine is already active for this broker, hot-apply immediately
+                bindings = await asyncio.to_thread(_srv._client_db.get_bindings_safe_sync, cid)
+                b = next((x for x in bindings if x["binding_id"] == body.binding_id), None)
+                hot_applied = False
+                if b and b.get("engine_active"):
+                    try:
+                        apply_deployment_to_runtime_config({
+                            "strategy_name": body.strategy_name, "underlying": body.underlying,
+                            "lot_multiplier": body.lot_multiplier, "max_profit_rs": body.max_profit_rs,
+                            "max_sl_rs": body.max_sl_rs, "squareoff_time": sq,
+                        })
+                        hot_applied = True
+                    except Exception as exc:
+                        logger.warning("Deploy hot-apply failed: %s", exc)
 
-            logger.info(
-                "Deploy saved: %s [lots=%.1f profit=%.0f sl=%.0f sq=%s hot=%s]",
-                deploy_id, body.lot_multiplier, body.max_profit_rs,
-                body.max_sl_rs, sq, hot_applied,
-            )
-            return {
-                "ok": True,
-                "deploy_id": deploy_id,
-                "hot_applied": hot_applied,
-                "message": f"Deployment saved{' and hot-applied' if hot_applied else ''}.",
-            }
+                logger.info(
+                    "Deploy saved: %s [lots=%.1f profit=%.0f sl=%.0f sq=%s hot=%s]",
+                    deploy_id, body.lot_multiplier, body.max_profit_rs,
+                    body.max_sl_rs, sq, hot_applied,
+                )
+                return {
+                    "ok": True,
+                    "deploy_id": deploy_id,
+                    "hot_applied": hot_applied,
+                    "message": f"Deployment saved{' and hot-applied' if hot_applied else ''}.",
+                }
 
         @app.get("/api/client/strategy/deployments", tags=["Client"])
         async def api_client_get_deployments(user: dict = Depends(_require_client)):
@@ -3097,6 +4463,7 @@ class DashboardServer:
                     bid = match["binding_id"]
                     await _srv._client_db.update_access_token(cid, bid, access_token, datetime.now(IST).isoformat(), _ist_eod())
                     await _srv._client_db.set_terminal_connected(cid, bid, True)
+                    await _srv._client_db.set_trade_enabled(cid, bid, True)
                     await _srv._bus.publish("system_event", {"type": "terminal_connected", "client_id": cid, "binding_id": bid, "provider": provider, "ok": True})
                     logger.info("[Callback] Dhan [%s/%s] token stored, terminal=ON in %.1fms", cid, bid, elapsed)
                     return HTMLResponse(_callback_page("success", provider, f"Dhan broker connected!"))
@@ -3138,6 +4505,7 @@ class DashboardServer:
                     cid, bid = match["client_id"], match["binding_id"]
                     await _srv._client_db.update_access_token(cid, bid, token, datetime.now(IST).isoformat(), _ist_eod())
                     await _srv._client_db.set_terminal_connected(cid, bid, True)
+                    await _srv._client_db.set_trade_enabled(cid, bid, True)
                     await _srv._bus.publish("system_event", {"type": "terminal_connected", "client_id": cid, "binding_id": bid, "provider": provider, "ok": True})
                     logger.info("[Callback] AliceBlue [%s/%s] token stored in %.1fms", cid, bid, elapsed)
                     return HTMLResponse(_callback_page("success", provider, "AliceBlue broker connected!"))
@@ -3205,6 +4573,7 @@ class DashboardServer:
                         now = datetime.now(IST).isoformat()
                         await _srv._client_db.update_access_token(client_id, binding_id, clean_token, now, _ist_eod())
                         await _srv._client_db.set_terminal_connected(client_id, binding_id, True)
+                        await _srv._client_db.set_trade_enabled(client_id, binding_id, True)
                         # Refresh the cached order-routing broker with the fresh OAuth token
                         # (same stale-token issue as the terminal-connect path).
                         try:
@@ -3271,6 +4640,55 @@ class DashboardServer:
                 "ts":     datetime.now(IST).isoformat(),
             }
 
+        @app.post("/api/admin/full_clean_restart", tags=["Admin"])
+        async def api_full_clean_restart(
+            _: dict = Depends(_require_admin),
+            body: _FullCleanRestartSchema = _FullCleanRestartSchema(),
+        ):
+            """Stop terminus, delete all logs + runtime JSON/state files, backup config, then restart.
+
+            The actual stop/delete/start is run in a detached subprocess so the HTTP response
+            returns before this server process is shut down by PM2.
+            """
+            ts = datetime.now(IST).strftime("%Y%m%d_%H%M%S")
+            backup_dir = os.path.join(os.getcwd(), "backups", f"{ts}_full_clean")
+
+            q_index      = shlex.quote(body.index)
+            q_strategies = shlex.quote(body.strategies)
+            q_port       = shlex.quote(str(body.port))
+            q_log_level  = shlex.quote(body.log_level)
+            q_backup     = shlex.quote(backup_dir)
+
+            script = f"""set -e
+mkdir -p {q_backup}
+cp -n data/strategy_config.json {q_backup}/ 2>/dev/null || true
+cp -n config/client_profiles.json {q_backup}/ 2>/dev/null || true
+pm2 stop terminus || true
+rm -rf logs/* logs/trades/*.log 2>/dev/null || true
+rm -rf data/positions/* data/live_records/* data/recorded/* data/history/* data/nse_option_cache/* 2>/dev/null || true
+rm -f data/state_snapshots.db data/trade_history.db data/client_trade_history.db 2>/dev/null || true
+pm2 delete terminus || true
+pm2 start run_system.py --name terminus -- --mode live --index {q_index} --strategies {q_strategies} --ui --port {q_port} --log-level {q_log_level}
+pm2 save
+"""
+            if body.dry_run:
+                return {"ok": True, "dry_run": True, "backup_dir": backup_dir, "script": script}
+
+            logger.warning("Dashboard: full_clean_restart requested by admin. Backup=%s", backup_dir)
+            subprocess.Popen(
+                ["bash", "-c", script],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            return {
+                "ok": True,
+                "message": "Full clean restart scheduled. Server will stop in ~3s and terminus will restart fresh.",
+                "backup_dir": backup_dir,
+                "index": body.index,
+                "strategies": body.strategies,
+            }
+
         # ── ADMIN — premium-selling strategy registry ────────────────────
 
         @app.get("/api/admin/strategies", tags=["Admin"])
@@ -3278,30 +4696,6 @@ class DashboardServer:
             now_ist = datetime.now(IST).isoformat()
             try:
                 out = []
-                for ic in _srv._iron_condors:
-                    pos = ic.position
-                    entry = None
-                    if pos:
-                        entry = {
-                            "short_ce": pos.short_ce.strike,
-                            "short_pe": pos.short_pe.strike,
-                            "long_ce":  pos.long_ce.strike,
-                            "long_pe":  pos.long_pe.strike,
-                            "net_credit":    round(pos.net_credit, 2),
-                            "profit_target": round(pos.profit_target_rs, 2),
-                            "stop_loss":     round(pos.sl_rs, 2),
-                            "unrealized_pnl": round(pos.total_pnl_pts * pos.lot_size, 2),
-                            "open_time": pos.open_time.isoformat() if pos.open_time else None,
-                        }
-                    out.append({
-                        "type":         "iron_condor",
-                        "underlying":   ic._underlying,
-                        "running":      ic._running,
-                        "has_position": ic.has_open_position,
-                        "spot":         round(ic._spot, 2),
-                        "entry_allowed": getattr(ic, "entry_allowed", True),
-                        "position":     entry,
-                    })
                 for ss in _srv._sell_straddles:
                     pos = ss.position
                     entry = None
@@ -3310,12 +4704,20 @@ class DashboardServer:
                             "atm":       pos.atm_at_entry,
                             "ce_strike": pos.ce_leg.strike,
                             "pe_strike": pos.pe_leg.strike,
+                            "expiry_date": pos.expiry_date.isoformat() if pos.expiry_date else None,
                             "net_credit":    round(pos.net_credit, 2),
                             "unrealized_pnl": round(pos.unrealized_pnl, 2),
                             "peak_profit":   round(pos.peak_profit, 2),
                             "trailing_active": pos.trailing_active,
                             "open_time": pos.open_time.isoformat() if pos.open_time else None,
+                            "entry_time": pos.open_time.isoformat() if pos.open_time else None,
                         }
+                    # 2026-08-26, direct user spec: the "SPOT" label was misleading once
+                    # futures_atm_underlyings makes self._spot actually track the near-month
+                    # FUTURES contract instead of the real index -- surface which one this
+                    # underlying is actually on so the UI can label it correctly instead of
+                    # always saying "SPOT".
+                    _futures_atm = {u.upper() for u in (getattr(_srv._cfg, "futures_atm_underlyings", None) or [])}
                     out.append({
                         "type":         "sell_straddle",
                         "underlying":   ss._underlying,
@@ -3324,6 +4726,14 @@ class DashboardServer:
                         "trades_today": ss.trades_today,
                         "booked_pnl":   round(getattr(ss, "_session_realized_pnl_pts", 0.0), 2),
                         "spot":         round(ss._spot, 2),
+                        "spot_source":  "futures" if ss._underlying.upper() in _futures_atm else "spot",
+                        # 2026-08-26, direct user spec: futures_atm underlyings now track
+                        # real spot AND futures simultaneously and trade off their MEAN,
+                        # not futures alone -- UI must show all three. 0.0/False for any
+                        # underlying not in cfg.futures_atm_underlyings (unchanged there).
+                        "futures":      round(getattr(ss, "_futures_spot", 0.0), 2),
+                        "atm_mean":     round(getattr(ss, "_atm_ref", 0.0), 2),
+                        "uses_mean_atm": bool(getattr(ss, "_uses_mean_atm", False)),
                         "rsi":          round(ss._ind.get("rsi", 0.0), 1),
                         "adx":          round(ss._ind.get("adx", 0.0), 1),
                         "entry_allowed": getattr(ss, "entry_allowed", True),
@@ -3340,29 +4750,11 @@ class DashboardServer:
         async def api_strategy_config_get(_: dict = Depends(_require_admin)):
             from data_layer.runtime_config import RuntimeConfig
             cfg = RuntimeConfig.get()
-            ic  = cfg.get("iron_condor", {})
             ss  = cfg.get("sell_straddle", {})
-            ic_idx = ic.get("per_index", {})
             return {
-                "ic_squareoff_time":  ic.get("squareoff_time", "15:15"),
-                "ic_rsi_min":         ic.get("rsi_min",  40.0),
-                "ic_rsi_max":         ic.get("rsi_max",  60.0),
-                "ic_adx_max":         ic.get("adx_max",  25.0),
-                "ic_profit_pct":      ic.get("profit_pct", 50.0),
-                "ic_sl_pct":          ic.get("sl_pct",   200.0),
-                "ic_nifty_otm":       ic_idx.get("NIFTY",      {}).get("short_otm_pts", 200.0),
-                "ic_nifty_wing":      ic_idx.get("NIFTY",      {}).get("wing_width_pts",200.0),
-                "ic_banknifty_otm":   ic_idx.get("BANKNIFTY",  {}).get("short_otm_pts", 400.0),
-                "ic_banknifty_wing":  ic_idx.get("BANKNIFTY",  {}).get("wing_width_pts",500.0),
-                "ic_finnifty_otm":    ic_idx.get("FINNIFTY",   {}).get("short_otm_pts", 200.0),
-                "ic_finnifty_wing":   ic_idx.get("FINNIFTY",   {}).get("wing_width_pts",200.0),
-                "ic_sensex_otm":      ic_idx.get("SENSEX",     {}).get("short_otm_pts", 500.0),
-                "ic_sensex_wing":     ic_idx.get("SENSEX",     {}).get("wing_width_pts",500.0),
-                "ic_midcp_otm":       ic_idx.get("MIDCPNIFTY", {}).get("short_otm_pts", 150.0),
-                "ic_midcp_wing":      ic_idx.get("MIDCPNIFTY", {}).get("wing_width_pts",200.0),
                 "ss_entry_start":     ss.get("entry_start",    "09:15"),
                 "ss_entry_end":       ss.get("entry_end",      "12:00"),
-                "ss_squareoff_time":  ss.get("squareoff_time", "15:15"),
+                "ss_squareoff_time":  ss.get("squareoff_time", "15:20"),
                 "ss_max_trades":      ss.get("max_trades",      1),
             }
 
@@ -3373,21 +4765,6 @@ class DashboardServer:
         ):
             from data_layer.runtime_config import RuntimeConfig
             patch = {
-                "iron_condor": {
-                    "squareoff_time": body.ic_squareoff_time,
-                    "rsi_min":        body.ic_rsi_min,
-                    "rsi_max":        body.ic_rsi_max,
-                    "adx_max":        body.ic_adx_max,
-                    "profit_pct":     body.ic_profit_pct,
-                    "sl_pct":         body.ic_sl_pct,
-                    "per_index": {
-                        "NIFTY":      {"short_otm_pts": body.ic_nifty_otm,     "wing_width_pts": body.ic_nifty_wing},
-                        "BANKNIFTY":  {"short_otm_pts": body.ic_banknifty_otm, "wing_width_pts": body.ic_banknifty_wing},
-                        "FINNIFTY":   {"short_otm_pts": body.ic_finnifty_otm,  "wing_width_pts": body.ic_finnifty_wing},
-                        "SENSEX":     {"short_otm_pts": body.ic_sensex_otm,    "wing_width_pts": body.ic_sensex_wing},
-                        "MIDCPNIFTY": {"short_otm_pts": body.ic_midcp_otm,     "wing_width_pts": body.ic_midcp_wing},
-                    },
-                },
                 "sell_straddle": {
                     "entry_start":    body.ss_entry_start,
                     "entry_end":      body.ss_entry_end,
@@ -3399,11 +4776,6 @@ class DashboardServer:
 
             # Live-inject into running strategy instances
             reconfigure_errors = []
-            for ic in (_srv._iron_condors or []):
-                try:
-                    ic.reconfigure()
-                except Exception as e:
-                    reconfigure_errors.append(f"iron_condor[{ic._underlying}]: {e}")
             for ss in (_srv._sell_straddles or []):
                 try:
                     ss.reconfigure()
@@ -3417,19 +4789,68 @@ class DashboardServer:
             logger.info("strategy/config/update: all strategies reconfigured live.")
             return {"ok": True, "message": "Runtime configuration live-deployed to all strategies."}
 
+        # ── ADMIN — OI-ORB Screener per-deployment config ─────────────────────
+        # Unlike sell_straddle's RuntimeConfig (global, disk-persisted, hot-inject
+        # via ss.reconfigure()), OI-ORB Screener's tunables live directly on the
+        # deployment row's strategy_params JSON -- OiOrbScreenerBookManager's own
+        # 5s reconcile loop already re-spawns a book when its params change
+        # (_should_respawn), so writing here is enough; no separate live-inject
+        # call is needed the way sell_straddle needs ss.reconfigure().
+
+        @app.get("/api/admin/oiorb/deployments", tags=["Admin"])
+        async def api_oiorb_deployments(_: dict = Depends(_require_admin)):
+            from strategies.oi_orb_screener.book_manager import _DEFAULT_PARAMS
+            import json as _json
+            rows = _srv._client_db.get_deployments_by_strategy_sync("oi_orb_screener")
+            out = []
+            for r in rows:
+                try:
+                    params = _json.loads(r.get("strategy_params") or "{}")
+                except Exception:
+                    params = {}
+                merged = dict(_DEFAULT_PARAMS)
+                merged.update(params)
+                out.append({
+                    "deploy_id": r["deploy_id"], "client_id": r["client_id"],
+                    "binding_id": r["binding_id"], "is_running": bool(r.get("is_running")),
+                    "params": merged,
+                })
+            return {"deployments": out}
+
+        @app.post("/api/admin/oiorb/config/{deploy_id}", tags=["Admin"])
+        async def api_oiorb_config_update(
+            deploy_id: str,
+            body: _OiOrbConfigSchema,
+            _: dict = Depends(_require_admin),
+        ):
+            import json as _json
+            patch = body.model_dump()
+            db = _srv._client_db
+            rows = db.get_deployments_by_strategy_sync("oi_orb_screener")
+            row = next((r for r in rows if r["deploy_id"] == deploy_id), None)
+            if row is None:
+                return {"ok": False, "error": f"Deployment '{deploy_id}' not found."}
+            try:
+                existing = _json.loads(row.get("strategy_params") or "{}")
+            except Exception:
+                existing = {}
+            existing.update(patch)
+            await db.set_deployment_strategy_params(deploy_id, _json.dumps(existing))
+            logger.info("oiorb/config/update: %s -> %s", deploy_id, patch)
+            return {"ok": True, "message": "Saved. Applies on the next 5s reconcile (auto-respawn if flat)."}
+
         # ── ADMIN — per-index strategy config (rule builder) ─────────────────
 
         @app.get("/api/admin/strategy/config/{index}", tags=["Admin"])
         async def api_index_config_get(index: str, _: dict = Depends(_require_admin)):
             from data_layer.runtime_config import RuntimeConfig
             idx = index.upper()
-            allowed = {"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY", "CRUDEOIL", "BTC", "ETH"}
+            allowed = {"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY", "CRUDEOIL", "GOLDM", "BTC", "ETH"}
             if idx not in allowed:
                 raise HTTPException(400, f"Unknown index '{idx}'. Allowed: {sorted(allowed)}")
             return {
                 "index": idx,
                 "sell_straddle": RuntimeConfig.index_section(idx, "sell_straddle"),
-                "iron_condor":   RuntimeConfig.index_section(idx, "iron_condor"),
             }
 
         @app.post("/api/admin/strategy/config/{index}", tags=["Admin"])
@@ -3438,7 +4859,7 @@ class DashboardServer:
         ):
             from data_layer.runtime_config import RuntimeConfig
             idx = index.upper()
-            allowed = {"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY", "CRUDEOIL", "BTC", "ETH"}
+            allowed = {"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY", "CRUDEOIL", "GOLDM", "BTC", "ETH"}
             if idx not in allowed:
                 raise HTTPException(400, f"Unknown index '{idx}'. Allowed: {sorted(allowed)}")
             try:
@@ -3455,15 +4876,6 @@ class DashboardServer:
                             ss.reconfigure()
                         except Exception as exc:
                             logger.warning("reconfigure SS[%s]: %s", idx, exc)
-
-            if "iron_condor" in body:
-                RuntimeConfig.set_index_section(idx, "iron_condor", body["iron_condor"])
-                for ic in (_srv._iron_condors or []):
-                    if getattr(ic, "_underlying", None) == idx:
-                        try:
-                            ic.reconfigure()
-                        except Exception as exc:
-                            logger.warning("reconfigure IC[%s]: %s", idx, exc)
 
             logger.info("Dashboard: per-index config saved for %s.", idx)
             return {"ok": True, "message": f"Config for {idx} saved and injected into running strategies."}
@@ -3876,7 +5288,7 @@ class DashboardServer:
             # Write strategy assignments and set approved flag
             for binding_id, strategy in body.strategy_assignments.items():
                 await _srv._client_db.set_assigned_strategy(client_id, binding_id, strategy)
-            await _srv._client_db.upsert_client(client_id, is_admin_approved=1)
+            await _srv._client_db.upsert_client(client_id, is_admin_approved=1, is_client_bot_active=1)
 
             # Build ClientProfile and register in registry
             if _srv._registry is not None and _srv._registry.get(client_id) is None:
@@ -4407,7 +5819,7 @@ class DashboardServer:
             defaults = {
                 "max_drawdown_pct":       5.0,
                 "order_throttle_per_sec": 5,
-                "squareoff_time":         "15:15",
+                "squareoff_time":         "15:20",
                 "distance_filter_pct":    5.0,
             }
             rms = getattr(_srv._cfg, "rms", {})
@@ -4704,10 +6116,25 @@ class DashboardServer:
         async def api_telemetry(_: dict = Depends(_current_user)):
             feeder   = _srv._feeder
             dual_lat = feeder.dual_latency if feeder and hasattr(feeder, "dual_latency") else {}
+            # EventBus.drop_stats() existed but was never surfaced anywhere --
+            # a consumer falling behind under load silently drops ticks with
+            # nothing but a log line every 1000 drops (base_feeder.py). Exposed
+            # here so a slow-consumer degradation is actually visible to
+            # whoever's watching the dashboard, not just discoverable by
+            # tailing raw logs after the fact.
+            drop_stats: dict = {}
+            try:
+                if _srv._bus is not None and hasattr(_srv._bus, "drop_stats"):
+                    drop_stats = _srv._bus.drop_stats()
+            except Exception:
+                pass
+            raw_feed_drops = getattr(feeder, "_raw_drop_count", None) if feeder else None
             return {
                 "upstox_latency_ms": round(dual_lat.get("upstox", 0.0), 3),
                 "fyers_latency_ms":  round(dual_lat.get("fyers",  0.0), 3),
                 "ws_clients":        len(bridge._connections),
+                "eventbus_drops":    drop_stats,
+                "raw_feed_drops":    raw_feed_drops,
             }
 
         # ── WebSocket endpoint ────────────────────────────────────────────────
@@ -4721,13 +6148,17 @@ class DashboardServer:
                 await websocket.close(code=1008, reason="auth required")
                 return
             try:
-                verify_token(token)
+                token_payload = verify_token(token)
             except ValueError as exc:
                 await websocket.close(code=1008, reason=str(exc))
                 return
 
             await websocket.accept()
-            bridge.add_connection(websocket)
+            bridge.add_connection(
+                websocket,
+                client_id=token_payload.get("client_id", ""),
+                role=token_payload.get("role", ""),
+            )
             try:
                 while True:
                     await websocket.receive_text()
@@ -4736,66 +6167,26 @@ class DashboardServer:
             finally:
                 bridge.remove_connection(websocket)
 
-        # ── ADMIN — Trap Scanner config ───────────────────────────────────────
+        # ── ADMIN — Sell Straddle book registry (per-binding) ─────────────────
 
-        @app.get("/api/admin/trap_scanner/settings", tags=["Admin"])
-        async def api_trap_scanner_settings_get(_: dict = Depends(_require_admin)):
-            """Return the current trap_scanner global admin settings (stored in system_settings)."""
-            import json
-            raw = await asyncio.to_thread(
-                _srv._client_db.get_setting_sync, "trap_scanner", ""
-            )
-            cfg = {}
-            if raw:
-                try:
-                    cfg = json.loads(raw)
-                except Exception:
-                    pass
-            return {"ok": True, "settings": cfg}
-
-        @app.post("/api/admin/trap_scanner/settings", tags=["Admin"])
-        async def api_trap_scanner_settings_save(
-            request: Request, _: dict = Depends(_require_admin),
-        ):
-            """Persist trap_scanner admin settings (htf_minutes, ltf_minutes, per_index config etc.)."""
-            import json
-            try:
-                body = await request.json()
-            except Exception:
-                return {"ok": False, "error": "Invalid JSON body."}
-            # Whitelist top-level keys
-            allowed_top = {"htf_minutes", "ltf_minutes", "gap_threshold_pct", "per_index"}
-            filtered = {k: v for k, v in body.items() if k in allowed_top}
-            if not filtered:
-                return {"ok": False, "error": "No valid fields provided."}
-            # Load existing and merge
-            raw = await asyncio.to_thread(_srv._client_db.get_setting_sync, "trap_scanner", "{}")
-            try:
-                existing = json.loads(raw)
-            except Exception:
-                existing = {}
-            existing.update(filtered)
-            await _srv._client_db.set_setting("trap_scanner", json.dumps(existing))
-            logger.info("TrapScanner admin settings saved: %s", filtered)
-            return {"ok": True, "message": "Trap scanner settings saved."}
-
-        @app.get("/api/admin/trap_scanner/status", tags=["Admin"])
-        async def api_trap_scanner_status(_: dict = Depends(_require_admin)):
-            """Return live telemetry for all running trap scanner books."""
-            mgr = getattr(_srv, "_trap_scanner_manager", None)
+        @app.get("/api/admin/straddle/books", tags=["Admin"])
+        async def api_admin_straddle_books(_: dict = Depends(_require_admin)):
+            """List every spawned sell_straddle book: (client, binding, underlying).
+            Useful for confirming all requested indices (e.g. NIFTY + CRUDEOIL) actually
+            spawned and for diagnosing missing log files."""
+            mgr = getattr(_srv, "_straddle_manager", None)
             if mgr is None:
                 return {"ok": True, "books": []}
-            return {"ok": True, "books": mgr.telemetry_all()}
-
-        @app.get("/api/client/trap_scanner/status", tags=["Client"])
-        async def api_client_trap_scanner_status(user: dict = Depends(_current_user)):
-            """Return live telemetry for trap scanner books belonging to this client."""
-            mgr = getattr(_srv, "_trap_scanner_manager", None)
-            if mgr is None:
-                return {"ok": True, "books": []}
-            cid = user.get("client_id") or user.get("username")
-            books = [b for b in mgr.telemetry_all() if b.get("client_id") == cid]
-            return {"ok": True, "books": books}
+            books = []
+            for (cid, bid, und), book in mgr._books.items():
+                books.append({
+                    "client_id": cid,
+                    "binding_id": bid,
+                    "underlying": und,
+                    "lot_multiplier": getattr(book, "_lot_multiplier", 1),
+                    "position_open": getattr(book, "_position", None) is not None,
+                })
+            return {"ok": True, "books": books, "monitored_indices": sorted(mgr._indices)}
 
         # ── Backtest ──────────────────────────────────────────────────────────
 
@@ -4891,6 +6282,76 @@ class DashboardServer:
             except Exception as exc:
                 return {"ok": False, "error": str(exc)}
 
+        # ── FnO Stock Scanner ────────────────────────────────────────────────
+        @app.get("/api/scanner/fno", tags=["Scanner"])
+        async def get_fno_scan():
+            """Return today's FnO stock scan result (or most recent available)."""
+            import glob as _glob
+            import json as _json
+            scan_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
+            pattern  = os.path.join(scan_dir, "fno_scan_*.json")
+            files    = sorted(_glob.glob(pattern), reverse=True)
+            if not files:
+                return {"ok": False, "error": "No scan file found — run the nightly scanner first"}
+            try:
+                with open(files[0]) as f:
+                    data = _json.load(f)
+                return {"ok": True, **data}
+            except Exception as exc:
+                return {"ok": False, "error": str(exc)}
+
+        @app.get("/api/scanner/alerts", tags=["Scanner"])
+        async def get_fno_alerts(token_data: dict = Depends(verify_token)):
+            """Return active FnO stock monitor alerts (fired but not yet notified)."""
+            monitor = _srv._fno_monitor
+            if not monitor:
+                return {"ok": True, "alerts": []}
+            alerts = monitor.get_active_alerts()
+            from datetime import datetime as _dt
+            for a in alerts:
+                if isinstance(a.get("fired_at"), _dt):
+                    a["fired_at"] = a["fired_at"].isoformat()
+            return {"ok": True, "alerts": alerts}
+
+        @app.post("/api/scanner/alerts/{uid}/notified", tags=["Scanner"])
+        async def mark_alert_notified(uid: str, token_data: dict = Depends(verify_token)):
+            """Mark a specific alert as notified (removes it from active list)."""
+            monitor = _srv._fno_monitor
+            if monitor:
+                monitor.mark_notified(uid)
+            return {"ok": True}
+
+        @app.post("/api/scanner/run", tags=["Scanner"])
+        async def run_fno_scan(params: _ScannerRunSchema, _: dict = Depends(_require_admin)):
+            """Admin: trigger a fresh FnO scan synchronously (takes ~2-3 min)."""
+            try:
+                import sys as _sys
+                _scripts = os.path.join(os.path.dirname(os.path.dirname(__file__)), "scripts")
+                if _scripts not in _sys.path:
+                    _sys.path.insert(0, _scripts)
+                from fno_stock_scanner import run_scan as _run_scan, _get_token as _tok
+                token = _tok()
+                if not token:
+                    return {"ok": False, "error": "No Upstox token — connect feeder first"}
+                output = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        _run_scan, token,
+                        params.nifty_prox_pct, params.stock_prox_pct, params.min_rr,
+                        params.use_nifty_bias,
+                    ),
+                    timeout=900.0,
+                )
+                return {"ok": True, **output}
+            except Exception as exc:
+                return {"ok": False, "error": str(exc)}
+
+        self._register_d1trap_routes(app)
+        self._register_fvg_routes(app)
+        self._register_oi_flow_routes(app)
+        self._register_liquidity_sweep_routes(app)
+        self._register_oi_orb_routes(app)
+        self._register_liquidity_trap_routes(app)
+        self._register_cag_straddle_routes(app)
         return app
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -4920,42 +6381,51 @@ class DashboardServer:
                 )
                 return
 
-        await self._client_db.initialise()
-
-        config = uvicorn.Config(
-            app=self._app,
-            host=host,
-            port=port,
-            log_level="warning",
-            loop="none",
-            lifespan="off",
-        )
-        self._uvicorn_server = uvicorn.Server(config)
-        self._uvicorn_server.install_signal_handlers = lambda: None
-
-        logger.info("Dashboard: http://%s:%d  (WebSocket: ws://%s:%d/ws)", host, port, host, port)
-
-        # Kick off background boot-time feeder auto-connect after a short settle delay
-        boot_task = asyncio.create_task(
-            self._boot_feeder_auto_connect(), name="boot_feeder_auto_connect"
-        )
+        logger.info("Dashboard: initializing server on %s:%d ...", host, port)
 
         try:
-            await asyncio.gather(
-                self._uvicorn_server.serve(),
-                self._ws_bridge.run(),
+            await self._client_db.initialise()
+
+            config = uvicorn.Config(
+                app=self._app,
+                host=host,
+                port=port,
+                log_level="warning",
+                loop="none",
+                lifespan="off",
             )
-        except asyncio.CancelledError:
-            pass
-        finally:
-            if not boot_task.done():
-                boot_task.cancel()
+            self._uvicorn_server = uvicorn.Server(config)
+            self._uvicorn_server.install_signal_handlers = lambda: None
+
+            logger.info("Dashboard: http://%s:%d  (WebSocket: ws://%s:%d/ws)", host, port, host, port)
+
+            # Kick off background boot-time feeder auto-connect after a short settle delay
+            boot_task = asyncio.create_task(
+                self._boot_feeder_auto_connect(), name="boot_feeder_auto_connect"
+            )
+
+            try:
+                await asyncio.gather(
+                    self._uvicorn_server.serve(),
+                    self._ws_bridge.run(),
+                )
+            except asyncio.CancelledError:
+                pass
+            finally:
+                if not boot_task.done():
+                    boot_task.cancel()
+
+        except Exception:
+            logger.exception("Dashboard: failed to start on %s:%d", host, port)
 
     async def _boot_feeder_auto_connect(self) -> None:
         """
         On server startup, check DB for cached feeder credentials and
         auto-reconnect if found.  Runs after a 4-second settle delay so the
         feeder object is fully initialised before we touch it.
+
+        Starts the configured primary + secondary providers as a hot-standby dual
+        feed when both tokens are available, otherwise the single available feed.
         """
         await asyncio.sleep(4.0)
         try:
@@ -4963,64 +6433,53 @@ class DashboardServer:
             if feeder is None:
                 return
 
-            from broker_auth.headless_auth import headless_engine as _he, _token_is_fresh, _ist_eod
-            u_row = self._client_db.get_feeder_creds_sync("upstox") or {}
-            f_row = self._client_db.get_feeder_creds_sync("fyers")  or {}
+            from broker_auth.headless_auth import _token_is_fresh
 
-            has_upstox = bool(u_row.get("client_id") or u_row.get("api_key"))
-            has_fyers  = bool(f_row.get("client_id") or f_row.get("api_key"))
+            primary   = (self._cfg.primary_feeder_provider or "upstox").lower()
+            secondary = (getattr(self._cfg, "secondary_feeder_provider", "fyers") or "none").lower()
+            if secondary in ("none", primary):
+                secondary = ""
 
-            if not has_upstox and not has_fyers:
+            providers = [p for p in {primary, secondary, "upstox", "upstox2", "fyers"} if p]
+            creds_map: dict = {}
+            present: List[str] = []
+
+            for p in providers:
+                row = self._client_db.get_feeder_creds_sync(p) or {}
+                has_creds = bool(row.get("client_id") or row.get("api_key"))
+                if not has_creds:
+                    continue
+                creds = {
+                    "client_id":          row.get("client_id", ""),
+                    "api_key":            row.get("api_key", ""),
+                    "access_token":       row.get("access_token", ""),
+                    "token_generated_at": row.get("token_generated_at", ""),
+                    "token_expiry_at":    row.get("token_expiry_at", ""),
+                }
+                if not _token_is_fresh(row.get("token_generated_at", ""), row.get("token_expiry_at", "")):
+                    logger.info("DashboardServer: %s token stale — will attempt stream without fresh token.", p)
+                    if not creds["access_token"]:
+                        continue
+                creds_map[p] = creds
+                present.append(p)
+
+            if not present:
                 logger.info("DashboardServer: No cached feeder credentials — skipping auto-connect.")
                 return
 
             logger.info(
-                "DashboardServer: Boot-time auto-connect (upstox=%s, fyers=%s).",
-                has_upstox, has_fyers,
+                "DashboardServer: Boot-time auto-connect (providers=%s).",
+                ",".join(present),
             )
-            now_ist = datetime.now(IST).isoformat()
-            eod     = _ist_eod()
 
-            upstox_creds: dict = {}
-            fyers_creds:  dict = {}
-
-            if has_upstox:
-                upstox_creds = {
-                    "client_id":          u_row.get("client_id", ""),
-                    "api_key":            u_row.get("api_key", ""),
-                    "access_token":       u_row.get("access_token", ""),
-                    "token_generated_at": u_row.get("token_generated_at", ""),
-                    "token_expiry_at":    u_row.get("token_expiry_at", ""),
-                }
-                if not _token_is_fresh(u_row.get("token_generated_at",""), u_row.get("token_expiry_at","")):
-                    logger.info("DashboardServer: Upstox token stale — will attempt stream without fresh token.")
-                    if not upstox_creds["access_token"]:
-                        has_upstox = False
-
-            if has_fyers:
-                fyers_creds = {
-                    "client_id":          f_row.get("client_id", ""),
-                    "api_key":            f_row.get("api_key", ""),
-                    "access_token":       f_row.get("access_token", ""),
-                    "token_generated_at": f_row.get("token_generated_at", ""),
-                    "token_expiry_at":    f_row.get("token_expiry_at", ""),
-                }
-                if not _token_is_fresh(f_row.get("token_generated_at",""), f_row.get("token_expiry_at","")):
-                    logger.info("DashboardServer: Fyers token stale — will attempt stream without fresh token.")
-                    if not fyers_creds["access_token"]:
-                        has_fyers = False
-
-            # Connect the feeder with whatever credentials are ready
             try:
-                if has_upstox and has_fyers:
-                    await feeder.start_dual(upstox_creds, fyers_creds)
-                    logger.info("DashboardServer: Boot auto-connect — dual feed active.")
-                elif has_upstox:
-                    await feeder.start_single("upstox", upstox_creds)
-                    logger.info("DashboardServer: Boot auto-connect — Upstox feed active.")
-                elif has_fyers:
-                    await feeder.start_single("fyers", fyers_creds)
-                    logger.info("DashboardServer: Boot auto-connect — Fyers feed active.")
+                if len(creds_map) >= 2:
+                    await feeder.start_providers(creds_map)
+                    logger.info("DashboardServer: Boot auto-connect — dual feed active (%s).", ",".join(creds_map))
+                else:
+                    p, c = next(iter(creds_map.items()))
+                    await feeder.start_single(p, c)
+                    logger.info("DashboardServer: Boot auto-connect — %s feed active.", p)
             except Exception as exc:
                 logger.error("DashboardServer: Boot auto-connect feeder start failed: %s", exc)
         except Exception as exc:
@@ -5034,19 +6493,401 @@ class DashboardServer:
         return self._sell_straddles_static
 
     def _find_ss_book(self, client_id: str, binding_id: str, underlying: str):
-        """Locate the per-binding book for this deployment; fall back to per-underlying match."""
+        """Locate the per-binding book for this deployment; fall back to per-underlying match.
+
+        2026-08-06: temporarily logged at WARNING (not DEBUG) on every miss/fallback
+        path -- prior investigation (2026-07-03) into "UI shows no position despite a
+        real filled trade" got stuck because this was DEBUG-level and never actually
+        appeared in production logs. That investigation concluded long ago (see the
+        2026-08-06 confirm-model redesign); this was simply never reverted, and by
+        2026-08-26 it was flooding the log on every dashboard poll for every binding
+        a client has -- including bindings that never ran sell_straddle at all (a
+        "MISS" there is completely expected, not a bug). Reverted to DEBUG per this
+        docstring's own original intent."""
         if self._straddle_manager is not None:
             b = self._straddle_manager.find(client_id, binding_id, underlying)
             if b is not None:
                 return b
+            logger.debug("_find_ss_book MISS: cid=%s bid=%s und=%s books=%s",
+                        client_id, binding_id, underlying,
+                        list(self._straddle_manager._books.keys()))
+        else:
+            logger.debug("_find_ss_book: straddle_manager is None (sell_straddle not enabled?)")
         u = str(underlying).upper()
         for s in self._sell_straddles:
             if getattr(s, "_underlying", None) == u and (
                 not getattr(s, "_client_id", "") or
                 (s._client_id == client_id and s._binding_id == binding_id)
             ):
+                logger.debug("_find_ss_book: fallback scan matched cid=%s bid=%s und=%s "
+                               "(manager.find missed but per-underlying scan recovered it)",
+                               client_id, binding_id, underlying)
                 return s
+        logger.debug("_find_ss_book: TOTAL MISS cid=%s bid=%s und=%s -- no book found via "
+                       "manager or fallback scan, UI will show no position", client_id, binding_id, underlying)
         return None
+
+    @property
+    def _v4_cascades(self) -> list:
+        """Live list of V4Cascade books — per-binding from the manager."""
+        if self._v4_cascade_manager is not None:
+            return self._v4_cascade_manager.books
+        return []
+
+    def _find_v4_book(self, client_id: str, binding_id: str, underlying: str):
+        if self._v4_cascade_manager is not None:
+            return self._v4_cascade_manager.find(client_id, binding_id, underlying)
+        return None
+
+    def _find_trap_book(self, client_id: str, binding_id: str, underlying: str):
+        """Find a single D1TrapOptionBook by (client, binding, underlying)."""
+        if self._d1_trap_manager is not None:
+            return self._d1_trap_manager.find(client_id, binding_id, underlying)
+        return None
+
+    def _find_trap_books_for_binding(self, client_id: str, binding_id: str):
+        """Return all D1Trap books for a given (client, binding) — used for ALL_FNO aggregation."""
+        if self._d1_trap_manager is None:
+            return []
+        return [b for b in self._d1_trap_manager.books
+                if getattr(b, "_client_id", "") == client_id
+                and getattr(b, "_binding_id", "") == binding_id]
+
+    # ── D1 Trap zone monitoring endpoint ──────────────────────────────────────
+
+    def _register_d1trap_routes(self, app) -> None:
+        _srv = self
+
+        @app.get("/api/d1trap/zones")
+        async def d1trap_zones():
+            """Return live monitoring state for all active D1 trap books."""
+            if _srv._d1_trap_manager is None:
+                return {"ok": True, "books": []}
+            books = _srv._d1_trap_manager.books
+            result = []
+            for b in books:
+                if not hasattr(b, "monitoring_zones"):
+                    logger.warning(
+                        "d1trap_zones: book %s (%s) has no monitoring_zones() -- silently "
+                        "invisible to the WATCHLIST TRACKER panel.",
+                        getattr(b, "_underlying", "?"), type(b).__name__,
+                    )
+                    continue
+                try:
+                    result.append(b.monitoring_zones())
+                except Exception:
+                    # 2026-08-12: this used to swallow silently -- a book whose
+                    # monitoring_zones() raised (e.g. a genuinely-running FnO
+                    # WATCHLIST stock book) would just vanish from the panel with
+                    # zero trace anywhere, indistinguishable from "never spawned."
+                    logger.exception(
+                        "d1trap_zones: monitoring_zones() raised for %s (%s) -- "
+                        "dropped from the WATCHLIST TRACKER panel.",
+                        getattr(b, "_underlying", "?"), type(b).__name__,
+                    )
+            # Sort: books with MONITORING zones or pending first, then by symbol
+            result.sort(key=lambda r: (
+                0 if (r.get("pending") or any(z["state"] == "MONITORING" for z in r.get("zones", []))) else 1,
+                r.get("underlying", "")
+            ))
+            return {"ok": True, "books": result}
+
+    # ── FVG monitoring endpoint ──────────────────────────────────────────────
+
+    def _register_fvg_routes(self, app) -> None:
+        _srv = self
+
+        @app.get("/api/fvg/status")
+        async def fvg_status():
+            """Return live monitoring state for all active FVG books -- same shape/
+            intent as /api/d1trap/zones above (FVGStrategy had no dashboard surface
+            at all before this; monitoring_fvgs() already existed, just unused)."""
+            if _srv._fvg_manager is None:
+                return {"ok": True, "books": []}
+            books = getattr(_srv._fvg_manager, "books", [])
+            result = []
+            for b in books:
+                if not hasattr(b, "monitoring_fvgs"):
+                    continue
+                try:
+                    result.append(b.monitoring_fvgs())
+                except Exception:
+                    pass
+            # Books with an open position or an active high-liquidity FVG first.
+            result.sort(key=lambda r: (
+                0 if (r.get("position") or any(z.get("high_liquidity") for z in r.get("zones", []))) else 1,
+                r.get("underlying", "")
+            ))
+            return {"ok": True, "books": result}
+
+    # ── OI-Flow monitoring endpoint ──────────────────────────────────────────
+
+    def _register_oi_flow_routes(self, app) -> None:
+        _srv = self
+
+        @app.get("/api/oiflow/status")
+        async def oi_flow_status():
+            """Return live monitoring state for all active OI-Flow books --
+            same shape/intent as /api/d1trap/zones and /api/fvg/status above:
+            OI wall + buildup per strike, the recent remarks trail, and the
+            open position with running P&L, straight from OIFlowStrategy.
+            monitoring_state() (strategies/oi_flow/engine.py)."""
+            if _srv._oi_flow_manager is None:
+                return {"ok": True, "books": []}
+            books = getattr(_srv._oi_flow_manager, "books", [])
+            result = []
+            for b in books:
+                if not hasattr(b, "monitoring_state"):
+                    continue
+                try:
+                    result.append(b.monitoring_state())
+                except Exception:
+                    logger.exception(
+                        "oi_flow_status: monitoring_state() raised for %s -- dropped from panel.",
+                        getattr(b, "_underlying", "?"),
+                    )
+            # Books with an open position first, then by underlying.
+            result.sort(key=lambda r: (0 if r.get("position") else 1, r.get("underlying", "")))
+            return {"ok": True, "books": result}
+
+    # ── Liquidity Sweep monitoring endpoint ──────────────────────────────────
+
+    def _register_liquidity_sweep_routes(self, app) -> None:
+        _srv = self
+
+        @app.get("/api/liqsweep/status")
+        async def liquidity_sweep_status():
+            """Same shape/intent as /api/oiflow/status above: pipeline state
+            (idle/awaiting_displacement/awaiting_fvg/retest_armed), bias,
+            active liquidity level, the recent remarks trail, and the open
+            position with running P&L, straight from LiquiditySweepStrategy.
+            monitoring_state() (strategies/liquidity_sweep/engine.py)."""
+            if _srv._liquidity_sweep_manager is None:
+                return {"ok": True, "books": []}
+            books = getattr(_srv._liquidity_sweep_manager, "books", [])
+            result = []
+            for b in books:
+                if not hasattr(b, "monitoring_state"):
+                    continue
+                try:
+                    result.append(b.monitoring_state())
+                except Exception:
+                    logger.exception(
+                        "liquidity_sweep_status: monitoring_state() raised for %s -- dropped from panel.",
+                        getattr(b, "_underlying", "?"),
+                    )
+            result.sort(key=lambda r: (0 if r.get("position") else 1, r.get("underlying", "")))
+            return {"ok": True, "books": result}
+
+    def _register_oi_orb_routes(self, app) -> None:
+        _srv = self
+
+        @app.get("/api/oiorb/status")
+        async def oi_orb_status():
+            """Same shape/intent as /api/oiflow/status above, adapted for a
+            book that can hold several concurrent stock positions at once:
+            today's shortlist, ORB regime/levels, and every open position
+            (keyed by stock symbol) with its live LTP, straight from
+            OiOrbScreenerStrategy.monitoring_state() (strategies/
+            oi_orb_screener/engine.py)."""
+            if _srv._oi_orb_manager is None:
+                return {"ok": True, "books": []}
+            books = getattr(_srv._oi_orb_manager, "books", [])
+            result = []
+            for b in books:
+                if not hasattr(b, "monitoring_state"):
+                    continue
+                try:
+                    result.append(b.monitoring_state())
+                except Exception:
+                    logger.exception(
+                        "oi_orb_status: monitoring_state() raised for %s/%s -- dropped from panel.",
+                        getattr(b, "_client_id", "?"), getattr(b, "_binding_id", "?"),
+                    )
+            result.sort(key=lambda r: (0 if r.get("positions") else 1, r.get("client_id", "")))
+            return {"ok": True, "books": result}
+
+    def _register_liquidity_trap_routes(self, app) -> None:
+        _srv = self
+
+        @app.get("/api/liqtrap/status")
+        async def liquidity_trap_status():
+            """Same shape/intent as /api/liqsweep/status above: pipeline
+            stage (bias/sl_hit/confirmed), the open position with running
+            lots/P&L, and the recent remarks trail, straight from
+            LiquidityTrapStrategy.monitoring_state() (strategies/
+            liquidity_trap/engine.py)."""
+            if _srv._liquidity_trap_manager is None:
+                return {"ok": True, "books": []}
+            books = getattr(_srv._liquidity_trap_manager, "books", [])
+            result = []
+            for b in books:
+                if not hasattr(b, "monitoring_state"):
+                    continue
+                try:
+                    result.append(b.monitoring_state())
+                except Exception:
+                    logger.exception(
+                        "liquidity_trap_status: monitoring_state() raised for %s -- dropped from panel.",
+                        getattr(b, "_underlying", "?"),
+                    )
+            result.sort(key=lambda r: (0 if r.get("position") else 1, r.get("underlying", "")))
+            return {"ok": True, "books": result}
+
+    def _register_cag_straddle_routes(self, app) -> None:
+        _srv = self
+
+        @app.get("/api/cagstraddle/status")
+        async def cag_straddle_status():
+            """Same shape/intent as /api/liqtrap/status above: per-side
+            (CE/PE) selected strike + R1/S1/phase, the open position, and
+            the recent remarks trail, straight from
+            CagStraddleStrategy.monitoring_state() (strategies/
+            cag_straddle/engine.py)."""
+            if _srv._cag_straddle_manager is None:
+                return {"ok": True, "books": []}
+            books = getattr(_srv._cag_straddle_manager, "books", [])
+            result = []
+            for b in books:
+                if not hasattr(b, "monitoring_state"):
+                    continue
+                try:
+                    result.append(b.monitoring_state())
+                except Exception:
+                    logger.exception(
+                        "cag_straddle_status: monitoring_state() raised for %s -- dropped from panel.",
+                        getattr(b, "_underlying", "?"),
+                    )
+            result.sort(key=lambda r: (0 if r.get("position") else 1, r.get("underlying", "")))
+            return {"ok": True, "books": result}
+
+    def _open_history_rows(self, cid: str) -> list:
+        """
+        Return synthetic history rows for currently OPEN positions so the dashboard
+        History tab shows trades that have started but not yet closed.  These rows
+        use the same schema as closed-trade history and disappear automatically
+        once the position is closed (the closed record then takes over).
+        """
+        rows: list = []
+        try:
+            deps = self._client_db.get_deployments_sync(cid)
+        except Exception:
+            return rows
+
+        def _ts(dt):
+            if not dt:
+                return None
+            if isinstance(dt, datetime):
+                return dt.isoformat(timespec="seconds")
+            return str(dt)
+
+        for dep in deps or []:
+            sname = dep.get("strategy_name", "")
+            underlying = dep.get("underlying") or dep.get("assigned_instrument") or ""
+            bid = dep.get("binding_id", "")
+            if not sname or not underlying:
+                continue
+
+            if sname == "sell_straddle":
+                strat = self._find_ss_book(cid, bid, underlying)
+                pos = getattr(strat, "_position", None) if strat else None
+                if pos is None or getattr(pos, "status", "") != "open":
+                    continue
+                _ot = getattr(pos, "open_time", None)
+                _lot = int(getattr(pos, "lot_size", 0) or 0)
+                _legs = []
+                for side, leg in (("CE", pos.ce_leg), ("PE", pos.pe_leg)):
+                    strike = int(getattr(leg, "strike", 0) or 0)
+                    if strike <= 0:
+                        continue
+                    ep = float(getattr(leg, "entry_price", 0.0) or 0.0)
+                    ltp = float(getattr(leg, "ltp", ep) or ep)
+                    _legs.append({
+                        "side": side, "strike": strike,
+                        "entry": round(ep, 2), "exit": 0,
+                        "pnl": round((ep - ltp) * _lot, 2),
+                        "entry_ts": _ts(getattr(leg, "open_time", None)),
+                        "exit_ts": None,
+                        "entry_reason": getattr(leg, "open_reason", "") or "",
+                    })
+                # 2026-08-27, real user-found incident: the EOD hedge-and-carry BUY legs
+                # were correctly placed at the broker but never surfaced in the History
+                # tab's "currently open" rows -- a real position invisible to the client.
+                # Bought (long), so P&L is (ltp - entry), opposite sign from the sold legs.
+                for side, leg in (("CE", getattr(pos, "hedge_ce_leg", None)),
+                                   ("PE", getattr(pos, "hedge_pe_leg", None))):
+                    if leg is None:
+                        continue
+                    strike = int(getattr(leg, "strike", 0) or 0)
+                    if strike <= 0:
+                        continue
+                    ep = float(getattr(leg, "entry_price", 0.0) or 0.0)
+                    ltp = float(getattr(leg, "ltp", ep) or ep)
+                    _legs.append({
+                        "side": side, "strike": strike,
+                        "entry": round(ep, 2), "exit": 0,
+                        "pnl": round((ltp - ep) * _lot, 2),
+                        "entry_ts": _ts(getattr(leg, "open_time", None)),
+                        "exit_ts": None,
+                        "entry_reason": getattr(leg, "open_reason", "") or "eod_hedge",
+                        "is_hedge": True,
+                    })
+                if _legs:
+                    rows.append({
+                        "date": _ts(_ot) or datetime.now(IST).isoformat(timespec="seconds"),
+                        "strategy": "sell_straddle",
+                        "instrument": str(underlying).upper(),
+                        "binding_id": bid,
+                        "entry_price": round(sum(l["entry"] for l in _legs), 2),
+                        "exit_price": 0,
+                        "exit_reason": "OPEN",
+                        "exit_remark": ("Hedged positional carry (NRML)"
+                                        if getattr(pos, "is_hedged_positional", False)
+                                        else "Live open position"),
+                        "pnl": round(sum(l["pnl"] for l in _legs), 2),
+                        "legs": _legs,
+                    })
+
+            elif sname == "v4_cascade":
+                book = self._find_v4_book(cid, bid, underlying)
+                pos = book._active_position if book is not None else None
+                if pos is None or not pos.is_open:
+                    continue
+                _is_crypto = str(underlying).upper() in ("BTC", "ETH")
+                _is_short = _is_crypto and pos.side == "PE"
+                live_price = getattr(book, "_live_price", {}) or {}
+                ltp = float(live_price.get(pos.side) or 0.0)
+                _legs = []
+                for leg in (pos.t1, pos.t2):
+                    if leg is None or leg.status != "open":
+                        continue
+                    _lp = ltp or leg.entry_price
+                    _pnl = (leg.entry_price - _lp) if _is_short else (_lp - leg.entry_price)
+                    strike = int(leg.strike) if not _is_crypto else 0
+                    _legs.append({
+                        "side": pos.side, "strike": strike,
+                        "entry": round(leg.entry_price, 2), "exit": 0,
+                        "pnl": round(_pnl * leg.qty, 2),
+                        "entry_ts": _ts(leg.entry_time),
+                        "exit_ts": None,
+                        "entry_reason": leg.entry_reason or "",
+                        "tranche": leg.tranche,
+                    })
+                if _legs:
+                    rows.append({
+                        "date": _ts(pos.open_time) or datetime.now(IST).isoformat(timespec="seconds"),
+                        "strategy": "v4_cascade",
+                        "instrument": str(underlying).upper(),
+                        "binding_id": bid,
+                        "entry_price": round(sum(l["entry"] for l in _legs) / max(len(_legs), 1), 2),
+                        "exit_price": 0,
+                        "exit_reason": "OPEN",
+                        "exit_remark": _legs[0]["entry_reason"] if _legs else "Live open position",
+                        "pnl": round(sum(l["pnl"] for l in _legs), 2),
+                        "legs": _legs,
+                    })
+
+        return rows
 
     def stop(self) -> None:
         self._ws_bridge.stop()
@@ -5063,15 +6904,8 @@ class DashboardServer:
         try:
             clients = self._registry.all_active() if self._registry else []
             sslist  = self._sell_straddles or []
-            iclist  = self._iron_condors or []
             from data_layer import trade_history as _th
             _today = datetime.now(IST).date().isoformat()
-
-            def _find(lst, u):
-                for s in lst:
-                    if getattr(s, "_underlying", None) == u:
-                        return s
-                return None
 
             def _lot(u):
                 return int(self._cfg.exchange.lot_sizes.get(u, 0) or 0) if self._cfg else 0
@@ -5098,11 +6932,30 @@ class DashboardServer:
                         p = getattr(s, "_position", None) if s else None
                         if p and getattr(p, "status", "open") == "open":
                             running += float(getattr(p, "unrealized_pnl", 0.0) or 0.0) * _lot(u)
-                    elif sname == "iron_condor":
-                        s = _find(iclist, u)
-                        p = getattr(s, "_position", None) if s else None
-                        if p and getattr(p, "status", "open") == "open":
-                            running += float(getattr(p, "total_pnl_pts", 0.0) or 0.0) * int(getattr(p, "lot_size", 0) or 0)
+                    elif sname == "d1_trap_bear_only" and self._d1_trap_manager is not None:
+                        # 2026-08-03 fix: header P&L was sell_straddle-only -- an open Bear Trap
+                        # leg's live unrealized P&L never counted toward the header/admin total,
+                        # only its booked (closed) P&L via History. qty here is already
+                        # lot_size*lot_multiplier (see D1TrapBearOnlyBook._leg_view), so no
+                        # separate _lot(u) multiply like the sell_straddle branch above.
+                        book = self._d1_trap_manager.find(c.client_id, d.get("binding_id", ""), u)
+                        if book is not None:
+                            try:
+                                for leg in book.status().get("positions") or []:
+                                    ltp = leg.get("ltp")
+                                    entry = leg.get("entry")
+                                    qty = leg.get("qty") or 0
+                                    # 2026-08-03 fix: _OptionSeries.last_ltp defaults to 0.0 (not
+                                    # None) until the first real tick lands -- right after a
+                                    # restart with a restored open position, "ltp is not None"
+                                    # passed with ltp=0.0, producing a fake ~100% loss per leg
+                                    # that tripped RiskManager's daily-loss halt on a phantom
+                                    # number within seconds of startup. Require ltp > 0 (a real
+                                    # quote has actually arrived) before counting it.
+                                    if ltp is not None and entry is not None and float(ltp) > 0:
+                                        running += (float(ltp) - float(entry)) * float(qty)
+                            except Exception:
+                                pass
                 try:
                     c._daily_pnl = round(booked + running, 2)
                 except Exception:

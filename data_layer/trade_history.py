@@ -39,6 +39,7 @@ def record(
     binding_id: str = "",
     ts: Optional[str] = None,
     legs: Optional[list] = None,
+    exit_remark: str = "",
 ) -> None:
     """Append one closed-trade record for a client (append-only, capped).
 
@@ -56,6 +57,7 @@ def record(
             "entry_price": round(float(entry_price), 2),
             "exit_price": round(float(exit_price), 2),
             "exit_reason": exit_reason,
+            "exit_remark": exit_remark,
             "pnl": round(float(pnl), 2),
         }
         if legs:

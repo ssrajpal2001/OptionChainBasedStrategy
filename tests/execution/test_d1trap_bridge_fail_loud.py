@@ -1,0 +1,417 @@
+import asyncio
+import pytest
+
+from config.global_config import Topic
+
+
+class _CapturingBus:
+    """Fake EventBus that records every published (topic, event) pair instead of
+    a bare counter -- lets the new tests below inspect the actual D1TrapFillEvent
+    the bridge publishes, not just that "something" was published."""
+
+    def __init__(self) -> None:
+        self.published: list = []
+
+    async def publish(self, topic, event):
+        self.published.append((topic, event))
+
+    def subscribe(self, topic):
+        class _Q:
+            async def get(self):
+                await asyncio.sleep(3600)
+        return _Q()
+
+
+class _Ev:
+    """Minimal D1TrapOrderEvent stand-in, event_id included (2026-08-05:
+    D1TrapOrderEvent grew an event_id field for the confirm-then-finalize fill
+    loop) -- tests override class attrs per-instance as needed."""
+    action = "SELL"
+    client_id = "gurmeet"
+    binding_id = "zerodha"
+    strategy = "d1_trap_bear_only"
+    underlying = "NIFTY"
+    option_type = "PE"
+    strike = 24600
+    expiry = "2026-08-06"
+    quantity = 75
+    entry_price = 100.0
+    exit_price = 90.0
+    reason = "sl_hit"
+    event_id = "NIFTY_PE24600_EXIT_1"
+
+
+@pytest.mark.asyncio
+async def test_no_paper_fallback_when_broker_missing_in_live_mode(monkeypatch):
+    """
+    Real routing entry point is D1TrapExecutionBridge._handle(ev) -- it computes
+    live_binding/db internally from self._router (unlike the brief's assumed
+    _route(ev, live_binding, db) signature). This test drives it through that
+    real path: a live-mode binding whose broker never resolves must NOT fall
+    back to _paper_fill, and must publish a SYSTEM_EVENT alert instead.
+    """
+    from execution_bridge.d1_trap_bridge import D1TrapExecutionBridge
+
+    calls = {"paper_fill": 0, "alerts": 0}
+
+    class _FakeBus:
+        async def publish(self, topic, event):
+            calls["alerts"] += 1
+
+        def subscribe(self, topic):
+            class _Q:
+                async def get(self):
+                    await asyncio.sleep(3600)
+            return _Q()
+
+    class _FakeDB:
+        def get_bindings_safe_sync(self, client_id):
+            return [{
+                "binding_id": "zerodha",
+                "trading_mode": "live",
+                "terminal_connected": True,
+                "engine_active": True,
+                "is_trade_enabled": True,
+            }]
+
+        def get_deployments_sync(self, client_id):
+            return [{
+                "binding_id": "zerodha",
+                "strategy_name": "d1_trap_index",
+                "underlying": "NIFTY",
+                "is_running": 1,
+            }]
+
+    class _FakeRouter:
+        _brokers = {}  # always empty -- broker never resolves
+        _client_db = _FakeDB()
+
+    bridge = D1TrapExecutionBridge.__new__(D1TrapExecutionBridge)
+    bridge._bus = _FakeBus()
+    bridge._router = _FakeRouter()
+    bridge._trade_log = None
+
+    async def _fake_paper_fill(ev):
+        calls["paper_fill"] += 1
+    bridge._paper_fill = _fake_paper_fill
+
+    class _Ev:
+        action = "BUY"
+        client_id = "gurmeet"
+        binding_id = "zerodha"
+        strategy = "d1_trap_index"
+        underlying = "NIFTY"
+        option_type = "PE"
+        strike = 24600
+        expiry = "2026-08-06"
+        quantity = 75
+        entry_price = 100.0
+        exit_price = 0.0
+        reason = "t2_swing_breach"
+
+    await bridge._handle(_Ev())
+
+    assert calls["paper_fill"] == 0, "must never fabricate a fill when broker is unavailable in live mode"
+    assert calls["alerts"] >= 1, "must publish a SYSTEM_EVENT alert instead"
+
+
+@pytest.mark.asyncio
+async def test_paper_mode_still_local_sim_untouched(monkeypatch):
+    """mode == 'paper' must still go straight to _paper_fill without ever
+    touching resolve_broker_or_alert (no alert, pure local simulation)."""
+    from execution_bridge.d1_trap_bridge import D1TrapExecutionBridge
+
+    calls = {"paper_fill": 0, "alerts": 0}
+
+    class _FakeBus:
+        async def publish(self, topic, event):
+            calls["alerts"] += 1
+
+        def subscribe(self, topic):
+            class _Q:
+                async def get(self):
+                    await asyncio.sleep(3600)
+            return _Q()
+
+    class _FakeDB:
+        def get_bindings_safe_sync(self, client_id):
+            return [{
+                "binding_id": "zerodha",
+                "trading_mode": "paper",
+                "terminal_connected": True,
+                "engine_active": True,
+                "is_trade_enabled": True,
+            }]
+
+        def get_deployments_sync(self, client_id):
+            return [{
+                "binding_id": "zerodha",
+                "strategy_name": "d1_trap_index",
+                "underlying": "NIFTY",
+                "is_running": 1,
+            }]
+
+    class _FakeRouter:
+        _brokers = {}
+        _client_db = _FakeDB()
+
+    bridge = D1TrapExecutionBridge.__new__(D1TrapExecutionBridge)
+    bridge._bus = _FakeBus()
+    bridge._router = _FakeRouter()
+    bridge._trade_log = None
+
+    async def _fake_paper_fill(ev):
+        calls["paper_fill"] += 1
+    bridge._paper_fill = _fake_paper_fill
+
+    class _Ev:
+        action = "BUY"
+        client_id = "gurmeet"
+        binding_id = "zerodha"
+        strategy = "d1_trap_index"
+        underlying = "NIFTY"
+        option_type = "PE"
+        strike = 24600
+        expiry = "2026-08-06"
+        quantity = 75
+        entry_price = 100.0
+        exit_price = 0.0
+        reason = "t2_swing_breach"
+
+    await bridge._handle(_Ev())
+
+    assert calls["paper_fill"] == 1
+    assert calls["alerts"] == 0
+
+
+# ── 2026-08-05: confirm-then-finalize fill-confirmation feedback loop ────────
+# Previously this bridge NEVER published to Topic.D1_TRAP_ORDER_FILL at all --
+# the three "can't route" cases below just logged and returned. bear_only_book.py
+# now dispatches an EXIT and blocks on a waiter keyed by event_id (see
+# strategies/d1_trap_option/bear_only_book.py::_square_off_leg) -- a silent
+# return here would leave that waiter hanging until its own timeout, and worse,
+# a caller written against the OLD "believe every EXIT succeeded" assumption
+# would never learn the order never reached the broker. These tests assert the
+# bridge now publishes a D1TrapFillEvent (exit_failed=True / entry_aborted=True)
+# on every one of the three no-route paths, matching cascade_bridge.py's
+# _abort() contract exactly.
+
+
+@pytest.mark.asyncio
+async def test_exit_publishes_exit_failed_fill_when_terminal_disconnected():
+    from execution_bridge.d1_trap_bridge import D1TrapExecutionBridge, D1TrapFillEvent
+
+    class _FakeDB:
+        def get_bindings_safe_sync(self, client_id):
+            return [{
+                "binding_id": "zerodha",
+                "trading_mode": "live",
+                "terminal_connected": False,
+                "engine_active": True,
+                "is_trade_enabled": True,
+            }]
+
+    class _FakeRouter:
+        _brokers = {}
+        _client_db = _FakeDB()
+
+    bus = _CapturingBus()
+    bridge = D1TrapExecutionBridge.__new__(D1TrapExecutionBridge)
+    bridge._bus = bus
+    bridge._router = _FakeRouter()
+    bridge._trade_log = None
+
+    ev = _Ev()  # action="SELL" by default
+    await bridge._handle(ev)
+
+    assert len(bus.published) == 1
+    topic, fill = bus.published[0]
+    assert topic == Topic.D1_TRAP_ORDER_FILL
+    assert isinstance(fill, D1TrapFillEvent)
+    assert fill.exit_failed is True
+    assert fill.entry_aborted is False
+    assert fill.routing_failed is True
+    assert fill.event_id == ev.event_id
+    assert fill.fill_price == 0.0
+
+
+@pytest.mark.asyncio
+async def test_entry_publishes_entry_aborted_fill_when_can_trade_gate_closed():
+    from execution_bridge.d1_trap_bridge import D1TrapExecutionBridge, D1TrapFillEvent
+
+    class _FakeDB:
+        def get_bindings_safe_sync(self, client_id):
+            return [{
+                "binding_id": "zerodha",
+                "trading_mode": "live",
+                "terminal_connected": True,
+                "engine_active": True,
+                "is_trade_enabled": False,  # gate closed
+            }]
+
+        def get_deployments_sync(self, client_id):
+            return [{
+                "binding_id": "zerodha",
+                "strategy_name": "d1_trap_bear_only",
+                "underlying": "NIFTY",
+                "is_running": 1,
+            }]
+
+    class _FakeRouter:
+        _brokers = {}
+        _client_db = _FakeDB()
+
+    bus = _CapturingBus()
+    bridge = D1TrapExecutionBridge.__new__(D1TrapExecutionBridge)
+    bridge._bus = bus
+    bridge._router = _FakeRouter()
+    bridge._trade_log = None
+
+    class _BuyEv(_Ev):
+        action = "BUY"
+        event_id = "NIFTY_PE24600_ENTRY_1"
+
+    ev = _BuyEv()
+    await bridge._handle(ev)
+
+    assert len(bus.published) == 1
+    topic, fill = bus.published[0]
+    assert topic == Topic.D1_TRAP_ORDER_FILL
+    assert isinstance(fill, D1TrapFillEvent)
+    assert fill.entry_aborted is True
+    assert fill.exit_failed is False
+    assert fill.event_id == ev.event_id
+
+
+@pytest.mark.asyncio
+async def test_exit_publishes_exit_failed_fill_when_broker_unresolved_live(monkeypatch):
+    from execution_bridge.d1_trap_bridge import D1TrapExecutionBridge, D1TrapFillEvent
+
+    class _FakeDB:
+        def get_bindings_safe_sync(self, client_id):
+            return [{
+                "binding_id": "zerodha",
+                "trading_mode": "live",
+                "terminal_connected": True,
+                "engine_active": True,
+                "is_trade_enabled": True,
+            }]
+
+    class _FakeRouter:
+        _brokers = {}  # always empty -- broker never resolves
+        _client_db = _FakeDB()
+
+    async def _fake_resolve(bus, router, client_id, binding_id, strategy, context="", **kw):
+        return None
+    monkeypatch.setattr(
+        "execution_bridge.broker_resolve.resolve_broker_or_alert", _fake_resolve,
+    )
+
+    bus = _CapturingBus()
+    bridge = D1TrapExecutionBridge.__new__(D1TrapExecutionBridge)
+    bridge._bus = bus
+    bridge._router = _FakeRouter()
+    bridge._trade_log = None
+
+    ev = _Ev()  # action="SELL", so no can_trade gate check
+    await bridge._handle(ev)
+
+    assert len(bus.published) == 1
+    topic, fill = bus.published[0]
+    assert topic == Topic.D1_TRAP_ORDER_FILL
+    assert fill.exit_failed is True
+    assert fill.event_id == ev.event_id
+
+
+# ── 2026-08-12: real live-fill success path, previously never covered ────────
+# Every test above only exercises abort/reject/no-route paths, which all
+# short-circuit before OrderRequest is ever constructed. That gap let a real
+# bug ship for 7 days (commit 85f9ddb, 2026-08-05) undetected by a fully
+# green suite: OrderRequest(symbol=...) -- the dataclass field is actually
+# broker_symbol, so EVERY live order crashed with TypeError before
+# broker.place_order() was ever called (confirmed live in production on
+# BANKNIFTY D1TrapSR 2026-08-12 -- entry + both exit attempts all raised
+# this). This test drives _handle() all the way through a live mode="live"
+# ENTRY with a broker that actually resolves and fills, so the bug is back
+# in scope and would fail loudly if it regressed.
+
+
+@pytest.mark.asyncio
+async def test_live_fill_success_reaches_broker_and_publishes_real_fill(monkeypatch):
+    from execution_bridge.d1_trap_bridge import D1TrapExecutionBridge, D1TrapFillEvent
+    from execution_bridge.base_broker import OrderRequest
+
+    class _FakeDB:
+        def get_bindings_safe_sync(self, client_id):
+            return [{
+                "binding_id": "zerodha",
+                "trading_mode": "live",
+                "terminal_connected": True,
+                "engine_active": True,
+                "is_trade_enabled": True,
+            }]
+
+        def get_deployments_sync(self, client_id):
+            return [{
+                "binding_id": "zerodha",
+                "strategy_name": "d1_trap_bear_only",
+                "underlying": "NIFTY",
+                "is_running": 1,
+            }]
+
+    class _FakeRouter:
+        _brokers = {}
+        _client_db = _FakeDB()
+
+    captured = {}
+
+    class _FakeFill:
+        avg_price = 91.5
+
+    class _FakeBroker:
+        provider = "zerodha"
+
+        async def place_order(self, req):
+            assert isinstance(req, OrderRequest)
+            captured["req"] = req
+            return "ORDER123"
+
+        async def get_order_status(self, order_id):
+            assert order_id == "ORDER123"
+            return _FakeFill()
+
+    async def _fake_resolve(bus, router, client_id, binding_id, strategy, context="", **kw):
+        return _FakeBroker()
+    monkeypatch.setattr(
+        "execution_bridge.broker_resolve.resolve_broker_or_alert", _fake_resolve,
+    )
+
+    class _FakeTradeLog:
+        def log(self, *a, **kw):
+            pass
+
+    bus = _CapturingBus()
+    bridge = D1TrapExecutionBridge.__new__(D1TrapExecutionBridge)
+    bridge._bus = bus
+    bridge._router = _FakeRouter()
+    bridge._trade_log = _FakeTradeLog()
+    bridge._resolve_symbol = lambda ev, broker: "NIFTY24AUG24600PE"
+
+    class _BuyEv(_Ev):
+        action = "BUY"
+        event_id = "NIFTY_PE24600_ENTRY_1"
+
+    ev = _BuyEv()
+    await bridge._handle(ev)  # must not raise -- bug #1 raised TypeError here
+
+    # Regression guard: OrderRequest was actually constructed and reached
+    # broker.place_order() with the field the dataclass really has.
+    assert captured["req"].broker_symbol == "NIFTY24AUG24600PE"
+
+    assert len(bus.published) == 1
+    topic, fill = bus.published[0]
+    assert topic == Topic.D1_TRAP_ORDER_FILL
+    assert isinstance(fill, D1TrapFillEvent)
+    assert fill.paper_mode is False
+    assert fill.fill_price == 91.5
+    assert fill.symbol == "NIFTY24AUG24600PE"

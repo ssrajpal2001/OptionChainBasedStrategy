@@ -69,42 +69,28 @@ def _setup_logging(level: str) -> None:
     )
 
 
-async def _load_feeder_creds(db_path: str = "data/clients.db") -> tuple[dict, dict]:
-    """Load Upstox + Fyers credentials from the feeder creds table in ClientDB."""
+async def _load_feeder_creds(db_path: str = "data/clients.db") -> dict[str, dict]:
+    """Load all known feeder credentials from the feeder creds table in ClientDB."""
+    creds_map: dict[str, dict] = {}
     try:
         from data_layer.client_db import ClientDB
         db = ClientDB(db_path)
-        await db.init()
-        upstox_row = await db.get_feeder_creds("upstox")
-        fyers_row  = await db.get_feeder_creds("fyers")
-
-        upstox_creds: dict = {}
-        fyers_creds: dict  = {}
-
-        if upstox_row:
-            upstox_creds = {
-                "api_key":     upstox_row.get("api_key", ""),
-                "api_secret":  upstox_row.get("api_secret", ""),
-                "user_id":     upstox_row.get("user_id", ""),
-                "password":    upstox_row.get("password", ""),
-                "totp_secret": upstox_row.get("totp_secret", ""),
-                "access_token": upstox_row.get("access_token", ""),
-            }
-        if fyers_row:
-            fyers_creds = {
-                "api_key":     fyers_row.get("api_key", ""),
-                "api_secret":  fyers_row.get("api_secret", ""),
-                "user_id":     fyers_row.get("user_id", ""),
-                "password":    fyers_row.get("password", ""),
-                "totp_secret": fyers_row.get("totp_secret", ""),
-                "access_token": fyers_row.get("access_token", ""),
-            }
-        return upstox_creds, fyers_creds
+        await db.initialise()
+        for provider in ("upstox", "upstox2", "fyers"):
+            row = db.get_feeder_creds_sync(provider)
+            if row and row.get("access_token"):
+                creds_map[provider] = {
+                    "api_key":      row.get("api_key", ""),
+                    "api_secret":   row.get("secret", ""),
+                    "user_id":      row.get("client_id", ""),
+                    "access_token": row.get("access_token", ""),
+                }
+        return creds_map
     except Exception as exc:
         logging.getLogger(__name__).warning(
             "FeedServer: could not load credentials from DB: %s — using empty creds.", exc
         )
-        return {}, {}
+        return {}
 
 
 async def _main(args: argparse.Namespace) -> None:
@@ -128,18 +114,18 @@ async def _main(args: argparse.Namespace) -> None:
 
     if args.dual:
         logger.info("FeedServer: loading feeder credentials from DB...")
-        upstox_creds, fyers_creds = await _load_feeder_creds()
+        creds_map = await _load_feeder_creds()
         logger.info(
-            "FeedServer: credentials loaded — upstox=%s fyers=%s",
-            bool(upstox_creds.get("api_key")), bool(fyers_creds.get("api_key")),
+            "FeedServer: credentials loaded — %s",
+            ", ".join(f"{p}={bool(c.get('access_token'))}" for p, c in creds_map.items()),
         )
         # Start mock feeder first so the system is live immediately
         await feeder.start()
         # Then bring up the real dual-feed
-        if upstox_creds or fyers_creds:
+        if creds_map:
             try:
-                await feeder.start_dual(upstox_creds, fyers_creds)
-                logger.info("FeedServer: dual-feed (Upstox + Fyers) active.")
+                await feeder.start_providers(creds_map)
+                logger.info("FeedServer: dual-feed active (%s).", ", ".join(creds_map))
             except Exception as exc:
                 logger.error("FeedServer: dual-feed start failed: %s — running on mock.", exc)
     else:

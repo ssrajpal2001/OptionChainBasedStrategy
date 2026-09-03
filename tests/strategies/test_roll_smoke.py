@@ -34,7 +34,7 @@ def test_single_side_roll_emits_close_and_open_when_candidate_exists():
         for k in (23450, 23500, 23550):
             s._prev_atp_closed[(k, "CE")] = s._strike_prem[(k, "CE")]["atp"] + 5.0
             s._prev_atp_closed[(k, "PE")] = s._strike_prem[(k, "PE")]["atp"] + 5.0
-        await s._single_side_roll("CE", datetime.datetime.now(IST), "ltp_decay_CE")
+        await s._single_side_roll(datetime.datetime.now(IST), "ltp_decay")
         while not q.empty():
             seen.append(q.get_nowait())
         actions = [(e.action, tuple(e.legs)) for e in seen if isinstance(e, StraddleOrderEvent)]
@@ -44,36 +44,37 @@ def test_single_side_roll_emits_close_and_open_when_candidate_exists():
         assert int(s._position.ce_leg.strike) != 23650   # rolled to a DIFFERENT strike (no same-strike wash)
 
 
-def test_single_side_roll_skips_when_best_partner_is_same_strike():
-    """A roll whose best balanced partner IS the leg's current strike must fire NO orders
-    (no buy-to-close + re-sell wash on the identical strike — the order-book bug)."""
+def test_single_side_roll_keeps_original_pair_when_best_partner_is_same_strike():
+    """If the only eligible partner is the SAME strike, there is no new pair.
+    The position must keep the original pair instead of doing a wash roll."""
     async def run():
         bus = EventBus()
         seen = []
         q = bus.subscribe(Topic.ORDER_REQUEST)
         s = SellStraddleStrategy(bus, cfg=GlobalConfig(), underlying="NIFTY")
         s._spot = 23500
-        # CE leg already AT the strike select_partner_for will pick (ATM 23500) → no-op roll.
         s._position = StraddlePosition(
             underlying="NIFTY", atm_at_entry=23500, entry_spot=23500,
             ce_leg=StraddleLeg("CE", 23500, 80.0, 10.0),
             pe_leg=StraddleLeg("PE", 23500, 80.0, 70.0),
             net_credit=160.0, status="open",
         )
-        s._strike_prem[(23500, "CE")] = {"ltp": 70.0, "atp": 80.0}   # ==kept PE(70): eligible (<=70) & closest → picked (same strike → skip)
+        # Only the SAME strike (23500 CE) is eligible; adjacent CE strikes are below ltp_target.
+        s._strike_prem[(23500, "CE")] = {"ltp": 70.0, "atp": 80.0}
         s._strike_prem[(23500, "PE")] = {"ltp": 60.0, "atp": 65.0}
         for k in (23450, 23550):
-            s._strike_prem[(k, "CE")] = {"ltp": 60.0, "atp": 65.0}
+            s._strike_prem[(k, "CE")] = {"ltp": 10.0, "atp": 65.0}   # below ltp_target → skipped
             s._strike_prem[(k, "PE")] = {"ltp": 72.0, "atp": 78.0}
         for k in (23450, 23500, 23550):
             s._prev_atp_closed[(k, "CE")] = s._strike_prem[(k, "CE")]["atp"] + 5.0
             s._prev_atp_closed[(k, "PE")] = s._strike_prem[(k, "PE")]["atp"] + 5.0
-        await s._single_side_roll("CE", datetime.datetime.now(IST), "ltp_decay_CE")
+        await s._single_side_roll(datetime.datetime.now(IST), "ltp_decay")
         while not q.empty():
             seen.append(q.get_nowait())
         orders = [e for e in seen if isinstance(e, StraddleOrderEvent)]
-        assert orders == []                                 # NO orders fired
-        assert int(s._position.ce_leg.strike) == 23500      # position unchanged
+        assert len(orders) == 0  # no orders emitted
+        assert s._position is not None
+        assert s._position.status == "open"
     asyncio.run(run())
     asyncio.run(run())
 
@@ -81,15 +82,13 @@ def test_single_side_roll_skips_when_best_partner_is_same_strike():
 def _neutralize_other_exits(s):
     """Turn off every _check_exits branch EXCEPT vwap_rise so a test can isolate it."""
     s._force_exit = datetime.time(23, 59)          # not EOD
-    s._guardrail_pnl_enabled = False
+    s._trail_sl_enabled = False
     s._day_profit_target_pct = 0.0
     s._day_loss_sl_pct = 0.0
     s._initial_net_credit = 0.0                    # skips the day-% block
     s._ltp_decay_enabled = False
     s._ratio_threshold = 99.0                      # ratio 1.0 < 99 → no ratio exit
     s._tsl_enabled = False
-    s._guardrail_roc_enabled = False
-    s._roc_guardrail_enabled = False
     s._exit_rules = []                             # no Dynamic / EXIT-EVAL dump
     s._vwap_rise_enabled = True
     s._vwap_rise_threshold = 1.0

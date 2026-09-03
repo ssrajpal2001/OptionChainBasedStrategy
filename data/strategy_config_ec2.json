@@ -1,0 +1,1723 @@
+{
+  "rms": {
+    "max_drawdown_pct": 30.0,
+    "order_throttle_per_sec": 5,
+    "squareoff_time": "15:23",
+    "distance_filter_pct": 5.0
+  },
+  "indicators": {
+    "rsi_period": 14,
+    "vwap_window": 500,
+    "adx_period": 20,
+    "ema_fast": 9,
+    "ema_slow": 21,
+    "htf_minutes": 75,
+    "ltf_minutes": 5
+  },
+  "iron_condor": {
+    "enabled": true,
+    "start_time": "09:16",
+    "squareoff_time": "15:15",
+    "entry_day": "daily",
+    "product_type": "MIS",
+    "lot_size": 65,
+    "strike_step": 50,
+    "max_adjustments_per_side": 3,
+    "roll_step_pts": 5,
+    "profit_target_inr": 5000.0,
+    "stoploss_inr": 2000.0,
+    "ratio_exit_threshold": 3.0,
+    "rsi_min": 40.0,
+    "rsi_max": 60.0,
+    "adx_max": 25.0,
+    "profit_pct": 50.0,
+    "sl_pct": 200.0,
+    "per_index": {
+      "NIFTY": {
+        "short_otm_pts": 200.0,
+        "wing_width_pts": 200.0
+      },
+      "BANKNIFTY": {
+        "short_otm_pts": 400.0,
+        "wing_width_pts": 500.0
+      },
+      "FINNIFTY": {
+        "short_otm_pts": 200.0,
+        "wing_width_pts": 200.0
+      },
+      "SENSEX": {
+        "short_otm_pts": 500.0,
+        "wing_width_pts": 500.0
+      },
+      "MIDCPNIFTY": {
+        "short_otm_pts": 150.0,
+        "wing_width_pts": 200.0
+      }
+    }
+  },
+  "sell_straddle": {
+    "entry_start": "09:20",
+    "entry_end": "12:00",
+    "squareoff_time": "15:15",
+    "trail_lock_pct": 20.0,
+    "trail_floor_pct": 10.0,
+    "profit_target_pct": 0.0,
+    "loss_sl_pct": 0.0,
+    "max_trades": 1,
+    "roc_limit_pct": 1.5,
+    "ratio_exit_threshold": 3.0,
+    "sl_cooldown_tf_multiplier": 1.0,
+    "capital_deployed_inr": 0,
+    "lot_size": 50,
+    "smart_rolling_enabled": true,
+    "vwap_rise_sl_enabled": false,
+    "vwap_rise_sl_threshold_pct": 1.0,
+    "tsl_scalable_enabled": false,
+    "tsl_base_profit_rs": 1500.0,
+    "tsl_base_lock_rs": 500.0,
+    "tsl_step_profit_rs": 500.0,
+    "tsl_step_lock_rs": 500.0,
+    "entry_rules_beginning": [],
+    "entry_rules_reentry": [],
+    "per_day": {
+      "monday": {
+        "enabled": false,
+        "profit_target_pct": 0.0,
+        "loss_sl_pct": 0.0
+      },
+      "tuesday": {
+        "enabled": false,
+        "profit_target_pct": 0.0,
+        "loss_sl_pct": 0.0
+      },
+      "wednesday": {
+        "enabled": false,
+        "profit_target_pct": 0.0,
+        "loss_sl_pct": 0.0
+      },
+      "thursday": {
+        "enabled": false,
+        "profit_target_pct": 0.0,
+        "loss_sl_pct": 0.0
+      },
+      "friday": {
+        "enabled": false,
+        "profit_target_pct": 0.0,
+        "loss_sl_pct": 0.0
+      }
+    },
+    "profit_pct": 30.0,
+    "sl_pct": 200.0,
+    "rsi_min": 35.0,
+    "rsi_max": 65.0,
+    "adx_max": 30.0
+  },
+  "indices": {
+    "NIFTY": {
+      "sell_straddle": {
+        "entry_start": "09:15",
+        "entry_end": "15:20",
+        "squareoff_time": "15:20",
+        "entry_workflow_mode": "hybrid",
+        "ltp_target": 50,
+        "trail_lock_pct": 20,
+        "trail_floor_pct": 12.5,
+        "pool_itm_depth": 5,
+        "pool_otm_depth": 5,
+        "roll_max_itm_steps": 5,
+        "itm_pair_gate_enabled": true,
+        "itm_pair_gate_profit_inr": 500,
+        "entry_rules_beginning": [
+          {
+            "indicator": "advanced",
+            "operator": "AND",
+            "openBrackets": "",
+            "closeBrackets": "",
+            "tf": "2",
+            "operator_sym": "<",
+            "operand1": "SLOPE",
+            "operand2": "VALUE",
+            "operand2_val": 0
+          }
+        ],
+        "entry_rules_reentry": [
+          {
+            "indicator": "advanced",
+            "operator": "AND",
+            "openBrackets": "",
+            "closeBrackets": "",
+            "tf": "2",
+            "operator_sym": "<",
+            "operand1": "CLOSE",
+            "operand2": "VWAP",
+            "operand2_val": 0
+          },
+          {
+            "indicator": "advanced",
+            "operator": "AND",
+            "openBrackets": "",
+            "closeBrackets": "",
+            "tf": "2",
+            "operator_sym": "<",
+            "operand1": "SLOPE",
+            "operand2": "VALUE",
+            "operand2_val": 0
+          }
+        ],
+        "exit_rules": [
+          {
+            "indicator": "advanced",
+            "operator": "AND",
+            "openBrackets": "",
+            "closeBrackets": "",
+            "tf": "1",
+            "operator_sym": ">",
+            "operand1": "SLOPE",
+            "operand2": "VALUE",
+            "operand2_val": 0
+          },
+          {
+            "indicator": "advanced",
+            "operator": "AND",
+            "openBrackets": "",
+            "closeBrackets": "",
+            "tf": "2",
+            "operator_sym": ">",
+            "operand1": "RSI",
+            "operand2": "VALUE",
+            "operand2_val": 55
+          },
+          {
+            "indicator": "advanced",
+            "operator": "AND",
+            "openBrackets": "",
+            "closeBrackets": "",
+            "tf": "2",
+            "operator_sym": ">",
+            "operand1": "ROC",
+            "operand2": "VALUE",
+            "operand2_val": 10
+          },
+          {
+            "indicator": "advanced",
+            "operator": "AND",
+            "openBrackets": "",
+            "closeBrackets": "",
+            "tf": "1",
+            "operator_sym": ">",
+            "operand1": "CLOSE",
+            "operand2": "VWAP",
+            "operand2_val": 0
+          }
+        ],
+        "profit_target_pct": 0,
+        "loss_sl_pct": 0,
+        "tsl_enabled": true,
+        "tsl_scalable": {
+          "enabled": true,
+          "base_profit": 1500,
+          "base_lock": 500,
+          "step_profit": 500,
+          "step_lock": 500,
+          "basis": "ltp"
+        },
+        "ratio_exit": {
+          "enabled": true,
+          "threshold": 4,
+          "max_entry_ratio": 0
+        },
+        "ltp_decay": {
+          "enabled": true,
+          "ltp_exit_min": 20
+        },
+        "smart_rolling_enabled": true,
+        "vwap_rise_sl": {
+          "enabled": true,
+          "tf": 1,
+          "threshold": 3
+        },
+        "sl_cooldown_tf_multiplier": 1,
+        "capital_deployed_inr": 16666.666666666668,
+        "max_trades": 5,
+        "per_day": {
+          "monday": {
+            "enabled": true,
+            "profit_target_pct": 30,
+            "loss_sl_pct": 30,
+            "guardrail_pnl": {
+              "target_pts": 0,
+              "stoploss_pts": 0
+            },
+            "exit_basis": "ltp"
+          },
+          "tuesday": {
+            "enabled": true,
+            "profit_target_pct": 30,
+            "loss_sl_pct": 30,
+            "guardrail_pnl": {
+              "target_pts": 0,
+              "stoploss_pts": 0
+            },
+            "exit_basis": "ltp"
+          },
+          "wednesday": {
+            "enabled": true,
+            "profit_target_pct": 30,
+            "loss_sl_pct": 30,
+            "guardrail_pnl": {
+              "target_pts": 0,
+              "stoploss_pts": 0
+            },
+            "exit_basis": "ltp"
+          },
+          "thursday": {
+            "enabled": true,
+            "profit_target_pct": 30,
+            "loss_sl_pct": 30,
+            "guardrail_pnl": {
+              "target_pts": 0,
+              "stoploss_pts": 0
+            },
+            "exit_basis": "ltp"
+          },
+          "friday": {
+            "enabled": true,
+            "profit_target_pct": 30,
+            "loss_sl_pct": 30,
+            "guardrail_pnl": {
+              "target_pts": 0,
+              "stoploss_pts": 0
+            },
+            "exit_basis": "ltp"
+          },
+          "saturday": {
+            "enabled": false,
+            "profit_target_pct": 0,
+            "loss_sl_pct": 0,
+            "exit_basis": "ltp"
+          },
+          "sunday": {
+            "enabled": false,
+            "profit_target_pct": 0,
+            "loss_sl_pct": 0,
+            "exit_basis": "ltp"
+          }
+        },
+        "profit_target_enabled": true,
+        "profit_pct": 50,
+        "sl_enabled": true,
+        "sl_pct": 30,
+        "guardrail_roc": {
+          "enabled": false,
+          "tf": 15,
+          "length": 9,
+          "target": 20,
+          "stoploss": -40
+        },
+        "guardrail_pnl": {
+          "enabled": false,
+          "target_pts": 100,
+          "stoploss_pts": -60
+        },
+        "lot_multiplier": 1.0,
+        "product_type": "NRML",
+        "sl_cooldown_minutes": 1,
+        "lot_size": 65,
+        "max_sl_rs": 5000,
+        "entry_basis": "ltp",
+        "theta_target": 20,
+        "trail_basis": "ltp",
+        "itm_pair_gate_enabled": false
+      },
+      "iron_condor": {
+        "enabled": true,
+        "start_time": "09:16",
+        "squareoff_time": "15:15",
+        "entry_day": "monday",
+        "product_type": "NRML",
+        "lot_size": 65,
+        "strike_step": 50,
+        "max_adjustments_per_side": 4,
+        "roll_step_pts": 5,
+        "profit_target_inr": 5000,
+        "stoploss_inr": 2000,
+        "ratio_exit_threshold": 3,
+        "short_leg_otm_pts": 300,
+        "long_leg_otm_pts": 150,
+        "ratio_trigger": 2
+      },
+      "trap_trading": {
+        "roundoff_step": 50,
+        "dte_offset_ladder": {
+          "5": 5,
+          "4": 4,
+          "3": 3,
+          "2": 2,
+          "1": 1
+        },
+        "lookback_days": 2,
+        "buy_depth": 0,
+        "htf_minutes": 75,
+        "mtf_minutes": 5,
+        "sl_min_minutes": 1
+      },
+      "trap_scanner": {
+        "lot_multiplier": 3.0,
+        "squareoff_time": "15:15"
+      }
+    },
+    "BANKNIFTY": {
+      "sell_straddle": {
+        "entry_start": "09:20",
+        "entry_end": "12:00",
+        "squareoff_time": "15:15",
+        "entry_workflow_mode": "hybrid",
+        "ltp_target": 0.0,
+        "trail_lock_pct": 20.0,
+        "trail_floor_pct": 10.0,
+        "pool_itm_depth": 4,
+        "pool_otm_depth": 4,
+        "roll_max_itm_steps": 5,
+        "entry_rules_beginning": [],
+        "entry_rules_reentry": [],
+        "exit_rules": [],
+        "profit_target_pct": 0.0,
+        "loss_sl_pct": 0.0,
+        "tsl_enabled": false,
+        "tsl_scalable": {
+          "enabled": false,
+          "base_profit": 3000,
+          "base_lock": 1500,
+          "step_profit": 1000,
+          "step_lock": 500
+        },
+        "ratio_exit": {
+          "enabled": false,
+          "threshold": 3.0
+        },
+        "ltp_decay": {
+          "enabled": false,
+          "ltp_exit_min": 20.0
+        },
+        "smart_rolling_enabled": false,
+        "vwap_rise_sl": {
+          "enabled": false,
+          "tf": 1,
+          "threshold": 1.0
+        },
+        "sl_cooldown_tf_multiplier": 1.0,
+        "capital_deployed_inr": 0,
+        "max_trades": 1,
+        "per_day": {
+          "monday": {
+            "enabled": false,
+            "profit_target_pct": 0.0,
+            "loss_sl_pct": 0.0
+          },
+          "tuesday": {
+            "enabled": false,
+            "profit_target_pct": 0.0,
+            "loss_sl_pct": 0.0
+          },
+          "wednesday": {
+            "enabled": false,
+            "profit_target_pct": 0.0,
+            "loss_sl_pct": 0.0
+          },
+          "thursday": {
+            "enabled": false,
+            "profit_target_pct": 0.0,
+            "loss_sl_pct": 0.0
+          },
+          "friday": {
+            "enabled": false,
+            "profit_target_pct": 0.0,
+            "loss_sl_pct": 0.0
+          }
+        },
+        "profit_target_enabled": true,
+        "profit_pct": 30.0,
+        "sl_enabled": true,
+        "sl_pct": 200.0,
+        "guardrail_roc": {
+          "enabled": false,
+          "tf": 15,
+          "length": 9,
+          "target": 20.0,
+          "stoploss": -40.0
+        },
+        "guardrail_pnl": {
+          "enabled": false,
+          "target_pts": 100.0,
+          "stoploss_pts": -60.0
+        }
+      },
+      "iron_condor": {
+        "enabled": true,
+        "start_time": "09:16",
+        "squareoff_time": "15:15",
+        "entry_day": "daily",
+        "product_type": "MIS",
+        "lot_size": 65,
+        "strike_step": 50,
+        "max_adjustments_per_side": 3,
+        "roll_step_pts": 5,
+        "profit_target_inr": 5000.0,
+        "stoploss_inr": 2000.0,
+        "ratio_exit_threshold": 3.0,
+        "short_leg_otm_pts": 400.0,
+        "long_leg_otm_pts": 600.0
+      },
+      "trap_trading": {
+        "roundoff_step": 100,
+        "dte_offset_ladder": {
+          "5": 5,
+          "4": 4,
+          "3": 3,
+          "2": 2,
+          "1": 1
+        },
+        "lookback_days": 2,
+        "buy_depth": 0,
+        "htf_minutes": 75,
+        "mtf_minutes": 5,
+        "sl_min_minutes": 1
+      },
+      "trap_scanner": {
+        "lot_multiplier": 2.0,
+        "squareoff_time": "15:15"
+      }
+    },
+    "FINNIFTY": {
+      "sell_straddle": {
+        "entry_start": "09:20",
+        "entry_end": "12:00",
+        "squareoff_time": "15:15",
+        "entry_workflow_mode": "hybrid",
+        "ltp_target": 0.0,
+        "trail_lock_pct": 20.0,
+        "trail_floor_pct": 10.0,
+        "pool_itm_depth": 4,
+        "pool_otm_depth": 4,
+        "roll_max_itm_steps": 5,
+        "entry_rules_beginning": [],
+        "entry_rules_reentry": [],
+        "exit_rules": [],
+        "profit_target_pct": 0.0,
+        "loss_sl_pct": 0.0,
+        "tsl_enabled": false,
+        "tsl_scalable": {
+          "enabled": false,
+          "base_profit": 3000,
+          "base_lock": 1500,
+          "step_profit": 1000,
+          "step_lock": 500
+        },
+        "ratio_exit": {
+          "enabled": false,
+          "threshold": 3.0
+        },
+        "ltp_decay": {
+          "enabled": false,
+          "ltp_exit_min": 20.0
+        },
+        "smart_rolling_enabled": false,
+        "vwap_rise_sl": {
+          "enabled": false,
+          "tf": 1,
+          "threshold": 1.0
+        },
+        "sl_cooldown_tf_multiplier": 1.0,
+        "capital_deployed_inr": 0,
+        "max_trades": 1,
+        "per_day": {
+          "monday": {
+            "enabled": false,
+            "profit_target_pct": 0.0,
+            "loss_sl_pct": 0.0
+          },
+          "tuesday": {
+            "enabled": false,
+            "profit_target_pct": 0.0,
+            "loss_sl_pct": 0.0
+          },
+          "wednesday": {
+            "enabled": false,
+            "profit_target_pct": 0.0,
+            "loss_sl_pct": 0.0
+          },
+          "thursday": {
+            "enabled": false,
+            "profit_target_pct": 0.0,
+            "loss_sl_pct": 0.0
+          },
+          "friday": {
+            "enabled": false,
+            "profit_target_pct": 0.0,
+            "loss_sl_pct": 0.0
+          }
+        },
+        "profit_target_enabled": true,
+        "profit_pct": 30.0,
+        "sl_enabled": true,
+        "sl_pct": 200.0,
+        "guardrail_roc": {
+          "enabled": false,
+          "tf": 15,
+          "length": 9,
+          "target": 20.0,
+          "stoploss": -40.0
+        },
+        "guardrail_pnl": {
+          "enabled": false,
+          "target_pts": 100.0,
+          "stoploss_pts": -60.0
+        }
+      },
+      "iron_condor": {
+        "enabled": true,
+        "start_time": "09:16",
+        "squareoff_time": "15:15",
+        "entry_day": "daily",
+        "product_type": "MIS",
+        "lot_size": 65,
+        "strike_step": 50,
+        "max_adjustments_per_side": 3,
+        "roll_step_pts": 5,
+        "profit_target_inr": 5000.0,
+        "stoploss_inr": 2000.0,
+        "ratio_exit_threshold": 3.0,
+        "short_leg_otm_pts": 200.0,
+        "long_leg_otm_pts": 300.0
+      },
+      "trap_trading": {
+        "roundoff_step": 50,
+        "dte_offset_ladder": {
+          "5": 5,
+          "4": 4,
+          "3": 3,
+          "2": 2,
+          "1": 1
+        },
+        "lookback_days": 2,
+        "buy_depth": 0,
+        "htf_minutes": 75,
+        "mtf_minutes": 5,
+        "sl_min_minutes": 1
+      }
+    },
+    "SENSEX": {
+      "sell_straddle": {
+        "entry_start": "09:15",
+        "entry_end": "15:00",
+        "squareoff_time": "15:15",
+        "entry_workflow_mode": "hybrid",
+        "ltp_target": 150,
+        "trail_lock_pct": 12.5,
+        "trail_floor_pct": 20,
+        "pool_itm_depth": 5,
+        "pool_otm_depth": 5,
+        "roll_max_itm_steps": 5,
+        "entry_rules_beginning": [
+          {
+            "indicator": "advanced",
+            "operator": "AND",
+            "openBrackets": "",
+            "closeBrackets": "",
+            "tf": "2",
+            "operator_sym": "<",
+            "operand1": "SLOPE",
+            "operand2": "VALUE",
+            "operand2_val": 0
+          }
+        ],
+        "entry_rules_reentry": [
+          {
+            "indicator": "advanced",
+            "operator": "AND",
+            "openBrackets": "",
+            "closeBrackets": "",
+            "tf": "2",
+            "operator_sym": "<",
+            "operand1": "CLOSE",
+            "operand2": "VWAP",
+            "operand2_val": 0
+          },
+          {
+            "indicator": "advanced",
+            "operator": "AND",
+            "openBrackets": "",
+            "closeBrackets": "",
+            "tf": "2",
+            "operator_sym": "<",
+            "operand1": "SLOPE",
+            "operand2": "VALUE",
+            "operand2_val": 0
+          }
+        ],
+        "exit_rules": [
+          {
+            "indicator": "advanced",
+            "operator": "AND",
+            "openBrackets": "",
+            "closeBrackets": "",
+            "tf": "1",
+            "operator_sym": ">",
+            "operand1": "SLOPE",
+            "operand2": "VALUE",
+            "operand2_val": 0
+          },
+          {
+            "indicator": "advanced",
+            "operator": "AND",
+            "openBrackets": "",
+            "closeBrackets": "",
+            "tf": "3",
+            "operator_sym": ">",
+            "operand1": "RSI",
+            "operand2": "VALUE",
+            "operand2_val": 55
+          },
+          {
+            "indicator": "advanced",
+            "operator": "AND",
+            "openBrackets": "",
+            "closeBrackets": "",
+            "tf": "2",
+            "operator_sym": ">",
+            "operand1": "ROC",
+            "operand2": "VALUE",
+            "operand2_val": 10
+          },
+          {
+            "indicator": "advanced",
+            "operator": "AND",
+            "openBrackets": "",
+            "closeBrackets": "",
+            "tf": "1",
+            "operator_sym": ">",
+            "operand1": "CLOSE",
+            "operand2": "VWAP",
+            "operand2_val": 0
+          }
+        ],
+        "profit_target_pct": 0,
+        "loss_sl_pct": 0,
+        "tsl_enabled": true,
+        "tsl_scalable": {
+          "enabled": true,
+          "base_profit": 1500,
+          "base_lock": 500,
+          "step_profit": 500,
+          "step_lock": 500,
+          "basis": "ltp"
+        },
+        "ratio_exit": {
+          "enabled": true,
+          "threshold": 4,
+          "max_entry_ratio": 0
+        },
+        "ltp_decay": {
+          "enabled": true,
+          "ltp_exit_min": 10
+        },
+        "smart_rolling_enabled": true,
+        "vwap_rise_sl": {
+          "enabled": true,
+          "tf": 1,
+          "threshold": 3
+        },
+        "sl_cooldown_tf_multiplier": 1,
+        "capital_deployed_inr": 16666.67,
+        "max_trades": 5,
+        "per_day": {
+          "monday": {
+            "enabled": true,
+            "profit_target_pct": 30,
+            "loss_sl_pct": 30,
+            "guardrail_pnl": {
+              "target_pts": 0,
+              "stoploss_pts": 0
+            },
+            "exit_basis": "ltp"
+          },
+          "tuesday": {
+            "enabled": true,
+            "profit_target_pct": 30,
+            "loss_sl_pct": 30,
+            "guardrail_pnl": {
+              "target_pts": 0,
+              "stoploss_pts": 0
+            },
+            "exit_basis": "ltp"
+          },
+          "wednesday": {
+            "enabled": true,
+            "profit_target_pct": 30,
+            "loss_sl_pct": 30,
+            "guardrail_pnl": {
+              "target_pts": 0,
+              "stoploss_pts": 0
+            },
+            "exit_basis": "ltp"
+          },
+          "thursday": {
+            "enabled": true,
+            "profit_target_pct": 30,
+            "loss_sl_pct": 30,
+            "guardrail_pnl": {
+              "target_pts": 0,
+              "stoploss_pts": 0
+            },
+            "exit_basis": "ltp"
+          },
+          "friday": {
+            "enabled": true,
+            "profit_target_pct": 30,
+            "loss_sl_pct": 30,
+            "guardrail_pnl": {
+              "target_pts": 0,
+              "stoploss_pts": 0
+            },
+            "exit_basis": "ltp"
+          },
+          "saturday": {
+            "enabled": false,
+            "profit_target_pct": 0,
+            "loss_sl_pct": 0,
+            "exit_basis": "ltp"
+          },
+          "sunday": {
+            "enabled": false,
+            "profit_target_pct": 0,
+            "loss_sl_pct": 0,
+            "exit_basis": "ltp"
+          }
+        },
+        "profit_target_enabled": true,
+        "profit_pct": 50,
+        "sl_enabled": true,
+        "sl_pct": 30,
+        "guardrail_roc": {
+          "enabled": false,
+          "tf": 15,
+          "length": 9,
+          "target": 20,
+          "stoploss": -40
+        },
+        "guardrail_pnl": {
+          "enabled": false,
+          "target_pts": 100,
+          "stoploss_pts": -60
+        },
+        "lot_multiplier": 2.0,
+        "product_type": "NRML",
+        "sl_cooldown_minutes": 5,
+        "lot_size": 20,
+        "max_sl_rs": 5000,
+        "entry_basis": "ltp",
+        "theta_target": 60,
+        "trail_basis": "ltp"
+      },
+      "iron_condor": {
+        "enabled": true,
+        "start_time": "09:16",
+        "squareoff_time": "15:15",
+        "entry_day": "daily",
+        "product_type": "MIS",
+        "lot_size": 65,
+        "strike_step": 50,
+        "max_adjustments_per_side": 3,
+        "roll_step_pts": 5,
+        "profit_target_inr": 5000.0,
+        "stoploss_inr": 2000.0,
+        "ratio_exit_threshold": 3.0,
+        "short_leg_otm_pts": 500.0,
+        "long_leg_otm_pts": 750.0
+      },
+      "trap_trading": {
+        "roundoff_step": 100,
+        "dte_offset_ladder": {
+          "5": 5,
+          "4": 4,
+          "3": 3,
+          "2": 2,
+          "1": 1
+        },
+        "lookback_days": 2,
+        "buy_depth": 0,
+        "htf_minutes": 75,
+        "mtf_minutes": 5,
+        "sl_min_minutes": 1
+      },
+      "trap_scanner": {
+        "lot_multiplier": 2.0,
+        "squareoff_time": "15:15"
+      }
+    },
+    "MIDCPNIFTY": {
+      "sell_straddle": {
+        "entry_start": "09:20",
+        "entry_end": "12:00",
+        "squareoff_time": "15:15",
+        "entry_workflow_mode": "hybrid",
+        "ltp_target": 0.0,
+        "trail_lock_pct": 20.0,
+        "trail_floor_pct": 10.0,
+        "pool_itm_depth": 4,
+        "pool_otm_depth": 4,
+        "roll_max_itm_steps": 5,
+        "entry_rules_beginning": [],
+        "entry_rules_reentry": [],
+        "exit_rules": [],
+        "profit_target_pct": 0.0,
+        "loss_sl_pct": 0.0,
+        "tsl_enabled": false,
+        "tsl_scalable": {
+          "enabled": false,
+          "base_profit": 3000,
+          "base_lock": 1500,
+          "step_profit": 1000,
+          "step_lock": 500
+        },
+        "ratio_exit": {
+          "enabled": false,
+          "threshold": 3.0
+        },
+        "ltp_decay": {
+          "enabled": false,
+          "ltp_exit_min": 20.0
+        },
+        "smart_rolling_enabled": false,
+        "vwap_rise_sl": {
+          "enabled": false,
+          "tf": 1,
+          "threshold": 1.0
+        },
+        "sl_cooldown_tf_multiplier": 1.0,
+        "capital_deployed_inr": 0,
+        "max_trades": 1,
+        "per_day": {
+          "monday": {
+            "enabled": false,
+            "profit_target_pct": 0.0,
+            "loss_sl_pct": 0.0
+          },
+          "tuesday": {
+            "enabled": false,
+            "profit_target_pct": 0.0,
+            "loss_sl_pct": 0.0
+          },
+          "wednesday": {
+            "enabled": false,
+            "profit_target_pct": 0.0,
+            "loss_sl_pct": 0.0
+          },
+          "thursday": {
+            "enabled": false,
+            "profit_target_pct": 0.0,
+            "loss_sl_pct": 0.0
+          },
+          "friday": {
+            "enabled": false,
+            "profit_target_pct": 0.0,
+            "loss_sl_pct": 0.0
+          }
+        },
+        "profit_target_enabled": true,
+        "profit_pct": 30.0,
+        "sl_enabled": true,
+        "sl_pct": 200.0,
+        "guardrail_roc": {
+          "enabled": false,
+          "tf": 15,
+          "length": 9,
+          "target": 20.0,
+          "stoploss": -40.0
+        },
+        "guardrail_pnl": {
+          "enabled": false,
+          "target_pts": 100.0,
+          "stoploss_pts": -60.0
+        }
+      },
+      "iron_condor": {
+        "enabled": true,
+        "start_time": "09:16",
+        "squareoff_time": "15:15",
+        "entry_day": "daily",
+        "product_type": "MIS",
+        "lot_size": 65,
+        "strike_step": 50,
+        "max_adjustments_per_side": 3,
+        "roll_step_pts": 5,
+        "profit_target_inr": 5000.0,
+        "stoploss_inr": 2000.0,
+        "ratio_exit_threshold": 3.0,
+        "short_leg_otm_pts": 150.0,
+        "long_leg_otm_pts": 250.0
+      },
+      "trap_trading": {
+        "roundoff_step": 50,
+        "dte_offset_ladder": {
+          "5": 5,
+          "4": 4,
+          "3": 3,
+          "2": 2,
+          "1": 1
+        },
+        "lookback_days": 2,
+        "buy_depth": 0,
+        "htf_minutes": 75,
+        "mtf_minutes": 5,
+        "sl_min_minutes": 1
+      }
+    },
+    "CRUDEOIL": {
+      "sell_straddle": {
+        "entry_start": "09:00",
+        "entry_end": "23:15",
+        "squareoff_time": "23:30",
+        "entry_workflow_mode": "hybrid",
+        "ltp_target": 50,
+        "trail_lock_pct": 12.5,
+        "trail_floor_pct": 20,
+        "pool_itm_depth": 4,
+        "pool_otm_depth": 4,
+        "roll_max_itm_steps": 5,
+        "entry_rules_beginning": [
+          {
+            "indicator": "advanced",
+            "operator": "AND",
+            "openBrackets": "",
+            "closeBrackets": "",
+            "tf": "1",
+            "operator_sym": "<",
+            "operand1": "CLOSE",
+            "operand2": "VWAP",
+            "operand2_val": 0
+          },
+          {
+            "indicator": "advanced",
+            "operator": "AND",
+            "openBrackets": "",
+            "closeBrackets": "",
+            "tf": "2",
+            "operator_sym": "<",
+            "operand1": "SLOPE",
+            "operand2": "VALUE",
+            "operand2_val": 0
+          }
+        ],
+        "entry_rules_reentry": [
+          {
+            "indicator": "advanced",
+            "operator": "AND",
+            "openBrackets": "",
+            "closeBrackets": "",
+            "tf": "5",
+            "operator_sym": "<",
+            "operand1": "CLOSE",
+            "operand2": "VWAP",
+            "operand2_val": 0
+          },
+          {
+            "indicator": "advanced",
+            "operator": "AND",
+            "openBrackets": "",
+            "closeBrackets": "",
+            "tf": "2",
+            "operator_sym": "<",
+            "operand1": "SLOPE",
+            "operand2": "VALUE",
+            "operand2_val": 0
+          }
+        ],
+        "exit_rules": [
+          {
+            "indicator": "advanced",
+            "operator": "AND",
+            "openBrackets": "",
+            "closeBrackets": "",
+            "tf": "1",
+            "operator_sym": ">",
+            "operand1": "CLOSE",
+            "operand2": "VWAP",
+            "operand2_val": 0
+          },
+          {
+            "indicator": "advanced",
+            "operator": "AND",
+            "openBrackets": "",
+            "closeBrackets": "",
+            "tf": "1",
+            "operator_sym": ">",
+            "operand1": "SLOPE",
+            "operand2": "VALUE",
+            "operand2_val": 0
+          },
+          {
+            "indicator": "advanced",
+            "operator": "AND",
+            "openBrackets": "",
+            "closeBrackets": "",
+            "tf": "2",
+            "operator_sym": ">",
+            "operand1": "RSI",
+            "operand2": "VALUE",
+            "operand2_val": 55
+          },
+          {
+            "indicator": "advanced",
+            "operator": "AND",
+            "openBrackets": "",
+            "closeBrackets": "",
+            "tf": "2",
+            "operator_sym": ">",
+            "operand1": "ROC",
+            "operand2": "VALUE",
+            "operand2_val": 10
+          }
+        ],
+        "profit_target_pct": 0,
+        "loss_sl_pct": 0,
+        "tsl_enabled": true,
+        "tsl_scalable": {
+          "enabled": true,
+          "base_profit": 10000,
+          "base_lock": 5000,
+          "step_profit": 5000,
+          "step_lock": 2500,
+          "basis": "theta"
+        },
+        "ratio_exit": {
+          "enabled": true,
+          "threshold": 8,
+          "max_entry_ratio": 0
+        },
+        "ltp_decay": {
+          "enabled": true,
+          "ltp_exit_min": 20
+        },
+        "smart_rolling_enabled": true,
+        "vwap_rise_sl": {
+          "enabled": false,
+          "tf": 1,
+          "threshold": 3
+        },
+        "sl_cooldown_tf_multiplier": 1,
+        "capital_deployed_inr": 6500,
+        "max_trades": 3,
+        "per_day": {
+          "monday": {
+            "enabled": true,
+            "profit_target_pct": 30,
+            "loss_sl_pct": 50,
+            "guardrail_pnl": {
+              "target_pts": 0,
+              "stoploss_pts": 0
+            },
+            "exit_basis": "theta"
+          },
+          "tuesday": {
+            "enabled": true,
+            "profit_target_pct": 30,
+            "loss_sl_pct": 50,
+            "guardrail_pnl": {
+              "target_pts": 0,
+              "stoploss_pts": 0
+            },
+            "exit_basis": "theta"
+          },
+          "wednesday": {
+            "enabled": true,
+            "profit_target_pct": 30,
+            "loss_sl_pct": 50,
+            "guardrail_pnl": {
+              "target_pts": 0,
+              "stoploss_pts": 0
+            },
+            "exit_basis": "theta"
+          },
+          "thursday": {
+            "enabled": true,
+            "profit_target_pct": 30,
+            "loss_sl_pct": 50,
+            "guardrail_pnl": {
+              "target_pts": 0,
+              "stoploss_pts": 0
+            },
+            "exit_basis": "theta"
+          },
+          "friday": {
+            "enabled": true,
+            "profit_target_pct": 30,
+            "loss_sl_pct": 50,
+            "guardrail_pnl": {
+              "target_pts": 0,
+              "stoploss_pts": 0
+            },
+            "exit_basis": "theta"
+          },
+          "saturday": {
+            "enabled": false,
+            "profit_target_pct": 0,
+            "loss_sl_pct": 0,
+            "exit_basis": "theta"
+          },
+          "sunday": {
+            "enabled": false,
+            "profit_target_pct": 0,
+            "loss_sl_pct": 0,
+            "exit_basis": "theta"
+          }
+        },
+        "profit_target_enabled": true,
+        "profit_pct": 50,
+        "sl_enabled": true,
+        "sl_pct": 30,
+        "guardrail_roc": {
+          "enabled": false,
+          "tf": 15,
+          "length": 9,
+          "target": 20,
+          "stoploss": -40
+        },
+        "guardrail_pnl": {
+          "enabled": false,
+          "target_pts": 100,
+          "stoploss_pts": -60
+        },
+        "lot_multiplier": 1.0,
+        "product_type": "MIS",
+        "entry_basis": "theta",
+        "theta_target": 15,
+        "sl_cooldown_minutes": 5,
+        "trail_basis": "theta"
+      },
+      "iron_condor": {
+        "enabled": true,
+        "start_time": "09:00",
+        "squareoff_time": "23:30",
+        "entry_day": "daily",
+        "product_type": "MIS",
+        "lot_size": 100,
+        "strike_step": 100,
+        "max_adjustments_per_side": 4,
+        "roll_step_pts": 5,
+        "profit_target_inr": 5000,
+        "stoploss_inr": 2000,
+        "ratio_exit_threshold": 3,
+        "short_leg_otm_pts": 300,
+        "long_leg_otm_pts": 150,
+        "ratio_trigger": 2,
+        "min_ltp": 50
+      },
+      "trap_trading": {
+        "roundoff_step": 100,
+        "dte_offset_ladder": {
+          "5": 5,
+          "4": 4,
+          "3": 3,
+          "2": 2,
+          "1": 1
+        },
+        "lookback_days": 2,
+        "buy_depth": 0,
+        "htf_minutes": 75,
+        "mtf_minutes": 5,
+        "sl_min_minutes": 1
+      },
+      "trap_scanner": {
+        "lot_multiplier": 2.0,
+        "squareoff_time": "23:15"
+      }
+    },
+    "BTC": {
+      "sell_straddle": {
+        "entry_start": "18:30",
+        "entry_end": "16:30",
+        "squareoff_time": "16:30",
+        "entry_workflow_mode": "hybrid",
+        "variable_strikes": true,
+        "ltp_target": 20,
+        "trail_lock_pct": 50,
+        "trail_floor_pct": 30,
+        "pool_itm_depth": 6,
+        "pool_otm_depth": 6,
+        "entry_rules_beginning": [
+          {
+            "indicator": "advanced",
+            "operator": "AND",
+            "openBrackets": "",
+            "closeBrackets": "",
+            "tf": "1",
+            "operator_sym": "<",
+            "operand1": "CLOSE",
+            "operand2": "VWAP",
+            "operand2_val": 0
+          },
+          {
+            "indicator": "advanced",
+            "operator": "AND",
+            "openBrackets": "",
+            "closeBrackets": "",
+            "tf": "1",
+            "operator_sym": "<",
+            "operand1": "SLOPE",
+            "operand2": "VALUE",
+            "operand2_val": 0
+          }
+        ],
+        "entry_rules_reentry": [
+          {
+            "indicator": "advanced",
+            "operator": "AND",
+            "openBrackets": "",
+            "closeBrackets": "",
+            "tf": "1",
+            "operator_sym": "<",
+            "operand1": "CLOSE",
+            "operand2": "VWAP",
+            "operand2_val": 0
+          },
+          {
+            "indicator": "advanced",
+            "operator": "AND",
+            "openBrackets": "",
+            "closeBrackets": "",
+            "tf": "1",
+            "operator_sym": "<",
+            "operand1": "SLOPE",
+            "operand2": "VALUE",
+            "operand2_val": 0
+          }
+        ],
+        "exit_rules": [
+          {
+            "indicator": "advanced",
+            "operator": "AND",
+            "openBrackets": "",
+            "closeBrackets": "",
+            "tf": "1",
+            "operator_sym": ">",
+            "operand1": "CLOSE",
+            "operand2": "VWAP",
+            "operand2_val": 0
+          },
+          {
+            "indicator": "advanced",
+            "operator": "AND",
+            "openBrackets": "",
+            "closeBrackets": "",
+            "tf": "1",
+            "operator_sym": ">",
+            "operand1": "SLOPE",
+            "operand2": "VALUE",
+            "operand2_val": 0
+          },
+          {
+            "indicator": "advanced",
+            "operator": "AND",
+            "openBrackets": "",
+            "closeBrackets": "",
+            "tf": "2",
+            "operator_sym": ">",
+            "operand1": "RSI",
+            "operand2": "VALUE",
+            "operand2_val": 55
+          },
+          {
+            "indicator": "advanced",
+            "operator": "AND",
+            "openBrackets": "",
+            "closeBrackets": "",
+            "tf": "2",
+            "operator_sym": ">",
+            "operand1": "ROC",
+            "operand2": "VALUE",
+            "operand2_val": 10
+          }
+        ],
+        "profit_target_enabled": true,
+        "profit_pct": 50,
+        "sl_enabled": true,
+        "sl_pct": 30,
+        "profit_target_pct": 100,
+        "loss_sl_pct": 100,
+        "tsl_enabled": true,
+        "tsl_scalable": {
+          "enabled": true,
+          "base_profit": 25,
+          "base_lock": 15,
+          "step_profit": 15,
+          "step_lock": 10,
+          "basis": "theta"
+        },
+        "guardrail_roc": {
+          "enabled": false,
+          "tf": 15,
+          "length": 9,
+          "target": 20,
+          "stoploss": -40
+        },
+        "guardrail_pnl": {
+          "enabled": false,
+          "target_pts": 100,
+          "stoploss_pts": -100
+        },
+        "ratio_exit": {
+          "enabled": true,
+          "threshold": 5,
+          "max_entry_ratio": 3
+        },
+        "ltp_decay": {
+          "enabled": true,
+          "ltp_exit_min": 20
+        },
+        "smart_rolling_enabled": true,
+        "vwap_rise_sl": {
+          "enabled": true,
+          "tf": 5,
+          "threshold": 30
+        },
+        "sl_cooldown_tf_multiplier": 1,
+        "capital_deployed_inr": 6500,
+        "max_trades": 5,
+        "per_day": {
+          "monday": {
+            "enabled": true,
+            "profit_target_pct": 100,
+            "loss_sl_pct": 100,
+            "guardrail_pnl": {
+              "target_pts": 0,
+              "stoploss_pts": 0
+            },
+            "exit_basis": "theta"
+          },
+          "tuesday": {
+            "enabled": true,
+            "profit_target_pct": 100,
+            "loss_sl_pct": 100,
+            "guardrail_pnl": {
+              "target_pts": 0,
+              "stoploss_pts": 0
+            },
+            "exit_basis": "theta"
+          },
+          "wednesday": {
+            "enabled": true,
+            "profit_target_pct": 100,
+            "loss_sl_pct": 100,
+            "guardrail_pnl": {
+              "target_pts": 0,
+              "stoploss_pts": 0
+            },
+            "exit_basis": "theta"
+          },
+          "thursday": {
+            "enabled": true,
+            "profit_target_pct": 100,
+            "loss_sl_pct": 100,
+            "guardrail_pnl": {
+              "target_pts": 0,
+              "stoploss_pts": 0
+            },
+            "exit_basis": "theta"
+          },
+          "friday": {
+            "enabled": true,
+            "profit_target_pct": 100,
+            "loss_sl_pct": 100,
+            "guardrail_pnl": {
+              "target_pts": 0,
+              "stoploss_pts": 0
+            },
+            "exit_basis": "theta"
+          },
+          "saturday": {
+            "enabled": true,
+            "profit_target_pct": 100,
+            "loss_sl_pct": 100,
+            "exit_basis": "theta"
+          },
+          "sunday": {
+            "enabled": true,
+            "profit_target_pct": 100,
+            "loss_sl_pct": 100,
+            "exit_basis": "theta"
+          }
+        },
+        "lot_multiplier": 5,
+        "product_type": "NRML",
+        "entry_basis": "theta",
+        "theta_target": 15,
+        "sl_cooldown_minutes": 5,
+        "trail_basis": "theta",
+        "itm_pair_gate_enabled": false
+      },
+      "iron_condor": {
+        "product_type": "NRML"
+      },
+      "trap_trading": {
+        "buy_depth": 0,
+        "lookback_days": 2,
+        "htf_minutes": 75,
+        "mtf_minutes": 5,
+        "sl_min_minutes": 1,
+        "roundoff_step": 0,
+        "dte_offset_ladder": {
+          "1": 1,
+          "2": 2,
+          "3": 3,
+          "4": 4,
+          "5": 5
+        }
+      },
+      "trap_scanner": {
+        "lot_multiplier": 20.0,
+        "squareoff_time": "15:15"
+      }
+    },
+    "ETH": {
+      "sell_straddle": {
+        "entry_start": "18:30",
+        "entry_end": "16:30",
+        "squareoff_time": "16:30",
+        "entry_workflow_mode": "hybrid",
+        "ltp_target": 50,
+        "trail_lock_pct": 12.5,
+        "trail_floor_pct": 20,
+        "pool_itm_depth": 4,
+        "pool_otm_depth": 4,
+        "entry_rules_beginning": [
+          {
+            "indicator": "advanced",
+            "operator": "AND",
+            "openBrackets": "",
+            "closeBrackets": "",
+            "tf": "1",
+            "operator_sym": "<",
+            "operand1": "CLOSE",
+            "operand2": "VWAP",
+            "operand2_val": 0
+          },
+          {
+            "indicator": "advanced",
+            "operator": "AND",
+            "openBrackets": "",
+            "closeBrackets": "",
+            "tf": "2",
+            "operator_sym": "<",
+            "operand1": "SLOPE",
+            "operand2": "VALUE",
+            "operand2_val": 0
+          }
+        ],
+        "entry_rules_reentry": [
+          {
+            "indicator": "advanced",
+            "operator": "AND",
+            "openBrackets": "",
+            "closeBrackets": "",
+            "tf": "5",
+            "operator_sym": "<",
+            "operand1": "CLOSE",
+            "operand2": "VWAP",
+            "operand2_val": 0
+          },
+          {
+            "indicator": "advanced",
+            "operator": "AND",
+            "openBrackets": "",
+            "closeBrackets": "",
+            "tf": "2",
+            "operator_sym": "<",
+            "operand1": "SLOPE",
+            "operand2": "VALUE",
+            "operand2_val": 0
+          }
+        ],
+        "exit_rules": [
+          {
+            "indicator": "advanced",
+            "operator": "AND",
+            "openBrackets": "",
+            "closeBrackets": "",
+            "tf": "1",
+            "operator_sym": ">",
+            "operand1": "CLOSE",
+            "operand2": "VWAP",
+            "operand2_val": 0
+          },
+          {
+            "indicator": "advanced",
+            "operator": "AND",
+            "openBrackets": "",
+            "closeBrackets": "",
+            "tf": "1",
+            "operator_sym": ">",
+            "operand1": "SLOPE",
+            "operand2": "VALUE",
+            "operand2_val": 0
+          },
+          {
+            "indicator": "advanced",
+            "operator": "AND",
+            "openBrackets": "",
+            "closeBrackets": "",
+            "tf": "2",
+            "operator_sym": ">",
+            "operand1": "RSI",
+            "operand2": "VALUE",
+            "operand2_val": 55
+          },
+          {
+            "indicator": "advanced",
+            "operator": "AND",
+            "openBrackets": "",
+            "closeBrackets": "",
+            "tf": "2",
+            "operator_sym": ">",
+            "operand1": "ROC",
+            "operand2": "VALUE",
+            "operand2_val": 10
+          }
+        ],
+        "profit_target_enabled": true,
+        "profit_pct": 50,
+        "sl_enabled": true,
+        "sl_pct": 30,
+        "profit_target_pct": 0,
+        "loss_sl_pct": 0,
+        "tsl_enabled": true,
+        "tsl_scalable": {
+          "enabled": true,
+          "base_profit": 1500,
+          "base_lock": 500,
+          "step_profit": 500,
+          "step_lock": 500,
+          "basis": "theta"
+        },
+        "guardrail_roc": {
+          "enabled": false,
+          "tf": 15,
+          "length": 9,
+          "target": 20,
+          "stoploss": -40
+        },
+        "guardrail_pnl": {
+          "enabled": false,
+          "target_pts": 100,
+          "stoploss_pts": -60
+        },
+        "ratio_exit": {
+          "enabled": true,
+          "threshold": 4
+        },
+        "ltp_decay": {
+          "enabled": true,
+          "ltp_exit_min": 20
+        },
+        "smart_rolling_enabled": true,
+        "vwap_rise_sl": {
+          "enabled": true,
+          "tf": 5,
+          "threshold": 10
+        },
+        "sl_cooldown_tf_multiplier": 1,
+        "capital_deployed_inr": 6500,
+        "max_trades": 5,
+        "per_day": {
+          "monday": {
+            "enabled": true,
+            "profit_target_pct": 30,
+            "loss_sl_pct": 30,
+            "guardrail_pnl": {
+              "target_pts": 0,
+              "stoploss_pts": 0
+            },
+            "exit_basis": "theta"
+          },
+          "tuesday": {
+            "enabled": true,
+            "profit_target_pct": 30,
+            "loss_sl_pct": 30,
+            "guardrail_pnl": {
+              "target_pts": 0,
+              "stoploss_pts": 0
+            },
+            "exit_basis": "theta"
+          },
+          "wednesday": {
+            "enabled": true,
+            "profit_target_pct": 30,
+            "loss_sl_pct": 30,
+            "guardrail_pnl": {
+              "target_pts": 0,
+              "stoploss_pts": 0
+            },
+            "exit_basis": "theta"
+          },
+          "thursday": {
+            "enabled": true,
+            "profit_target_pct": 30,
+            "loss_sl_pct": 30,
+            "guardrail_pnl": {
+              "target_pts": 0,
+              "stoploss_pts": 0
+            },
+            "exit_basis": "theta"
+          },
+          "friday": {
+            "enabled": true,
+            "profit_target_pct": 30,
+            "loss_sl_pct": 30,
+            "guardrail_pnl": {
+              "target_pts": 0,
+              "stoploss_pts": 0
+            },
+            "exit_basis": "theta"
+          }
+        },
+        "lot_multiplier": 10.0,
+        "product_type": "MIS",
+        "entry_basis": "theta",
+        "theta_target": 30,
+        "sl_cooldown_minutes": 5,
+        "trail_basis": "theta"
+      }
+    },
+    "GOLDM": {
+      "trap_scanner": {
+        "lot_multiplier": 1.0,
+        "squareoff_time": "15:15"
+      }
+    }
+  },
+  "trap_trading": {
+    "htf_minutes": 75,
+    "ltf_minutes": 5,
+    "adx_threshold": 20.0,
+    "volume_spike_multiplier": 1.5,
+    "swing_lookback": 5,
+    "zone_tolerance_pct": 0.5,
+    "void_atr_mult": 2.0,
+    "retest_zone_pct": 0.5,
+    "slippage_buffer": 0.5,
+    "sl_mode": "structural",
+    "sl_pct": 2.0,
+    "sl_buffer_pct": 0.3,
+    "entry_cutoff_time": "14:45"
+  },
+  "per_index": {
+    "CRUDEOIL": {
+      "sell_straddle": {
+        "vwap_rise_sl": {
+          "enabled": false,
+          "threshold": 0.0
+        }
+      }
+    }
+  }
+}

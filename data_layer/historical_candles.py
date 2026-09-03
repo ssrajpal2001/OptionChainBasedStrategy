@@ -15,17 +15,32 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import date, timedelta
-from typing import List
+import time
+from datetime import date, datetime, timedelta
+from typing import List, Tuple
+
+from config.global_config import IST
 
 logger = logging.getLogger(__name__)
 
+# TTL cache for warm-up candles so multiple strategy books starting on the same
+# underlying do not hammer Upstox with identical REST calls.
+_WARM_CACHE: dict[Tuple[str, date], tuple[List[dict], float]] = {}
+_WARM_CACHE_TTL_SECONDS = 300.0
+
 
 def _parse_candles(r: dict) -> List[dict]:
-    """Upstox candle response (newest-first) -> oldest-first list of candle dicts."""
+    """Upstox candle response (newest-first) -> oldest-first list of candle dicts.
+    'oi' is Upstox's optional 7th column (open interest) -- 0 for instruments/
+    intervals that don't carry it (e.g. equity spot, 1-minute)."""
     rows = (r.get("data", {}) or {}).get("candles", []) or []
     return [{"ts": c[0], "open": c[1], "high": c[2], "low": c[3], "close": c[4],
-             "volume": c[5]} for c in reversed(rows)]
+             "volume": c[5], "oi": (c[6] if len(c) > 6 else 0)} for c in reversed(rows)]
+
+
+def _fyers_ts_to_iso(ts: int) -> str:
+    """Fyers history returns epoch seconds; convert to ISO with IST offset."""
+    return datetime.fromtimestamp(ts, tz=IST).isoformat()
 
 
 def _http_get_json(url: str, access_token: str) -> dict:
@@ -37,6 +52,9 @@ def _http_get_json(url: str, access_token: str) -> dict:
     except Exception as exc:
         logger.debug("http_get_json %s: %s", url, exc)
         return {}
+
+
+_ORIGINAL_HTTP_GET_JSON = _http_get_json  # used to skip cache when tests monkeypatch
 
 
 async def fetch_upstox_1m(instrument_key: str, access_token: str, max_step_back: int = 7) -> List[dict]:
@@ -58,6 +76,58 @@ async def fetch_upstox_1m(instrument_key: str, access_token: str, max_step_back:
     return []
 
 
+async def fetch_upstox_range_1m(
+    instrument_key: str, access_token: str, start: date, end: date,
+) -> List[dict]:
+    """2026-07-19 — full date-range 1-min history (oldest-first), one Upstox
+    call per weekday in [start, end] inclusive, merged and sorted. Used for
+    deep multi-week re-ingestion on strategy boot (v4_cascade's HTF/MTF zone
+    rebuild) — a production version of the ad-hoc per-day fetch loop used in
+    this session's validation scripts. Each candle:
+    {'ts','open','high','low','close','volume'}. [] if the range yields
+    nothing (holiday-only range, bad instrument_key, etc)."""
+    def _get_day(d: date) -> List[dict]:
+        from urllib.parse import quote as _q
+        url = (f"https://api.upstox.com/v2/historical-candle/{_q(instrument_key, safe='')}/1minute/"
+               f"{d.isoformat()}/{d.isoformat()}")
+        try:
+            return _parse_candles(_http_get_json(url, access_token))
+        except Exception as exc:
+            logger.debug("fetch_upstox_range_1m day=%s: %s", d, exc)
+            return []
+
+    def _get_all() -> List[dict]:
+        rows: List[dict] = []
+        d = start
+        while d <= end:
+            if d.weekday() < 5:  # Mon-Fri only
+                rows.extend(_get_day(d))
+            d += timedelta(days=1)
+        return rows
+
+    rows = await asyncio.to_thread(_get_all)
+    rows.sort(key=lambda r: r["ts"])
+    return rows
+
+
+async def fetch_upstox_daily(instrument_key: str, access_token: str, lookback_days: int = 5) -> List[dict]:
+    """Daily candles (oldest-first) for instrument_key over the trailing
+    lookback_days calendar days, via the 'day' interval endpoint. Each candle
+    includes 'oi' (open interest) -- populated by Upstox for F&O instruments
+    (e.g. a stock's near-month futures key), 0 for spot/equity keys. Used for
+    day-over-day OI-buildup classification, not candle price analysis. []
+    on error/empty."""
+    def _get():
+        from urllib.parse import quote as _q
+        end = date.today() - timedelta(days=1)
+        start = end - timedelta(days=lookback_days)
+        url = (f"https://api.upstox.com/v2/historical-candle/{_q(instrument_key, safe='')}/day/"
+               f"{end.isoformat()}/{start.isoformat()}")
+        return _parse_candles(_http_get_json(url, access_token))
+
+    return await asyncio.to_thread(_get)
+
+
 async def fetch_upstox_intraday_1m(instrument_key: str, access_token: str) -> List[dict]:
     """TODAY's 1-min candles (oldest-first, open→now) for an Upstox instrument_key via the
     intraday endpoint (no date range). [] on error/empty."""
@@ -69,12 +139,77 @@ async def fetch_upstox_intraday_1m(instrument_key: str, access_token: str) -> Li
     return await asyncio.to_thread(_get)
 
 
+async def fetch_fyers_intraday_1m(symbol: str, client_id: str, access_token: str) -> List[dict]:
+    """TODAY's 1-min candles (oldest-first) for a Fyers symbol.
+
+    Symbol examples:
+      NSE:NIFTY50-INDEX
+      NSE:NIFTY26JUN24000CE
+      BSE:SENSEX-INDEX
+      BSE:SENSEX26JUN77100PE
+    """
+    if not symbol or not client_id or not access_token:
+        return []
+    try:
+        from fyers_apiv3 import fyersModel  # type: ignore[import]
+    except ImportError:
+        logger.warning("fetch_fyers_intraday_1m: fyers-apiv3 not installed")
+        return []
+
+    try:
+        today = date.today().isoformat()
+        fyers = fyersModel.FyersModel(
+            client_id=client_id,
+            token=access_token,
+            log_path="logs/",
+        )
+        data = {
+            "symbol": symbol,
+            "resolution": "1",
+            "date_format": "1",
+            "range_from": today,
+            "range_to": today,
+            "cont_flag": "1",
+        }
+        resp = await asyncio.to_thread(fyers.get_history, data=data)
+        if not resp or resp.get("s") != "ok":
+            logger.warning("fetch_fyers_intraday_1m %s: %s", symbol, resp)
+            return []
+        candles = resp.get("candles", [])
+        return [
+            {"ts": _fyers_ts_to_iso(c[0]), "open": float(c[1]), "high": float(c[2]),
+             "low": float(c[3]), "close": float(c[4]), "volume": int(c[5] or 0)}
+            for c in candles
+        ]
+    except Exception as exc:
+        logger.warning("fetch_fyers_intraday_1m %s: %s", symbol, exc)
+        return []
+
+
 async def fetch_upstox_warm_1m(instrument_key: str, access_token: str, min_bars: int = 15) -> List[dict]:
     """Warm-up series (oldest-first) for RSI/ROC: today's intraday bars, backfilled with the
     previous trading day's bars (prepended, older-first) when the session is too young to have
-    >= min_bars. Returns [] if both sources are empty."""
+    >= min_bars. Returns [] if both sources are empty.
+
+    Results are cached per (instrument_key, today) for 5 minutes so N clients trading
+    the same underlying share the same warm-up data without duplicate Upstox calls."""
+    # Skip cache when tests monkeypatch _http_get_json; otherwise share results
+    # across strategy books for the same instrument on the same day.
+    use_cache = _http_get_json is _ORIGINAL_HTTP_GET_JSON
+    cache_key = (instrument_key, date.today())
+    if use_cache:
+        cached, cached_at = _WARM_CACHE.get(cache_key, (None, 0.0))
+        if cached is not None and (time.monotonic() - cached_at) < _WARM_CACHE_TTL_SECONDS:
+            logger.debug("fetch_upstox_warm_1m cache hit: %s", instrument_key)
+            return cached
+
     today = await fetch_upstox_intraday_1m(instrument_key, access_token)
     if len(today) >= min_bars:
+        if use_cache:
+            _WARM_CACHE[cache_key] = (today, time.monotonic())
         return today
     prev = await fetch_upstox_1m(instrument_key, access_token)
-    return prev + today
+    result = prev + today
+    if use_cache:
+        _WARM_CACHE[cache_key] = (result, time.monotonic())
+    return result

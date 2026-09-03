@@ -1,0 +1,1804 @@
+"""
+2026-08-24: integration-style smoke test for
+strategies/oi_orb_screener/engine.py (OiOrbScreenerStrategy) -- drives the
+real class (not a standalone reimplementation, per this repo's own
+feedback_backtest_drive_real_class discipline) through signal -> contract
+resolution -> live-LTP wait -> order emitted -> simulated fill -> position
+tracked -> EOD close, using a fake bus with real asyncio.Queue-backed
+subscribe/publish so the book's own running tasks (option-tick loop, fill
+loop) do the actual work.
+
+Confirms multiple concurrent stock positions are tracked independently
+(per direct user instruction 2026-08-24: one position per shortlisted
+stock allowed, not capped to 1).
+"""
+import asyncio
+from datetime import date, datetime, time as dtime
+
+import pytest
+
+from config.global_config import IST, Topic
+from data_layer.base_feeder import IndexTick, OptionTick
+from strategies.oi_orb_screener import screener, stock_resolve, store
+from strategies.oi_orb_screener.engine import OiOrbScreenerStrategy
+from strategies.oi_orb_screener.events import OiOrbFillEvent
+
+
+@pytest.fixture(autouse=True)
+def _isolated_store_db(tmp_path, monkeypatch):
+    """Every test in this file that touches the book's real logic (fills,
+    signal evaluation, the daily pipeline) now also writes to
+    strategies/oi_orb_screener/store.py -- point it at an isolated tmp_path
+    file so the whole suite never touches the real data/oi_orb_screener.db,
+    matching the existing _TEST_CLIENT_ID/_TEST_BINDING_ID discipline this
+    file already uses for logs (see the comment above those constants)."""
+    monkeypatch.setattr(store, "_DB_PATH", str(tmp_path / "oi_orb_test.db"))
+    monkeypatch.setattr(store, "_initialized", False)
+    yield
+
+
+class _FakeGlobalFeeder:
+    def __init__(self) -> None:
+        self.subscribed_tokens: list = []
+        self.subscribed_equity: list = []   # [(fyers_sym, underlying), ...]
+
+    async def subscribe_tokens(self, tokens):
+        self.subscribed_tokens.extend(tokens)
+
+    def subscribe_fno_equity(self, fyers_sym, underlying):
+        self.subscribed_equity.append((fyers_sym, underlying))
+
+
+class _FakeBus:
+    """Real asyncio.Queue per topic so the book's own running loop tasks
+    (started via book.start()) actually consume what tests publish."""
+
+    def __init__(self) -> None:
+        self._queues: dict = {}
+        self.published: list = []
+        self._global_feeder = _FakeGlobalFeeder()
+
+    def subscribe(self, topic):
+        q = self._queues.setdefault(topic, asyncio.Queue())
+        return q
+
+    def unsubscribe(self, topic, q):
+        pass
+
+    async def publish(self, topic, event):
+        self.published.append((topic, event))
+        q = self._queues.get(topic)
+        if q is not None:
+            await q.put(event)
+
+
+# 2026-08-24 CRITICAL fix: this used to construct real OiOrbScreenerStrategy
+# instances with client_id="ssrajpal2001"/binding_id="SA5770" -- the real
+# production client/binding. Since the constructor opens a REAL rotating log
+# file at logs/clients/oiorb_{client}_{binding}_{date}.log (same path a live
+# run writes to), running this test suite wrote fabricated per-test fixture
+# data (fake fills, fake EOD/kill_switch closes) straight into the real log
+# the user was watching for genuine live signals -- confusing and easily
+# mistaken for real activity. Never reuse a real client_id/binding_id in a
+# test fixture that touches make_strategy_logger (or anything else that
+# opens a real file keyed by those IDs).
+_TEST_CLIENT_ID = "TESTCLIENT"
+_TEST_BINDING_ID = "TESTBINDING"
+
+
+def _make_book(bus) -> OiOrbScreenerStrategy:
+    return OiOrbScreenerStrategy(
+        bus, cfg=None, client_id=_TEST_CLIENT_ID, binding_id=_TEST_BINDING_ID,
+        lot_multiplier=1, product_type="MIS", squareoff_time="15:15",
+    )
+
+
+def _contract(symbol: str, strike: int, opt_type: str) -> "stock_resolve.ResolvedContract":
+    return stock_resolve.ResolvedContract(
+        underlying=symbol, expiry=date(2026, 8, 27), strike=strike, option_type=opt_type,
+        upstox_key=f"NSE_FO|{symbol}{strike}{opt_type}",
+        broker_symbols={"zerodha": f"{symbol}25AUG{strike}{opt_type}"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_handle_signal_resolves_contract_subscribes_feed_and_emits_buy(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    # Only the option-tick loop is needed for this test -- NOT book.start()'s
+    # full task set (_daily_loop would try real NSE calls off the wall clock,
+    # which this test must never risk triggering).
+    book._subscribe(Topic.OPTION_TICK)
+    opt_tick_task = asyncio.create_task(book._option_tick_loop())
+    try:
+        contract = _contract("MANAPPURAM", 365, "CE")
+        monkeypatch.setattr(stock_resolve, "resolve_lot_async", _async_return(6900))
+        monkeypatch.setattr(stock_resolve, "resolve_contract_async", _async_return(contract))
+
+        sig = screener.Signal(symbol="MANAPPURAM", side="CALL", reason="orb_high_breakout",
+                               trigger_price=365.25, orb_high=362.30, orb_low=358.95, ts="10:10:58")
+
+        book._running = True
+        task = asyncio.create_task(book._handle_signal(sig))
+        await asyncio.sleep(0.05)   # let _ensure_option_feed's subscribe task run
+        # Push a live option tick matching the resolved contract -- the running
+        # _option_tick_loop picks this up and populates _live_option_ltp.
+        await bus.publish(Topic.OPTION_TICK, OptionTick(
+            symbol="MANAPPURAM365CE", underlying="MANAPPURAM", strike=365, option_type="CE",
+            expiry=date(2026, 8, 27), ltp=8.65, bid=8.5, ask=8.8, oi=0, change_oi=0,
+            volume=0, iv=0.0, delta=0.0, timestamp=datetime(2026, 8, 24, 10, 10, 58),
+        ))
+        await asyncio.wait_for(task, timeout=2.0)
+
+        assert "NSE_FO|MANAPPURAM365CE" in bus._global_feeder.subscribed_tokens
+        buy_events = [e for t, e in bus.published if t == Topic.OI_ORB_ORDER_REQUEST]
+        assert len(buy_events) == 1
+        assert buy_events[0].action == "BUY"
+        assert buy_events[0].underlying == "MANAPPURAM"
+        assert buy_events[0].entry_price == 8.65
+        assert buy_events[0].quantity == 6900
+    finally:
+        book._running = False
+        opt_tick_task.cancel()
+        try:
+            await opt_tick_task
+        except asyncio.CancelledError:
+            pass
+
+
+@pytest.mark.asyncio
+async def test_on_fill_confirms_entry_and_tracks_position():
+    bus = _FakeBus()
+    book = _make_book(bus)
+    contract = _contract("SIEMENS", 4050, "CE")
+    book._pending_contracts["SIEMENS"] = contract
+    book._pending_fills["EVT1"] = {
+        "symbol": "SIEMENS", "contract": contract, "qty": 300, "entry_price": 105.0, "reason": "orb_high_breakout",
+    }
+
+    await book._on_fill(OiOrbFillEvent(
+        action="BUY", underlying="SIEMENS", option_type="CE", strike=4050, fill_price=106.2,
+        qty=300, client_id=_TEST_CLIENT_ID, binding_id=_TEST_BINDING_ID, event_id="EVT1", paper_mode=True,
+    ))
+
+    assert "SIEMENS" in book._positions
+    assert book._positions["SIEMENS"]["entry_price"] == 106.2
+    assert "SIEMENS" not in book._pending_contracts
+    assert "EVT1" not in book._pending_fills
+
+
+@pytest.mark.asyncio
+async def test_on_fill_new_entry_tagged_trap_mechanic():
+    """2026-08-31, direct user spec: every NEW entry (going forward) uses
+    the trap+TSL mechanic, not the old VWAP-retest/VWAP-SL one."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    contract = _contract("SIEMENS", 4050, "CE")
+    book._pending_contracts["SIEMENS"] = contract
+    book._pending_fills["EVT1"] = {
+        "symbol": "SIEMENS", "contract": contract, "qty": 300, "entry_price": 105.0, "reason": "trap_retest",
+    }
+    await book._on_fill(OiOrbFillEvent(
+        action="BUY", underlying="SIEMENS", option_type="CE", strike=4050, fill_price=106.2,
+        qty=300, client_id=_TEST_CLIENT_ID, binding_id=_TEST_BINDING_ID, event_id="EVT1", paper_mode=True,
+    ))
+    assert book._positions["SIEMENS"]["sl_mechanic"] == "trap"
+
+
+@pytest.mark.asyncio
+async def test_restored_position_tagged_vwap_mechanic_not_retroactively_switched(monkeypatch):
+    """A position restored from the DB predates the trap+TSL mechanic --
+    must stay on the old option-premium-VWAP SL it was actually entered
+    under, never silently switched to the new risk model."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._today = date(2026, 8, 31)
+    contract = _contract("PERSISTENT", 5500, "PE")
+    monkeypatch.setattr(store, "load_open_positions", lambda cid, bid, td: [
+        {"symbol": "PERSISTENT", "expiry": "2026-09-29", "strike": 5500, "option_type": "PE",
+         "qty": 125, "entry_price": 114.90, "paper_mode": 1, "entry_ts": "2026-08-31T11:26:30"},
+    ])
+    monkeypatch.setattr(store, "load_already_fired", lambda cid, bid, trade_date=None: set())
+    monkeypatch.setattr(store, "load_rejected", lambda cid, bid, trade_date=None: set())
+    monkeypatch.setattr(stock_resolve, "resolve_contract_exact_async", _async_return(contract))
+    monkeypatch.setattr(book, "_ensure_option_feed", lambda *a, **k: None)
+    monkeypatch.setattr(book, "_ensure_spot_feed", lambda *a, **k: None)
+    monkeypatch.setattr(book, "_seed_option_bars_from_history", _async_return(None))
+
+    await book._restore_from_db()
+
+    assert book._positions["PERSISTENT"]["sl_mechanic"] == "vwap"
+
+
+@pytest.mark.asyncio
+async def test_update_option_sl_target_skips_trap_tagged_positions():
+    """The old option-premium-VWAP SL path must never run for a
+    trap-tagged position -- that mechanic's exit is _trap_update_tsl_and_
+    check_exit, driven by the poll loop, not option ticks."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._positions["SIEMENS"] = {
+        "contract": _contract("SIEMENS", 4050, "CE"), "qty": 300, "entry_price": 106.2,
+        "paper_mode": True, "opened_at": datetime.now(IST), "sl_mechanic": "trap",
+    }
+    await book._update_option_sl_target_and_check("SIEMENS", 110.0, datetime.now(IST))
+    assert "SIEMENS" not in book._option_sl_bar_key   # old-mechanic bar tracking never touched
+
+
+def test_trap_check_entry_returns_false_before_any_zone_forms():
+    bus = _FakeBus()
+    book = _make_book(bus)
+    now = datetime(2026, 8, 31, 9, 15, tzinfo=IST)
+    fired = book._trap_check_entry("SIEMENS", "CALL", 100.0, now)
+    assert fired is False
+    assert "SIEMENS" not in book._trap_entry_calc
+
+
+@pytest.mark.asyncio
+async def test_on_fill_entry_aborted_discards_pending():
+    bus = _FakeBus()
+    book = _make_book(bus)
+    contract = _contract("SIEMENS", 4050, "CE")
+    book._pending_contracts["SIEMENS"] = contract
+    book._pending_fills["EVT1"] = {
+        "symbol": "SIEMENS", "contract": contract, "qty": 300, "entry_price": 105.0, "reason": "orb_high_breakout",
+    }
+
+    await book._on_fill(OiOrbFillEvent(
+        action="BUY", underlying="SIEMENS", option_type="CE", strike=4050, fill_price=0.0,
+        qty=300, client_id=_TEST_CLIENT_ID, binding_id=_TEST_BINDING_ID, event_id="EVT1",
+        entry_aborted=True,
+    ))
+
+    assert "SIEMENS" not in book._positions
+    assert "SIEMENS" not in book._pending_contracts
+
+
+@pytest.mark.asyncio
+async def test_multiple_concurrent_positions_tracked_independently():
+    """Per direct user instruction 2026-08-24: one position PER shortlisted
+    stock, not capped to 1 -- two different stocks filling must both end
+    up tracked, independently, in the same book."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+
+    for i, (sym, strike) in enumerate([("MANAPPURAM", 365), ("SIEMENS", 4050)]):
+        contract = _contract(sym, strike, "CE")
+        eid = f"EVT{i}"
+        book._pending_contracts[sym] = contract
+        book._pending_fills[eid] = {"symbol": sym, "contract": contract, "qty": 100 * (i + 1),
+                                     "entry_price": 10.0 + i, "reason": "orb_high_breakout"}
+        await book._on_fill(OiOrbFillEvent(
+            action="BUY", underlying=sym, option_type="CE", strike=strike, fill_price=10.0 + i,
+            qty=100 * (i + 1), client_id=_TEST_CLIENT_ID, binding_id=_TEST_BINDING_ID, event_id=eid,
+        ))
+
+    assert set(book._positions.keys()) == {"MANAPPURAM", "SIEMENS"}
+    assert book._positions["MANAPPURAM"]["qty"] == 100
+    assert book._positions["SIEMENS"]["qty"] == 200
+
+
+def test_monitoring_state_computes_pnl_and_pct_per_position():
+    """2026-08-24, direct user request -- client-perspective UI review: the
+    panel showed entry/LTP side by side with no P&L, forcing the client to
+    do the math themselves. monitoring_state() now computes both ₹ P&L and
+    %% P&L per position, plus opened_at for a "time held" display."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    contract = _contract("MANAPPURAM", 365, "CE")
+    book._positions["MANAPPURAM"] = {
+        "contract": contract, "qty": 100, "entry_price": 10.0, "paper_mode": True,
+        "opened_at": datetime(2026, 8, 24, 13, 0, 0),
+    }
+    book._live_option_ltp["MANAPPURAM"] = 12.5
+
+    state = book.monitoring_state()
+    pos = state["positions"]["MANAPPURAM"]
+    assert pos["pnl"] == pytest.approx((12.5 - 10.0) * 100)
+    assert pos["pnl_pct"] == pytest.approx((12.5 - 10.0) / 10.0 * 100.0)
+    assert pos["opened_at"] == "2026-08-24T13:00:00"
+
+
+def test_monitoring_state_pnl_is_none_without_a_live_ltp_yet():
+    bus = _FakeBus()
+    book = _make_book(bus)
+    contract = _contract("MANAPPURAM", 365, "CE")
+    book._positions["MANAPPURAM"] = {
+        "contract": contract, "qty": 100, "entry_price": 10.0, "paper_mode": True,
+        "opened_at": datetime(2026, 8, 24, 13, 0, 0),
+    }
+    # no self._live_option_ltp entry yet
+
+    state = book.monitoring_state()
+    pos = state["positions"]["MANAPPURAM"]
+    assert pos["pnl"] is None
+    assert pos["pnl_pct"] is None
+
+
+@pytest.mark.asyncio
+async def test_eod_loop_closes_open_positions_at_squareoff_time():
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._squareoff_time = dtime(0, 0)   # always past squareoff -- fires immediately
+    book._running = True
+    contract = _contract("MANAPPURAM", 365, "CE")
+    book._positions["MANAPPURAM"] = {
+        "contract": contract, "qty": 6900, "entry_price": 8.5, "paper_mode": True,
+    }
+
+    task = asyncio.create_task(book._eod_loop())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    sell_events = [e for t, e in bus.published if t == Topic.OI_ORB_ORDER_REQUEST]
+    assert len(sell_events) == 1
+    assert sell_events[0].action == "SELL"
+    assert sell_events[0].underlying == "MANAPPURAM"
+    assert sell_events[0].reason == "eod_squareoff"
+
+
+@pytest.mark.asyncio
+async def test_liquidate_closes_positions_immediately_for_kill_switch():
+    bus = _FakeBus()
+    book = _make_book(bus)
+    contract = _contract("MANAPPURAM", 365, "CE")
+    book._positions["MANAPPURAM"] = {
+        "contract": contract, "qty": 6900, "entry_price": 8.5, "paper_mode": True,
+    }
+
+    await book.liquidate("kill_switch")
+
+    sell_events = [e for t, e in bus.published if t == Topic.OI_ORB_ORDER_REQUEST]
+    assert len(sell_events) == 1
+    assert sell_events[0].reason == "kill_switch"
+
+
+def _async_return(value):
+    async def _f(*a, **kw):
+        return value
+    return _f
+
+
+class _FakeNSESession:
+    """No-op stand-in for screener.NSESession -- real construction does
+    real network warm-up GETs, which these tests must never trigger."""
+    def __init__(self) -> None:
+        pass
+
+
+@pytest.mark.asyncio
+async def test_run_today_pipeline_retries_build_shortlist_on_transient_failure(monkeypatch):
+    """2026-08-24, confirmed live on EC2: a fresh NSESession's first request
+    burst can hit a short-lived Akamai throttle that clears moments later.
+    Without a retry, that single transient failure silently kills the whole
+    trading day (the daily pipeline only runs once per calendar day).
+
+    2026-09-01: build_shortlist's 3rd (successful) attempt returns an EMPTY
+    shortlist -- since the empty-shortlist fix below now falls through into
+    the real polling loop instead of returning, this test must stop that
+    loop itself (real production paces it with a real asyncio.sleep between
+    iterations; only the test's OWN asyncio.sleep mock made an unbounded
+    loop unsafe here)."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._screener_cfg["IGNORE_TIME_WINDOWS"] = True
+    book._running = True
+
+    monkeypatch.setattr(screener, "NSESession", _FakeNSESession)
+    monkeypatch.setattr(asyncio, "sleep", _async_return(None))
+
+    calls = {"n": 0}
+    monkeypatch.setattr(screener, "build_shortlist",
+                         lambda nse, cfg: _flaky_build_shortlist_sync(nse, cfg, calls))
+
+    def _stop_after_one_poll(nse):
+        book._running = False   # exit the polling loop after this single iteration
+        raise RuntimeError("stop the test here, no real network call")
+    monkeypatch.setattr(screener, "fetch_fno_price_universe", _stop_after_one_poll)
+
+    await book._run_today_pipeline()
+
+    assert calls["n"] == 3   # 2 failures + 1 success, never hit the max-attempts cap
+    assert book._shortlist_symbols == []   # the successful attempt's shortlist was empty
+
+
+def _flaky_build_shortlist_sync(nse, cfg, calls):
+    calls["n"] += 1
+    if calls["n"] < 3:
+        raise RuntimeError("transient NSE throttle")
+    import pandas as pd
+    return pd.DataFrame(), 0.0
+
+
+@pytest.mark.asyncio
+async def test_run_today_pipeline_gives_up_after_max_attempts(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._screener_cfg["IGNORE_TIME_WINDOWS"] = True
+    book._running = True
+
+    monkeypatch.setattr(screener, "NSESession", _FakeNSESession)
+    monkeypatch.setattr(asyncio, "sleep", _async_return(None))
+
+    calls = {"n": 0}
+    def _always_fails(nse, cfg):
+        calls["n"] += 1
+        raise RuntimeError("persistent NSE block")
+    monkeypatch.setattr(screener, "build_shortlist", _always_fails)
+
+    await book._run_today_pipeline()
+
+    from strategies.oi_orb_screener.engine import _BUILD_SHORTLIST_MAX_ATTEMPTS
+    assert calls["n"] == _BUILD_SHORTLIST_MAX_ATTEMPTS
+    assert book._shortlist_symbols == []
+
+
+@pytest.mark.asyncio
+async def test_empty_morning_shortlist_still_reaches_afternoon_scan(monkeypatch):
+    """2026-09-01 CRITICAL FIX, real incident: an empty morning shortlist used
+    to `return` out of _run_today_pipeline() entirely, so the polling loop
+    below -- the ONLY place _maybe_run_afternoon_scan() is ever called -- was
+    never reached. Since _daily_loop() only calls _run_today_pipeline() once
+    per calendar day, two_session_scan_enabled could never actually rescue a
+    day that started empty, which is exactly the scenario it exists for.
+
+    Real incident: 2026-09-01, NIFTY flat (-0.18%) at 09:25 -> morning
+    shortlist empty -> book went silent all day even though real candidates
+    (HEROMOTOCO/BAJAJ-AUTO/ADANIENSOL/MARUTI/KALYANKJIL/POLYCAB/KEI) existed
+    by 12:51 and two_session_scan_enabled was explicitly on.
+
+    This test proves the fix: build_shortlist returns empty on the morning
+    call, and the very next thing the polling loop does is call
+    _maybe_run_afternoon_scan -- confirmed here by making THAT call itself
+    the thing that stops the loop and recording that it happened.
+
+    2026-09-02 fix: the polling loop's own hard-stop check (`datetime.now(IST)
+    .time() < _hard_stop_time`, _hard_stop_time=15:20) used the REAL wall
+    clock -- this test failed with zero calls whenever actually run after
+    15:20 IST, nothing to do with any code regression. Pins engine.py's own
+    `datetime.now()` to a fixed mid-day time so the test is deterministic
+    regardless of when it's actually run."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._screener_cfg["IGNORE_TIME_WINDOWS"] = True
+    book._running = True
+
+    import strategies.oi_orb_screener.engine as _engine_mod
+    from datetime import datetime as _dt, date as _date, time as _dtime
+    _fixed_now = _dt(2026, 9, 2, 13, 0, 0, tzinfo=_engine_mod.IST)
+    class _FixedDT(_dt):
+        @classmethod
+        def now(cls, tz=None):
+            return _fixed_now
+    monkeypatch.setattr(_engine_mod, "datetime", _FixedDT)
+
+    monkeypatch.setattr(screener, "NSESession", _FakeNSESession)
+    monkeypatch.setattr(asyncio, "sleep", _async_return(None))
+
+    import pandas as pd
+    monkeypatch.setattr(screener, "build_shortlist", lambda nse, cfg: (pd.DataFrame(), -0.18))
+
+    afternoon_scan_calls = {"n": 0}
+    _orig_maybe_run_afternoon_scan = book._maybe_run_afternoon_scan
+
+    async def _spy_afternoon_scan(now, cfg):
+        afternoon_scan_calls["n"] += 1
+        book._running = False   # stop the loop right after the first real call
+        return await _orig_maybe_run_afternoon_scan(now, cfg)
+    book._maybe_run_afternoon_scan = _spy_afternoon_scan
+
+    def _fetch_universe_noop(nse):
+        return pd.DataFrame(columns=["symbol", "lastPrice", "pChange"])
+    monkeypatch.setattr(screener, "fetch_fno_price_universe", _fetch_universe_noop)
+
+    await book._run_today_pipeline()
+
+    assert book._shortlist_symbols == []   # morning found nothing, as before
+    assert afternoon_scan_calls["n"] >= 1, (
+        "the empty-morning-shortlist path must still reach the polling loop "
+        "so _maybe_run_afternoon_scan() gets a real chance to run"
+    )
+
+
+# ── Two-session scan (2026-08-27, direct user spec): session 1 is a single
+# point-in-time scan at scan_start; session 2 re-scans between afternoon_
+# scan_start/end, ADDING any newly-qualifying stock without dropping one
+# already being watched. No scanning outside these two windows. ───────────
+
+def _shortlist_df(rows):
+    import pandas as pd
+    return pd.DataFrame(rows)
+
+
+def _ranked_df(rows):
+    import pandas as pd
+    return pd.DataFrame(rows)
+
+
+@pytest.mark.asyncio
+async def test_do_rank_poll_first_poll_only_records_no_drop_detection(monkeypatch):
+    """First poll of the day has nothing to compare against -- must never
+    drop anything, only seed self._rank_prev_top."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._nse = object()
+    book._shortlist_symbols = ["AAA", "BBB"]
+    book._shortlist_pchange = {"AAA": 3.0, "BBB": -2.5}
+    monkeypatch.setattr(screener, "poll_oi_rank", lambda nse, cfg: _ranked_df([
+        {"symbol": "AAA", "rank": 1, "oi_spurt_pct": 20.0, "pChange": 3.0},
+        {"symbol": "BBB", "rank": 2, "oi_spurt_pct": 15.0, "pChange": -2.5},
+    ]))
+
+    now = datetime(2026, 8, 30, 9, 16, 0, tzinfo=IST)
+    await book._do_rank_poll(now, book._screener_cfg)
+
+    assert book._rank_prev_top == {"AAA", "BBB"}
+    assert book._shortlist_symbols == ["AAA", "BBB"]   # untouched
+    assert book._rejected == set()
+
+
+@pytest.mark.asyncio
+async def test_do_rank_poll_drops_not_yet_entered_symbol_that_falls_out_of_top_n(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._nse = object()
+    book._shortlist_symbols = ["AAA", "BBB"]
+    book._shortlist_pchange = {"AAA": 3.0, "BBB": -2.5}
+
+    polls = [
+        _ranked_df([
+            {"symbol": "AAA", "rank": 1, "oi_spurt_pct": 20.0, "pChange": 3.0},
+            {"symbol": "BBB", "rank": 2, "oi_spurt_pct": 15.0, "pChange": -2.5},
+        ]),
+        # BBB fell out of the ranked list entirely on this later poll.
+        _ranked_df([
+            {"symbol": "AAA", "rank": 1, "oi_spurt_pct": 22.0, "pChange": 3.2},
+            {"symbol": "CCC", "rank": 2, "oi_spurt_pct": 14.0, "pChange": 2.1},
+        ]),
+    ]
+    calls = {"n": 0}
+
+    def _poll(nse, cfg):
+        df = polls[calls["n"]]
+        calls["n"] += 1
+        return df
+    monkeypatch.setattr(screener, "poll_oi_rank", _poll)
+
+    now1 = datetime(2026, 8, 30, 9, 16, 0, tzinfo=IST)
+    now2 = datetime(2026, 8, 30, 9, 18, 0, tzinfo=IST)
+    await book._do_rank_poll(now1, book._screener_cfg)
+    await book._do_rank_poll(now2, book._screener_cfg)
+
+    side_bbb = screener.side_from_pchange(-2.5)
+    assert "BBB" not in book._shortlist_symbols
+    assert "AAA" in book._shortlist_symbols
+    assert (side_bbb, ) != ()  # sanity -- side computed
+    assert (("BBB", side_bbb) in book._rejected)
+    assert "BBB" in book._rank_dropped
+
+
+@pytest.mark.asyncio
+async def test_do_rank_poll_never_drops_an_already_entered_symbol(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._nse = object()
+    book._shortlist_symbols = ["AAA", "BBB"]
+    book._shortlist_pchange = {"AAA": 3.0, "BBB": -2.5}
+    book._positions["BBB"] = {"contract": None, "qty": 1, "entry_price": 10.0,
+                               "paper_mode": True, "opened_at": datetime.now(IST)}
+
+    polls = [
+        _ranked_df([
+            {"symbol": "AAA", "rank": 1, "oi_spurt_pct": 20.0, "pChange": 3.0},
+            {"symbol": "BBB", "rank": 2, "oi_spurt_pct": 15.0, "pChange": -2.5},
+        ]),
+        _ranked_df([
+            {"symbol": "AAA", "rank": 1, "oi_spurt_pct": 22.0, "pChange": 3.2},
+            {"symbol": "CCC", "rank": 2, "oi_spurt_pct": 14.0, "pChange": 2.1},
+        ]),
+    ]
+    calls = {"n": 0}
+
+    def _poll(nse, cfg):
+        df = polls[calls["n"]]
+        calls["n"] += 1
+        return df
+    monkeypatch.setattr(screener, "poll_oi_rank", _poll)
+
+    now1 = datetime(2026, 8, 30, 9, 16, 0, tzinfo=IST)
+    now2 = datetime(2026, 8, 30, 9, 18, 0, tzinfo=IST)
+    await book._do_rank_poll(now1, book._screener_cfg)
+    await book._do_rank_poll(now2, book._screener_cfg)
+
+    assert "BBB" in book._shortlist_symbols, "an already-open position must never be dropped"
+    assert "BBB" not in book._rank_dropped
+
+
+@pytest.mark.asyncio
+async def test_afternoon_scan_noop_outside_window(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    monkeypatch.setattr(screener, "build_shortlist", lambda nse, cfg: (_ for _ in ()).throw(
+        AssertionError("must not scan outside the afternoon window")))
+    now = datetime(2026, 8, 27, 11, 0, 0, tzinfo=IST)   # before 12:00
+    await book._maybe_run_afternoon_scan(now, book._screener_cfg)
+    assert book._shortlist_symbols == []
+
+
+@pytest.mark.asyncio
+async def test_afternoon_scan_noop_when_disabled(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._screener_cfg["TWO_SESSION_SCAN_ENABLED"] = False
+    monkeypatch.setattr(screener, "build_shortlist", lambda nse, cfg: (_ for _ in ()).throw(
+        AssertionError("must not scan when two_session_scan_enabled is off")))
+    now = datetime(2026, 8, 27, 12, 30, 0, tzinfo=IST)
+    await book._maybe_run_afternoon_scan(now, book._screener_cfg)
+    assert book._shortlist_symbols == []
+
+
+@pytest.mark.asyncio
+async def test_afternoon_scan_adds_new_symbols_without_dropping_existing(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._shortlist_symbols = ["EXISTING"]
+    book._shortlist_pchange = {"EXISTING": 3.0}
+    book._regime = "bullish"   # already frozen at 09:25 -- must stay untouched
+
+    df = _shortlist_df([
+        {"symbol": "EXISTING", "pChange": 3.0, "oi_spurt_pct": 8.0, "score": 0.5,
+         "lastPrice": 100.0, "previousClose": 97.0},
+        {"symbol": "NEWSTOCK", "pChange": -2.5, "oi_spurt_pct": 9.0, "score": 0.6,
+         "lastPrice": 50.0, "previousClose": 51.3},
+    ])
+    monkeypatch.setattr(screener, "build_shortlist", lambda nse, cfg: (df, 0.4))
+    monkeypatch.setattr(screener, "backfill_orb_from_yahoo", lambda *a, **k: None)
+    monkeypatch.setattr(screener, "backfill_vwap_from_yahoo", lambda *a, **k: None)
+    monkeypatch.setattr(asyncio, "to_thread", lambda fn, *a, **k: _async_return(fn(*a, **k))())
+
+    now = datetime(2026, 8, 27, 12, 30, 0, tzinfo=IST)
+    await book._maybe_run_afternoon_scan(now, book._screener_cfg)
+
+    assert sorted(book._shortlist_symbols) == ["EXISTING", "NEWSTOCK"]
+    assert book._shortlist_pchange["NEWSTOCK"] == -2.5
+    assert book._regime == "bullish"   # untouched -- afternoon reuses the frozen regime
+
+
+@pytest.mark.asyncio
+async def test_afternoon_scan_throttled_by_interval(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    calls = {"n": 0}
+
+    def _build(nse, cfg):
+        calls["n"] += 1
+        return _shortlist_df([]), 0.0
+    monkeypatch.setattr(screener, "build_shortlist", _build)
+    monkeypatch.setattr(asyncio, "to_thread", lambda fn, *a, **k: _async_return(fn(*a, **k))())
+
+    now = datetime(2026, 8, 27, 12, 30, 0, tzinfo=IST)
+    await book._maybe_run_afternoon_scan(now, book._screener_cfg)
+    # Same instant again -- must be throttled, not re-scanned.
+    await book._maybe_run_afternoon_scan(now, book._screener_cfg)
+    assert calls["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_afternoon_scan_never_refetches_regime(monkeypatch):
+    """Direct user spec: reuse the SAME regime frozen at 09:25 all day --
+    the afternoon scan must never call fetch_nifty_pchange itself."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._regime = "bearish"
+    df = _shortlist_df([{"symbol": "NEWSTOCK", "pChange": -3.0, "oi_spurt_pct": 8.0,
+                          "score": 0.5, "lastPrice": 50.0, "previousClose": 51.5}])
+    monkeypatch.setattr(screener, "build_shortlist", lambda nse, cfg: (df, 0.0))
+    monkeypatch.setattr(screener, "fetch_nifty_pchange", lambda nse: (_ for _ in ()).throw(
+        AssertionError("afternoon scan must not re-fetch NIFTY regime")))
+    monkeypatch.setattr(asyncio, "to_thread", lambda fn, *a, **k: _async_return(fn(*a, **k))())
+
+    now = datetime(2026, 8, 27, 12, 30, 0, tzinfo=IST)
+    await book._maybe_run_afternoon_scan(now, book._screener_cfg)
+    assert book._regime == "bearish"
+
+
+@pytest.mark.asyncio
+async def test_shortlist_pchange_exposed_via_monitoring_state(monkeypatch):
+    """2026-08-24: the dashboard panel used to show every shortlisted stock
+    as just "ORB pending" with zero directional signal, even though the
+    shortlist itself already knows bullish vs bearish (that's how it got
+    split in the first place). monitoring_state() must expose pChange per
+    symbol so the UI can show CALL-bias vs PUT-bias before any ORB level
+    exists."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._screener_cfg["IGNORE_TIME_WINDOWS"] = True
+    book._running = True
+
+    monkeypatch.setattr(screener, "NSESession", _FakeNSESession)
+    monkeypatch.setattr(asyncio, "sleep", _async_return(None))
+    monkeypatch.setattr(screener, "backfill_orb_from_yahoo", lambda bars, syms, cfg: None)
+
+    import pandas as pd
+    fake_shortlist = pd.DataFrame([
+        {"symbol": "VMM", "pChange": 9.28, "previousClose": 103.43},
+        {"symbol": "DIXON", "pChange": -2.04, "previousClose": 14700.0},
+    ])
+    monkeypatch.setattr(screener, "build_shortlist", lambda nse, cfg: (fake_shortlist, 0.11))
+
+    def _stop_after_shortlist(nse):
+        # Only care about the shortlist-building portion of the pipeline --
+        # stop the book so the monitor while-loop exits on its next check
+        # instead of spinning (asyncio.sleep is mocked to return instantly).
+        book._running = False
+        raise RuntimeError("stop test here")
+    monkeypatch.setattr(screener, "fetch_fno_price_universe", _stop_after_shortlist)
+
+    await book._run_today_pipeline()
+
+    assert book._shortlist_pchange == {"VMM": 9.28, "DIXON": -2.04}
+    state = book.monitoring_state()
+    assert state["shortlist_pchange"] == {"VMM": 9.28, "DIXON": -2.04}
+    assert set(state["shortlist"]) == {"VMM", "DIXON"}
+
+
+# ── restore-on-restart (2026-08-24 real incident: DIXON PE14500 entered,
+# then a pm2 restart at ~14:40 silently lost all memory it existed) ────────
+
+@pytest.mark.asyncio
+async def test_restore_from_db_reopens_position_and_resubscribes_feed(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._today = date(2026, 8, 24)
+
+    store.open_position(_TEST_CLIENT_ID, _TEST_BINDING_ID, "DIXON", "PE", 14500,
+                         "2026-08-25", 50, 118.80, "orb_low_breakdown", True, "EVT1",
+                         trade_date="2026-08-24")
+
+    contract = _contract("DIXON", 14500, "PE")
+    monkeypatch.setattr(stock_resolve, "resolve_contract_exact_async", _async_return(contract))
+
+    await book._restore_from_db()
+
+    assert "DIXON" in book._positions
+    assert book._positions["DIXON"]["qty"] == 50
+    assert book._positions["DIXON"]["entry_price"] == 118.80
+    assert book._positions["DIXON"]["paper_mode"] is True
+    assert contract.upstox_key in bus._global_feeder.subscribed_tokens
+
+
+# ── option history backfill on mid-day restart (2026-08-27, direct user spec:
+# "it should get historical intraday data for that option chart from time
+# entry happened and then evaluate the sl and target in tf which we have
+# applied") ──────────────────────────────────────────────────────────────
+
+def _bar(hhmm: str, h: float, l: float, c: float, vol: float) -> dict:
+    return {"ts": f"2026-08-24T{hhmm}:00", "high": h, "low": l, "close": c, "volume": vol}
+
+
+@pytest.mark.asyncio
+async def test_seed_option_bars_from_history_reconstructs_sl_from_real_bars(monkeypatch):
+    """Baseline bars (09:55-09:59, flat @100) establish a running vwap ~100.
+    Position entered at 10:00. The 10:00-10:04 bucket (vwap_sl_tf_minutes=5)
+    drifts down to a close of 82 -- adverse, a lone touch, no arm yet. The
+    10:05-10:09 bucket stays near that same level (low=81.70, within
+    pool_sl_from_adverse_lows' tol_pct% of bucket1's 82.0) -- the SECOND
+    touch confirms the cluster and arms the SL there. A later still-forming
+    bucket (10:10, partial) must NOT be replayed -- it becomes the seeded
+    "current" bar for the live loop to continue."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    contract = _contract("DIXON", 14500, "PE")
+    book._positions["DIXON"] = {
+        "contract": contract, "qty": 50, "entry_price": 118.80, "paper_mode": True,
+        "opened_at": datetime(2026, 8, 24, 10, 0, 0),
+    }
+    bars = (
+        [_bar(f"09:{m:02d}", 100, 100, 100, 100) for m in range(55, 60)]
+        + [
+            _bar("10:00", 100, 95, 95, 100),
+            _bar("10:01", 95, 90, 90, 100),
+            _bar("10:02", 90, 88, 88, 100),
+            _bar("10:03", 88, 85, 85, 100),
+            _bar("10:04", 85, 82, 82, 100),
+            _bar("10:05", 82.0, 81.8, 81.9, 100),
+            _bar("10:06", 81.9, 81.8, 81.85, 100),
+            _bar("10:07", 81.85, 81.75, 81.8, 100),
+            _bar("10:08", 81.8, 81.75, 81.78, 100),
+            _bar("10:09", 81.78, 81.70, 81.75, 100),
+            _bar("10:10", 81.75, 80.0, 80.0, 50),   # still-forming bucket -- not replayed
+        ]
+    )
+    monkeypatch.setattr("data_layer.historical_candles.fetch_upstox_intraday_1m", _async_return(bars))
+    monkeypatch.setattr("data_layer.client_db.ClientDB.get_feeder_creds_sync",
+                         lambda self, provider: {"access_token": "tok"})
+
+    await book._seed_option_bars_from_history("DIXON", contract, book._positions["DIXON"]["opened_at"])
+
+    assert book._option_adverse_lows["DIXON"] == [82.0, 81.70]
+    assert book._live_sl["DIXON"] == 81.70
+    # entry=118.80, sl=81.70 -> risk=37.10, default rr_multiple=2.0 -> target=193.00
+    assert book._live_target["DIXON"] == pytest.approx(193.00, abs=0.01)
+    # The still-forming 10:10 bucket is seeded as the CURRENT bar, not replayed.
+    assert book._option_sl_bar_key["DIXON"] == "10:10"
+    assert book._option_sl_bar_cur["DIXON"]["c"] == 80.0
+    assert book._live_option_atp["DIXON"] is not None
+
+
+@pytest.mark.asyncio
+async def test_seed_option_bars_from_history_ignores_bars_before_entry(monkeypatch):
+    """A bucket that closed adverse entirely BEFORE the position existed must
+    never arm an SL -- only bars from entry_ts onward count."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    contract = _contract("DIXON", 14500, "PE")
+    book._positions["DIXON"] = {
+        "contract": contract, "qty": 50, "entry_price": 118.80, "paper_mode": True,
+        "opened_at": datetime(2026, 8, 24, 10, 30, 0),
+    }
+    bars = [
+        _bar("09:55", 100, 60, 60, 100),   # adverse close, but BEFORE entry -- must be ignored
+        _bar("10:30", 100, 100, 100, 100),
+        _bar("10:35", 100, 100, 100, 50),   # still-forming
+    ]
+    monkeypatch.setattr("data_layer.historical_candles.fetch_upstox_intraday_1m", _async_return(bars))
+    monkeypatch.setattr("data_layer.client_db.ClientDB.get_feeder_creds_sync",
+                         lambda self, provider: {"access_token": "tok"})
+
+    await book._seed_option_bars_from_history("DIXON", contract, book._positions["DIXON"]["opened_at"])
+
+    assert "DIXON" not in book._live_sl
+
+
+@pytest.mark.asyncio
+async def test_seed_option_bars_from_history_noop_without_a_token(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    contract = _contract("DIXON", 14500, "PE")
+    book._positions["DIXON"] = {
+        "contract": contract, "qty": 50, "entry_price": 118.80, "paper_mode": True,
+        "opened_at": datetime(2026, 8, 24, 10, 0, 0),
+    }
+    async def _must_not_be_called(*a, **k):
+        raise AssertionError("must never fetch without a token")
+    monkeypatch.setattr("data_layer.historical_candles.fetch_upstox_intraday_1m", _must_not_be_called)
+    monkeypatch.setattr("data_layer.client_db.ClientDB.get_feeder_creds_sync",
+                         lambda self, provider: {})
+
+    await book._seed_option_bars_from_history("DIXON", contract, book._positions["DIXON"]["opened_at"])
+
+    assert "DIXON" not in book._live_sl
+    assert "DIXON" not in book._live_option_atp
+
+
+@pytest.mark.asyncio
+async def test_seed_option_bars_from_history_noop_on_fetch_exception(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    contract = _contract("DIXON", 14500, "PE")
+    book._positions["DIXON"] = {
+        "contract": contract, "qty": 50, "entry_price": 118.80, "paper_mode": True,
+        "opened_at": datetime(2026, 8, 24, 10, 0, 0),
+    }
+
+    async def _raise(*a, **k):
+        raise RuntimeError("network error")
+    monkeypatch.setattr("data_layer.historical_candles.fetch_upstox_intraday_1m", _raise)
+    monkeypatch.setattr("data_layer.client_db.ClientDB.get_feeder_creds_sync",
+                         lambda self, provider: {"access_token": "tok"})
+
+    await book._seed_option_bars_from_history("DIXON", contract, book._positions["DIXON"]["opened_at"])
+
+    assert "DIXON" not in book._live_sl
+
+
+@pytest.mark.asyncio
+async def test_restore_from_db_restores_already_fired_and_rejected_sets(monkeypatch):
+    """The other real half of the 2026-08-24 incident: DIXON PUT re-signaled
+    a second time the same day after the restart, because the in-memory
+    _already_fired/_rejected sets were wiped along with everything else.
+    Only harmless that day because contract resolution happened to fail on
+    the retry -- must not rely on that luck going forward."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._today = date(2026, 8, 24)
+
+    store.log_signal_event(_TEST_CLIENT_ID, _TEST_BINDING_ID, "DIXON", "signal_fired",
+                            side="PUT", trade_date="2026-08-24")
+    store.log_signal_event(_TEST_CLIENT_ID, _TEST_BINDING_ID, "VMM", "rejection_rule_triggered",
+                            side="CALL", trade_date="2026-08-24")
+
+    await book._restore_from_db()
+
+    assert ("DIXON", "PUT") in book._already_fired
+    assert ("VMM", "CALL") in book._rejected
+
+
+@pytest.mark.asyncio
+async def test_restore_from_db_with_nothing_stored_is_a_safe_noop():
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._today = date(2026, 8, 24)
+
+    await book._restore_from_db()
+
+    assert book._positions == {}
+    assert book._already_fired == set()
+    assert book._rejected == set()
+
+
+@pytest.mark.asyncio
+async def test_restore_from_db_logs_critical_when_contract_cannot_be_re_resolved(monkeypatch):
+    """A restored position whose contract can no longer be resolved (e.g.
+    the registry can't produce an upstox_key any more) must not silently
+    vanish -- it stays in the DB as still-open (so a human can reconcile
+    against the broker) and the failure is logged at CRITICAL, not just
+    dropped."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._today = date(2026, 8, 24)
+
+    store.open_position(_TEST_CLIENT_ID, _TEST_BINDING_ID, "DIXON", "PE", 14500,
+                         "2026-08-25", 50, 118.80, "orb_low_breakdown", True, "EVT1",
+                         trade_date="2026-08-24")
+    monkeypatch.setattr(stock_resolve, "resolve_contract_exact_async", _async_return(None))
+
+    await book._restore_from_db()
+
+    assert "DIXON" not in book._positions
+    # the DB row itself is untouched (still open) -- restore failure never closes it
+    still_open = store.load_open_positions(_TEST_CLIENT_ID, _TEST_BINDING_ID, trade_date="2026-08-24")
+    assert len(still_open) == 1
+
+
+@pytest.mark.asyncio
+async def test_on_fill_persists_position_open_and_close_to_db():
+    """End-to-end: a confirmed BUY fill writes an open row, and the
+    matching SELL fill closes it with the real exit reason (threaded
+    through _pending_closes, since OiOrbFillEvent itself carries no reason
+    field) and computed P&L."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    contract = _contract("DIXON", 14500, "PE")
+
+    book._pending_contracts["DIXON"] = contract
+    book._pending_fills["EVT1"] = {
+        "symbol": "DIXON", "contract": contract, "qty": 50,
+        "entry_price": 118.80, "reason": "orb_low_breakdown",
+    }
+    await book._on_fill(OiOrbFillEvent(
+        action="BUY", underlying="DIXON", option_type="PE", strike=14500, fill_price=118.80,
+        qty=50, client_id=_TEST_CLIENT_ID, binding_id=_TEST_BINDING_ID, event_id="EVT1", paper_mode=True,
+    ))
+
+    open_rows = store.load_open_positions(_TEST_CLIENT_ID, _TEST_BINDING_ID)
+    assert len(open_rows) == 1 and open_rows[0]["symbol"] == "DIXON"
+
+    book._pending_closes["EVT2"] = "sma_exit"
+    await book._on_fill(OiOrbFillEvent(
+        action="SELL", underlying="DIXON", option_type="PE", strike=14500, fill_price=95.30,
+        qty=50, client_id=_TEST_CLIENT_ID, binding_id=_TEST_BINDING_ID, event_id="EVT2",
+    ))
+
+    assert store.load_open_positions(_TEST_CLIENT_ID, _TEST_BINDING_ID) == []
+    import sqlite3
+    con = sqlite3.connect(store._DB_PATH)
+    con.row_factory = sqlite3.Row
+    row = dict(con.execute("SELECT * FROM positions WHERE symbol='DIXON'").fetchone())
+    con.close()
+    assert row["exit_reason"] == "sma_exit"
+    assert row["pnl"] == round((95.30 - 118.80) * 50, 2)
+
+
+# ── S&R (R1/S1/R2/S2) SL tracking (2026-08-26, direct user spec, replaces
+# the removed SMA-exit) ──────────────────────────────────────────────────
+
+def test_ensure_spot_feed_subscribes_and_is_idempotent():
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._ensure_spot_feed("MANAPPURAM")
+    book._ensure_spot_feed("MANAPPURAM")   # second call must be a no-op
+    assert bus._global_feeder.subscribed_equity == [("NSE:MANAPPURAM-EQ", "MANAPPURAM")]
+
+
+# ── dedicated upstox2 feeder routing (2026-08-27) ────────────────────────
+
+class _FakeOiOrbFeeder:
+    """Stand-in for run_system.py's dedicated `bus._oiorb_feeder` -- the
+    Upstox-native GlobalFeeder wrapper. Only the two methods OI-ORB actually
+    calls on it are faked."""
+
+    def __init__(self) -> None:
+        self.subscribed_tokens: list = []
+        self.registered_spot_keys: dict = {}
+
+    async def subscribe_tokens(self, tokens):
+        self.subscribed_tokens.extend(tokens)
+
+    def register_extra_spot_keys(self, mapping):
+        self.registered_spot_keys.update(mapping)
+
+
+def test_ensure_spot_feed_prefers_dedicated_oiorb_feeder_when_available(monkeypatch):
+    bus = _FakeBus()
+    bus._oiorb_feeder = _FakeOiOrbFeeder()
+    monkeypatch.setattr(stock_resolve, "resolve_eq_instrument_key", lambda sym: "NSE_EQ|INE123A01011")
+    book = _make_book(bus)
+    book._ensure_spot_feed("MANAPPURAM")
+    assert bus._oiorb_feeder.registered_spot_keys == {"NSE_EQ|INE123A01011": "MANAPPURAM"}
+    # The dedicated route succeeded -- the shared Fyers-only fallback must NOT fire too.
+    assert bus._global_feeder.subscribed_equity == []
+
+
+def test_ensure_spot_feed_falls_back_to_shared_feeder_when_no_eq_key_resolved(monkeypatch):
+    bus = _FakeBus()
+    bus._oiorb_feeder = _FakeOiOrbFeeder()
+    monkeypatch.setattr(stock_resolve, "resolve_eq_instrument_key", lambda sym: "")
+    book = _make_book(bus)
+    book._ensure_spot_feed("MANAPPURAM")
+    assert bus._oiorb_feeder.registered_spot_keys == {}
+    assert bus._global_feeder.subscribed_equity == [("NSE:MANAPPURAM-EQ", "MANAPPURAM")]
+
+
+def test_ensure_spot_feed_uses_shared_feeder_when_no_dedicated_feeder_configured():
+    bus = _FakeBus()   # no _oiorb_feeder attribute at all
+    book = _make_book(bus)
+    book._ensure_spot_feed("MANAPPURAM")
+    assert bus._global_feeder.subscribed_equity == [("NSE:MANAPPURAM-EQ", "MANAPPURAM")]
+
+
+@pytest.mark.asyncio
+async def test_ensure_option_feed_prefers_dedicated_oiorb_feeder_when_available():
+    bus = _FakeBus()
+    bus._oiorb_feeder = _FakeOiOrbFeeder()
+    book = _make_book(bus)
+    contract = _contract("MANAPPURAM", 365, "CE")
+    book._ensure_option_feed("MANAPPURAM", contract)
+    await asyncio.sleep(0.05)
+    assert contract.upstox_key in bus._oiorb_feeder.subscribed_tokens
+    assert contract.upstox_key not in bus._global_feeder.subscribed_tokens
+
+
+@pytest.mark.asyncio
+async def test_spot_tick_loop_reacts_to_index_tick_not_just_equity_tick():
+    """The dedicated upstox2 feeder's register_extra_spot_keys() publishes
+    stock spot ticks as INDEX_TICK (Upstox-native mechanic), not EQUITY_TICK
+    (the Fyers-only fallback route) -- _spot_tick_loop must react to both."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    contract = _contract("MANAPPURAM", 365, "CE")
+    book._positions["MANAPPURAM"] = {
+        "contract": contract, "qty": 100, "entry_price": 10.0, "paper_mode": True,
+        "opened_at": datetime(2026, 8, 26, 9, 15, 0),
+    }
+    # Only the spot-tick loop is needed -- NOT book.start()'s full task set
+    # (_daily_loop would try real NSE calls off the wall clock).
+    book._subscribe(Topic.EQUITY_TICK)
+    book._subscribe(Topic.INDEX_TICK)
+    book._running = True
+    spot_task = asyncio.create_task(book._spot_tick_loop())
+    try:
+        await bus.publish(Topic.INDEX_TICK, IndexTick(
+            symbol="MANAPPURAM", ltp=101.5, open=101.5, high=101.5, low=101.5, close=101.5,
+            volume=0, timestamp=datetime(2026, 8, 26, 9, 15, 10, tzinfo=IST),
+        ))
+        await asyncio.sleep(0.1)
+        assert book._live_spot_ltp.get("MANAPPURAM") == 101.5
+    finally:
+        book._running = False
+        spot_task.cancel()
+        try:
+            await spot_task
+        except asyncio.CancelledError:
+            pass
+
+
+def test_on_fill_buy_resets_option_sl_target_state_and_subscribes_spot_feed():
+    bus = _FakeBus()
+    book = _make_book(bus)
+    contract = _contract("MANAPPURAM", 365, "CE")
+    book._pending_fills["EVT1"] = {
+        "symbol": "MANAPPURAM", "contract": contract, "qty": 100,
+        "entry_price": 10.0, "reason": "signal",
+    }
+    # Stale state from an earlier (already-closed) run on this same symbol today --
+    # must not leak into the freshly-opened position's own SL/target tracking.
+    book._option_sl_bar_key["MANAPPURAM"] = "09:15"
+    book._option_sl_bar_cur["MANAPPURAM"] = {"h": 1.0, "l": 1.0, "c": 1.0, "ts": datetime(2026, 8, 26, 9, 15)}
+    book._live_sl["MANAPPURAM"] = 999.0
+    book._live_target["MANAPPURAM"] = 999.0
+    book._live_option_atp["MANAPPURAM"] = 5.0
+
+    asyncio.run(book._on_fill(OiOrbFillEvent(
+        action="BUY", underlying="MANAPPURAM", option_type="CE", strike=365, fill_price=10.0,
+        qty=100, client_id=_TEST_CLIENT_ID, binding_id=_TEST_BINDING_ID, event_id="EVT1",
+        paper_mode=True,
+    )))
+
+    assert "MANAPPURAM" not in book._option_sl_bar_key
+    assert "MANAPPURAM" not in book._option_sl_bar_cur
+    assert "MANAPPURAM" not in book._live_sl
+    assert "MANAPPURAM" not in book._live_target
+    assert "MANAPPURAM" not in book._live_option_atp
+    assert bus._global_feeder.subscribed_equity == [("NSE:MANAPPURAM-EQ", "MANAPPURAM")]
+
+
+@pytest.mark.asyncio
+async def test_option_sl_does_not_arm_on_a_single_adverse_bar():
+    """2026-08-28 real incident fix: a single adverse bar's own low is
+    ordinary intraday noise, not a real defended level -- two real trades
+    the same session (COFORGE CE2000, KPITTECH CE620) got stopped by the
+    OLD single-bar anchor right before a genuine reversal (confirmed on
+    real TradingView charts). See screener.pool_sl_from_adverse_lows' own
+    docstring. One adverse bar close must NOT arm the SL by itself."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._vwap_sl_tf_minutes = 1
+    book._live_option_atp["MANAPPURAM"] = 100.0
+    contract = _contract("MANAPPURAM", 365, "CE")
+    book._positions["MANAPPURAM"] = {
+        "contract": contract, "qty": 100, "entry_price": 100.0, "paper_mode": True,
+        "opened_at": datetime(2026, 8, 26, 9, 15, 0),
+    }
+
+    await book._update_option_sl_target_and_check("MANAPPURAM", 105.0, datetime(2026, 8, 26, 9, 15, 10, tzinfo=IST))
+    await book._update_option_sl_target_and_check("MANAPPURAM", 108.0, datetime(2026, 8, 26, 9, 15, 40, tzinfo=IST))
+    # bar1 (09:15, close=108 > vwap=100 -- FAVORABLE) closes on this next tick.
+    await book._update_option_sl_target_and_check("MANAPPURAM", 102.0, datetime(2026, 8, 26, 9, 16, 10, tzinfo=IST))
+    assert "MANAPPURAM" not in book._live_sl   # favorable close never arms
+
+    await book._update_option_sl_target_and_check("MANAPPURAM", 90.0, datetime(2026, 8, 26, 9, 16, 40, tzinfo=IST))
+    # bar2 (09:16, high=102/low=90/close=90 < vwap=100 -- ADVERSE) closes on this next tick.
+    await book._update_option_sl_target_and_check("MANAPPURAM", 91.0, datetime(2026, 8, 26, 9, 17, 10, tzinfo=IST))
+
+    # Only ONE adverse bar so far -- a lone touch, not a confirmed cluster.
+    assert "MANAPPURAM" not in book._live_sl
+    assert book._option_adverse_lows["MANAPPURAM"] == [90.0]
+
+
+@pytest.mark.asyncio
+async def test_option_sl_arms_once_a_second_adverse_bar_clusters_near_the_first():
+    """A second adverse bar whose own low sits within pool_sl_from_adverse_
+    lows' tol_pct% of the first confirms a real anchor -- the SL arms to
+    that (most recent) clustered low, and a live tick breaching it closes
+    immediately, same tick, not waiting for the next bar close."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._vwap_sl_tf_minutes = 1
+    book._live_option_atp["MANAPPURAM"] = 100.0
+    contract = _contract("MANAPPURAM", 365, "CE")
+    book._positions["MANAPPURAM"] = {
+        "contract": contract, "qty": 100, "entry_price": 100.0, "paper_mode": True,
+        "opened_at": datetime(2026, 8, 26, 9, 15, 0),
+    }
+    # bar1 (09:15): low=90 -- adverse, lone touch, no arm yet.
+    await book._update_option_sl_target_and_check("MANAPPURAM", 95.0, datetime(2026, 8, 26, 9, 15, 10, tzinfo=IST))
+    await book._update_option_sl_target_and_check("MANAPPURAM", 90.0, datetime(2026, 8, 26, 9, 15, 40, tzinfo=IST))
+    await book._update_option_sl_target_and_check("MANAPPURAM", 92.0, datetime(2026, 8, 26, 9, 16, 10, tzinfo=IST))
+    assert "MANAPPURAM" not in book._live_sl
+
+    # bar2 (09:16): low=90.5 -- within 1% of 90 (tol=0.905) -- clusters, arms at 90.5.
+    await book._update_option_sl_target_and_check("MANAPPURAM", 90.5, datetime(2026, 8, 26, 9, 16, 40, tzinfo=IST))
+    await book._update_option_sl_target_and_check("MANAPPURAM", 91.0, datetime(2026, 8, 26, 9, 17, 10, tzinfo=IST))
+    assert book._live_sl["MANAPPURAM"] == 90.5
+    # entry=100, sl=90.5 -> risk=9.5, default rr_multiple=2.0 -> target=119.0
+    assert book._live_target["MANAPPURAM"] == 119.0
+    assert "MANAPPURAM" in book._positions   # not breached yet (91 > 90.5)
+
+    sell_events_before = [e for t, e in bus.published if t == Topic.OI_ORB_ORDER_REQUEST and e.action == "SELL"]
+    assert sell_events_before == []
+
+    # A live tick (same forming bar, no new bar close needed) breaches SL immediately.
+    await book._update_option_sl_target_and_check("MANAPPURAM", 90.4, datetime(2026, 8, 26, 9, 17, 20, tzinfo=IST))
+
+    sell_events = [e for t, e in bus.published if t == Topic.OI_ORB_ORDER_REQUEST and e.action == "SELL"]
+    assert len(sell_events) == 1
+    assert sell_events[0].underlying == "MANAPPURAM"
+    assert "MANAPPURAM" in book._eod_closing
+
+
+@pytest.mark.asyncio
+async def test_option_sl_two_far_apart_adverse_lows_do_not_cluster():
+    """Two adverse bars whose lows sit FAR apart (outside tol_pct%) are two
+    separate one-off dips, not a real defended level -- neither should arm
+    the SL alone."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._vwap_sl_tf_minutes = 1
+    book._live_option_atp["MANAPPURAM"] = 100.0
+    contract = _contract("MANAPPURAM", 365, "CE")
+    book._positions["MANAPPURAM"] = {
+        "contract": contract, "qty": 100, "entry_price": 100.0, "paper_mode": True,
+        "opened_at": datetime(2026, 8, 26, 9, 15, 0),
+    }
+    await book._update_option_sl_target_and_check("MANAPPURAM", 95.0, datetime(2026, 8, 26, 9, 15, 10, tzinfo=IST))
+    await book._update_option_sl_target_and_check("MANAPPURAM", 90.0, datetime(2026, 8, 26, 9, 15, 40, tzinfo=IST))
+    await book._update_option_sl_target_and_check("MANAPPURAM", 92.0, datetime(2026, 8, 26, 9, 16, 10, tzinfo=IST))
+    await book._update_option_sl_target_and_check("MANAPPURAM", 85.0, datetime(2026, 8, 26, 9, 16, 40, tzinfo=IST))
+    await book._update_option_sl_target_and_check("MANAPPURAM", 88.0, datetime(2026, 8, 26, 9, 17, 10, tzinfo=IST))
+
+    assert "MANAPPURAM" not in book._live_sl
+    assert book._option_adverse_lows["MANAPPURAM"] == [90.0, 85.0]
+
+
+@pytest.mark.asyncio
+async def test_option_target_hit_closes_position():
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._vwap_sl_tf_minutes = 1
+    book._live_option_atp["MANAPPURAM"] = 100.0
+    contract = _contract("MANAPPURAM", 365, "CE")
+    book._positions["MANAPPURAM"] = {
+        "contract": contract, "qty": 100, "entry_price": 100.0, "paper_mode": True,
+        "opened_at": datetime(2026, 8, 26, 9, 15, 0),
+    }
+    book._live_sl["MANAPPURAM"] = 90.0
+    book._live_target["MANAPPURAM"] = 120.0
+
+    await book._update_option_sl_target_and_check("MANAPPURAM", 121.0, datetime(2026, 8, 26, 9, 15, 10, tzinfo=IST))
+
+    sell_events = [e for t, e in bus.published if t == Topic.OI_ORB_ORDER_REQUEST and e.action == "SELL"]
+    assert len(sell_events) == 1
+    assert sell_events[0].underlying == "MANAPPURAM"
+
+
+@pytest.mark.asyncio
+async def test_option_sl_rearms_once_a_new_cluster_forms_at_a_different_level():
+    """2026-08-28: re-arm is no longer "every single adverse bar" -- it now
+    requires its own fresh 2-touch cluster (screener.pool_sl_from_adverse_
+    lows). A confirmed level holds steady while a new, uncorroborated dip
+    comes in, then replaces it once THAT dip earns its own second touch."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._vwap_sl_tf_minutes = 1
+    book._live_option_atp["MANAPPURAM"] = 100.0
+    contract = _contract("MANAPPURAM", 365, "CE")
+    book._positions["MANAPPURAM"] = {
+        "contract": contract, "qty": 100, "entry_price": 100.0, "paper_mode": True,
+        "opened_at": datetime(2026, 8, 26, 9, 15, 0),
+    }
+
+    # bar1 (09:15) low=90, bar2 (09:16) low=90.3 -- cluster confirms SL=90.3.
+    await book._update_option_sl_target_and_check("MANAPPURAM", 95.0, datetime(2026, 8, 26, 9, 15, 10, tzinfo=IST))
+    await book._update_option_sl_target_and_check("MANAPPURAM", 90.0, datetime(2026, 8, 26, 9, 15, 40, tzinfo=IST))
+    await book._update_option_sl_target_and_check("MANAPPURAM", 92.0, datetime(2026, 8, 26, 9, 16, 10, tzinfo=IST))
+    await book._update_option_sl_target_and_check("MANAPPURAM", 90.3, datetime(2026, 8, 26, 9, 16, 40, tzinfo=IST))
+    await book._update_option_sl_target_and_check("MANAPPURAM", 91.5, datetime(2026, 8, 26, 9, 17, 10, tzinfo=IST))
+    assert book._live_sl["MANAPPURAM"] == 90.3
+    assert book._live_target["MANAPPURAM"] == pytest.approx(119.4)   # entry=100, risk=9.7, rr=2 -> 119.4
+
+    # bar3 (09:17): low=80 -- a fresh, uncorroborated dip -- does NOT re-arm yet.
+    await book._update_option_sl_target_and_check("MANAPPURAM", 80.0, datetime(2026, 8, 26, 9, 17, 40, tzinfo=IST))
+    await book._update_option_sl_target_and_check("MANAPPURAM", 81.0, datetime(2026, 8, 26, 9, 18, 10, tzinfo=IST))
+    assert book._live_sl["MANAPPURAM"] == 90.3   # unchanged -- only one touch at 80 so far
+
+    # bar4 (09:18): low=80.2 -- clusters with bar3's 80 -- NOW re-arms down to 80.2.
+    await book._update_option_sl_target_and_check("MANAPPURAM", 80.2, datetime(2026, 8, 26, 9, 18, 40, tzinfo=IST))
+    await book._update_option_sl_target_and_check("MANAPPURAM", 81.0, datetime(2026, 8, 26, 9, 19, 10, tzinfo=IST))
+    assert book._live_sl["MANAPPURAM"] == 80.2
+    assert book._live_target["MANAPPURAM"] == pytest.approx(139.6)   # entry=100, risk=19.8, rr=2 -> 139.6
+
+
+@pytest.mark.asyncio
+async def test_option_sl_no_close_while_sl_not_yet_established():
+    """Only ONE bar is still forming so far -- it hasn't CLOSED yet, so no SL
+    exists and a big drop must NOT trigger a close (the position runs on the
+    hard risk cap alone during this window)."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    contract = _contract("MANAPPURAM", 365, "CE")
+    book._positions["MANAPPURAM"] = {
+        "contract": contract, "qty": 100, "entry_price": 100.0, "paper_mode": True,
+        "opened_at": datetime(2026, 8, 26, 9, 15, 0),
+    }
+    await book._update_option_sl_target_and_check("MANAPPURAM", 100.0, datetime(2026, 8, 26, 9, 15, 10, tzinfo=IST))
+    await book._update_option_sl_target_and_check("MANAPPURAM", 1.0, datetime(2026, 8, 26, 9, 15, 40, tzinfo=IST))
+
+    assert "MANAPPURAM" not in book._live_sl
+    sell_events = [e for t, e in bus.published if t == Topic.OI_ORB_ORDER_REQUEST and e.action == "SELL"]
+    assert sell_events == []
+
+
+def test_default_vwap_sl_tf_minutes_is_5():
+    """2026-08-27, direct user spec default -- fresh, unvalidated (this
+    strategy still can't be backtested), watch real forward telemetry."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    assert book._vwap_sl_tf_minutes == 5
+
+
+def test_default_rr_multiple_is_2():
+    bus = _FakeBus()
+    book = _make_book(bus)
+    assert book._rr_multiple == 2.0
+
+
+@pytest.mark.asyncio
+async def test_option_sl_bars_bucket_by_the_configured_tf_not_always_1min():
+    """09:15 and 09:16 must fall in the SAME bar at the 5-min default
+    (floor(15/5)*5 == floor(16/5)*5 == 15) -- confirms the bucketing actually
+    uses self._vwap_sl_tf_minutes, not a hardcoded 1-min key."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    assert book._vwap_sl_tf_minutes == 5
+    contract = _contract("MANAPPURAM", 365, "CE")
+    book._positions["MANAPPURAM"] = {
+        "contract": contract, "qty": 100, "entry_price": 100.0, "paper_mode": True,
+        "opened_at": datetime(2026, 8, 26, 9, 15, 0),
+    }
+    await book._update_option_sl_target_and_check("MANAPPURAM", 100.0, datetime(2026, 8, 26, 9, 15, 10, tzinfo=IST))
+    await book._update_option_sl_target_and_check("MANAPPURAM", 95.0, datetime(2026, 8, 26, 9, 16, 40, tzinfo=IST))
+    # Still the SAME 5-min bar (09:15-09:20) -- no bar close, no arm yet.
+    assert book._option_sl_bar_key["MANAPPURAM"] == "09:15"
+    assert "MANAPPURAM" not in book._live_sl
+    sell_events = [e for t, e in bus.published if t == Topic.OI_ORB_ORDER_REQUEST and e.action == "SELL"]
+    assert sell_events == []
+
+
+@pytest.mark.asyncio
+async def test_option_tick_loop_feeds_atp_and_sl_target_check():
+    """End-to-end via the real _option_tick_loop (not calling the SL/target
+    method directly) -- confirms OptionTick.atp is what feeds the option's
+    own VWAP reference, and that a real OPTION_TICK stream can arm the SL
+    (via the 2026-08-28 pooled multi-touch anchor) exactly like the
+    direct-call tests above."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._vwap_sl_tf_minutes = 1
+    contract = _contract("MANAPPURAM", 365, "CE")
+    book._positions["MANAPPURAM"] = {
+        "contract": contract, "qty": 100, "entry_price": 100.0, "paper_mode": True,
+        "opened_at": datetime(2026, 8, 26, 9, 15, 0),
+    }
+    book._subscribe(Topic.OPTION_TICK)
+    book._running = True
+    task = asyncio.create_task(book._option_tick_loop())
+    try:
+        ticks = [
+            (105.0, 100.0, datetime(2026, 8, 26, 9, 15, 10, tzinfo=IST)),
+            (108.0, 100.0, datetime(2026, 8, 26, 9, 15, 40, tzinfo=IST)),
+            (102.0, 100.0, datetime(2026, 8, 26, 9, 16, 10, tzinfo=IST)),   # closes bar1 (favorable)
+            (90.0, 100.0, datetime(2026, 8, 26, 9, 16, 40, tzinfo=IST)),
+            (89.5, 100.0, datetime(2026, 8, 26, 9, 17, 10, tzinfo=IST)),    # closes bar2 (adverse, low=90.0) -- lone touch
+            (91.0, 100.0, datetime(2026, 8, 26, 9, 18, 10, tzinfo=IST)),    # closes bar3 (adverse, low=89.5) -- clusters w/ 90.0 -> arms SL=89.5
+        ]
+        for ltp, atp, ts in ticks:
+            await bus.publish(Topic.OPTION_TICK, OptionTick(
+                symbol="MANAPPURAM365CE", underlying="MANAPPURAM", strike=365, option_type="CE",
+                expiry=date(2026, 8, 27), ltp=ltp, bid=ltp, ask=ltp, oi=0, change_oi=0,
+                volume=0, iv=0.0, delta=0.0, timestamp=ts, atp=atp,
+            ))
+            await asyncio.sleep(0.02)
+        assert book._live_option_atp["MANAPPURAM"] == 100.0
+        assert book._live_sl["MANAPPURAM"] == 89.5
+    finally:
+        book._running = False
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
+@pytest.mark.asyncio
+async def test_monitoring_state_includes_live_spot_ltp_and_sl():
+    bus = _FakeBus()
+    book = _make_book(bus)
+    contract = _contract("MANAPPURAM", 365, "CE")
+    book._positions["MANAPPURAM"] = {
+        "contract": contract, "qty": 100, "entry_price": 10.0, "paper_mode": True,
+        "opened_at": datetime(2026, 8, 24, 13, 0, 0),
+    }
+    book._live_spot_ltp["MANAPPURAM"] = 372.5
+    book._live_sl["MANAPPURAM"] = 365.0
+    book._live_target["MANAPPURAM"] = 400.0
+
+    state = book.monitoring_state()
+    pos = state["positions"]["MANAPPURAM"]
+    assert pos["spot_ltp"] == 372.5
+    assert pos["sl"] == 365.0
+    assert pos["target"] == 400.0
+
+
+def test_monitoring_state_sl_is_none_before_establishment():
+    bus = _FakeBus()
+    book = _make_book(bus)
+    contract = _contract("MANAPPURAM", 365, "CE")
+    book._positions["MANAPPURAM"] = {
+        "contract": contract, "qty": 100, "entry_price": 10.0, "paper_mode": True,
+        "opened_at": datetime(2026, 8, 24, 13, 0, 0),
+    }
+    state = book.monitoring_state()
+    pos = state["positions"]["MANAPPURAM"]
+    assert pos["spot_ltp"] is None
+    assert pos["sl"] is None
+    assert pos["target"] is None
+
+
+# ── Hard Rs/lot risk cap backstop (2026-08-26) ───────────────────────────
+
+@pytest.mark.asyncio
+async def test_hard_risk_cap_closes_when_loss_meets_the_cap():
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._lot_multiplier = 1
+    contract = _contract("MANAPPURAM", 365, "CE")
+    book._positions["MANAPPURAM"] = {
+        "contract": contract, "qty": 100, "entry_price": 30.0, "paper_mode": True,
+        "opened_at": datetime(2026, 8, 26, 9, 15, 0),
+    }
+    await book._check_hard_risk_cap("MANAPPURAM", 9.9)   # loss = (30-9.9)*100 = 2010 >= 2000
+
+    sell_events = [e for t, e in bus.published if t == Topic.OI_ORB_ORDER_REQUEST and e.action == "SELL"]
+    assert len(sell_events) == 1
+    assert sell_events[0].underlying == "MANAPPURAM"
+    assert "MANAPPURAM" in book._eod_closing
+
+
+@pytest.mark.asyncio
+async def test_hard_risk_cap_no_close_within_the_cap():
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._lot_multiplier = 1
+    contract = _contract("MANAPPURAM", 365, "CE")
+    book._positions["MANAPPURAM"] = {
+        "contract": contract, "qty": 100, "entry_price": 30.0, "paper_mode": True,
+        "opened_at": datetime(2026, 8, 26, 9, 15, 0),
+    }
+    await book._check_hard_risk_cap("MANAPPURAM", 25.0)   # loss = (30-25)*100 = 500 < 2000
+
+    sell_events = [e for t, e in bus.published if t == Topic.OI_ORB_ORDER_REQUEST and e.action == "SELL"]
+    assert sell_events == []
+    assert "MANAPPURAM" not in book._eod_closing
+
+
+@pytest.mark.asyncio
+async def test_hard_risk_cap_scales_with_lot_multiplier():
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._lot_multiplier = 2   # cap doubles to Rs4000
+    contract = _contract("MANAPPURAM", 365, "CE")
+    book._positions["MANAPPURAM"] = {
+        "contract": contract, "qty": 100, "entry_price": 30.0, "paper_mode": True,
+        "opened_at": datetime(2026, 8, 26, 9, 15, 0),
+    }
+    # loss = (30-9.9)*100 = 2010 -- would have hit a Rs2000 cap, but not a Rs4000 one.
+    await book._check_hard_risk_cap("MANAPPURAM", 9.9)
+
+    sell_events = [e for t, e in bus.published if t == Topic.OI_ORB_ORDER_REQUEST and e.action == "SELL"]
+    assert sell_events == []
+
+
+# ── Periodic per-stock heartbeat log (2026-08-27) ────────────────────────
+
+def test_heartbeat_logs_price_vs_orb_levels():
+    """_clog uses propagate=False (its own dedicated per-binding log file),
+    so caplog can't observe it -- monkeypatch .info directly instead, same
+    pattern the throttle test below already uses."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    calls = []
+    book._clog.info = lambda *a, **k: calls.append(a)
+    book._maybe_log_heartbeat(["GVT&D=4550.00 [ORB 4433.20-4523.40] CALL@-0.59% PUT@2.57%"])
+    assert len(calls) == 1
+    assert "WATCH" in calls[0][0]
+    assert "GVT&D" in calls[0][-1]
+
+
+def test_heartbeat_is_throttled():
+    bus = _FakeBus()
+    book = _make_book(bus)
+    calls = []
+    book._clog.info = lambda *a, **k: calls.append(a)
+    book._maybe_log_heartbeat(["A=1 [ORB pending]"])
+    book._maybe_log_heartbeat(["A=2 [ORB pending]"])   # same cycle, must not double-log
+    assert len(calls) == 1
+
+
+def test_heartbeat_no_op_with_no_parts():
+    bus = _FakeBus()
+    book = _make_book(bus)
+    calls = []
+    book._clog.info = lambda *a, **k: calls.append(a)
+    book._maybe_log_heartbeat([])
+    assert calls == []
+
+
+# ── trap TSL: unconfirmed levels must not trigger an exit (2026-09-01 fix) ──
+# Real incident: ITC entered 13:33:11, TSL level {low:267.6,high:267.95}
+# (is_established=False) hit at 13:37:30 on a 0.15% underlying pullback --
+# same shape on ASHOKLEY, stopped under 2 minutes after entry. Both levels
+# were the extreme of just 1-2 three-minute bars since entry, not real
+# structure. _check_hard_risk_cap's independent Rs2000/lot backstop still
+# protects the position the whole time this gate is waiting.
+
+class _FakeSRCalc:
+    """Stand-in for SupportResistanceCalculator -- returns a fixed,
+    caller-controlled S1/R1 level regardless of what bars get fed in,
+    so the test can isolate the is_established gate itself."""
+    def __init__(self, level: dict, key: str):
+        self._level = level
+        self._key = key
+
+    def process_straddle_candle(self, sym, bar):
+        pass
+
+    def get_calculated_sr_state(self, sym):
+        return {"sr_levels": {self._key: self._level}}
+
+
+def _rig_trap_tsl(book, sym, side, level, key, entry_price=100.0, qty=10):
+    from strategies.liquidity_trap.detector import BarAccumulator as _TrapAcc
+    book._positions[sym] = {
+        "contract": type("C", (), {"option_type": "CE" if side == "CALL" else "PE", "strike": 100,
+                                     "expiry": date(2026, 9, 29)})(),
+        "qty": qty, "entry_price": entry_price, "paper_mode": True,
+        "opened_at": datetime.now(IST), "sl_mechanic": "trap",
+    }
+    book._trap_tsl_calc[sym] = _FakeSRCalc(level, key)
+    book._trap_tsl_acc[sym] = _TrapAcc(timeframe_min=3)
+    book._trap_tsl_fed_bars[sym] = 0
+
+
+@pytest.mark.asyncio
+async def test_unestablished_level_does_not_trigger_exit(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    level = {"low": 267.6, "high": 267.95, "is_established": False}
+    _rig_trap_tsl(book, "ITC", "CALL", level, "S1")
+
+    closed = []
+    async def _fake_emit_close(sym, pos, reason):
+        closed.append((sym, reason))
+    book._emit_close = _fake_emit_close
+
+    # underlying breaches the level's low (267.50 < 267.6) -- same real numbers as the incident
+    await book._trap_update_tsl_and_check_exit("ITC", "CALL", 267.50, datetime.now(IST))
+
+    assert closed == [], "an unconfirmed (is_established=False) level must not trigger the TSL"
+    assert "ITC" not in book._eod_closing
+
+
+@pytest.mark.asyncio
+async def test_established_level_still_triggers_exit(monkeypatch):
+    """The gate must not block genuine, confirmed breaches -- only unconfirmed ones."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    level = {"low": 267.6, "high": 267.95, "is_established": True}
+    _rig_trap_tsl(book, "ITC", "CALL", level, "S1")
+
+    closed = []
+    async def _fake_emit_close(sym, pos, reason):
+        closed.append((sym, reason))
+    book._emit_close = _fake_emit_close
+
+    await book._trap_update_tsl_and_check_exit("ITC", "CALL", 267.50, datetime.now(IST))
+
+    assert closed == [("ITC", "trap_tsl")]
+    assert "ITC" in book._eod_closing
+
+
+@pytest.mark.asyncio
+async def test_unestablished_level_no_breach_also_no_exit(monkeypatch):
+    """Sanity: the gate itself isn't what's suppressing the exit above --
+    confirm a price that doesn't even breach the level correctly no-ops too."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    level = {"low": 267.6, "high": 267.95, "is_established": True}
+    _rig_trap_tsl(book, "ITC", "CALL", level, "S1")
+
+    closed = []
+    async def _fake_emit_close(sym, pos, reason):
+        closed.append((sym, reason))
+    book._emit_close = _fake_emit_close
+
+    await book._trap_update_tsl_and_check_exit("ITC", "CALL", 268.50, datetime.now(IST))  # above the low, no breach
+
+    assert closed == []
+    assert "ITC" not in book._eod_closing
+
+
+@pytest.mark.asyncio
+async def test_put_side_uses_r1_and_same_established_gate(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    level = {"low": 169.32, "high": 169.61, "is_established": False}
+    _rig_trap_tsl(book, "ASHOKLEY", "PUT", level, "R1")
+
+    closed = []
+    async def _fake_emit_close(sym, pos, reason):
+        closed.append((sym, reason))
+    book._emit_close = _fake_emit_close
+
+    # PUT breaches on ltp >= level["high"] -- same real numbers as the ASHOKLEY incident
+    await book._trap_update_tsl_and_check_exit("ASHOKLEY", "PUT", 169.61, datetime.now(IST))
+
+    assert closed == [], "unconfirmed R1 must not trigger the PUT-side TSL either"
+
+
+# ── 2026-09-02 opt-in immediate-entry alternate mode ────────────────────────
+# Skips the zone/retest wait entirely, entering the instant ORB freezes, with
+# a HYBRID stop: fixed ORB(09:15-09:25) extreme protects from entry, ratchets
+# tighter to a 15-min S1/R1 ladder once that ladder establishes a genuine
+# level closer than the ORB floor (never loosens past the floor either way).
+
+def test_immediate_check_entry_fires_once_orb_frozen():
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._orb_frozen["ITC"] = (267.25, 261.5)
+
+    fired = book._immediate_check_entry("ITC", "CALL", datetime.now(IST))
+
+    assert fired is True
+    assert "ITC" in book._immediate_tsl_calc
+    assert "ITC" in book._immediate_tsl_acc
+
+
+def test_immediate_check_entry_false_before_orb_frozen():
+    bus = _FakeBus()
+    book = _make_book(bus)
+    # ORB never frozen for this symbol
+    fired = book._immediate_check_entry("ITC", "CALL", datetime.now(IST))
+    assert fired is False
+    assert "ITC" not in book._immediate_tsl_calc
+
+
+def test_immediate_check_entry_does_not_refire():
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._orb_frozen["ITC"] = (267.25, 261.5)
+
+    first = book._immediate_check_entry("ITC", "CALL", datetime.now(IST))
+    second = book._immediate_check_entry("ITC", "CALL", datetime.now(IST))
+
+    assert first is True
+    assert second is False
+
+
+def _rig_immediate_tsl(book, sym, side, level, key, entry_price=100.0, qty=10):
+    from strategies.liquidity_trap.detector import BarAccumulator as _TrapAcc
+    book._positions[sym] = {
+        "contract": type("C", (), {"option_type": "CE" if side == "CALL" else "PE", "strike": 100,
+                                     "expiry": date(2026, 9, 29)})(),
+        "qty": qty, "entry_price": entry_price, "paper_mode": True,
+        "opened_at": datetime.now(IST), "sl_mechanic": "immediate_15m",
+    }
+    book._immediate_tsl_calc[sym] = _FakeSRCalc(level, key)
+    book._immediate_tsl_acc[sym] = _TrapAcc(timeframe_min=15)
+    book._immediate_tsl_fed_bars[sym] = 0
+
+
+@pytest.mark.asyncio
+async def test_immediate_hybrid_uses_orb_floor_when_ladder_unestablished():
+    """An unconfirmed 15-min level must be ignored entirely -- the stop
+    stays at the ORB floor, which itself still protects the position."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._orb_frozen["ITC"] = (267.25, 261.5)   # CALL -> floor is 261.5
+    level = {"low": 267.6, "high": 267.95, "is_established": False}
+    _rig_immediate_tsl(book, "ITC", "CALL", level, "S1")
+
+    closed = []
+    async def _fake_emit_close(sym, pos, reason):
+        closed.append((sym, reason))
+    book._emit_close = _fake_emit_close
+
+    # Above the unestablished ladder level's own low (267.6) but nowhere
+    # near the ORB floor (261.5) -- must NOT fire, since the ladder level
+    # was never confirmed and the ORB floor alone is what's active.
+    await book._immediate_update_tsl_and_check_exit("ITC", "CALL", 267.50, datetime.now(IST))
+    assert closed == [], "an unconfirmed 15-min level must never itself trigger the stop"
+
+    # The ORB floor itself still protects the position.
+    await book._immediate_update_tsl_and_check_exit("ITC", "CALL", 261.50, datetime.now(IST))
+    assert closed == [("ITC", "immediate_hybrid_sl")]
+    assert "ITC" in book._eod_closing
+
+
+@pytest.mark.asyncio
+async def test_immediate_hybrid_ratchets_tighter_once_ladder_established():
+    """A genuinely established 15-min level, tighter than the ORB floor,
+    must tighten the effective stop -- firing at the ladder level, not
+    waiting all the way down to the (looser) ORB floor."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._orb_frozen["ITC"] = (267.25, 261.5)   # CALL -> floor is 261.5
+    level = {"low": 265.0, "high": 267.95, "is_established": True}   # tighter than 261.5
+    _rig_immediate_tsl(book, "ITC", "CALL", level, "S1")
+
+    closed = []
+    async def _fake_emit_close(sym, pos, reason):
+        closed.append((sym, reason))
+    book._emit_close = _fake_emit_close
+
+    # Below the established ladder level (265.0) but still above the ORB
+    # floor (261.5) -- must fire, since the ladder has tightened the stop.
+    await book._immediate_update_tsl_and_check_exit("ITC", "CALL", 264.80, datetime.now(IST))
+
+    assert closed == [("ITC", "immediate_hybrid_sl")]
+    assert "ITC" in book._eod_closing
+
+
+@pytest.mark.asyncio
+async def test_immediate_hybrid_never_loosens_past_orb_floor():
+    """A defensive case: an established ladder level that is somehow LOOSER
+    than the ORB floor must never widen the stop -- the ORB floor is the
+    permanent minimum protection."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._orb_frozen["ITC"] = (267.25, 261.5)   # CALL -> floor is 261.5
+    level = {"low": 258.0, "high": 267.95, "is_established": True}   # looser than 261.5
+    _rig_immediate_tsl(book, "ITC", "CALL", level, "S1")
+
+    closed = []
+    async def _fake_emit_close(sym, pos, reason):
+        closed.append((sym, reason))
+    book._emit_close = _fake_emit_close
+
+    # Between the (looser) ladder level and the (tighter) ORB floor -- must
+    # fire at the ORB floor, since the stop never widens past it.
+    await book._immediate_update_tsl_and_check_exit("ITC", "CALL", 260.00, datetime.now(IST))
+
+    assert closed == [("ITC", "immediate_hybrid_sl")]
+
+
+@pytest.mark.asyncio
+async def test_immediate_hybrid_put_side_same_ratchet_logic():
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._orb_frozen["ASHOKLEY"] = (169.61, 165.00)   # PUT -> floor is 169.61
+    level = {"low": 160.0, "high": 168.0, "is_established": True}   # tighter than 169.61
+    _rig_immediate_tsl(book, "ASHOKLEY", "PUT", level, "R1")
+
+    closed = []
+    async def _fake_emit_close(sym, pos, reason):
+        closed.append((sym, reason))
+    book._emit_close = _fake_emit_close
+
+    await book._immediate_update_tsl_and_check_exit("ASHOKLEY", "PUT", 168.20, datetime.now(IST))
+
+    assert closed == [("ASHOKLEY", "immediate_hybrid_sl")]
+
+
+@pytest.mark.asyncio
+async def test_on_fill_tags_immediate_15m_when_reason_is_immediate_orb_entry(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    contract = _contract("ITC", 270, "CE")
+    eid = "evt1"
+    book._pending_fills[eid] = {
+        "symbol": "ITC", "contract": contract, "qty": 375,
+        "entry_price": 10.0, "reason": "immediate_orb_entry",
+    }
+    fill = OiOrbFillEvent(
+        client_id=_TEST_CLIENT_ID, binding_id=_TEST_BINDING_ID, event_id=eid,
+        action="BUY", underlying="ITC", option_type="CE", strike=270,
+        qty=375, fill_price=10.0, paper_mode=True,
+    )
+    await book._on_fill(fill)
+
+    assert book._positions["ITC"]["sl_mechanic"] == "immediate_15m"
+
+
+@pytest.mark.asyncio
+async def test_on_fill_tags_trap_when_reason_is_trap_retest(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    contract = _contract("ITC", 270, "CE")
+    eid = "evt2"
+    book._pending_fills[eid] = {
+        "symbol": "ITC", "contract": contract, "qty": 375,
+        "entry_price": 10.0, "reason": "trap_retest",
+    }
+    fill = OiOrbFillEvent(
+        client_id=_TEST_CLIENT_ID, binding_id=_TEST_BINDING_ID, event_id=eid,
+        action="BUY", underlying="ITC", option_type="CE", strike=270,
+        qty=375, fill_price=10.0, paper_mode=True,
+    )
+    await book._on_fill(fill)
+
+    assert book._positions["ITC"]["sl_mechanic"] == "trap"

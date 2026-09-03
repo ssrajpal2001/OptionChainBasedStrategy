@@ -44,3 +44,30 @@ discussion.txt
 knowledge_graph_imp
 data/positions/
 data/history/
+data/chart_history/
+data/deployments/
+data/live_records/
+
+# Generated scan / validation outputs
+data/fno_scan_*.json
+data/fno_scan_summary_*.md
+data/fno_scanner_validation*.csv
+data/fno_scanner_validation*.md
+data/nse_option_cache/
+data/d1trap_fractal_cache/
+data/trap_scanner_*.json
+data/btc_*.csv
+data/btc_*.txt
+
+# Backtest runtime data (large JSON downloads + result CSVs)
+backtest/*/data_cache/
+backtest/*/results/
+backtest/nifty_liquidity_sweep/
+
+# Ad-hoc / temporary scripts
+scan_js.sh
+entry_time_fix.patch
+tools/revert_to_nifty.py
+tools/start_crude_test.py
+.agents/skills/fix-btc-sell-straddle-workflow.skill
+.worktrees/
