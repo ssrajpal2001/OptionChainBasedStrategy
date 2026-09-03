@@ -18,7 +18,8 @@ from data_layer.client_db import ClientDB
 
 def seed_from_answers(db: ClientDB, answers: dict) -> None:
     """Pure, testable core -- no interactive I/O. answers shape:
-    {"upstox": {...}, "fyers": {...}, "zerodha_binding": {client_id, binding_id, ...}}
+    {"upstox": {...}, "fyers": {...}, "zerodha_binding": {client_id, binding_id, ...},
+     "gmail": {user, app_password}}
     Any top-level key may be omitted to skip that provider/binding.
     """
     if "upstox" in answers:
@@ -41,6 +42,10 @@ def seed_from_answers(db: ClientDB, answers: dict) -> None:
             client_id=a["client_id"], binding_id=a["binding_id"],
             password=a.get("password", ""), totp_secret=a.get("totp_secret", ""),
         ))
+    if "gmail" in answers:
+        a = answers["gmail"]
+        asyncio.run(db.set_setting_sync("auto_alert_gmail_user", a.get("user", "")))
+        asyncio.run(db.set_setting_sync("auto_alert_gmail_app_password", a.get("app_password", "")))
 
 
 def _prompt_provider(name: str) -> dict:
@@ -73,6 +78,13 @@ def main() -> None:
             "binding_id":  input("binding_id: "),
             "password":    getpass.getpass("password: "),
             "totp_secret": getpass.getpass("TOTP base32 secret: "),
+        }
+
+    if input("Seed Gmail alert credentials? [y/N]: ").strip().lower() == "y":
+        print("\n--- Gmail alert credentials ---")
+        answers["gmail"] = {
+            "user":         input("Gmail address to send FROM: "),
+            "app_password": getpass.getpass("Gmail app-specific password: "),
         }
 
     seed_from_answers(db, answers)

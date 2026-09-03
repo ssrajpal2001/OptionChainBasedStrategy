@@ -983,6 +983,21 @@ class ClientDB:
             (key, value),
         )
 
+    async def set_setting_sync(self, key: str, value: str) -> None:
+        """Persist a system setting with XOR+PBKDF2 obfuscation (upsert).
+
+        Named set_setting_sync for consistency with get_setting_sync, but is
+        actually async. Use for storing secrets (e.g., Gmail app passwords).
+        """
+        encoded_value = _encode_cred(value)
+        logger.info("[DB] set_setting_sync %s=%r (encoded)", key, encoded_value[:80] if encoded_value else "")
+        await asyncio.to_thread(
+            self._exec,
+            "INSERT INTO system_settings (key, value) VALUES (?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, encoded_value),
+        )
+
     # ── Client/broker/strategy events (admin monitoring) ──────────────────────────
 
     async def record_client_event(
