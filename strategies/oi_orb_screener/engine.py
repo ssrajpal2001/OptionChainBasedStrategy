@@ -1882,6 +1882,12 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 elif side == "PUT" and ladder_level < sl_level:
                     sl_level = ladder_level
 
+        # 2026-09-03: surface the live effective stop to monitoring_state()'s
+        # "sl" field -- was never written for trap/immediate_15m positions
+        # (only the legacy vwap mechanic populated it), so the dashboard
+        # showed "establishing..." even though real protection was active.
+        self._live_sl[sym] = sl_level
+
         breach = (ltp <= sl_level) if side == "CALL" else (ltp >= sl_level)
         if not breach:
             return
@@ -1953,6 +1959,13 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             return   # cold-start -- no exit check until a real ladder value exists
         if not level.get("is_established"):
             return   # level exists but isn't confirmed yet -- hard risk cap still protects
+
+        # 2026-09-03: surface the live effective stop to monitoring_state()'s
+        # "sl" field -- was never written for trap/immediate_15m positions
+        # (only the legacy vwap mechanic populated it), so the dashboard
+        # showed "establishing..." even though real protection was active.
+        self._live_sl[sym] = level["low"] if side == "CALL" else level["high"]
+
         breach = (ltp <= level["low"]) if side == "CALL" else (ltp >= level["high"])
         if not breach:
             return

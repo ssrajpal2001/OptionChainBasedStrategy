@@ -1603,6 +1603,36 @@ async def test_unestablished_level_no_breach_also_no_exit(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_trap_tsl_populates_live_sl_for_dashboard(monkeypatch):
+    """2026-09-03 fix, direct user report: same gap as the immediate_15m
+    mechanic -- _live_sl was never written for trap-mechanic positions
+    either, so the dashboard showed 'establishing...' despite the trap TSL
+    genuinely protecting the position once its level is established."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    level = {"low": 267.6, "high": 267.95, "is_established": True}
+    _rig_trap_tsl(book, "ITC", "CALL", level, "S1")
+    book._emit_close = lambda *a, **k: None
+
+    await book._trap_update_tsl_and_check_exit("ITC", "CALL", 268.50, datetime.now(IST))  # no breach
+    assert book._live_sl["ITC"] == 267.6
+
+
+@pytest.mark.asyncio
+async def test_trap_tsl_does_not_populate_live_sl_while_unestablished(monkeypatch):
+    """The unestablished-level gate returns before the _live_sl write --
+    confirms we don't surface a not-yet-real level to the dashboard either."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    level = {"low": 267.6, "high": 267.95, "is_established": False}
+    _rig_trap_tsl(book, "ITC", "CALL", level, "S1")
+    book._emit_close = lambda *a, **k: None
+
+    await book._trap_update_tsl_and_check_exit("ITC", "CALL", 267.50, datetime.now(IST))
+    assert "ITC" not in book._live_sl
+
+
+@pytest.mark.asyncio
 async def test_put_side_uses_r1_and_same_established_gate(monkeypatch):
     bus = _FakeBus()
     book = _make_book(bus)
@@ -1762,6 +1792,32 @@ async def test_immediate_hybrid_put_side_same_ratchet_logic():
     await book._immediate_update_tsl_and_check_exit("ASHOKLEY", "PUT", 168.20, datetime.now(IST))
 
     assert closed == [("ASHOKLEY", "immediate_hybrid_sl")]
+
+
+@pytest.mark.asyncio
+async def test_immediate_hybrid_populates_live_sl_for_dashboard():
+    """2026-09-03 fix, direct user report: monitoring_state()'s 'sl' field
+    read straight from self._live_sl, which was only ever written by the
+    legacy vwap mechanic -- a trap/immediate_15m position's dashboard panel
+    showed 'establishing...' forever, even with real protection active.
+    _live_sl must reflect the current effective stop (ORB floor or the
+    tighter ratcheted ladder level) on every tick, not just at breach time."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._orb_frozen["ITC"] = (267.25, 261.5)   # CALL -> floor is 261.5
+    level = {"low": 267.6, "high": 267.95, "is_established": False}
+    _rig_immediate_tsl(book, "ITC", "CALL", level, "S1")
+    book._emit_close = lambda *a, **k: None
+
+    # Unestablished ladder -- effective stop is still the ORB floor.
+    await book._immediate_update_tsl_and_check_exit("ITC", "CALL", 267.50, datetime.now(IST))
+    assert book._live_sl["ITC"] == 261.5
+
+    # Ladder establishes tighter than the floor -- _live_sl must ratchet with it.
+    book._immediate_tsl_calc["ITC"] = _FakeSRCalc(
+        {"low": 265.0, "high": 267.95, "is_established": True}, "S1")
+    await book._immediate_update_tsl_and_check_exit("ITC", "CALL", 266.00, datetime.now(IST))
+    assert book._live_sl["ITC"] == 265.0
 
 
 @pytest.mark.asyncio
