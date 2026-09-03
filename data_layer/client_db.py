@@ -165,6 +165,8 @@ CREATE TABLE IF NOT EXISTS system_feeder_creds (
     client_id_enc      TEXT DEFAULT '',
     api_key_enc        TEXT DEFAULT '',
     secret_enc         TEXT DEFAULT '',
+    password_enc       TEXT DEFAULT '',
+    totp_secret_enc    TEXT DEFAULT '',
     access_token       TEXT DEFAULT '',
     token_generated_at TEXT DEFAULT '',
     token_expiry_at    TEXT DEFAULT '',
@@ -742,36 +744,47 @@ class ClientDB:
 
     async def upsert_feeder_creds(
         self,
-        provider:  str,
-        client_id: str = "",
-        api_key:   str = "",
-        secret:    str = "",
+        provider:    str,
+        client_id:   str = "",
+        api_key:     str = "",
+        secret:      str = "",
+        password:    str = "",
+        totp_secret: str = "",
     ) -> None:
         """
         Persist admin feeder credentials (XOR-obfuscated).
-        Only client_id (broker user ID), api_key, and secret are stored.
-        Passwords, PINs, and TOTP secrets are NOT accepted.
+        password/totp_secret exist ONLY to support the unattended headless
+        TOTP login used by scripts/auto_morning_start.py (see
+        broker_auth/headless_totp_auth.py) -- never used by the interactive
+        OAuth dashboard flow.
         """
         logger.info(
-            "[DB] upsert_feeder_creds provider=%s client_id_present=%s api_key_present=%s secret_present=%s",
+            "[DB] upsert_feeder_creds provider=%s client_id_present=%s api_key_present=%s "
+            "secret_present=%s password_present=%s totp_present=%s",
             provider, bool(client_id), bool(api_key), bool(secret),
+            bool(password), bool(totp_secret),
         )
         now = datetime.now(IST).isoformat()
         await asyncio.to_thread(
             self._exec,
             """INSERT INTO system_feeder_creds
-               (provider, client_id_enc, api_key_enc, secret_enc, updated_at)
-               VALUES (?,?,?,?,?)
+               (provider, client_id_enc, api_key_enc, secret_enc, password_enc,
+                totp_secret_enc, updated_at)
+               VALUES (?,?,?,?,?,?,?)
                ON CONFLICT(provider) DO UPDATE SET
-                 client_id_enc = CASE WHEN excluded.client_id_enc != '' THEN excluded.client_id_enc ELSE client_id_enc END,
-                 api_key_enc   = CASE WHEN excluded.api_key_enc   != '' THEN excluded.api_key_enc   ELSE api_key_enc   END,
-                 secret_enc    = CASE WHEN excluded.secret_enc    != '' THEN excluded.secret_enc    ELSE secret_enc    END,
-                 updated_at    = excluded.updated_at""",
+                 client_id_enc   = CASE WHEN excluded.client_id_enc   != '' THEN excluded.client_id_enc   ELSE client_id_enc   END,
+                 api_key_enc     = CASE WHEN excluded.api_key_enc     != '' THEN excluded.api_key_enc     ELSE api_key_enc     END,
+                 secret_enc      = CASE WHEN excluded.secret_enc      != '' THEN excluded.secret_enc      ELSE secret_enc      END,
+                 password_enc    = CASE WHEN excluded.password_enc    != '' THEN excluded.password_enc    ELSE password_enc    END,
+                 totp_secret_enc = CASE WHEN excluded.totp_secret_enc != '' THEN excluded.totp_secret_enc ELSE totp_secret_enc END,
+                 updated_at      = excluded.updated_at""",
             (
                 provider,
                 _encode_cred(client_id),
                 _encode_cred(api_key),
                 _encode_cred(secret),
+                _encode_cred(password),
+                _encode_cred(totp_secret),
                 now,
             ),
         )
@@ -780,7 +793,7 @@ class ClientDB:
         """
         Return system feeder credentials for a provider with fields decoded.
         Returns None if no record exists.
-        Only client_id, api_key, secret, and token fields are returned.
+        Includes password and totp_secret for headless TOTP login automation.
         """
         try:
             con = sqlite3.connect(self._db_path)
@@ -797,6 +810,8 @@ class ClientDB:
                 "client_id":          _decode_cred(r.get("client_id_enc", "")),
                 "api_key":            _decode_cred(r.get("api_key_enc", "")),
                 "secret":             _decode_cred(r.get("secret_enc", "")),
+                "password":           _decode_cred(r.get("password_enc", "")),
+                "totp_secret":        _decode_cred(r.get("totp_secret_enc", "")),
                 "access_token":       r.get("access_token", ""),
                 "token_generated_at": r.get("token_generated_at", ""),
                 "token_expiry_at":    r.get("token_expiry_at", ""),
@@ -1377,6 +1392,8 @@ class ClientDB:
             # unconditionally regardless, so NRML never actually did anything.
             # Defaults to 0 (same-day close) for every strategy.
             "ALTER TABLE strategy_deployments ADD COLUMN carry_forward INTEGER DEFAULT 0",
+            "ALTER TABLE system_feeder_creds ADD COLUMN password_enc TEXT DEFAULT ''",
+            "ALTER TABLE system_feeder_creds ADD COLUMN totp_secret_enc TEXT DEFAULT ''",
         ):
             try:
                 con.execute(migration)
@@ -1386,39 +1403,6 @@ class ClientDB:
                     pass   # idempotent migration — column already exists
                 else:
                     raise
-
-
-        # Security migration: drop password_enc / totp_secret_enc from system_feeder_creds
-        existing_fc_cols = {row[1] for row in con.execute("PRAGMA table_info(system_feeder_creds)").fetchall()}
-        if "password_enc" in existing_fc_cols or "totp_secret_enc" in existing_fc_cols:
-            logger.info("ClientDB: migrating system_feeder_creds — dropping password/totp columns")
-            try:
-                con.executescript("""
-                    BEGIN;
-                    ALTER TABLE system_feeder_creds RENAME TO system_feeder_creds_old;
-                    CREATE TABLE system_feeder_creds (
-                        provider           TEXT PRIMARY KEY,
-                        client_id_enc      TEXT DEFAULT '',
-                        api_key_enc        TEXT DEFAULT '',
-                        secret_enc         TEXT DEFAULT '',
-                        access_token       TEXT DEFAULT '',
-                        token_generated_at TEXT DEFAULT '',
-                        token_expiry_at    TEXT DEFAULT '',
-                        updated_at         TEXT NOT NULL
-                    );
-                    INSERT INTO system_feeder_creds
-                        (provider, client_id_enc, api_key_enc, secret_enc,
-                         access_token, token_generated_at, token_expiry_at, updated_at)
-                    SELECT
-                        provider, client_id_enc, api_key_enc, secret_enc,
-                        access_token, token_generated_at, token_expiry_at, updated_at
-                    FROM system_feeder_creds_old;
-                    DROP TABLE system_feeder_creds_old;
-                    COMMIT;
-                """)
-                logger.info("ClientDB: system_feeder_creds migration complete.")
-            except Exception as exc:
-                logger.error("ClientDB: system_feeder_creds migration FAILED: %s", exc)
 
         con.close()
 
