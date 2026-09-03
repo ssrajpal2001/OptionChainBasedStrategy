@@ -58,7 +58,9 @@ def fyers_totp_login(client_id: str, app_id: str, password: str, totp_secret: st
                 resp = session.generate_token()
                 access_token = resp.get("access_token", "")
                 if not access_token:
-                    raise FyersHeadlessLoginError(f"Fyers: token exchange failed — {resp}")
+                    # Log only safe, non-sensitive fields from response
+                    safe_detail = resp.get("message") or resp.get("code") or resp.get("s") or "unknown error"
+                    raise FyersHeadlessLoginError(f"Fyers: token exchange failed — {safe_detail}")
                 return access_token
             finally:
                 browser.close()
