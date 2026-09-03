@@ -1009,6 +1009,7 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         self._post1500_armed = False
         self._post1500_armed_reason = None
         self._post1500_leg_closed = {"CE": False, "PE": False}
+        self._post1500_closing = {"CE": False, "PE": False}
         self._post1500_calc = {}
         self._post1500_bar_acc = {}
         self._shadow_vwap = {}

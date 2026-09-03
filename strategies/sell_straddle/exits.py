@@ -1073,6 +1073,7 @@ class ExitMixin:
             self._post1500_armed = False
             self._post1500_armed_reason = None
             self._post1500_leg_closed = {"CE": False, "PE": False}
+            self._post1500_closing = {"CE": False, "PE": False}
             self._persist_session()
 
         if now.time() < self._POST1500_START:
@@ -1097,6 +1098,17 @@ class ExitMixin:
                     {"timestamp": acc["minute"], "high": acc["h"], "low": acc["l"], "duration": 1},
                 )
                 self._post1500_bar_acc[side] = {"minute": minute, "h": ltp, "l": ltp}
+                # 2026-09-03 diagnostic (direct user request): prove/disprove
+                # whether R1 genuinely recomputes every closed 1-min bar, since
+                # this is only observable per-bar here, never dumped elsewhere.
+                _r1_now = self._post1500_calc[side].get_calculated_sr_state(
+                    f"{self._underlying}_{side}_P1500").get("sr_levels", {}).get("R1")
+                self._clog.info(
+                    "POST-15:00 R1 BAR CLOSE %s — bar %s h=%.2f l=%.2f -> R1.high=%s established=%s",
+                    side, acc["minute"].strftime("%H:%M"), acc["h"], acc["l"],
+                    f"{_r1_now['high']:.2f}" if _r1_now else "None",
+                    _r1_now.get("is_established") if _r1_now else "-",
+                )
             else:
                 acc["h"] = max(acc["h"], ltp)
                 acc["l"] = min(acc["l"], ltp)
@@ -1126,6 +1138,18 @@ class ExitMixin:
             leg_closed_attr = f"{side.lower()}_leg_closed"
             if getattr(pos, leg_closed_attr):
                 continue
+            # 2026-09-03 CRITICAL FIX: a real duplicate-close incident (two
+            # broker orders for the same CE leg, 138ms apart, same R1.high,
+            # same ltp) traced to this exact gap -- ce_leg_closed/pe_leg_closed
+            # only flip True AFTER _close_leg's await returns (order placement
+            # + broker confirmation, observed >1s), so a second exit-check tick
+            # landing during that window saw the leg as still open and fired a
+            # second real close. This flag is set True BEFORE the await, so a
+            # concurrent re-entry sees the leg is already being closed and
+            # skips; cleared only on an aborted close, so a genuine retry after
+            # a broker-confirm timeout is still possible.
+            if self._post1500_closing.get(side):
+                continue
             leg = pos.ce_leg if side == "CE" else pos.pe_leg
             sr = self._post1500_calc[side].get_calculated_sr_state(
                 f"{self._underlying}_{side}_P1500").get("sr_levels", {})
@@ -1137,8 +1161,10 @@ class ExitMixin:
                 continue
             if not self._defer_exit(f"post1500_r1_breach_{side}", now):
                 continue
+            self._post1500_closing[side] = True
             order_ev = await self._close_leg(side, "post1500_r1_breach", now)
             if getattr(order_ev, "close_aborted", False):
+                self._post1500_closing[side] = False
                 continue
             setattr(pos, leg_closed_attr, True)
             self._post1500_leg_closed[side] = True

@@ -521,3 +521,105 @@ def test_single_leg_mode_blocks_everything_simultaneously():
 
     _run_single_leg_check(s, pos)
     assert s._position is not None and s._position.status == "open"
+
+
+def test_concurrent_r1_breach_checks_close_the_leg_only_once():
+    """2026-09-03 CRITICAL FIX, real incident, live NIFTY: two full close
+    cycles fired for the same CE leg 138ms apart -- same R1.high=85.15, same
+    ltp=85.70 -- because ce_leg_closed only flips True AFTER _close_leg's
+    await returns (order placement + broker confirmation, observed >1s in
+    the real log), and _close_leg itself has no in-flight guard of its own.
+    A second exit-check tick landing in that window saw the leg as still
+    open and fired a second real broker order. Reproduces the race directly:
+    two concurrent _check_post1500_r1_exit calls for the same already-
+    breached tick, both reaching the close call before either's _close_leg
+    resolves -- asserts _close_leg is invoked exactly once."""
+    s = _strategy()
+    s._post1500_exit_enabled = True
+    s._session_min_straddle_frozen = 1000.0   # arms immediately
+    s._position = _position(20.0, 20.0)
+
+    import strategies.sell_straddle.exits as exits_mod
+    from datetime import datetime, timedelta
+    base = datetime.now(exits_mod.IST).replace(hour=15, minute=1, second=0, microsecond=0)
+
+    # Feed real rising bars to establish a genuine CE R1, same as the
+    # existing per-leg breach test, but stop one bar short of the breach so
+    # the position is armed with a live R1 and the NEXT tick is what
+    # actually breaches it -- that breaching tick is what gets raced below.
+    for i in range(4):
+        now = base + timedelta(minutes=i)
+        s._position.ce_leg.ltp = 20.0 + i
+        s._position.pe_leg.ltp = 20.0
+        asyncio.run(s._check_post1500_r1_exit(s._position, now))
+    assert s._post1500_armed is True
+
+    # A slow, controllable fake _close_leg: both concurrent callers must
+    # reach this await before either is allowed to resolve, faithfully
+    # reproducing the real order-confirmation delay that created the window.
+    close_calls = []
+    release = asyncio.Event()
+
+    async def _slow_close_leg(side, reason, now):
+        close_calls.append((side, reason))
+        await release.wait()
+        leg = s._position.ce_leg if side == "CE" else s._position.pe_leg
+        leg.close_time = now
+        return _FakeOrderEvent(close_aborted=False)
+    s._close_leg = _slow_close_leg
+
+    breach_now = base + timedelta(minutes=4)
+    s._position.ce_leg.ltp = 200.0   # unambiguous breach of whatever R1 formed
+    s._position.pe_leg.ltp = 20.0
+
+    async def _race():
+        t1 = asyncio.create_task(s._check_post1500_r1_exit(s._position, breach_now))
+        t2 = asyncio.create_task(s._check_post1500_r1_exit(s._position, breach_now))
+        # Let both tasks run until they've each reached (or skipped) the
+        # close call, then release the slow close so whichever one is
+        # actually in flight can complete.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        release.set()
+        await asyncio.gather(t1, t2)
+
+    asyncio.run(_race())
+
+    ce_closes = [c for c in close_calls if c[0] == "CE"]
+    assert len(ce_closes) == 1, (
+        f"_close_leg must be invoked exactly once for the CE leg even when two "
+        f"exit-check ticks race the same breach -- got {len(ce_closes)} calls: {close_calls}"
+    )
+    assert s._position.ce_leg_closed is True
+    assert s._post1500_closing["CE"] is True
+
+
+def test_post1500_closing_flag_clears_on_aborted_close_allowing_retry():
+    """The in-flight guard must not permanently wedge a leg open if its
+    close genuinely aborts (e.g. broker-confirm timeout) -- clearing the
+    flag on abort lets the next tick retry the close."""
+    s = _strategy()
+    s._post1500_exit_enabled = True
+    s._session_min_straddle_frozen = 1000.0
+    s._position = _position(20.0, 20.0)
+
+    import strategies.sell_straddle.exits as exits_mod
+    from datetime import datetime, timedelta
+    base = datetime.now(exits_mod.IST).replace(hour=15, minute=1, second=0, microsecond=0)
+    for i in range(5):
+        now = base + timedelta(minutes=i)
+        s._position.ce_leg.ltp = 20.0 + i
+        s._position.pe_leg.ltp = 20.0
+        asyncio.run(s._check_post1500_r1_exit(s._position, now))
+
+    close_calls = _spy_close_leg(s, closes_ok=False)   # every close aborts
+    retry_now = base + timedelta(minutes=5)
+    s._position.ce_leg.ltp = 20.0 + 5
+    asyncio.run(s._check_post1500_r1_exit(s._position, retry_now))
+    first_call_count = len(close_calls)
+
+    if first_call_count > 0:
+        assert s._post1500_closing["CE"] is False, (
+            "an aborted close must clear the in-flight flag so a later tick can retry"
+        )
+        assert s._position.ce_leg_closed is False

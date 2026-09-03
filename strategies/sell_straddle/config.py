@@ -398,6 +398,18 @@ class ConfigMixin:
             self._post1500_armed = False
             self._post1500_armed_reason = None
             self._post1500_leg_closed = {"CE": False, "PE": False}
+            # 2026-09-03 CRITICAL FIX: in-flight guard against a real duplicate
+            # close order. _close_leg's own await (order placement -> broker
+            # confirmation) takes over a second; ce_leg_closed/pe_leg_closed on
+            # the position only flip True AFTER that await returns. A second
+            # exit-check tick landing during that window (confirmed live: two
+            # ticks 138ms apart, same R1.high, same ltp, both fired a real
+            # close -> 2 broker orders for the same leg) saw the leg as still
+            # open and fired again. This flag is set True BEFORE the await
+            # (not after) so a concurrent re-entry sees the leg as already
+            # being closed and skips; cleared only if the close aborts, so a
+            # genuine retry after a broker-confirm timeout is still possible.
+            self._post1500_closing = {"CE": False, "PE": False}
             self._post1500_calc = {}       # side -> SupportResistanceCalculator
             self._post1500_bar_acc = {}    # side -> {"minute": datetime, "h":, "l":, "c":}
         if not hasattr(self, "_shadow_vwap"):
