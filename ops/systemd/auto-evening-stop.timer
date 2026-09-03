@@ -1,0 +1,9 @@
+[Unit]
+Description=Trigger auto-evening-stop.service at 15:58 IST on weekdays
+
+[Timer]
+OnCalendar=Mon..Fri 15:58:00 Asia/Kolkata
+Persistent=false
+
+[Install]
+WantedBy=timers.target
