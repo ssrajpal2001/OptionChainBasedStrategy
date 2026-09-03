@@ -522,6 +522,17 @@ class ClientDB:
             (1 if enabled else 0, client_id, binding_id),
         )
 
+    async def set_binding_password_totp(
+        self, client_id: str, binding_id: str, password: str, totp_secret: str,
+    ) -> None:
+        """Store password/TOTP secret for a broker binding's headless login (e.g. Zerodha)."""
+        await asyncio.to_thread(
+            self._exec,
+            "UPDATE broker_bindings SET password_enc=?, totp_secret_enc=? "
+            "WHERE client_id=? AND binding_id=?",
+            (_encode_cred(password), _encode_cred(totp_secret), client_id, binding_id),
+        )
+
     async def set_trading_mode(
         self, client_id: str, binding_id: str, mode: str
     ) -> None:
