@@ -792,6 +792,7 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
             f"║ POST-15:00 R1 EXIT: {'ON' if self._post1500_exit_enabled else 'OFF'} "
             f"(arms on day-low retest or profit@15:15+, then per-leg R1 close, other leg runs solo)",
             f"║ SHADOW VWAP (log-only): {'ON' if self._shadow_vwap_enabled else 'OFF'}",
+            f"║ VWAP SOURCE (drives every decision): {self._vwap_source}",
             # 2026-08-26 fix (user request): hedge_carry_enabled was invisible in this banner --
             # no way to tell from the log alone whether a book's EOD hedge-and-carry behavior is
             # armed for the day without grepping config directly. precheck lead is the new
@@ -1650,9 +1651,25 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                         entry["ltp"] = float(tick.ltp)
                         if _a > 0:
                             entry["atp"] = _a
-                    if self._shadow_vwap_enabled:
+                    # 2026-09-03, direct user spec: run a paper-mode A/B comparison
+                    # between the broker-ATP VWAP (default, every other deployment)
+                    # and the calculative (self-computed) VWAP on two separate paper
+                    # bindings. The calculative series itself is the SAME cumulative
+                    # VWAP the shadow-VWAP feature already computes -- must run here
+                    # regardless of shadow_vwap_enabled once this binding's decisions
+                    # actually depend on it, not just when it's opted into for logging.
+                    if self._shadow_vwap_enabled or self._vwap_source == "calculative":
                         self._update_shadow_vwap(_k, float(tick.ltp), tick)
-                    _eng_atp = float(self._strike_prem[_k].get("atp", 0.0) or 0.0)
+                    if self._vwap_source == "calculative":
+                        _sv = self._shadow_vwap.get(_k, {})
+                        _cum_v = _sv.get("cum_v", 0.0)
+                        # Warm-up guard: no volume accumulated yet for this strike/side
+                        # -- fall back to broker ATP rather than feed the pool engine a
+                        # bogus 0 (which it would otherwise treat as "no update").
+                        _eng_atp = (_sv["cum_pv"] / _cum_v) if _cum_v > 0 else \
+                            float(self._strike_prem[_k].get("atp", 0.0) or 0.0)
+                    else:
+                        _eng_atp = float(self._strike_prem[_k].get("atp", 0.0) or 0.0)
                     self._pool_engine.update_tick(
                         int(tick.strike), tick.option_type,
                         ltp=float(tick.ltp), atp=_eng_atp)

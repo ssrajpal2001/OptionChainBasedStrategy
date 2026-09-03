@@ -82,6 +82,7 @@ class SellStraddleConfig:
 
     post1500_exit_enabled: bool
     shadow_vwap_enabled: bool
+    vwap_source: str
 
     same_day_expiry_enabled: bool
 
@@ -255,6 +256,18 @@ def load_sell_straddle_config(
     # decision path. Opt-in, default OFF.
     shadow_vwap_enabled = bool(ss.get("shadow_vwap_enabled", True))
 
+    # VWAP source (2026-09-03, direct user spec): which VWAP actually drives
+    # every entry/exit/roll decision. "broker_atp" (default, unchanged
+    # behavior for every existing deployment) feeds the pool engine the
+    # broker's own live ATP. "calculative" feeds it the same self-computed
+    # cumulative VWAP the shadow-VWAP feature already calculates (see
+    # _update_shadow_vwap) -- lets one binding run live on the calculative
+    # VWAP for direct paper-trading comparison against a sibling binding
+    # left on broker_atp, same underlying, same day.
+    vwap_source = str(ss.get("vwap_source", "broker_atp")).lower()
+    if vwap_source not in ("broker_atp", "calculative"):
+        vwap_source = "broker_atp"
+
     same_day_expiry_enabled = bool(ss.get("same_day_expiry_enabled", False))
 
     # EOD hedge-and-carry (2026-08-20, user spec): if BOTH sold legs are running in
@@ -306,6 +319,7 @@ def load_sell_straddle_config(
         day_low_freeze_time=day_low_freeze_time,
         post1500_exit_enabled=post1500_exit_enabled,
         shadow_vwap_enabled=shadow_vwap_enabled,
+        vwap_source=vwap_source,
         same_day_expiry_enabled=same_day_expiry_enabled,
         hedge_carry_enabled=hedge_carry_enabled,
     )
@@ -393,6 +407,7 @@ class ConfigMixin:
 
         self._post1500_exit_enabled = cfg.post1500_exit_enabled
         self._shadow_vwap_enabled = cfg.shadow_vwap_enabled
+        self._vwap_source = cfg.vwap_source
         if not hasattr(self, "_post1500_pair"):
             self._post1500_pair = None
             self._post1500_armed = False
