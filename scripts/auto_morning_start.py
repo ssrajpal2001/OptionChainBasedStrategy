@@ -68,6 +68,23 @@ async def _wait_for_dashboard_health() -> Tuple[bool, str]:
 
 
 async def run_morning_sequence(dry_run: bool = False, zerodha_client_id: str = "") -> List[Tuple[str, bool, str]]:
+    # KNOWN RISK, VERIFY ON FIRST LIVE RUN: pm2 start (below) boots the live
+    # app -- which loads feeder credentials from the DB at THAT moment --
+    # BEFORE the headless Upstox/Zerodha/Fyers logins run and write fresh
+    # tokens to the DB. The just-booted app may therefore initialize using
+    # yesterday's stale/expired token, and there is no confirmed same-process
+    # signal for it to pick up the fresh token written moments later by this
+    # script. Reordering pm2-start to run AFTER the logins was considered and
+    # deliberately NOT done here: it would break
+    # test_pm2_failure_skips_all_downstream_steps's premise (that logins never
+    # run if pm2 fails becomes meaningless if pm2 no longer gates them), for a
+    # behavioral change whose actual effectiveness is itself unconfirmed (it's
+    # unclear whether the live feeder process has any mechanism to pick up a
+    # DB token update after its own boot-time load, with or without a
+    # reorder). The first live/manual run of this script (the plan's own
+    # Task 7 checkpoint) MUST confirm via the dashboard that the feed
+    # genuinely reflects a fresh token post-run -- not just that the DB row
+    # was updated.
     steps: List[Tuple[str, bool, str]] = []
 
     if not dry_run:

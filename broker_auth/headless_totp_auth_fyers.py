@@ -50,6 +50,14 @@ def fyers_totp_login(client_id: str, app_id: str, password: str, totp_secret: st
                 if not auth_code:
                     raise FyersHeadlessLoginError(f"Fyers: auth_code not found in redirect URL {final_url!r}")
                 from fyers_apiv3 import fyersModel
+                # KNOWN GAP, NOT AN ACCIDENTAL BUG: secret_key/redirect_uri below
+                # are placeholders, not real Fyers app credentials. Even when the
+                # Playwright flow above successfully captures a real auth_code,
+                # generate_token() is structurally guaranteed to fail until this
+                # app's real secret_key/redirect_uri are wired in here. Consistent
+                # with Fyers already being documented elsewhere as best-effort/
+                # may-not-fully-work (Cloudflare risk, etc.) -- left as-is
+                # deliberately rather than fabricated.
                 session = fyersModel.SessionModel(
                     client_id=app_id, secret_key="", redirect_uri="",
                     response_type="code", grant_type="authorization_code",

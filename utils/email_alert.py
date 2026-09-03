@@ -25,7 +25,8 @@ _SETTING_GMAIL_APP_PASSWORD = "auto_alert_gmail_app_password"
 def _get_gmail_credentials() -> Tuple[str, str]:
     from data_layer.client_db import ClientDB, _decode_cred
     db = ClientDB()
-    user = db.get_setting_sync(_SETTING_GMAIL_USER, "")
+    user_encoded = db.get_setting_sync(_SETTING_GMAIL_USER, "")
+    user = _decode_cred(user_encoded) if user_encoded else ""
     app_pw_encoded = db.get_setting_sync(_SETTING_GMAIL_APP_PASSWORD, "")
     app_pw = _decode_cred(app_pw_encoded) if app_pw_encoded else ""
     return user, app_pw

@@ -148,3 +148,42 @@ def test_gmail_credentials_round_trip():
         assert decoded_pw == gmail_app_pw, (
             f"Decoded password does not match original: {decoded_pw} != {gmail_app_pw}"
         )
+
+
+def test_seed_headless_creds_then_get_gmail_credentials_real_integration(tmp_path, monkeypatch):
+    """
+    Exercises the REAL, un-monkeypatched seam between
+    scripts.seed_headless_creds.seed_from_answers() (how Gmail creds actually
+    get written in production) and utils.email_alert._get_gmail_credentials()
+    (how they actually get read back) -- against a real ClientDB backed by a
+    tmp_path SQLite file. This is the exact integration gap that let the
+    original "reads user raw/undecoded" bug ship silently, since every other
+    test in this file monkeypatches _get_gmail_credentials directly and so
+    never exercises its own body.
+    """
+    import data_layer.client_db as client_db_mod
+    import utils.email_alert as email_alert_mod
+    from scripts.seed_headless_creds import seed_from_answers
+
+    db_path = tmp_path / "clients.db"
+    db = ClientDB(db_path=str(db_path))
+    asyncio.run(db.initialise())
+
+    gmail_user = "realbot@gmail.com"
+    gmail_app_pw = "real-secret-app-password-456"
+
+    seed_from_answers(db, {"gmail": {"user": gmail_user, "app_password": gmail_app_pw}})
+
+    # _get_gmail_credentials() constructs its own ClientDB() (default db path)
+    # internally -- redirect that construction at the module level so it
+    # resolves to the SAME tmp_path-backed db seed_from_answers just wrote to,
+    # without touching _get_gmail_credentials itself.
+    monkeypatch.setattr(client_db_mod, "ClientDB", lambda *a, **k: db)
+
+    user, app_pw = email_alert_mod._get_gmail_credentials()
+
+    assert user == gmail_user, (
+        f"_get_gmail_credentials() returned {user!r} -- expected the decoded "
+        f"plaintext Gmail address {gmail_user!r}, not the raw/encoded DB value"
+    )
+    assert app_pw == gmail_app_pw
