@@ -922,13 +922,13 @@ document.addEventListener('alpine:init', () => {
     // providers that actually HAVE a headless login implementation; adding a
     // TOTP field for a provider with no backend consumer would just be a form
     // that silently stores data nothing reads.
+    // user_id: true for these three (2026-09-06) -- OAuth itself never needed it
+    // (you type your login ID on the broker's own page), but the headless TOTP
+    // login added this session submits the login form itself, with no human to
+    // type it, so it needs the real broker login ID collected up front. Real
+    // incident: Zerodha's headless login failed "user_id ... required" on first
+    // live use because this was still false and the field had never been shown.
     brokerFieldConfig: {
-      <!-- user_id: true for these three (2026-09-06) -- OAuth itself never needed it
-           (you type your login ID on the broker's own page), but the headless TOTP
-           login added this session submits the login form itself, with no human to
-           type it, so it needs the real broker login ID collected up front. Real
-           incident: Zerodha's headless login failed "user_id ... required" on first
-           live use because this was still false and the field had never been shown. -->
       zerodha:   { user_id:true,  api_key:true,  api_secret:true,  label:'Zerodha Kite', oauth:true,  totp:true  },
       upstox:    { user_id:true,  api_key:true,  api_secret:true,  label:'Upstox',       oauth:true,  totp:true  },
       fyers:     { user_id:true,  api_key:true,  api_secret:true,  label:'Fyers',        oauth:true,  totp:true  },
