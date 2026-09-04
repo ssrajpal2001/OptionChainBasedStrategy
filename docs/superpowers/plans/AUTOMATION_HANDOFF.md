@@ -31,15 +31,18 @@ Nothing typed is echoed or logged. Run this on the server, against the
 real `data/clients.db` — not locally then copied over, unless you're
 deliberately doing it that way.
 
-## 4. Confirm the pm2 launch command matches production exactly
+## 4. pm2 launch command — DONE, confirmed 2026-09-06
 
-    pm2 describe terminus
-
-Compare `script args` against `_PM2_START_CMD` in `scripts/auto_morning_start.py`
-— the checked-in default is `--mode live --ui --port 5000 --index NIFTY`
-with no `--strategies` flag (matches CLAUDE.md's documented default). If
-production actually pins `--strategies`, edit the constant before going
-further.
+`_start_pm2()` now prefers `pm2 restart terminus` — pm2's own remembered
+definition from the last `pm2 save` (already run on the real box with the
+real production args: `--mode live --ui --port 5000 --index NIFTY,SENSEX
+--strategies sell_straddle,oi_orb_screener,cag_straddle
+--futures-atm-underlyings NIFTY,SENSEX`). `_PM2_START_CMD` in
+`scripts/auto_morning_start.py` now matches this exactly too, but only as a
+fallback for a from-scratch box where no `pm2 save` exists yet — normal
+operation never touches it. If production's launch flags ever change
+again, just `pm2 save` after the manual restart and the automation stays
+correct automatically, no code edit needed.
 
 ## 5. Dry-run validation (repeatable, safe, no side effects)
 

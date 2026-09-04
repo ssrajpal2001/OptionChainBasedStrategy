@@ -37,14 +37,23 @@ from utils.email_alert import send_summary_email
 
 logger = logging.getLogger(__name__)
 
-# NOTE: confirm this against the real `pm2 describe terminus` output on the
-# server before first deploy (Task 6, Step 5 of the implementation plan) --
-# this placeholder mirrors CLAUDE.md's own documented "Launch Commands"
-# default and may need --strategies added to match whatever is actually
-# pinned in production.
+# 2026-09-06, confirmed against the real `pm2 start` command run on the server
+# (production pins NIFTY+SENSEX, sell_straddle+oi_orb_screener+cag_straddle, and
+# futures-atm-underlyings -- an earlier placeholder here only had --index NIFTY
+# with no --strategies/--futures-atm-underlyings at all, which would have booted
+# the wrong process on a real unattended morning). Rather than duplicate these
+# args here (guaranteed to drift out of sync again the next time production's
+# launch flags change), _start_pm2() now prefers `pm2 restart terminus` --
+# pm2's OWN remembered definition from the last `pm2 save`, always accurate by
+# construction. This full command is kept only as a rebuild-from-scratch
+# fallback for the case where the process was fully `pm2 delete`d and pm2's
+# saved dump was lost (e.g. a from-scratch EC2 instance before first deploy).
 _PM2_START_CMD = [
     "pm2", "start", "run_system.py", "--name", "terminus", "--interpreter", "python3",
-    "--", "--mode", "live", "--ui", "--port", "5000", "--index", "NIFTY",
+    "--", "--mode", "live", "--ui", "--port", "5000",
+    "--index", "NIFTY,SENSEX",
+    "--strategies", "sell_straddle,oi_orb_screener,cag_straddle",
+    "--futures-atm-underlyings", "NIFTY,SENSEX",
 ]
 _DASHBOARD_HEALTH_URL = "http://localhost:5000/"
 _HEALTH_TIMEOUT_SEC = 90
@@ -53,10 +62,14 @@ _HEALTH_POLL_INTERVAL_SEC = 3
 
 async def _start_pm2() -> Tuple[bool, str]:
     try:
+        restart = subprocess.run(["pm2", "restart", "terminus"], capture_output=True, text=True, timeout=30)
+        if restart.returncode == 0:
+            return True, "via pm2 restart (existing saved process)"
+        # Process not found (e.g. pm2 delete'd, or a fresh box) -- rebuild from scratch.
         result = subprocess.run(_PM2_START_CMD, capture_output=True, text=True, timeout=30)
         if result.returncode != 0:
             return False, result.stderr.strip()[:300]
-        return True, ""
+        return True, "via pm2 start (fresh process, restart target not found)"
     except Exception as exc:
         return False, str(exc)
 
