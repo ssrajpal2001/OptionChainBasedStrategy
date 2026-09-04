@@ -638,10 +638,14 @@ document.addEventListener('alpine:init', () => {
     feederToggle:        { upstox: false, upstox2: false, fyers: false },
     feederToggleLoading: { upstox: false, upstox2: false, fyers: false },
     feederEditOpen:      { upstox: false, upstox2: false, fyers: false },
+    // password/totp_secret: OPTIONAL, only used by the unattended daily
+    // automation (scripts/auto_morning_start.py, see broker_auth/
+    // headless_totp_auth.py + headless_totp_auth_fyers.py) — leaving them
+    // blank changes nothing about the normal interactive OAuth "toggle ON" flow.
     feederEditCreds:     {
-      upstox:  { client_id:'', api_key:'', secret:'' },
-      upstox2: { client_id:'', api_key:'', secret:'' },
-      fyers:   { client_id:'', api_key:'', secret:'' },
+      upstox:  { client_id:'', api_key:'', secret:'', password:'', totp_secret:'' },
+      upstox2: { client_id:'', api_key:'', secret:'', password:'', totp_secret:'' },
+      fyers:   { client_id:'', api_key:'', secret:'', password:'', totp_secret:'' },
     },
     feederEditSaving:    { upstox: false, upstox2: false, fyers: false },
     feederEditMsg:       { upstox: '', upstox2: '', fyers: '' },
@@ -908,25 +912,33 @@ document.addEventListener('alpine:init', () => {
     brokerAddOk:     null,
     brokerAddLoading: false,
     // Per-provider field definitions: which credential fields are required/shown.
-    // Only Client ID (where needed), App Key, and App Secret are stored.
-    // NO passwords, PINs, or TOTP secrets — all authentication via broker's official login page.
+    // OAuth-capable brokers (zerodha/upstox/fyers/dhan/aliceblue) authenticate
+    // via the broker's own official login page by default — App Key/App Secret
+    // only. `totp: true` additionally opts a provider into the OPTIONAL headless
+    // TOTP fields (password/PIN + TOTP base32 secret) used ONLY by the unattended
+    // daily automation (scripts/auto_morning_start.py, see broker_auth/
+    // headless_totp_auth.py + headless_totp_auth_fyers.py) — leaving these blank
+    // changes nothing about the normal interactive OAuth flow. Scoped to the
+    // providers that actually HAVE a headless login implementation; adding a
+    // TOTP field for a provider with no backend consumer would just be a form
+    // that silently stores data nothing reads.
     brokerFieldConfig: {
-      zerodha:   { user_id:false, api_key:true,  api_secret:true,  label:'Zerodha Kite', oauth:true  },
-      upstox:    { user_id:false, api_key:true,  api_secret:true,  label:'Upstox',       oauth:true  },
-      fyers:     { user_id:false, api_key:true,  api_secret:true,  label:'Fyers',        oauth:true  },
-      dhan:      { user_id:true,  api_key:true,  api_secret:true,  label:'Dhan',         oauth:true  },
-      angelone:  { user_id:true,  api_key:true,  api_secret:false, label:'Angel One',    oauth:false },
-      aliceblue: { user_id:true,  api_key:true,  api_secret:true,  label:'AliceBlue',    oauth:true  },
-      delta:     { user_id:false, api_key:true,  api_secret:true,  label:'Delta Exchange (Crypto)', oauth:false },
-      mock:      { user_id:false, api_key:false, api_secret:false, label:'Paper/Mock',   oauth:false },
+      zerodha:   { user_id:false, api_key:true,  api_secret:true,  label:'Zerodha Kite', oauth:true,  totp:true  },
+      upstox:    { user_id:false, api_key:true,  api_secret:true,  label:'Upstox',       oauth:true,  totp:true  },
+      fyers:     { user_id:false, api_key:true,  api_secret:true,  label:'Fyers',        oauth:true,  totp:true  },
+      dhan:      { user_id:true,  api_key:true,  api_secret:true,  label:'Dhan',         oauth:true,  totp:false },
+      angelone:  { user_id:true,  api_key:true,  api_secret:false, label:'Angel One',    oauth:false, totp:true  },
+      aliceblue: { user_id:true,  api_key:true,  api_secret:true,  label:'AliceBlue',    oauth:true,  totp:false },
+      delta:     { user_id:false, api_key:true,  api_secret:true,  label:'Delta Exchange (Crypto)', oauth:false, totp:false },
+      mock:      { user_id:false, api_key:false, api_secret:false, label:'Paper/Mock',   oauth:false, totp:false },
     },
     // Per-provider human-readable field label overrides
     brokerFieldHints: {
-      zerodha:   { user_id:'USER ID (optional)', api_key:'API KEY',          api_secret:'API SECRET'   },
-      upstox:    { user_id:'MOBILE (optional)',   api_key:'API KEY',          api_secret:'API SECRET'   },
-      fyers:     { user_id:'FY ID (optional)',    api_key:'APP ID (XXXXX-100)',api_secret:'SECRET ID'   },
+      zerodha:   { user_id:'USER ID (optional)', api_key:'API KEY',          api_secret:'API SECRET',    password:'PASSWORD (for automated login)' },
+      upstox:    { user_id:'MOBILE (optional)',   api_key:'API KEY',          api_secret:'API SECRET',    password:'PIN (6-digit, for automated login)' },
+      fyers:     { user_id:'FY ID (optional)',    api_key:'APP ID (XXXXX-100)',api_secret:'SECRET ID',    password:'PIN (for automated login)' },
       dhan:      { user_id:'CLIENT ID',           api_key:'APP ID',           api_secret:'APP SECRET'   },
-      angelone:  { user_id:'CLIENT ID (e.g. A123456)', api_key:'SMARTAPI API KEY', api_secret:'(not needed)' },
+      angelone:  { user_id:'CLIENT ID (e.g. A123456)', api_key:'SMARTAPI API KEY', api_secret:'(not needed)', password:'MPIN (4-digit)' },
       aliceblue: { user_id:'USER ID (AliceBlue)', api_key:'APP CODE',         api_secret:'API SECRET'   },
       delta:     { user_id:'(not needed)',        api_key:'DELTA API KEY',    api_secret:'DELTA API SECRET' },
       mock:      { user_id:'USER ID',             api_key:'API KEY',          api_secret:'API SECRET'   },
@@ -1692,17 +1704,19 @@ document.addEventListener('alpine:init', () => {
       try {
         const r = await this._fetch('/api/admin/feeder/save-creds', {
           json: {
-            provider:  p,
-            client_id: this.feederEditCreds[p].client_id,
-            api_key:   this.feederEditCreds[p].api_key,
-            secret:    this.feederEditCreds[p].secret,
+            provider:    p,
+            client_id:   this.feederEditCreds[p].client_id,
+            api_key:     this.feederEditCreds[p].api_key,
+            secret:      this.feederEditCreds[p].secret,
+            password:    this.feederEditCreds[p].password,
+            totp_secret: this.feederEditCreds[p].totp_secret,
           }
         });
         if (!r) return;
         const d = await r.json();
         this.feederEditMsg[p] = d.ok ? '✓ Credentials saved.' : (d.error || 'Save failed.');
         if (d.ok) {
-          this.feederEditCreds[p] = { client_id:'', api_key:'', secret:'' };
+          this.feederEditCreds[p] = { client_id:'', api_key:'', secret:'', password:'', totp_secret:'' };
           this.feederEditOpen[p]  = false;
           await this.loadFeederStatus();
         }
@@ -5625,6 +5639,24 @@ function amoTest() {
                        autocomplete="off" spellcheck="false"/>
               </div>
             </div>
+            <!-- Password/TOTP — OPTIONAL, only used by the unattended daily automation
+                 (scripts/auto_morning_start.py). Leaving these blank changes nothing
+                 about the normal interactive OAuth toggle-ON flow above. -->
+            <div class="font-mono text-xs" style="color:var(--t-muted)">For automated daily login (optional) — leave blank to keep OAuth-only</div>
+            <div class="grid grid-cols-2 gap-2">
+              <div>
+                <div class="sec-label mb-1">PASSWORD / PIN</div>
+                <input class="t-input" type="password" x-model="feederEditCreds[p].password"
+                       placeholder="leave blank to keep existing"
+                       autocomplete="new-password" spellcheck="false"/>
+              </div>
+              <div>
+                <div class="sec-label mb-1">TOTP SECRET (base32)</div>
+                <input class="t-input" type="password" x-model="feederEditCreds[p].totp_secret"
+                       placeholder="leave blank to keep existing"
+                       autocomplete="new-password" spellcheck="false"/>
+              </div>
+            </div>
             <div class="flex items-center gap-3">
               <button @click="saveFeederCreds(p)" :disabled="feederEditSaving[p]"
                       class="font-ui font-bold text-xs px-4 py-1.5 rounded border"
@@ -6943,9 +6975,9 @@ function amoTest() {
                 <div class="sec-label mb-1" x-text="(brokerFieldHints[portalBroker.provider]||{}).user_id||'USER ID'"></div>
                 <input class="t-input" type="text" x-model="portalBroker.user_id" autocomplete="off"/>
               </div>
-              <!-- Password/MPIN — only for headless-auth brokers (AngelOne) -->
-              <div x-show="portalBroker.provider==='angelone'">
-                <div class="sec-label mb-1">MPIN (4-digit login PIN)</div>
+              <!-- Password/PIN/MPIN — OPTIONAL, only used by the unattended daily automation -->
+              <div x-show="(brokerFieldConfig[portalBroker.provider]||{}).totp">
+                <div class="sec-label mb-1" x-text="(brokerFieldHints[portalBroker.provider]||{}).password||'PASSWORD / PIN'"></div>
                 <input class="t-input" type="password" x-model="portalBroker.password" autocomplete="new-password" placeholder="leave blank to keep existing"/>
               </div>
             </div>
@@ -6960,9 +6992,11 @@ function amoTest() {
                 <input class="t-input" type="password" x-model="portalBroker.api_secret" autocomplete="new-password"/>
               </div>
             </div>
-            <!-- TOTP secret — only for headless-auth brokers (AngelOne) -->
-            <div x-show="portalBroker.provider==='angelone'">
-              <div class="sec-label mb-1">TOTP SECRET (base32 key from authenticator app)</div>
+            <!-- TOTP secret — OPTIONAL, only used by the unattended daily automation
+                 (scripts/auto_morning_start.py). Leaving this blank changes nothing
+                 about the normal interactive OAuth "Terminal ON" flow. -->
+            <div x-show="(brokerFieldConfig[portalBroker.provider]||{}).totp">
+              <div class="sec-label mb-1">TOTP SECRET (base32 key from authenticator app) — for automated daily login</div>
               <input class="t-input" type="password" x-model="portalBroker.totp_secret" autocomplete="new-password" placeholder="leave blank to keep existing"/>
             </div>
             <!-- OAuth info banner for OAuth-capable providers -->
@@ -7047,7 +7081,11 @@ function amoTest() {
                 <div class="sec-label mb-1" x-text="(brokerFieldHints[portalBroker.provider]||{}).user_id||'USER ID'"></div>
                 <input class="t-input" type="text" x-model="portalBroker.user_id" autocomplete="off"/>
               </div>
-              <!-- Password/PIN not stored — auth via broker OAuth portal -->
+              <!-- Password/PIN — OPTIONAL, only used by the unattended daily automation -->
+              <div x-show="(brokerFieldConfig[portalBroker.provider]||{}).totp">
+                <div class="sec-label mb-1" x-text="(brokerFieldHints[portalBroker.provider]||{}).password||'PASSWORD / PIN'"></div>
+                <input class="t-input" type="password" x-model="portalBroker.password" autocomplete="new-password" placeholder="leave blank to keep existing"/>
+              </div>
             </div>
             <div class="grid grid-cols-2 gap-2">
               <div x-show="brokerFieldConfig[portalBroker.provider].api_key">
@@ -7059,7 +7097,11 @@ function amoTest() {
                 <input class="t-input" type="password" x-model="portalBroker.api_secret" autocomplete="new-password"/>
               </div>
             </div>
-            <!-- TOTP/PIN not stored — 2FA handled on broker's secure login portal -->
+            <!-- TOTP secret — OPTIONAL, only used by the unattended daily automation -->
+            <div x-show="(brokerFieldConfig[portalBroker.provider]||{}).totp">
+              <div class="sec-label mb-1">TOTP SECRET (base32 key) — for automated daily login</div>
+              <input class="t-input" type="password" x-model="portalBroker.totp_secret" autocomplete="new-password" placeholder="leave blank to keep existing"/>
+            </div>
           </div>
         </template>
         <div x-show="portalBrokerMsg" class="font-mono text-xs px-2 py-1.5 rounded"
@@ -8150,7 +8192,11 @@ function amoTest() {
                 <div class="sec-label mb-1" x-text="(brokerFieldHints[portalBroker.provider]||{}).user_id||'USER ID'"></div>
                 <input class="t-input" type="text" x-model="portalBroker.user_id" autocomplete="off"/>
               </div>
-              <!-- Password/PIN not stored — auth via broker OAuth portal -->
+              <!-- Password/PIN — OPTIONAL, only used by the unattended daily automation -->
+              <div x-show="(brokerFieldConfig[portalBroker.provider]||{}).totp">
+                <div class="sec-label mb-1" x-text="(brokerFieldHints[portalBroker.provider]||{}).password||'PASSWORD / PIN'"></div>
+                <input class="t-input" type="password" x-model="portalBroker.password" autocomplete="new-password" placeholder="leave blank to keep existing"/>
+              </div>
             </div>
             <!-- API Key + API Secret row -->
             <div class="grid gap-3"
@@ -8164,8 +8210,13 @@ function amoTest() {
                 <input class="t-input" type="password" x-model="portalBroker.api_secret" autocomplete="new-password"/>
               </div>
             </div>
-            <!-- TOTP Secret -->
-            <!-- TOTP/PIN not stored — 2FA handled on broker's secure login portal -->
+            <!-- TOTP Secret — OPTIONAL, only used by the unattended daily automation
+                 (scripts/auto_morning_start.py). Leaving this blank changes nothing
+                 about the normal interactive OAuth "Terminal ON" flow. -->
+            <div x-show="(brokerFieldConfig[portalBroker.provider]||{}).totp">
+              <div class="sec-label mb-1">TOTP SECRET (base32 key) — for automated daily login</div>
+              <input class="t-input" type="password" x-model="portalBroker.totp_secret" autocomplete="new-password" placeholder="leave blank to keep existing"/>
+            </div>
             <!-- Mock / Dhan info notes -->
             <div x-show="portalBroker.provider==='mock'" class="text-xs px-3 py-2 rounded" style="background:rgba(var(--t-cyan-rgb),0.06);color:var(--t-muted)">
               Mock/Paper mode — no real broker credentials needed. Orders will be simulated.
@@ -10220,11 +10271,14 @@ function amoTest() {
           <input class="t-input" type="password" placeholder="api secret" x-model="newBroker.api_secret" autocomplete="new-password"/>
         </div>
       </div>
-      <!-- Angel One headless: password (MPIN) + TOTP secret -->
-      <div x-show="newBroker.provider==='angelone'" class="grid grid-cols-2 gap-3">
+      <!-- Password/PIN + TOTP secret — OPTIONAL, only used by the unattended daily
+           automation (scripts/auto_morning_start.py); leaving blank changes nothing
+           about the normal interactive OAuth flow. Scoped to providers with a real
+           headless-login backend (see brokerFieldConfig[p].totp). -->
+      <div x-show="(brokerFieldConfig[newBroker.provider]||{}).totp" class="grid grid-cols-2 gap-3">
         <div>
-          <div class="sec-label mb-1">MPIN (4-digit password)</div>
-          <input class="t-input" type="password" placeholder="1234" x-model="newBroker.password" autocomplete="new-password"/>
+          <div class="sec-label mb-1" x-text="(brokerFieldHints[newBroker.provider]||{}).password||'PASSWORD / PIN'"></div>
+          <input class="t-input" type="password" placeholder="for automated login" x-model="newBroker.password" autocomplete="new-password"/>
         </div>
         <div>
           <div class="sec-label mb-1">TOTP SECRET (base32)</div>

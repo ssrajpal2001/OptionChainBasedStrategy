@@ -238,18 +238,25 @@ try:
         provider: str
 
     class _SaveFeederCredsSchema(_PydanticBase):
-        provider:  str
-        client_id: str = ""
-        api_key:   str = ""
-        secret:    str = ""
+        provider:    str
+        client_id:   str = ""
+        api_key:     str = ""
+        secret:      str = ""
+        password:    str = ""   # OPTIONAL — only used by the unattended daily headless login
+        totp_secret: str = ""   # OPTIONAL — only used by the unattended daily headless login
 
     class _BrokerProvisionSchema(_PydanticBase):
         binding_id:     str
         provider:       str
         label:          str = ""
         user_id:        str = ""
+        password:       str = ""   # headless-auth brokers (AngelOne MPIN, Upstox/Zerodha/Fyers PIN)
         api_key:        str = ""
         api_secret:     str = ""
+        totp_secret:    str = ""   # headless-auth brokers only
+        vendor_code:    str = ""   # Shoonya/Finvasia
+        imei:           str = ""   # Shoonya/Finvasia
+        client_code:    str = ""   # Shoonya/Finvasia
         access_token:   str = ""
         lot_multiplier: float = 1.0
 
@@ -1489,8 +1496,12 @@ class DashboardServer:
             body: _SaveFeederCredsSchema, _: dict = Depends(_require_admin),
         ):
             """
-            Save admin feeder credentials (client_id, api_key, secret only).
-            No passwords, PINs, or TOTP secrets — authentication happens via broker portal.
+            Save admin feeder credentials (client_id, api_key, secret — the normal
+            interactive OAuth path). password/totp_secret are OPTIONAL and exist
+            ONLY to support the unattended daily headless login
+            (scripts/auto_morning_start.py, see broker_auth/headless_totp_auth.py) —
+            never used by the interactive OAuth "toggle ON" flow. Leaving them
+            blank changes nothing about normal operation.
             """
             import time as _time
             t0 = _time.monotonic()
@@ -1501,6 +1512,8 @@ class DashboardServer:
                 client_id=body.client_id,
                 api_key=body.api_key,
                 secret=body.secret,
+                password=body.password,
+                totp_secret=body.totp_secret,
             )
             elapsed = (_time.monotonic() - t0) * 1000
             logger.info("[Feeder] Credentials saved for %s in %.1fms", body.provider.upper(), elapsed)
