@@ -44,6 +44,7 @@ def seed_from_answers(db: ClientDB, answers: dict) -> None:
         asyncio.run(db.set_binding_password_totp(
             client_id=a["client_id"], binding_id=a["binding_id"],
             password=a.get("password", ""), totp_secret=a.get("totp_secret", ""),
+            user_id=a.get("user_id", ""),
         ))
     if "gmail" in answers:
         a = answers["gmail"]
@@ -80,6 +81,8 @@ def main() -> None:
         answers["zerodha_binding"] = {
             "client_id":   input("client_id: "),
             "binding_id":  input("binding_id: "),
+            "user_id":     input("Zerodha login ID (e.g. AB1234 — needed for headless login, "
+                                 "NOT needed for normal OAuth): "),
             "password":    getpass.getpass("password: "),
             "totp_secret": getpass.getpass("TOTP base32 secret: "),
         }

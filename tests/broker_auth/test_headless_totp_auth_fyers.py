@@ -23,7 +23,7 @@ def test_fyers_playwright_timeout_raises_named_error(monkeypatch):
             raise TimeoutError("locator not found")
 
     class FakeBrowser:
-        def new_page(self):
+        def new_page(self, **k):
             return FakePage()
 
         def close(self):

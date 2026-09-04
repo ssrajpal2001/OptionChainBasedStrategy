@@ -116,7 +116,22 @@ def upstox_totp_login(
     sess_user_id = (qs1.get("user_id") or [""])[0]
     sess_client_id = (qs1.get("client_id") or [api_key])[0]
     if not sess_user_id:
-        raise HeadlessTotpAuthError(f"Upstox: Step 1 failed — session user_id missing. final_url={r1.url!r}")
+        # 2026-09-06 real incident: r1.url came back IDENTICAL to the request
+        # URL (no redirect followed at all), meaning Upstox served something
+        # other than the expected 302-with-user_id -- most likely their login
+        # flow has drifted since this was reverse-engineered (see this
+        # module's own docstring re: reviving pre-refactor code). Surface the
+        # actual status code + a body snippet so the next failure is
+        # debuggable from the log alone instead of a bare "missing" message.
+        try:
+            _body_snip = r1.text[:400]
+        except Exception:
+            _body_snip = "<no body available>"
+        raise HeadlessTotpAuthError(
+            f"Upstox: Step 1 failed — session user_id missing. "
+            f"final_url={r1.url!r} status={getattr(r1, 'status_code', '?')} "
+            f"body_snippet={_body_snip!r}"
+        )
     time.sleep(1)
 
     # Step 2: generate OTP

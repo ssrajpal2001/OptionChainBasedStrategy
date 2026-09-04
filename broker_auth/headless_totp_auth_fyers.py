@@ -35,14 +35,24 @@ def fyers_totp_login(client_id: str, app_id: str, password: str, totp_secret: st
         with sync_playwright() as pw:
             browser = pw.chromium.launch(headless=True)
             try:
-                page = browser.new_page()
+                # 2026-09-06 real incident: headless Chromium's default (small)
+                # viewport tripped Fyers' responsive layout, which renders the
+                # login form TWICE (desktop + mobile variants, one hidden via
+                # CSS) -- Playwright's locator resolved 2 elements for
+                # input[id='fy_client_id'] and picked the hidden one, timing
+                # out on fill(). An explicit desktop-sized viewport avoids the
+                # mobile breakpoint in the first place; the `:visible` filter
+                # (a Playwright-specific selector extension) is kept as a
+                # defense-in-depth second layer in case a duplicate persists
+                # for some other reason.
+                page = browser.new_page(viewport={"width": 1366, "height": 900})
                 page.goto("https://login.fyers.in/")
-                page.fill("input[id='fy_client_id']", client_id)
-                page.click("button[id='clientIdSubmit']")
-                page.fill("input[id='fy_totp']", totp_code)
-                page.click("button[id='totpSubmit']")
-                page.fill("input[id='fy_pin']", pin)
-                page.click("button[id='pinSubmit']")
+                page.fill("input[id='fy_client_id']:visible", client_id)
+                page.click("button[id='clientIdSubmit']:visible")
+                page.fill("input[id='fy_totp']:visible", totp_code)
+                page.click("button[id='totpSubmit']:visible")
+                page.fill("input[id='fy_pin']:visible", pin)
+                page.click("button[id='pinSubmit']:visible")
                 page.wait_for_url("**/api-login/redirect-uri/**", timeout=20000)
                 final_url = page.url
                 from urllib.parse import parse_qs, urlparse

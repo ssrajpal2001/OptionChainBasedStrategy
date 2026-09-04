@@ -524,20 +524,41 @@ class ClientDB:
 
     async def set_binding_password_totp(
         self, client_id: str, binding_id: str, password: str, totp_secret: str,
+        user_id: str = "",
     ) -> None:
-        """Store password/TOTP secret for a broker binding's headless login
-        (e.g. Zerodha, via scripts/seed_headless_creds.py). A narrow, single-
-        purpose UPDATE touching ONLY these two columns -- deliberately NOT
-        routed through upsert_binding(), which unconditionally overwrites
+        """Store password/TOTP secret (+ optionally the real broker login ID)
+        for a broker binding's headless login (e.g. Zerodha, via
+        scripts/seed_headless_creds.py). A narrow, single-purpose UPDATE
+        touching ONLY these columns -- deliberately NOT routed through
+        upsert_binding(), which unconditionally overwrites
         label/lot_multiplier/trading_mode/product_type on every call (no
         CASE-WHEN guard on those columns) and would silently reset a real
-        binding's live trading_mode/lot_multiplier back to their defaults."""
-        await asyncio.to_thread(
-            self._exec,
-            "UPDATE broker_bindings SET password_enc=?, totp_secret_enc=? "
-            "WHERE client_id=? AND binding_id=?",
-            (_encode_cred(password), _encode_cred(totp_secret), client_id, binding_id),
-        )
+        binding's live trading_mode/lot_multiplier back to their defaults.
+
+        user_id (2026-09-06, real incident fix): Zerodha's normal OAuth flow
+        never needs the broker's own login ID -- the user types it on
+        Zerodha's own login page -- so this binding's user_id_enc column was
+        never populated for any pre-existing binding. The headless TOTP login
+        (zerodha_totp_login) DOES need it (it submits the login form itself,
+        with no human to type it), and failed with "user_id ... required" on
+        first live use because of exactly this gap. user_id="" (the default)
+        leaves the column untouched, same CASE-WHEN-preserving behavior as
+        password/totp_secret already have via upsert_binding elsewhere."""
+        if user_id:
+            await asyncio.to_thread(
+                self._exec,
+                "UPDATE broker_bindings SET password_enc=?, totp_secret_enc=?, user_id_enc=? "
+                "WHERE client_id=? AND binding_id=?",
+                (_encode_cred(password), _encode_cred(totp_secret), _encode_cred(user_id),
+                 client_id, binding_id),
+            )
+        else:
+            await asyncio.to_thread(
+                self._exec,
+                "UPDATE broker_bindings SET password_enc=?, totp_secret_enc=? "
+                "WHERE client_id=? AND binding_id=?",
+                (_encode_cred(password), _encode_cred(totp_secret), client_id, binding_id),
+            )
 
     async def set_trading_mode(
         self, client_id: str, binding_id: str, mode: str

@@ -1590,6 +1590,48 @@ class DashboardServer:
                     "[Feeder/Toggle] [%s] cached token rejected in %.1fms", p, elapsed,
                 )
 
+            # Step 1.5 (2026-09-06, direct user spec): if password/TOTP secret are
+            # saved for this provider, attempt the SAME headless login
+            # scripts/auto_morning_start.py uses, right here, synchronously, so
+            # Terminal ON itself answers "did auto-login work, or do I still need
+            # to log in on the broker's website" -- instead of only finding out
+            # the next unattended morning. On any failure (wrong creds, broker
+            # site changed, Fyers Cloudflare/selector issues, etc.) this falls
+            # straight through to the existing OAuth flow below, unchanged.
+            password    = db_row.get("password", "")
+            totp_secret = db_row.get("totp_secret", "")
+            if password and totp_secret:
+                try:
+                    if p in ("upstox", "upstox2"):
+                        from broker_auth.headless_totp_auth import upstox_totp_login
+                        new_token = await asyncio.to_thread(
+                            upstox_totp_login, api_key=api_key, api_secret=secret,
+                            user_id=user_id, password=password, totp_secret=totp_secret,
+                        )
+                    else:  # fyers
+                        from broker_auth.headless_totp_auth_fyers import fyers_totp_login
+                        new_token = await asyncio.to_thread(
+                            fyers_totp_login, client_id=user_id, app_id=api_key,
+                            password=password, totp_secret=totp_secret, pin=password,
+                        )
+                    now = datetime.now(IST).isoformat()
+                    await _srv._client_db.update_feeder_token(p, new_token, generated_at=now)
+                    await _start_feeder_stream(_srv._feeder, p, api_key, new_token, _srv._client_db, _srv._cfg)
+                    elapsed = (_time.monotonic() - t0) * 1000
+                    logger.info(
+                        "[Feeder/Toggle] [%s] headless auto-login succeeded in %.1fms", p, elapsed,
+                    )
+                    return {
+                        "ok": True, "connected": True, "flow": "headless",
+                        "message": f"{p.upper()} feeder connected via automated login.",
+                    }
+                except Exception as exc:
+                    elapsed = (_time.monotonic() - t0) * 1000
+                    logger.warning(
+                        "[Feeder/Toggle] [%s] headless auto-login failed in %.1fms (%s) — "
+                        "falling back to manual OAuth login.", p, elapsed, exc,
+                    )
+
             # Step 2: generate OAuth URL
             base_url     = _redirect_base(request, _srv._client_db)
             callback_url = f"{base_url}/callback/{p}"
@@ -4002,6 +4044,88 @@ class DashboardServer:
                 except Exception as exc:
                     logger.error("[Terminal] [%s/%s] Angel One connect error: %s", cid, binding_id, exc)
                     return {"ok": False, "error": f"Angel One connect error: {exc}"}
+
+            # Headless TOTP auto-login (2026-09-06, direct user spec): if this
+            # binding has a password + TOTP secret saved, attempt the SAME
+            # headless login scripts/auto_morning_start.py uses, right here,
+            # synchronously -- so Terminal ON itself answers "did it auto-
+            # connect, or do I still need to log in on the broker's website"
+            # instead of only finding out on the next unattended morning.
+            # AngelOne already has its own dedicated headless path above (no
+            # OAuth at all) -- this covers the OAuth-capable-but-now-also-
+            # headless-capable providers added this session (Zerodha/Upstox/
+            # Fyers). On any failure (wrong creds, broker site changed,
+            # Fyers Cloudflare/selector issues, etc.) this falls straight
+            # through to the existing OAuth flow below, unchanged.
+            if provider in ("zerodha", "upstox", "fyers") and b.get("password") and b.get("totp_secret"):
+                try:
+                    if provider == "zerodha":
+                        from broker_auth.headless_totp_auth import zerodha_totp_login
+                        new_token = await asyncio.to_thread(
+                            zerodha_totp_login, api_key=api_key, api_secret=api_secret,
+                            user_id=user_id, password=b.get("password", ""),
+                            totp_secret=b.get("totp_secret", ""),
+                        )
+                    elif provider == "upstox":
+                        from broker_auth.headless_totp_auth import upstox_totp_login
+                        new_token = await asyncio.to_thread(
+                            upstox_totp_login, api_key=api_key, api_secret=api_secret,
+                            user_id=user_id, password=b.get("password", ""),
+                            totp_secret=b.get("totp_secret", ""),
+                        )
+                    else:  # fyers
+                        from broker_auth.headless_totp_auth_fyers import fyers_totp_login
+                        new_token = await asyncio.to_thread(
+                            fyers_totp_login, client_id=user_id, app_id=api_key,
+                            password=b.get("password", ""), totp_secret=b.get("totp_secret", ""),
+                            pin=b.get("password", ""),
+                        )
+                    await _srv._client_db.update_access_token(
+                        cid, binding_id, new_token, generated_at=datetime.now(IST).isoformat())
+                    await _srv._client_db.set_terminal_connected(cid, binding_id, True)
+                    await _srv._client_db.set_trade_enabled(cid, binding_id, True)
+                    # Refresh the cached execution broker with the new token — same
+                    # pattern the cached-token-valid path below uses.
+                    try:
+                        from config.client_profiles import BrokerBinding as _BB
+                        from execution_bridge.base_broker import create_broker
+                        _bb = _BB(
+                            binding_id=binding_id, provider=provider, label=b.get("label", ""),
+                            user_id=user_id, api_key=api_key, api_secret=api_secret,
+                            access_token=new_token,
+                            password=b.get("password", ""), totp_secret=b.get("totp_secret", ""),
+                            is_trade_enabled=bool(b.get("is_trade_enabled", 1)),
+                            lot_multiplier=float(b.get("lot_multiplier", 1.0) or 1.0),
+                            product_type=(b.get("product_type", "") or "MIS"),
+                            trading_mode=(b.get("trading_mode", "paper") or "paper"),
+                            source_ip=(b.get("source_ip", "") or ""),
+                        )
+                        _nb = create_broker(_bb, cid)
+                        if await _nb.authenticate() and _srv._router is not None:
+                            _srv._router._brokers.setdefault(cid, {})[binding_id] = _nb
+                            try:
+                                _srv._router._pool.add_broker_to_worker(cid, binding_id, _nb, provider)
+                            except Exception:
+                                pass
+                    except Exception as _re:
+                        logger.warning(
+                            "[Terminal] [%s/%s] execution broker refresh after headless login: %s",
+                            cid, binding_id, _re,
+                        )
+                    logger.info(
+                        "[Terminal] [%s/%s] %s connected (headless TOTP).",
+                        cid, binding_id, provider.upper(),
+                    )
+                    return {
+                        "ok": True, "connected": True, "flow": "headless",
+                        "message": f"{provider.upper()} connected automatically (no browser login needed).",
+                    }
+                except Exception as exc:
+                    logger.warning(
+                        "[Terminal] [%s/%s] headless TOTP login failed (%s) — falling back to OAuth.",
+                        cid, binding_id, exc,
+                    )
+                    # fall through to the cached-token check / OAuth flow below
 
             ok, msg, token = await _he.authenticate_binding(b, cid, _srv._client_db)
 
