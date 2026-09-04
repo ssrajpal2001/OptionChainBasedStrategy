@@ -342,8 +342,11 @@ class StraddleExecutionBridge:
         self._trade_log = TradeLogger(log_dir)
         self._running   = False
         self._q         = bus.subscribe(Topic.ORDER_REQUEST)
-        # Track last ENTRY event per underlying for exit price correlation
-        self._last_entry: Dict[str, StraddleOrderEvent] = {}
+        # Track last ENTRY event per (client_id, binding_id, underlying) for exit price
+        # correlation -- 2026-09-06 (stale-value audit F16): previously keyed by
+        # underlying alone, which collided across two bindings trading the same
+        # underlying concurrently (a real deployment shape here).
+        self._last_entry: Dict[Tuple[str, str, str], StraddleOrderEvent] = {}
         # Broker order_ids per (client, binding, underlying) → {"CE": id, "PE": id} so a
         # later close can reference the exact orders the app opened (close-own-legs only,
         # and for cancel/modify of the exact exchange order).
@@ -818,7 +821,19 @@ class StraddleExecutionBridge:
         )
 
         if ev.action == "ENTRY":
-            self._last_entry[ev.underlying] = ev
+            # 2026-09-06, direct user follow-up (stale-value audit F16): keyed
+            # by underlying ALONE, this silently collided the instant two
+            # DIFFERENT bindings traded the same underlying concurrently (the
+            # confirmed-real deployment shape here -- e.g. ssrajpal2001/SA5770
+            # and gurmeet/zerodha both on NIFTY) -- one binding's ENTRY would
+            # overwrite the other's cached entry, and the fallback read below
+            # could pick up the WRONG binding's prices. Scoping the key by
+            # (client_id, binding_id, underlying) makes each binding's own
+            # cache genuinely its own; the real fix that already made this
+            # safe in practice (ev.ce_entry/pe_entry carried directly on the
+            # EXIT event, preferred below) stays unchanged -- this closes the
+            # remaining fallback-only exposure.
+            self._last_entry[(client_id, binding_id, ev.underlying)] = ev
             logger.info(
                 "[PAPER] %s %s ENTRY | CE=%s@%.2f PE=%s@%.2f credit=%.2f | client=%s broker=%s",
                 ev.underlying, ev.atm,
@@ -831,7 +846,7 @@ class StraddleExecutionBridge:
         else:
             # Prefer the real entry prices carried on the EXIT event (survive restarts);
             # fall back to the in-memory last-entry only if the event didn't carry them.
-            entry_ev = self._last_entry.get(ev.underlying)
+            entry_ev = self._last_entry.get((client_id, binding_id, ev.underlying))
             entry_ce = ev.ce_entry if getattr(ev, "ce_entry", 0.0) else (entry_ev.ce_ltp if entry_ev else 0.0)
             entry_pe = ev.pe_entry if getattr(ev, "pe_entry", 0.0) else (entry_ev.pe_ltp if entry_ev else 0.0)
             logger.info(
@@ -1355,12 +1370,14 @@ class StraddleExecutionBridge:
         )
 
         if ev.action == "ENTRY":
-            self._last_entry[ev.underlying] = ev
+            # 2026-09-06 (stale-value audit F16): scoped per-binding, same fix as
+            # _paper_fill's own _last_entry write above -- see that comment.
+            self._last_entry[(client_id, binding_id, ev.underlying)] = ev
             self._trade_log.log_entry(client_id, binding_id, ev, fill_ev)
         else:
             # Prefer real entry prices on the EXIT event (survive restarts); fall back to
             # in-memory last-entry only if absent.
-            entry_ev = self._last_entry.get(ev.underlying)
+            entry_ev = self._last_entry.get((client_id, binding_id, ev.underlying))
             entry_ce = ev.ce_entry if getattr(ev, "ce_entry", 0.0) else (entry_ev.ce_ltp if entry_ev else 0.0)
             entry_pe = ev.pe_entry if getattr(ev, "pe_entry", 0.0) else (entry_ev.pe_ltp if entry_ev else 0.0)
             self._trade_log.log_exit(client_id, binding_id, ev, fill_ev, entry_ce, entry_pe)

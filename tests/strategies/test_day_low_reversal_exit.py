@@ -255,7 +255,7 @@ def test_tracking_resets_on_a_mid_day_rollover_onto_a_new_pair():
 
     s._position = _position(30.0, 20.0)   # 50
     asyncio.run(s._check_exits())
-    assert s._day_low_tracked_pair == (24000, 24000)
+    assert s._day_low_tracked_pair == (24000, 24000, None)   # 3rd element = expiry_date (2026-09-06 fix)
     assert s._session_min_straddle_frozen is None   # not frozen yet -- before freeze time
     s._compute_day_low_for_pair.assert_not_called()
 
@@ -267,7 +267,7 @@ def test_tracking_resets_on_a_mid_day_rollover_onto_a_new_pair():
         net_credit=70.0, status="open",
     )
     asyncio.run(s._check_exits())
-    assert s._day_low_tracked_pair == (24100, 23900)
+    assert s._day_low_tracked_pair == (24100, 23900, None)   # 3rd element = expiry_date (2026-09-06 fix)
     assert s._session_min_straddle_frozen is None
 
     # Cross freeze time on this NEW pair -- computes fresh for CE24100/PE23900,

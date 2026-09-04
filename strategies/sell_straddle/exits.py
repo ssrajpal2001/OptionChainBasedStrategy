@@ -918,6 +918,33 @@ class ExitMixin:
         # back to the current (expiring) week before the roll completes.
         self._expiry_shifted_low_anchor_ltp = True
         self._strike_prem.clear()
+        # 2026-09-06, direct user follow-up (stale-value audit) -- this hedge
+        # roll moves to next week's expiry the exact same way
+        # _shift_to_next_week_expiry (entries.py) does, but never carried
+        # over that path's own 2026-08-31 CRITICAL FIX: self._pool_engine is
+        # keyed by strike NUMBER alone, which repeats across weekly
+        # contracts, so without a rebuild it kept blending the OLD
+        # (expiring) contract's VWAP/SLOPE/RSI/ROC history into the NEW
+        # contract's incoming ticks under the same key -- corrupting the
+        # indicators that drive the fresh sold pair's entry AND the carried
+        # position's own exit checks. Same fix, same reasoning, mirrored
+        # here. _prev_atp_closed / _shadow_vwap are the other two per-
+        # (strike,side) caches that feed the SAME decision chain (the
+        # fallback SLOPE source and the calculative-VWAP-source pool feed,
+        # respectively) and were found to have the identical gap -- cleared
+        # alongside the pool engine so no cache in this decision chain
+        # survives the contract change.
+        from strategies.pool_indicator_engine import PoolIndicatorEngine
+        _old = self._pool_engine
+        self._pool_engine = PoolIndicatorEngine(
+            rsi_len=_old._rsi_len, roc_len=_old._roc_len, maxlen=_old._maxlen)
+        self._prev_atp_closed.clear()
+        self._shadow_vwap.clear()
+        self._clog.info(
+            "HEDGE ROLL: pool indicator engine (VWAP/SLOPE/RSI/ROC) + _prev_atp_closed + "
+            "_shadow_vwap reset fresh for the new expiry -- prevents old-contract price "
+            "history from blending into new-contract ticks under the same strike numbers."
+        )
         await self._subscribe_expiry_window(next_expiry)
         logger.info(
             "SellStraddle[%s]: HEDGE ROLL (%s) — rolling to next expiry %s, waiting for "
@@ -1065,15 +1092,38 @@ class ExitMixin:
              remaining backstop, exactly as the user confirmed ("R1 logic
              will survive and EOD").
         """
-        _pair_id = (int(pos.ce_leg.strike), int(pos.pe_leg.strike))
-        if self._post1500_pair != _pair_id:
+        # 2026-09-06, direct user follow-up (stale-value audit F6): keyed by
+        # strike NUMBER alone, this "has the pair changed" check couldn't
+        # tell an expiry roll apart from "still the same pair" whenever the
+        # roll happened to land on identical strike numbers (e.g. a hedge
+        # roll to next week keeping the same ATM strikes) -- reusing the OLD
+        # contract's R1 calculators/armed-state for the NEW contract's ticks
+        # after 15:00. expiry_date makes a same-strike-different-contract
+        # roll register as a genuine pair change, same fix shape as F1/F2/F3.
+        _pair_id = (int(pos.ce_leg.strike), int(pos.pe_leg.strike), pos.expiry_date)
+        _pair_changed = (self._post1500_pair != _pair_id)
+        # 2026-09-06, direct user follow-up (stale-value audit F11): a restart
+        # after 15:00 now restores _post1500_pair/_post1500_armed from disk
+        # (see _restore_session) so the arm decision survives -- but the
+        # SupportResistanceCalculator instances themselves are deliberately
+        # NOT persisted (they safely re-warm from live bars within a few
+        # minutes). If the restored pair matches the live position exactly,
+        # the OLD version of this check would skip creating _post1500_calc
+        # entirely (pair "unchanged") and the very next bar-close would
+        # KeyError on an empty dict. _calc_missing catches that restart case
+        # specifically -- calculators get created fresh either way, but the
+        # restored armed/armed_reason/leg_closed/closing flags are only
+        # wiped on a GENUINE pair change, never on this restart re-init.
+        _calc_missing = not self._post1500_calc
+        if _pair_changed or _calc_missing:
             self._post1500_pair = _pair_id
             self._post1500_calc = {"CE": SupportResistanceCalculator(), "PE": SupportResistanceCalculator()}
             self._post1500_bar_acc = {}
-            self._post1500_armed = False
-            self._post1500_armed_reason = None
-            self._post1500_leg_closed = {"CE": False, "PE": False}
-            self._post1500_closing = {"CE": False, "PE": False}
+            if _pair_changed:
+                self._post1500_armed = False
+                self._post1500_armed_reason = None
+                self._post1500_leg_closed = {"CE": False, "PE": False}
+                self._post1500_closing = {"CE": False, "PE": False}
             self._persist_session()
 
         if now.time() < self._POST1500_START:
@@ -1553,7 +1603,11 @@ class ExitMixin:
         # gets the old both-legs-close behavior this feature replaces.
         if self._day_low_exit_enabled or self._post1500_exit_enabled:
             _cv = pos.current_value
-            _pair_id = (int(pos.ce_leg.strike), int(pos.pe_leg.strike))
+            # 2026-09-06, direct user follow-up (stale-value audit F6): add
+            # expiry_date so an expiry roll landing on identical strike
+            # numbers registers as a genuine pair change, not "still the
+            # same pair" -- same fix shape as _post1500_pair above.
+            _pair_id = (int(pos.ce_leg.strike), int(pos.pe_leg.strike), pos.expiry_date)
             if tuple(getattr(self, "_day_low_tracked_pair", None) or ()) != _pair_id:
                 self._day_low_tracked_pair = _pair_id
                 self._session_min_straddle_frozen = None
@@ -2231,6 +2285,28 @@ class ExitMixin:
         pos.net_credit = pos.ce_leg.entry_price + pos.pe_leg.entry_price
         pos.tsl_high_lock_rs = 0.0
         pos.open_time = now
+        # 2026-09-06, direct user follow-up (indicator-freshness audit): a roll
+        # used to leave two stale gaps the ENTRY path already avoided --
+        # (1) self._ind's RSI/ROC/SLOPE/VWAP keys only get conditionally
+        # overwritten by _recompute_indicators (indicators.py:58-60), so the
+        # PREVIOUS strike's numbers lingered here and leaked into this exact
+        # order event's `indicators=dict(self._ind)` snapshot below until the
+        # new pair warmed up on its own; (2) RSI/ROC were never REST-warmed
+        # for a rolled-into strike the way _seed_exec_legs already does for a
+        # fresh ENTRY, so a roll target outside the startup pool ring could
+        # sit RSI/ROC-blind for ~15 minutes. Clearing the stale keys makes a
+        # not-yet-warm indicator read as genuinely missing (None, fail-closed
+        # -- matches how pair_indicators() already behaves for a cold pair)
+        # instead of quietly showing the strike we just rolled OUT of; the
+        # REST warm-seed (idempotent -- warm_tf() no-ops if already warm)
+        # closes that window as fast as entry does.
+        for _k in ("rsi", "roc", "slope", "slope_prev", "vwap", "vwap_prev"):
+            self._ind.pop(_k, None)
+        try:
+            await self._seed_exec_legs(int(pos.ce_leg.strike), int(pos.pe_leg.strike))
+        except Exception as exc:
+            logger.warning("SellStraddle[%s]: roll-seed exec legs failed (non-fatal): %s",
+                            self._underlying, exc)
         self._event_counter += 1
         order_ev = StraddleOrderEvent(
             action="ENTRY", underlying=self._underlying, atm=pos.atm_at_entry,

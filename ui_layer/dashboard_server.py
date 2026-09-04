@@ -2812,9 +2812,9 @@ class DashboardServer:
                 out = []
                 ccy, cv = _ccy_cv(pos.underlying)
                 _crypto = str(pos.underlying).upper() in ("BTC", "ETH")
-                for leg in (pos.ce_leg, pos.pe_leg):
+                for leg, _leg_closed in ((pos.ce_leg, pos.ce_leg_closed), (pos.pe_leg, pos.pe_leg_closed)):
                     strike = int(getattr(leg, "strike", 0))
-                    if strike <= 0:
+                    if strike <= 0 or _leg_closed:
                         continue
                     ot = getattr(leg, "option_type", "")
                     ep = float(getattr(leg, "entry_price", 0.0) or 0.0)

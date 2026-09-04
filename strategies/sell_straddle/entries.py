@@ -489,10 +489,23 @@ class EntryMixin:
         _old = self._pool_engine
         self._pool_engine = PoolIndicatorEngine(
             rsi_len=_old._rsi_len, roc_len=_old._roc_len, maxlen=_old._maxlen)
+        # 2026-09-06, direct user follow-up (stale-value audit): the pool-engine
+        # rebuild above (2026-08-31 fix) covers the main VWAP/SLOPE/RSI/ROC
+        # source, but two more per-(strike,side) caches feed the SAME decision
+        # chain and had the identical old-contract-carryover gap --
+        # _prev_atp_closed (the fallback SLOPE source selection.pair_indicators
+        # falls back to whenever the freshly-rebuilt pool engine is still cold,
+        # i.e. exactly right after this shift) and _shadow_vwap (drives the
+        # pool engine's own ATP feed for any binding on vwap_source=
+        # "calculative"). Cleared alongside the pool engine so no cache in this
+        # chain can blend the old contract into the new one under the same
+        # strike numbers.
+        self._prev_atp_closed.clear()
+        self._shadow_vwap.clear()
         self._clog.info(
-            "EXPIRY-SHIFT: pool indicator engine (VWAP/SLOPE/RSI/ROC) reset fresh for the "
-            "new expiry -- prevents old-contract price history from blending into new-"
-            "contract ticks under the same strike numbers."
+            "EXPIRY-SHIFT: pool indicator engine (VWAP/SLOPE/RSI/ROC) + _prev_atp_closed + "
+            "_shadow_vwap reset fresh for the new expiry -- prevents old-contract price "
+            "history from blending into new-contract ticks under the same strike numbers."
         )
         await self._subscribe_expiry_window(next_expiry)
         return True
@@ -806,6 +819,16 @@ class EntryMixin:
             self._pending_hedge_pe_leg = None
 
         self._pin_position_legs(self._position)
+        # 2026-09-06, direct user follow-up (stale-value audit F5): the roll-
+        # attempt throttle (rolling.py's _last_roll_attempt, keyed by roll
+        # REASON string only) used to survive across a full position close
+        # and a fresh reopen -- a protective roll on this brand-new position
+        # could be silently throttled for up to 60s by a timestamp left over
+        # from the PREVIOUS position's own last attempt at the same reason
+        # (real path: an ITM-pair-gate close-and-immediate-restart, which
+        # deliberately has no cooldown of its own). A fresh position has
+        # nothing in common with whatever the last one was doing -- clear it.
+        self._last_roll_attempt = {}
         self._persist()
         asyncio.create_task(self._seed_exec_legs(int(ce_strike), int(pe_strike)))
         self._trades_today += 1
@@ -817,6 +840,21 @@ class EntryMixin:
         if self._position:
             _new_etv = float(getattr(self._position, "entry_time_value", 0.0) or 0.0) or (ce_ltp + pe_ltp)
             if _new_etv > self._initial_entry_time_value:
+                # 2026-09-06, direct user follow-up (stale-value audit): same
+                # optimistic-before-confirmation problem _initial_net_credit's
+                # own 2026-08-22 fix already solved, for the sibling theta
+                # day-stop denominator this fix missed. Unlike net_credit
+                # (a running SUM an abort can just subtract back out),
+                # _initial_entry_time_value is a running MAX ratchet -- there
+                # is no single "this position's share" to subtract. Stash the
+                # PRE-ratchet value on the position itself so the ENTRY
+                # ABORTED branch (engine.py) can restore it if this specific
+                # optimistic entry turns out to be the one that raised it;
+                # if it never confirms and gets discarded, the denominator
+                # must not stay inflated by a credit that was never
+                # collected -- see engine.py's ENTRY ABORTED handler for the
+                # restore side of this.
+                self._position._pre_optimistic_ivt = self._initial_entry_time_value
                 self._initial_entry_time_value = _new_etv
 
         _cid = getattr(self, "_client_id", "") or "-"
@@ -930,7 +968,16 @@ class EntryMixin:
             lot_size=self._lot_size * self._lot_multiplier,
             expiry_date=expiry_date,
         )
-        self._position.entry_time_value = _ctv(ce_strike, pe_strike, self._spot, ce_ltp, pe_ltp)
+        # 2026-09-06, direct user follow-up (stale-value audit F9): this used
+        # self._spot (the CURRENT spot, at confirm time) to split the
+        # manually-supplied fill price into intrinsic/time-value -- but the
+        # real fill this is confirming may be up to _MANUAL_CONFIRM_MAX_
+        # STALENESS (2h) old, so "now's" spot can be materially different
+        # from the spot the trade actually happened at. pending["entry_spot"]
+        # is the REAL spot from the moment this position was first
+        # (optimistically) opened, already retained specifically so it could
+        # be reused here -- use it instead.
+        self._position.entry_time_value = _ctv(ce_strike, pe_strike, pending["entry_spot"], ce_ltp, pe_ltp)
 
         self._pin_position_legs(self._position)
         self._persist()

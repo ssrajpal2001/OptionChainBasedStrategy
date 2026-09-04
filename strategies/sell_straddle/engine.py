@@ -412,7 +412,16 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                 "session_day": str(self._session_day(datetime.now(IST))),
                 "initial_net_credit": self._initial_net_credit,
                 "session_min_straddle_frozen": self._session_min_straddle_frozen,
-                "day_low_tracked_pair": list(self._day_low_tracked_pair) if self._day_low_tracked_pair else None,
+                # 2026-09-06 (stale-value audit F6): the tracked-pair key now
+                # includes expiry_date (a date object) as its 3rd element --
+                # serialize it as an isoformat string so it round-trips through
+                # JSON; the restore side below parses it back with
+                # date.fromisoformat.
+                "day_low_tracked_pair": ([self._day_low_tracked_pair[0], self._day_low_tracked_pair[1]] +
+                                          ([self._day_low_tracked_pair[2].isoformat()]
+                                           if len(self._day_low_tracked_pair) > 2 and self._day_low_tracked_pair[2]
+                                           else []))
+                                         if self._day_low_tracked_pair else None,
                 # 2026-08-27, direct user-found gap: the 70%-of-booked-profit roll-
                 # protection budget (rolling.py's _itm_roll_protection) was armed in
                 # memory only -- a restart silently wiped it while the rolled leg kept
@@ -426,6 +435,24 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                 # immediately, defeating the whole point of resting after a loss.
                 "sl_cooldown_until": (self._sl_cooldown_until.isoformat()
                                        if getattr(self, "_sl_cooldown_until", None) else None),
+                # 2026-09-06, direct user follow-up (stale-value audit F11): only
+                # the ARMED decision (not the per-leg SupportResistanceCalculator
+                # bar history, which safely re-warms from live 1-min bars within
+                # a few minutes of restart -- same graceful degradation this
+                # codebase already accepts for RSI/ROC warm-up elsewhere) is
+                # persisted here. Without this, a restart after 15:00 lost the
+                # arm decision outright and the R1 exit could not re-arm before
+                # force_exit without a fresh day-low retest or a fresh flip to
+                # profit at/after 15:15 -- the EOD backstop still covers the gap
+                # either way, but re-arming immediately (rather than possibly
+                # never, for the rest of a short post-15:00 window) is strictly
+                # better and costs nothing to persist.
+                "post1500_armed": getattr(self, "_post1500_armed", False),
+                "post1500_armed_reason": getattr(self, "_post1500_armed_reason", None),
+                "post1500_pair": ([self._post1500_pair[0], self._post1500_pair[1]] +
+                                   ([self._post1500_pair[2].isoformat()]
+                                    if len(self._post1500_pair) > 2 and self._post1500_pair[2] else []))
+                                  if getattr(self, "_post1500_pair", None) else None,
             }, product_type="MIS")
         except Exception as exc:
             logger.debug("SellStraddle[%s]: session persist failed: %s", self._underlying, exc)
@@ -451,7 +478,36 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                     self._session_min_straddle_frozen = float(_saved_frozen)
                 _saved_pair = _sess.get("day_low_tracked_pair", None)
                 if _saved_pair is not None:
-                    self._day_low_tracked_pair = tuple(int(x) for x in _saved_pair)
+                    # 2026-09-06 (stale-value audit F6): tolerate BOTH the old
+                    # 2-element (strike, strike) shape persisted before this
+                    # fix and the new 3-element (strike, strike, expiry_iso)
+                    # shape -- an in-flight restart right after this deploy
+                    # must not crash on an old-format record still on disk.
+                    if len(_saved_pair) >= 3 and _saved_pair[2]:
+                        self._day_low_tracked_pair = (
+                            int(_saved_pair[0]), int(_saved_pair[1]), date.fromisoformat(str(_saved_pair[2])))
+                    else:
+                        self._day_low_tracked_pair = (int(_saved_pair[0]), int(_saved_pair[1]))
+                # 2026-09-06 (stale-value audit F11): restore the post-1500 R1
+                # ARM decision (not the calculators -- see this key's own
+                # comment in _persist_session for why that's fine to lose).
+                # Deliberately NOT re-validated against the current position
+                # here -- _check_post1500_r1_exit's own existing pair-mismatch
+                # check (self._post1500_pair != the LIVE position's current
+                # strikes/expiry) already runs on every real tick and discards
+                # a stale/non-matching restore automatically, same
+                # restore-then-self-correct pattern already relied on for
+                # _day_low_tracked_pair above.
+                self._post1500_armed = bool(_sess.get("post1500_armed", False))
+                self._post1500_armed_reason = _sess.get("post1500_armed_reason", None)
+                _saved_p1500_pair = _sess.get("post1500_pair", None)
+                if _saved_p1500_pair is not None:
+                    if len(_saved_p1500_pair) >= 3 and _saved_p1500_pair[2]:
+                        self._post1500_pair = (
+                            int(_saved_p1500_pair[0]), int(_saved_p1500_pair[1]),
+                            date.fromisoformat(str(_saved_p1500_pair[2])))
+                    else:
+                        self._post1500_pair = (int(_saved_p1500_pair[0]), int(_saved_p1500_pair[1]))
                 # 2026-08-27: restore any armed 70%-roll-protection budget exactly as it
                 # was -- without this, a restart silently wiped it and the rolled leg
                 # kept running with zero protective stop (real incident).
@@ -1031,6 +1087,7 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         self._post1500_calc = {}
         self._post1500_bar_acc = {}
         self._shadow_vwap = {}
+        self._shadow_vwap_seeding = set()
         self._prem_closes.clear()
         self._prem_volumes.clear()
         self._chart_series.clear()
@@ -1043,6 +1100,23 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         self._last_entry_bucket_r = ""
         self._strike_prem.clear()
         self._prev_atp_closed.clear()
+        # 2026-09-06, direct user follow-up (stale-value audit F4): a LIVE
+        # (no-restart) day-boundary tick never reset the pool engine or the
+        # legacy _prev_vwap_atp/_prev_slope -- only the restart/restore path
+        # (_restore_pool_engine) had a same-day check. Left alone, the pool
+        # engine's maxlen=240 per-strike deques would carry yesterday's tail
+        # bars into the new session (indistinguishable from today's own bars
+        # by minute-index alone) until enough new ticks aged them out, and
+        # the legacy indicator fallback's first SLOPE of the new day would be
+        # computed against yesterday's last combined ATP. Same rebuild used
+        # by both expiry-shift paths -- a day boundary is exactly as much a
+        # "genuine instrument-history change" as an expiry shift.
+        from strategies.pool_indicator_engine import PoolIndicatorEngine
+        _old_pool = self._pool_engine
+        self._pool_engine = PoolIndicatorEngine(
+            rsi_len=_old_pool._rsi_len, roc_len=_old_pool._roc_len, maxlen=_old_pool._maxlen)
+        self._prev_vwap_atp = None
+        self._prev_slope = None
         # Reset the low-anchor-LTP expiry-shift sticky flag BEFORE recomputing --
         # a fresh trading day starts back on the normal current-week expiry,
         # never inheriting yesterday's shift.
@@ -1383,6 +1457,25 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                     if self._position is not None:
                         self._initial_net_credit = max(
                             0.0, self._initial_net_credit - float(self._position.net_credit or 0.0))
+                        # 2026-09-06, direct user follow-up (stale-value audit): the
+                        # net_credit rollback above only ever fixed half of the
+                        # theta day-stop denominator problem -- _initial_entry_time_value
+                        # (entries.py's optimistic MAX-ratchet update) was left
+                        # permanently inflated by a phantom aborted trade's time
+                        # value, silently weakening day_loss_sl_pct/
+                        # day_profit_target_pct for theta-basis bindings for the
+                        # rest of the session. Restore the pre-ratchet snapshot
+                        # entries.py stashed on this position IF this specific
+                        # optimistic entry was the one that raised it (the stash
+                        # only exists on that condition) -- a genuinely safe
+                        # restore even if another real entry raised the ratchet
+                        # again in between, since reverting to a lower prior
+                        # value only ever makes the day-stop denominator SMALLER
+                        # (i.e. the guardrail fires MORE conservatively, never
+                        # less), the safe direction for a live risk cap.
+                        _pre_ivt = getattr(self._position, "_pre_optimistic_ivt", None)
+                        if _pre_ivt is not None:
+                            self._initial_entry_time_value = _pre_ivt
                         # 2026-08-23, direct user spec: retain the strikes/expiry this
                         # attempt had already decided on (before discarding the position
                         # below) so the client can later manually confirm the trade with
@@ -1580,17 +1673,99 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         validated for OI-Flow's own volume-spike detector) and the last
         cumulative volume seen for this same (strike, side). A tick with no
         volume field, or a volume that hasn't advanced (duplicate/backwards
-        tick), contributes nothing rather than corrupting the running sum."""
+        tick), contributes nothing rather than corrupting the running sum.
+
+        2026-09-06, direct user follow-up: on a strike ROLL, this used to
+        start a brand-new key at cum_pv=cum_v=0 -- silently discarding
+        whatever real volume/price history that strike already had since
+        market open (the broker's own vwap_source="broker_atp" reflects the
+        WHOLE session; a "self" series that only starts counting from the
+        moment it happens to get rolled into is not a fair like-for-like
+        comparison against it). Fixes this the same way
+        _compute_day_low_for_pair already does for a different tracker: a
+        ONE-SHOT REST fetch of today's own 1-min bars for this exact
+        strike/side, fired in the background (never awaited inline here --
+        this loop also carries every OPTION_TICK for the live position, and
+        blocking it on a REST call for a log-only shadow value would be a
+        real regression for a strategy trading real capital elsewhere).
+        Live ticks keep accumulating into cum_pv/cum_v from zero exactly as
+        before while the fetch is in flight; _seed_shadow_vwap_from_rest
+        ADDS the REST-derived sums on top once it lands, rather than
+        overwriting, so no live-tick volume seen during the fetch window is
+        lost."""
         st = self._shadow_vwap.get(key)
         vol = int(getattr(tick, "volume", 0) or 0)
         if st is None:
             self._shadow_vwap[key] = {"cum_pv": 0.0, "cum_v": 0.0, "last_vol": vol}
+            if key not in self._shadow_vwap_seeding:
+                self._shadow_vwap_seeding.add(key)
+                asyncio.create_task(self._seed_shadow_vwap_from_rest(key))
             return
         delta = vol - st.get("last_vol", 0)
         st["last_vol"] = vol
         if delta > 0:
             st["cum_pv"] += ltp * delta
             st["cum_v"] += delta
+
+    async def _seed_shadow_vwap_from_rest(self, key: tuple) -> None:
+        """One-shot background REST seed for a freshly-rolled (strike, side)
+        shadow-VWAP key -- see _update_shadow_vwap's own docstring for why.
+        Mirrors exits.py's _compute_day_low_for_pair (same credential/
+        symbol-resolution pattern, same fetch_upstox_intraday_1m source,
+        same fail-safe-to-no-op-on-any-error contract): never raises, never
+        blocks a decision, degrades to "just start from zero" (the
+        pre-existing behavior) on any failure -- crypto, no token, no
+        broker symbol, no data, network error."""
+        strike, side = key
+        try:
+            if getattr(self, "_is_crypto", False):
+                return
+            from data_layer.historical_candles import fetch_upstox_intraday_1m
+            from data_layer.instrument_registry import REGISTRY
+            from data_layer.client_db import ClientDB
+            creds = await asyncio.to_thread(ClientDB().get_feeder_creds_sync, "upstox")
+            token = (creds or {}).get("access_token", "")
+            if not token:
+                return
+            pos = self._position
+            if pos and pos.expiry_date:
+                exp = pos.expiry_date
+            elif self._entry_expiry_date:
+                exp = self._entry_expiry_date
+            else:
+                exp = REGISTRY.get_active_expiry(self._underlying, datetime.now(IST).date())
+            ikey = REGISTRY.get_broker_symbol(self._underlying, exp, int(strike), side, "upstox")
+            if not ikey:
+                return
+            bars = await fetch_upstox_intraday_1m(ikey, token)
+            if not bars:
+                return
+            cum_pv = 0.0
+            cum_v = 0
+            for b in bars:
+                bar_vol = int(b.get("volume", 0) or 0)
+                if bar_vol <= 0:
+                    continue
+                typical = (float(b["high"]) + float(b["low"]) + float(b["close"])) / 3.0
+                cum_pv += typical * bar_vol
+                cum_v += bar_vol
+            if cum_v <= 0:
+                return
+            st = self._shadow_vwap.get(key)
+            if st is None:
+                return
+            st["cum_pv"] += cum_pv
+            st["cum_v"] += cum_v
+            self._clog.info(
+                "SHADOW_VWAP REST-SEED %s%d — %d bars, seed_vwap=%.2f (cum_v=%d) merged in "
+                "(now cum_pv=%.2f cum_v=%.2f).",
+                side, int(strike), len(bars), cum_pv / cum_v, cum_v, st["cum_pv"], st["cum_v"],
+            )
+        except Exception as exc:
+            self._clog.warning("SHADOW_VWAP REST-SEED %s%d failed (non-fatal, stays zero-started): %s",
+                                side, int(strike), exc)
+        finally:
+            self._shadow_vwap_seeding.discard(key)
 
     async def _option_loop(self) -> None:
         from data_layer.base_feeder import OptionTick

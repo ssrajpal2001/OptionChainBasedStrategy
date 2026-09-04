@@ -436,6 +436,8 @@ class ConfigMixin:
             self._post1500_bar_acc = {}    # side -> {"minute": datetime, "h":, "l":, "c":}
         if not hasattr(self, "_shadow_vwap"):
             self._shadow_vwap = {}         # (strike, side) -> {"cum_pv":, "cum_v":, "last":}
+        if not hasattr(self, "_shadow_vwap_seeding"):
+            self._shadow_vwap_seeding = set()   # (strike, side) keys with a REST seed task in flight
         if not hasattr(self, "_day_low_tracked_pair"):
             self._day_low_tracked_pair = None
         if not hasattr(self, "_day_low_computing"):
