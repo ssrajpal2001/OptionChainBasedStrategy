@@ -522,6 +522,23 @@ class ClientDB:
             (1 if enabled else 0, client_id, binding_id),
         )
 
+    async def set_binding_password_totp(
+        self, client_id: str, binding_id: str, password: str, totp_secret: str,
+    ) -> None:
+        """Store password/TOTP secret for a broker binding's headless login
+        (e.g. Zerodha, via scripts/seed_headless_creds.py). A narrow, single-
+        purpose UPDATE touching ONLY these two columns -- deliberately NOT
+        routed through upsert_binding(), which unconditionally overwrites
+        label/lot_multiplier/trading_mode/product_type on every call (no
+        CASE-WHEN guard on those columns) and would silently reset a real
+        binding's live trading_mode/lot_multiplier back to their defaults."""
+        await asyncio.to_thread(
+            self._exec,
+            "UPDATE broker_bindings SET password_enc=?, totp_secret_enc=? "
+            "WHERE client_id=? AND binding_id=?",
+            (_encode_cred(password), _encode_cred(totp_secret), client_id, binding_id),
+        )
+
     async def set_trading_mode(
         self, client_id: str, binding_id: str, mode: str
     ) -> None:
