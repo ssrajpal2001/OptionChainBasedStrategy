@@ -498,6 +498,91 @@ async def _reconcile_single_leg_book(book, router, bus, strategy_label: str) -> 
     )
 
 
+async def _refresh_upstox_instrument_maps(cfg, router, client_db) -> None:
+    """(Re)builds the Upstox {canonical_symbol: instrument_key} map for every
+    monitored index and injects it into every currently-connected broker that
+    supports it (UpstoxBroker.inject_instrument_map).
+
+    2026-09-04, real incident: this used to run ONLY ONCE, inline at process
+    boot. A process left running across a weekly options-expiry rollover
+    (NIFTY/BANKNIFTY/SENSEX all roll weekly) kept using the map built for the
+    OLD week's contracts -- every subsequent order attempt failed with
+    Upstox's own "UDAPI100011 Invalid Instrument key", because place_order()'s
+    lookup (self._instrument_map.get(req.broker_symbol, req.broker_symbol))
+    silently fell back to the raw (wrong-format) canonical string once the
+    real key for the CURRENT week's expiry was missing from the stale map.
+    Confirmed live: ssrajpal2001's UPSTOX-routed SellStraddle binding failed
+    3 straight placement retries on both legs, 10 days after the process's
+    last restart -- exactly one weekly rollover later.
+
+    Called once at startup (same call site as before) AND periodically
+    thereafter (see _upstox_instrument_map_refresh_loop) so a long-running
+    process never again needs a restart just to pick up a new week's
+    contracts. Deliberately kept as its own function (not inlined) so both
+    callers share identical logic -- no risk of the periodic path drifting
+    from the boot-time path."""
+    from data_layer.instrument_registry import REGISTRY as _instrument_registry
+    from data_layer.instrument_registry import _MCX_UNDERLYINGS as _MCX_SET
+    logger = logging.getLogger(__name__)
+    _upstox_creds = await asyncio.to_thread(client_db.get_feeder_creds_sync, "upstox")
+    _upstox_token = (_upstox_creds or {}).get("access_token", "")
+    for _idx in cfg.monitored_indices:
+        _is_mcx = _idx.upper() in _MCX_SET
+        if not _is_mcx and not _upstox_token:
+            continue
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(_instrument_registry.load_sync, _idx, _upstox_token),
+                timeout=30.0,
+            )
+            _upstox_map = _instrument_registry.build_instrument_map(_idx)
+            for _brokers_by_binding in router._brokers.values():
+                for _broker in _brokers_by_binding.values():
+                    if hasattr(_broker, "inject_instrument_map"):
+                        _broker.inject_instrument_map(_upstox_map)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "InstrumentRegistry: load [%s] timed out (30s) — skipping, will use constructed symbols", _idx
+            )
+        except Exception as _exc:
+            logger.warning("InstrumentRegistry: failed to load [%s]: %s", _idx, _exc)
+
+
+_INSTRUMENT_MAP_REFRESH_HOUR_IST = 8   # 08:00 IST — comfortably before both the previous
+                                        # session's close and today's 09:15 market open
+
+
+async def _upstox_instrument_map_refresh_loop(cfg, router, client_db) -> None:
+    """Re-runs _refresh_upstox_instrument_maps() once a day at a fixed pre-
+    market time (08:00 IST) so a long-running process (restarts are
+    deliberately minimized in this codebase, since a graceful shutdown
+    liquidates every real position — see strategies/core/book_manager.py)
+    never again silently trades against a stale instrument-key map after an
+    options-expiry rollover. Same deliberately-defensive shape as
+    _broker_reconciliation_loop -- a bug in this refresh must never itself
+    reach _run_live's FIRST_COMPLETED task barrier and trigger a full
+    shutdown+liquidate; every exception is caught and logged, never raised."""
+    from config.global_config import IST as _IST
+    from datetime import timedelta as _timedelta
+    logger = logging.getLogger(__name__)
+    while True:
+        try:
+            now = datetime.now(_IST)
+            next_run = now.replace(hour=_INSTRUMENT_MAP_REFRESH_HOUR_IST, minute=0, second=0, microsecond=0)
+            if next_run <= now:
+                next_run += _timedelta(days=1)
+            await asyncio.sleep((next_run - now).total_seconds())
+        except asyncio.CancelledError:
+            break
+        try:
+            logger.info("Upstox instrument-map: starting scheduled daily refresh.")
+            await _refresh_upstox_instrument_maps(cfg, router, client_db)
+            logger.info("Upstox instrument-map: scheduled daily refresh complete.")
+        except Exception:
+            logger.exception("Upstox instrument-map: scheduled refresh failed (recovered) — "
+                              "will retry at tomorrow's scheduled time.")
+
+
 _RECONCILIATION_INITIAL_DELAY_SEC = 60.0    # let books fully spawn/restore/warm up first
 _RECONCILIATION_INTERVAL_SEC = 300.0        # 5 min thereafter
 
@@ -773,37 +858,14 @@ async def _run_live(
     risk_mgr      = RiskManager(bus, registry, router=router)
 
     # ── Instrument registry — load active contracts from Upstox API ───────────
-    from data_layer.instrument_registry import REGISTRY as _instrument_registry
-    _upstox_creds = await asyncio.to_thread(
-        _shared_client_db.get_feeder_creds_sync, "upstox"
-    )
-    _upstox_token = (_upstox_creds or {}).get("access_token", "")
-    from data_layer.instrument_registry import _MCX_UNDERLYINGS as _MCX_SET
     # MCX commodities (CRUDEOIL) load from the public MCX master — no token needed.
-    # NSE/BSE indices need the Upstox token for get_option_contracts.
-    for _idx in cfg.monitored_indices:
-        _is_mcx = _idx.upper() in _MCX_SET
-        if not _is_mcx and not _upstox_token:
-            continue
-        try:
-            await asyncio.wait_for(
-                asyncio.to_thread(_instrument_registry.load_sync, _idx, _upstox_token),
-                timeout=30.0,
-            )
-            _upstox_map = _instrument_registry.build_instrument_map(_idx)
-            for _brokers_by_binding in router._brokers.values():
-                for _broker in _brokers_by_binding.values():
-                    if hasattr(_broker, "inject_instrument_map"):
-                        _broker.inject_instrument_map(_upstox_map)
-        except asyncio.TimeoutError:
-            logging.getLogger(__name__).warning(
-                "InstrumentRegistry: load [%s] timed out (30s) — skipping, will use constructed symbols", _idx
-            )
-        except Exception as _exc:
-            logging.getLogger(__name__).warning(
-                "InstrumentRegistry: failed to load [%s]: %s", _idx, _exc
-            )
-    if not _upstox_token:
+    # NSE/BSE indices need the Upstox token for get_option_contracts. See
+    # _refresh_upstox_instrument_maps's own docstring for why this now ALSO
+    # runs periodically (_upstox_instrument_map_refresh_loop, added to `tasks`
+    # below), not just here at boot.
+    await _refresh_upstox_instrument_maps(cfg, router, _shared_client_db)
+    _upstox_creds = await asyncio.to_thread(_shared_client_db.get_feeder_creds_sync, "upstox")
+    if not (_upstox_creds or {}).get("access_token", ""):
         logging.getLogger(__name__).warning(
             "InstrumentRegistry: no Upstox token — using constructed symbols. "
             "Authenticate Upstox feeder via Admin > Feeder for exact instrument keys."
@@ -1013,6 +1075,8 @@ async def _run_live(
         asyncio.create_task(shutdown_event.wait(),      name="shutdown_sentinel"),
         asyncio.create_task(_memory_watchdog(),         name="memory_watchdog"),
         asyncio.create_task(_broker_reconciliation_loop(managers, router, bus), name="broker_reconciliation"),
+        asyncio.create_task(_upstox_instrument_map_refresh_loop(cfg, router, _shared_client_db),
+                             name="upstox_instrument_map_refresh"),
     ]
 
     done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
