@@ -735,6 +735,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             return
 
         new_rows = []
+        new_orb_levels = []
         for sym in new_symbols:
             row = sl_indexed.loc[sym]
             pchange = float(row["pChange"]) if "pChange" in shortlist.columns else 0.0
@@ -762,6 +763,27 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 self._clog.exception("OiOrb[%s/%s]: afternoon-scan backfill failed for %s "
                                       "(non-fatal, VWAP will start cold from now).",
                                       self._client_id, self._binding_id, sym)
+            # 2026-09-04 CRITICAL FIX, found while preparing a backtest: the morning
+            # path's ORB freeze block (self._regime is None -> ...) runs EXACTLY ONCE
+            # per day, only over self._shortlist_symbols as they exist at that moment
+            # -- any symbol added later, here, was backfilled with real 09:15-09:25
+            # bars but self._orb_frozen[sym] was never actually set from them, and
+            # orb_high/orb_low were never persisted (record_shortlist's own INSERT
+            # doesn't carry those columns; update_orb_levels() is a separate call this
+            # function never made). _immediate_check_entry() hard-requires
+            # self._orb_frozen.get(sym) to be non-None before it will EVER fire, so
+            # immediate-entry mode was silently, permanently blocked for every
+            # afternoon-added stock -- no error, it just sat there unable to enter.
+            # Trap-retest mode was unaffected (it only reads live-polled bars, never
+            # self._orb_frozen). Mirrors the morning freeze block's own two lines.
+            # The DB write itself is deferred to AFTER record_shortlist below (see
+            # new_orb_levels) -- update_orb_levels() is an UPDATE, not an upsert, so
+            # calling it here (before record_shortlist's own INSERT has even run for
+            # this brand-new row) would silently match zero rows and do nothing.
+            h, l = self._bars.orb(sym, cfg["ORB_START"], cfg["ORB_END"])
+            if h is not None:
+                self._orb_frozen[sym] = (h, l)
+                new_orb_levels.append((sym, h, l))
             # Chain subscription for the 5 additive filters, same shared-WS-budget
             # cap as the morning batch -- only if there's still room.
             if len(self._shortlist_symbols) <= self._chain_watch_max_stocks:
@@ -773,6 +795,8 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                                           "for %s.", self._client_id, self._binding_id, sym)
 
         await asyncio.to_thread(store.record_shortlist, self._client_id, self._binding_id, new_rows)
+        for sym, h, l in new_orb_levels:
+            await asyncio.to_thread(store.update_orb_levels, self._client_id, self._binding_id, sym, h, l)
         self._clog.info(
             "OiOrb[%s/%s]: afternoon scan added %d new stock(s): %s",
             self._client_id, self._binding_id, len(new_symbols),

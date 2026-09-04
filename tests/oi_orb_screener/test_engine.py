@@ -669,6 +669,48 @@ async def test_afternoon_scan_adds_new_symbols_without_dropping_existing(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_afternoon_scan_sets_orb_frozen_for_the_new_symbol(monkeypatch):
+    """2026-09-04 CRITICAL FIX regression: an afternoon-added symbol's ORB
+    level was never being set on self._orb_frozen (nor persisted), which
+    silently, permanently blocked _immediate_check_entry() for it forever
+    (that function hard-requires self._orb_frozen.get(sym) to be non-None).
+    Trap-retest mode was unaffected. This seeds real 09:15-09:25 bars into
+    self._bars (mirroring what backfill_orb_from_yahoo does for real) and
+    confirms the fix actually computes and stores the level."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._regime = "bullish"
+
+    df = _shortlist_df([
+        {"symbol": "NEWSTOCK", "pChange": -2.5, "oi_spurt_pct": 9.0, "score": 0.6,
+         "lastPrice": 50.0, "previousClose": 51.3},
+    ])
+    monkeypatch.setattr(screener, "build_shortlist", lambda nse, cfg: (df, 0.4))
+
+    def _fake_backfill_orb(bars, symbols, cfg):
+        for sym in symbols:
+            bars.bars[sym]["09:16"] = {"o": 48.0, "h": 49.5, "l": 47.5, "c": 48.5}
+            bars.bars[sym]["09:20"] = {"o": 48.5, "h": 50.0, "l": 48.0, "c": 49.0}
+    monkeypatch.setattr(screener, "backfill_orb_from_yahoo", _fake_backfill_orb)
+    monkeypatch.setattr(screener, "backfill_vwap_from_yahoo", lambda *a, **k: None)
+    monkeypatch.setattr(asyncio, "to_thread", lambda fn, *a, **k: _async_return(fn(*a, **k))())
+
+    now = datetime(2026, 8, 27, 12, 30, 0, tzinfo=IST)
+    await book._maybe_run_afternoon_scan(now, book._screener_cfg)
+
+    assert book._orb_frozen.get("NEWSTOCK") == (50.0, 47.5)
+
+    import sqlite3
+    con = sqlite3.connect(store._DB_PATH)
+    row = con.execute(
+        "SELECT orb_high, orb_low FROM shortlist WHERE client_id=? AND binding_id=? AND symbol='NEWSTOCK'",
+        (_TEST_CLIENT_ID, _TEST_BINDING_ID),
+    ).fetchone()
+    con.close()
+    assert row == (50.0, 47.5)
+
+
+@pytest.mark.asyncio
 async def test_afternoon_scan_throttled_by_interval(monkeypatch):
     bus = _FakeBus()
     book = _make_book(bus)
