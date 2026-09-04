@@ -135,6 +135,43 @@ class ExecutionRouter:
                         "Router: Authenticated %s/%s (%s).",
                         client.client_id, binding.binding_id, binding.provider,
                     )
+                    # 2026-09-04 CRITICAL FIX, real incident: run_system.py's own
+                    # boot-time Upstox instrument-map build (_refresh_upstox_
+                    # instrument_maps) runs BEFORE router.run() is even scheduled
+                    # as a task, so it can only ever inject into brokers that
+                    # already exist in self._brokers at that instant -- ZERO of
+                    # them, on every single boot, since THIS loop is what
+                    # populates self._brokers in the first place. Confirmed live
+                    # twice the same morning: map built at 09:50:12 with the
+                    # correct current-week expiry, this broker didn't exist
+                    # until 09:50:13 (one second later), so the earlier
+                    # injection loop had nothing to inject into -- the very
+                    # next SellStraddle entry on this exact binding still
+                    # failed with Upstox's "Invalid Instrument key". Fix: give
+                    # every broker whatever map is CURRENTLY cached in the
+                    # registry the moment it becomes available, instead of
+                    # relying on a fixed point in the boot sequence lining up
+                    # with when authentication happens to finish. Cheap/local
+                    # -- build_instrument_map() only reads already-fetched
+                    # in-process data (REGISTRY.load_sync already ran
+                    # synchronously earlier in run_system.py's own startup),
+                    # never a network call, safe to run for every successful
+                    # auth. Does NOT cover a brand-new broker connected via the
+                    # dashboard's own OAuth reconnect flow mid-day (a separate
+                    # code path that never calls start() again) -- still a
+                    # known, smaller, deliberately deferred gap.
+                    if hasattr(broker, "inject_instrument_map"):
+                        from data_layer.instrument_registry import REGISTRY as _registry
+                        for _idx in getattr(self._cfg, "monitored_indices", []) or []:
+                            try:
+                                _map = _registry.build_instrument_map(_idx)
+                                if _map:
+                                    broker.inject_instrument_map(_map)
+                            except Exception:
+                                logger.warning(
+                                    "Router: could not inject instrument map for %s into %s/%s.",
+                                    _idx, client.client_id, binding.binding_id,
+                                )
                 elif binding.is_trade_enabled:
                     logger.critical(
                         "Router: Auth FAILED for %s/%s (%s). System cannot start.",
