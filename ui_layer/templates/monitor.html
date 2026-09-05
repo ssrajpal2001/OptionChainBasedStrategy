@@ -635,12 +635,17 @@ document.addEventListener('alpine:init', () => {
     tokenOk:       null,
 
     /* ── Admin feeder toggles ───────────────────────────────────────── */
-    // 2026-09-06: fyers -> angelone (Fyers headless confirmed non-viable,
-    // Cloudflare Turnstile-blocked; AngelOne is free and genuinely headless).
-    feederToggle:        { upstox: false, upstox2: false, angelone: false },
-    feederToggleLoading: { upstox: false, upstox2: false, angelone: false },
-    feederEditOpen:      { upstox: false, upstox2: false, angelone: false },
-    // password/totp_secret: OPTIONAL for upstox/upstox2, only used by the
+    // 2026-09-06 fix: an earlier pass dropped 'fyers' from this admin toggle
+    // loop when AngelOne was added, as if AngelOne were replacing Fyers.
+    // That was wrong -- only Fyers's HEADLESS auto-login attempt was ever
+    // abandoned (Cloudflare Turnstile-blocked); Fyers's normal manual-OAuth
+    // toggle is still a real, live standby feed (see DualFeeder's 3-way
+    // active-passive design: upstox/upstox2/fyers/angelone all run in
+    // parallel). Restored -- all 4 providers get a toggle card.
+    feederToggle:        { upstox: false, upstox2: false, fyers: false, angelone: false },
+    feederToggleLoading: { upstox: false, upstox2: false, fyers: false, angelone: false },
+    feederEditOpen:      { upstox: false, upstox2: false, fyers: false, angelone: false },
+    // password/totp_secret: OPTIONAL for upstox/upstox2/fyers, only used by the
     // unattended daily automation (scripts/auto_morning_start.py, see
     // broker_auth/headless_totp_auth.py) — leaving them blank changes nothing
     // about the normal interactive OAuth "toggle ON" flow. REQUIRED for
@@ -648,21 +653,18 @@ document.addEventListener('alpine:init', () => {
     feederEditCreds:     {
       upstox:   { client_id:'', api_key:'', secret:'', password:'', totp_secret:'' },
       upstox2:  { client_id:'', api_key:'', secret:'', password:'', totp_secret:'' },
+      fyers:    { client_id:'', api_key:'', secret:'', password:'', totp_secret:'' },
       angelone: { client_id:'', api_key:'', secret:'', password:'', totp_secret:'' },
     },
-    feederEditSaving:    { upstox: false, upstox2: false, angelone: false },
-    feederEditMsg:       { upstox: '', upstox2: '', angelone: '' },
-    feederMsg:           { upstox: '', upstox2: '', angelone: '' },
-    // AngelOne (2026-09-06): free, genuinely headless (no browser/OAuth/
-    // Cloudflare dependency) candidate data feeder built to replace Fyers,
-    // whose own headless login is confirmed non-viable (Cloudflare
-    // Turnstile). Deliberately a "test connection" card, NOT a live toggle
-    // like the ones above -- verifying it actually streams real ticks is a
-    // separate, safer step before ever wiring it into the live Upstox+Fyers
-    // feed (that swap is the user's own deliberate follow-up decision).
-    angelOneCreds:       { client_id:'', api_key:'', password:'', totp_secret:'' },
-    angelOneSaving:      false,
-    angelOneSaveMsg:      '',
+    feederEditSaving:    { upstox: false, upstox2: false, fyers: false, angelone: false },
+    feederEditMsg:       { upstox: '', upstox2: '', fyers: '', angelone: '' },
+    feederMsg:           { upstox: '', upstox2: '', fyers: '', angelone: '' },
+    // AngelOne connection test -- reads whatever creds are ALREADY saved via
+    // the main toggle loop's own gear-icon form above (feederEditCreds.
+    // angelone / saveFeederCreds('angelone')); this button does not take its
+    // own separate credential input, it just calls a throwaway isolated
+    // connect-and-wait-for-a-tick check against the stored DB creds (see
+    // /api/admin/feeder/angelone/test's own docstring).
     angelOneTestLoading: false,
     angelOneTestMsg:     '',
     angelOneTestOk:      null,
@@ -1676,26 +1678,6 @@ document.addEventListener('alpine:init', () => {
       finally { this.feederEditSaving[p] = false; }
     },
 
-    async saveAngelOneFeederCreds() {
-      this.angelOneSaving = true; this.angelOneSaveMsg = '';
-      try {
-        const r = await this._fetch('/api/admin/feeder/save-creds', {
-          json: {
-            provider:    'angelone',
-            client_id:   this.angelOneCreds.client_id,
-            api_key:     this.angelOneCreds.api_key,
-            secret:      '',
-            password:    this.angelOneCreds.password,
-            totp_secret: this.angelOneCreds.totp_secret,
-          }
-        });
-        if (!r) return;
-        const d = await r.json();
-        this.angelOneSaveMsg = d.ok ? '✓ Saved.' : (d.error || 'Save failed.');
-      } catch { this.angelOneSaveMsg = 'Request failed.'; }
-      finally { this.angelOneSaving = false; }
-    },
-
     async testAngelOneFeed() {
       this.angelOneTestLoading = true; this.angelOneTestMsg = ''; this.angelOneTestOk = null;
       try {
@@ -1788,7 +1770,7 @@ document.addEventListener('alpine:init', () => {
           // Only sync toggle from DB on explicit request (initial login).
           // During normal operation, feederToggle reflects user's live intent.
           if (syncToggle) {
-            for (const p of ['upstox', 'fyers']) {
+            for (const p of ['upstox', 'upstox2', 'fyers', 'angelone']) {
               const prov = (d.providers || {})[p] || {};
               if (prov.token_fresh) this.feederToggle[p] = true;
             }
@@ -5343,21 +5325,23 @@ function amoTest() {
            x-text="redirectBaseMsg"></div>
     </div>
 
-    <!-- Feeder toggle rows — Upstox + Upstox2 (CrudeOil) + AngelOne -->
-    <!-- 2026-09-06: Fyers replaced with AngelOne here -- Fyers' own headless
-         login is confirmed non-viable (Cloudflare Turnstile-blocked, see
-         broker_auth/headless_totp_auth_fyers.py's own docstring for the full
-         evidence trail); AngelOne is free and genuinely headless. -->
+    <!-- Feeder toggle rows — Upstox + Upstox2 (CrudeOil) + Fyers + AngelOne -->
+    <!-- 2026-09-06 fix: 'fyers' was wrongly dropped from this loop in an
+         earlier pass (as if AngelOne replaced it). Only Fyers' HEADLESS
+         auto-login attempt was abandoned (Cloudflare Turnstile-blocked, see
+         broker_auth/headless_totp_auth_fyers.py) -- Fyers is still a real,
+         live standby feed via manual OAuth, part of the 3-way active-passive
+         redundancy (upstox/upstox2/fyers/angelone all run in parallel). -->
     <div class="space-y-3">
-      <template x-for="p in ['upstox','upstox2','angelone']" :key="p">
+      <template x-for="p in ['upstox','upstox2','fyers','angelone']" :key="p">
         <div class="rounded p-3 flex flex-col gap-2" style="background:var(--t-surface);border:1px solid var(--t-border)">
 
           <!-- Row: name + status + gear + toggle -->
           <div class="flex items-center gap-3">
             <div class="flex-1 min-w-0">
               <div class="font-ui font-bold text-sm tracking-widest"
-                   :style="p==='upstox'?'color:var(--t-cyan)':p==='upstox2'?'color:var(--t-green)':'color:var(--t-amber)'"
-                   x-text="p==='upstox'?'UPSTOX API v2 (NIFTY/SENSEX)':p==='upstox2'?'UPSTOX API v2 (CRUDEOIL)':'ANGELONE SMARTAPI'"></div>
+                   :style="p==='upstox'?'color:var(--t-cyan)':p==='upstox2'?'color:var(--t-green)':p==='fyers'?'color:var(--t-cyan)':'color:var(--t-amber)'"
+                   x-text="p==='upstox'?'UPSTOX API v2 (NIFTY/SENSEX)':p==='upstox2'?'UPSTOX API v2 (CRUDEOIL)':p==='fyers'?'FYERS API v3':'ANGELONE SMARTAPI'"></div>
               <div class="font-mono text-xs mt-0.5">
                 <span x-show="(systemStatus.providers||{})[p]?.token_fresh"
                       style="color:var(--t-green)">&#x25CF; TOKEN FRESH</span>
@@ -5470,46 +5454,19 @@ function amoTest() {
         </div>
       </template>
 
-      <!-- AngelOne — TEST-ONLY card, deliberately NOT a live toggle like the
-           providers above. Free + genuinely headless (MPIN+TOTP, no browser/
-           OAuth/Cloudflare) candidate built to replace Fyers, whose own
-           headless login is confirmed non-viable. Verify it actually streams
-           real ticks here BEFORE ever wiring it into the live Upstox+Fyers
-           feed -- that swap is a separate, deliberate decision. -->
+      <!-- AngelOne connection test — deliberately NOT its own credential
+           form (2026-09-06 fix: this used to duplicate the CLIENT ID/API
+           KEY/MPIN/TOTP inputs already in the AngelOne card in the loop
+           above, asking the user to enter the same PIN/TOTP twice). Reads
+           whatever creds are already saved via that card's gear icon +
+           SAVE button; this button only runs the isolated connect-and-
+           wait-for-a-tick check against those stored creds. -->
       <div class="rounded p-3 flex flex-col gap-2" style="background:var(--t-surface);border:1px solid rgba(var(--t-green-rgb),0.3)">
         <div class="flex items-center gap-3">
           <div class="flex-1 min-w-0">
-            <div class="font-ui font-bold text-sm tracking-widest" style="color:var(--t-green)">ANGELONE SMARTAPI (TEST)</div>
-            <div class="font-mono text-xs mt-0.5" style="color:var(--t-muted)">Free · headless MPIN+TOTP · candidate replacement for Fyers</div>
+            <div class="font-ui font-bold text-sm tracking-widest" style="color:var(--t-green)">ANGELONE — VERIFY CONNECTION</div>
+            <div class="font-mono text-xs mt-0.5" style="color:var(--t-muted)">Uses the AngelOne credentials saved above. Isolated test — never touches the live feed.</div>
           </div>
-        </div>
-        <div class="grid grid-cols-2 gap-2">
-          <div>
-            <div class="sec-label mb-1">CLIENT ID (e.g. A123456)</div>
-            <input class="t-input" type="text" x-model="angelOneCreds.client_id" autocomplete="off" spellcheck="false"/>
-          </div>
-          <div>
-            <div class="sec-label mb-1">SMARTAPI API KEY</div>
-            <input class="t-input" type="text" x-model="angelOneCreds.api_key" autocomplete="off" spellcheck="false"/>
-          </div>
-        </div>
-        <div class="grid grid-cols-2 gap-2">
-          <div>
-            <div class="sec-label mb-1">MPIN (4-digit password)</div>
-            <input class="t-input" type="password" x-model="angelOneCreds.password" placeholder="leave blank to keep existing" autocomplete="new-password"/>
-          </div>
-          <div>
-            <div class="sec-label mb-1">TOTP SECRET (base32)</div>
-            <input class="t-input" type="password" x-model="angelOneCreds.totp_secret" placeholder="leave blank to keep existing" autocomplete="new-password"/>
-          </div>
-        </div>
-        <div class="flex items-center gap-3">
-          <button @click="saveAngelOneFeederCreds()" :disabled="angelOneSaving"
-                  class="font-ui font-bold text-xs px-4 py-1.5 rounded border"
-                  style="border-color:rgba(var(--t-green-rgb),0.4);color:var(--t-green);background:rgba(var(--t-green-rgb),0.06)">
-            <span x-show="!angelOneSaving">&#x1F4BE; SAVE</span>
-            <span x-show="angelOneSaving">Saving…</span>
-          </button>
           <button @click="testAngelOneFeed()" :disabled="angelOneTestLoading"
                   class="font-ui font-bold text-xs px-4 py-1.5 rounded border"
                   style="border-color:rgba(var(--t-cyan-rgb),0.4);color:var(--t-cyan);background:rgba(var(--t-cyan-rgb),0.06)"
@@ -5517,9 +5474,6 @@ function amoTest() {
             <span x-show="!angelOneTestLoading">&#x25B6; TEST CONNECTION</span>
             <span x-show="angelOneTestLoading">Connecting &amp; waiting for a tick (up to ~30s)…</span>
           </button>
-          <div x-show="angelOneSaveMsg" class="font-mono text-xs"
-               :style="angelOneSaveMsg.startsWith('✓')?'color:var(--t-green)':'color:var(--t-red)'"
-               x-text="angelOneSaveMsg"></div>
         </div>
         <div x-show="angelOneTestMsg" class="font-mono text-xs px-2 py-1.5 rounded"
              :style="angelOneTestOk ? 'color:var(--t-green);background:rgba(var(--t-green-rgb),0.08);border:1px solid rgba(var(--t-green-rgb),0.2)'
