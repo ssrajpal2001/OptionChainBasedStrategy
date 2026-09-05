@@ -2,24 +2,22 @@
 
 Complete codebase reference for Claude Code. Updated after each major phase.
 
-> **CURRENT FOCUS (2026-08-27):** This project's core work is six strategies, **plus two
-> explicit exceptions (see #7 and #8 below)**. **Actually live-deployed and running right
-> now: SellStraddle, OI-Flow, and Liquidity Trap.** D1 Trap FnO/Index, FVG, and Liquidity
-> Sweep are built but not part of the current live rotation (see each one's own status
-> below). OI-ORB Screener (#7) is built, tested, NOT yet deployed. CAG Long Straddle (#8)
-> is built, tested, awaiting first paper-mode deployment — see its own section.
+> **CURRENT FOCUS (2026-09-06):** This project's core work is now exactly **three
+> strategies** — direct user decision, superseding every prior "current focus" framing
+> below. **D1 Trap FnO/Index, FVG, OI-Flow Pre-Breakout, Liquidity Sweep, and Liquidity
+> Trap were all removed entirely** (code, execution bridges, dedicated Topics, tests,
+> backtest scripts) — all five were fully stopped and are not coming back without a new
+> explicit decision to rebuild them. Their own sections further down are kept as
+> historical reference/rationale only (each is flagged "REMOVED 2026-09-06" at the top)
+> — do not treat them as current, do not suggest resurrecting them.
 > 1. **SellStraddle** — theta-decay option seller (mature, live in production)
-> 2. **D1 Trap FnO/Index** — zone-based option buyer (built, not in the current live rotation — see "D1 Trap FnO / Index" section below)
-> 3. **FVG (Fair Value Gap)** — Smart Money Concepts option buyer (new 2026-08-01/03, built for paper trading, not in the current live rotation; see "FVG Strategy" section below)
-> 4. **OI-Flow Pre-Breakout** — OI-divergence option buyer (new 2026-08-12, built as a **fully standalone 4th strategy pipeline** — own package, own Topics, own execution bridge, own book manager; shares zero runtime infrastructure with strategies 1-3. **Live-deployed** — see "OI-Flow Pre-Breakout Strategy" section below.)
-> 5. **Liquidity Sweep** — SMC/ICT sweep+displacement+FVG+retest option buyer (new 2026-08-19, built as a **fully standalone 5th strategy pipeline**, same zero-shared-infrastructure mandate as OI-Flow. Iteratively built and validated as a Pine Script indicator against real NIFTY chart data in TradingView BEFORE being ported to Python, per direct user instruction — not backtested in Python first. Not yet deployed even in paper mode — see "Liquidity Sweep Strategy" section below.)
-> 6. **Liquidity Trap** — ref-candle sweep/CHoCH option buyer (new 2026-08-20/21, built as a **fully standalone 6th strategy pipeline**, same zero-shared-infrastructure mandate. **Live-deployed** on NIFTY/SENSEX — see "Liquidity Trap Strategy" section below.)
-> 7. **OI-ORB Screener** — OI-Spurt + ORB breakout option buyer on individual F&O **STOCKS**, not an index (new 2026-08-24, built as a **fully standalone 7th strategy pipeline**, same zero-shared-infrastructure mandate. **Explicit exception to the "only six strategies" rule** — direct user instruction 2026-08-24 to port an already-working standalone Colab screener into the live app as a paper_route connectivity proof; EOD-square-off only, no SL/target yet. See "OI-ORB Screener Strategy" section below.)
-> 8. **CAG Long Straddle** — R1/S1 phase-breach option buyer on NIFTY/SENSEX, active only 15:00-15:35 IST (new 2026-08-27, built as a **fully standalone 8th strategy pipeline**, same zero-shared-infrastructure mandate. **Second explicit exception to the "only six strategies" rule** — direct user instruction 2026-08-27, same precedent as OI-ORB Screener's own addition. Built from a real-data-validated backtest (scripts/nifty_1500_sr_breakout_backtest.py) refined through many rounds of direct user review against real minute-by-minute NIFTY option premium charts. See "CAG Long Straddle Strategy" section below.)
+> 2. **OI-ORB Screener** — OI-Spurt + ORB breakout option buyer on individual F&O **STOCKS**. Uses real S&R + trap-zone-detection primitives (rescued into `strategies/core/support_resistance.py` and `strategies/core/trap_zone_utils.py` during the removal above, since this strategy depends on them directly — see "OI-ORB Screener Strategy" section below).
+> 3. **CAG Long Straddle** — R1/S1 phase-breach option buyer on NIFTY/SENSEX, active only 15:00-15:35 IST. See "CAG Long Straddle Strategy" section below.
 >
-> Do NOT suggest, implement, or discuss any other strategies beyond these eight. When
-> starting a new session, read the D1 Trap, FVG, OI-Flow, Liquidity Sweep, Liquidity
-> Trap, OI-ORB Screener, and CAG Long Straddle sections below first.
+> Do NOT suggest, implement, or discuss any other strategies beyond these three unless
+> the user explicitly reopens that door. When starting a new session, read the OI-ORB
+> Screener and CAG Long Straddle sections below first (SellStraddle's own section is
+> long-established and mature).
 
 ---
 
@@ -255,6 +253,8 @@ ATM straddle/strangle selling for theta decay. Ported from Option_Selling_May_20
 - **Ops**: `python run_system.py --mode live --ui --index <IDX> --strategies sell_straddle`. `scripts/fresh_start.sh <IDX>` pulls + WIPES positions/history/logs + restarts (skip if preserving data; plain `git reset --hard` never touches gitignored `data/`). `pm2 restart` reuses old args — use fresh_start / explicit `pm2 start` to change `--index`/`--strategies`. HTTPS broker callbacks on a raw EC2 IP: `scripts/setup_https.sh` (Caddy + sslip.io). **Footguns**: MCX `squareoff_time` must be ~23:25 (15:15 default instantly EOD-exits MCX); NIFTY lot=75 (65 rejected); MCX needs Zerodha single-ledger activation.
 
 ### D1 Trap FnO / Index (`strategies/d1_trap_option/`)
+> ⚠️ **REMOVED 2026-09-06** — direct user decision, fully stopped, code deleted entirely (see git history / commit 217e6b8). Kept below as historical reference only.
+
 
 Option **buyer** strategy — detects D1 supply/demand zones on the UNDERLYING spot price,
 enters intraday option (CE for LONG, PE for SHORT) on a multi-timeframe cascade:
@@ -307,6 +307,8 @@ Fields per book: `underlying`, `client_id`, `binding_id`, `spot`, `zones[]` (eac
 ---
 
 ### D1 Trap BearTrap — `D1TrapBearOnlyBook` (`strategies/d1_trap_option/bear_only_book.py`)
+> ⚠️ **REMOVED 2026-09-06** — direct user decision, fully stopped, code deleted entirely (see git history / commit 217e6b8). Kept below as historical reference only.
+
 
 The **actively-developed, live-traded** D1 Trap engine (`strategy_name="d1_trap_bear_only"`)
 — distinct from `D1TrapOptionBook` (`book.py`) above, which is frozen/legacy. Runs zone
@@ -374,6 +376,8 @@ live `bb._detect_bear_zones` reproduces the sweep scripts' numbers exactly),
 ---
 
 ### FVG — Fair Value Gap (`strategies/fvg/`)
+> ⚠️ **REMOVED 2026-09-06** — direct user decision, fully stopped, code deleted entirely (see git history / commit 217e6b8). Kept below as historical reference only.
+
 
 Smart Money Concepts option **buyer** strategy. Detection runs on the underlying
 **spot/index chart** (matches D1TrapOptionBook's design, not D1TrapBearOnlyBook's
@@ -516,6 +520,8 @@ needed). Ready for paper trading — see "Launch Commands" at the top of this fi
 ---
 
 ### OI-Flow Pre-Breakout Strategy (`strategies/oi_flow/`)
+> ⚠️ **REMOVED 2026-09-06** — direct user decision, fully stopped, code deleted entirely (see git history / commit 217e6b8). Kept below as historical reference only.
+
 
 Smart-money-flow option **buyer** strategy for BANKNIFTY. Built 2026-08-12 from a
 direct user request to integrate Open Interest (OI) analysis with the price-action
@@ -932,6 +938,8 @@ specific numbers (₹2 tolerance, 2-touch minimum) any further.
 ---
 
 ### Liquidity Sweep Strategy (`strategies/liquidity_sweep/`)
+> ⚠️ **REMOVED 2026-09-06** — direct user decision, fully stopped, code deleted entirely (see git history / commit 217e6b8). Kept below as historical reference only.
+
 
 SMC/ICT option **buyer** strategy: sweep (stop-hunt) → structure bias → displacement →
 Fair Value Gap (FVG) → retest entry. Detection runs on the underlying **spot/index
@@ -1067,6 +1075,8 @@ graduation discipline already established for OI-Flow.
 ---
 
 ### Liquidity Trap Strategy (`strategies/liquidity_trap/`)
+> ⚠️ **REMOVED 2026-09-06** — direct user decision, fully stopped, code deleted entirely (see git history / commit 217e6b8). Kept below as historical reference only.
+
 
 Option **buyer** strategy, distinct package from Liquidity Sweep above (different
 mechanic, different files, same zero-shared-runtime mandate as OI-Flow/Liquidity
