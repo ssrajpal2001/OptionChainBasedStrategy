@@ -1604,15 +1604,25 @@ class DashboardServer:
                 try:
                     if p in ("upstox", "upstox2"):
                         from broker_auth.headless_totp_auth import upstox_totp_login
+                        # 2026-09-06 real incident: Upstox rejected the default
+                        # redirect_uri ("UDAPI100068 ... client_id and redirect_uri
+                        # ... incorrect") -- it must be one of the URIs actually
+                        # registered for this api_key's app. Use the SAME base the
+                        # real interactive OAuth flow below already uses, which is
+                        # necessarily correct since that flow works today.
+                        _redirect_uri = f"{_redirect_base(request, _srv._client_db)}/callback/upstox"
                         new_token = await asyncio.to_thread(
                             upstox_totp_login, api_key=api_key, api_secret=secret,
                             user_id=user_id, password=password, totp_secret=totp_secret,
+                            redirect_uri=_redirect_uri,
                         )
                     else:  # fyers
                         from broker_auth.headless_totp_auth_fyers import fyers_totp_login
+                        _redirect_uri = f"{_redirect_base(request, _srv._client_db)}/callback/fyers"
                         new_token = await asyncio.to_thread(
                             fyers_totp_login, client_id=user_id, app_id=api_key,
                             password=password, totp_secret=totp_secret, pin=password,
+                            redirect_uri=_redirect_uri,
                         )
                     now = datetime.now(IST).isoformat()
                     await _srv._client_db.update_feeder_token(p, new_token, generated_at=now)
@@ -4068,17 +4078,23 @@ class DashboardServer:
                         )
                     elif provider == "upstox":
                         from broker_auth.headless_totp_auth import upstox_totp_login
+                        # 2026-09-06 real incident: must use the SAME registered
+                        # redirect_uri the real OAuth flow below already uses --
+                        # Upstox rejects any other one ("client_id and
+                        # redirect_uri ... incorrect").
+                        _redirect_uri = f"{_redirect_base(request, _srv._client_db)}/callback/upstox"
                         new_token = await asyncio.to_thread(
                             upstox_totp_login, api_key=api_key, api_secret=api_secret,
                             user_id=user_id, password=b.get("password", ""),
-                            totp_secret=b.get("totp_secret", ""),
+                            totp_secret=b.get("totp_secret", ""), redirect_uri=_redirect_uri,
                         )
                     else:  # fyers
                         from broker_auth.headless_totp_auth_fyers import fyers_totp_login
+                        _redirect_uri = f"{_redirect_base(request, _srv._client_db)}/callback/fyers"
                         new_token = await asyncio.to_thread(
                             fyers_totp_login, client_id=user_id, app_id=api_key,
                             password=b.get("password", ""), totp_secret=b.get("totp_secret", ""),
-                            pin=b.get("password", ""),
+                            pin=b.get("password", ""), redirect_uri=_redirect_uri,
                         )
                     await _srv._client_db.update_access_token(
                         cid, binding_id, new_token, generated_at=datetime.now(IST).isoformat())

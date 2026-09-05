@@ -12,6 +12,17 @@ def test_fyers_missing_totp_secret_raises():
         fyers_totp_login(client_id="c", app_id="a", password="p", totp_secret="", pin="1234")
 
 
+def test_fyers_missing_redirect_uri_raises():
+    """2026-09-06: the token exchange used to hardcode redirect_uri="" on
+    fyersModel.SessionModel -- same real-incident class as Upstox's own
+    redirect_uri fix. No default is provided so a caller that forgets to
+    resolve the real one gets a clear error here instead of a confusing
+    Fyers-side token-exchange rejection."""
+    with pytest.raises(FyersHeadlessLoginError, match="redirect_uri"):
+        fyers_totp_login(client_id="c", app_id="a", password="p",
+                          totp_secret="JBSWY3DPEHPK3PXP", pin="1234")
+
+
 def test_fyers_playwright_timeout_raises_named_error(monkeypatch):
     import broker_auth.headless_totp_auth_fyers as mod
 
@@ -45,4 +56,5 @@ def test_fyers_playwright_timeout_raises_named_error(monkeypatch):
     monkeypatch.setattr(mod, "sync_playwright", lambda: FakePlaywrightCtx())
 
     with pytest.raises(FyersHeadlessLoginError, match="locator not found"):
-        fyers_totp_login(client_id="c", app_id="a", password="p", totp_secret="JBSWY3DPEHPK3PXP", pin="1234")
+        fyers_totp_login(client_id="c", app_id="a", password="p", totp_secret="JBSWY3DPEHPK3PXP",
+                          pin="1234", redirect_uri="https://example.com/callback/fyers")

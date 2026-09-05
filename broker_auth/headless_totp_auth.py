@@ -78,11 +78,30 @@ def _upstox_parse(resp):
 
 def upstox_totp_login(
     api_key: str, api_secret: str, user_id: str, password: str, totp_secret: str,
+    redirect_uri: str = "",
 ) -> str:
     """
     6-step Upstox headless TOTP login (service.upstox.com internal API),
     curl_cffi chrome131 TLS fingerprint. Raises HeadlessTotpAuthError on any
     failure, naming the step. Returns the access_token on success.
+
+    redirect_uri (2026-09-06 real incident fix): Upstox rejected Step 1 with
+    "UDAPI100068: Check your 'client_id' and 'redirect_uri'; one or both are
+    incorrect" -- Upstox requires the redirect_uri passed here to be one of
+    the URIs actually registered for this api_key's app in the Upstox
+    developer console. This is the SAME value already saved in this app's
+    own DB (system_settings.GLOBAL_REDIRECT_BASE) and used by every real
+    interactive OAuth flow (dashboard_server.py's _redirect_base() +
+    "/callback/upstox") -- callers MUST resolve it from there, never
+    hardcode a guess (an earlier version of this function defaulted to
+    "https://www.google.com", which only ever worked by coincidence and
+    produced this exact real failure once it didn't match). No default is
+    provided deliberately -- a caller that forgets to pass it gets a clear
+    error here instead of a confusing Upstox-side rejection. Nothing ever
+    actually browses to this URL in this server-to-server flow -- Upstox
+    only validates that the (api_key, redirect_uri) pair is a registered
+    combination, for both this dialog call and the Step 6 token exchange
+    below.
     """
     import pyotp
 
@@ -90,6 +109,13 @@ def upstox_totp_login(
         raise HeadlessTotpAuthError("Upstox: api_key is required.")
     if not totp_secret:
         raise HeadlessTotpAuthError("Upstox: totp_secret is required for headless auto-authentication.")
+    if not redirect_uri:
+        raise HeadlessTotpAuthError(
+            "Upstox: redirect_uri is required — pass the same value saved in "
+            "system_settings.GLOBAL_REDIRECT_BASE (+ '/callback/upstox'), the "
+            "one already used by the real interactive OAuth flow. Do not "
+            "hardcode a guess."
+        )
     if not password:
         raise HeadlessTotpAuthError("Upstox: password (6-digit PIN) is required.")
 
@@ -102,7 +128,6 @@ def upstox_totp_login(
     _API = "https://api.upstox.com"
     _SVC = "https://service.upstox.com"
     _INT_RDR = "https://api-v2.upstox.com/login/authorization/redirect"
-    redirect_uri = "https://www.google.com"
 
     session = _upstox_session()
 

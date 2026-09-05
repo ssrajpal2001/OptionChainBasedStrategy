@@ -22,6 +22,18 @@ def test_upstox_missing_totp_secret_raises():
                            password="123456", totp_secret="")
 
 
+def test_upstox_missing_redirect_uri_raises():
+    """2026-09-06 real incident: a hardcoded default redirect_uri
+    ("https://www.google.com") produced a real Upstox rejection
+    ("client_id and redirect_uri ... incorrect") once it stopped matching
+    what's actually registered for the app -- no default is provided
+    anymore, so a caller that forgets to resolve the real one (from
+    system_settings.GLOBAL_REDIRECT_BASE) gets a clear error here instead."""
+    with pytest.raises(HeadlessTotpAuthError, match="redirect_uri"):
+        upstox_totp_login(api_key="k", api_secret="s", user_id="u",
+                           password="123456", totp_secret="JBSWY3DPEHPK3PXP")
+
+
 def test_upstox_step1_no_redirect_error_includes_status_and_body(monkeypatch):
     """2026-09-06 real incident: Step 1 came back with the request URL
     unchanged (no redirect followed, no user_id in query) -- the error must
@@ -45,7 +57,8 @@ def test_upstox_step1_no_redirect_error_includes_status_and_body(monkeypatch):
     monkeypatch.setattr("time.sleep", lambda *_: None)
     with pytest.raises(HeadlessTotpAuthError, match="status=200") as excinfo:
         upstox_totp_login(api_key="k", api_secret="s", user_id="9999999999",
-                           password="123456", totp_secret="JBSWY3DPEHPK3PXP")
+                           password="123456", totp_secret="JBSWY3DPEHPK3PXP",
+                           redirect_uri="https://example.com/callback/upstox")
     assert "some login page html" in str(excinfo.value)
 
 
@@ -72,7 +85,8 @@ def test_upstox_invalid_totp_secret_raises(monkeypatch):
     monkeypatch.setattr("time.sleep", lambda *_: None)
     with pytest.raises(HeadlessTotpAuthError, match="invalid TOTP secret"):
         upstox_totp_login(api_key="k", api_secret="s", user_id="9999999999",
-                           password="123456", totp_secret="NOT-VALID-BASE32!!")
+                           password="123456", totp_secret="NOT-VALID-BASE32!!",
+                           redirect_uri="https://example.com/callback/upstox")
 
 
 def test_upstox_full_success_path(monkeypatch):
@@ -122,5 +136,6 @@ def test_upstox_full_success_path(monkeypatch):
     monkeypatch.setattr("time.sleep", lambda *_: None)
 
     token = upstox_totp_login(api_key="k", api_secret="s", user_id="9999999999",
-                               password="123456", totp_secret="JBSWY3DPEHPK3PXP")
+                               password="123456", totp_secret="JBSWY3DPEHPK3PXP",
+                               redirect_uri="https://example.com/callback/upstox")
     assert token == "FINAL_TOKEN_XYZ"

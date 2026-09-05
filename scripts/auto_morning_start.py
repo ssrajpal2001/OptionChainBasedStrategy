@@ -105,14 +105,30 @@ async def run_morning_sequence(dry_run: bool = False, zerodha_client_id: str = "
 
     db = ClientDB()
 
+    # 2026-09-06 real incident: Upstox/Fyers both reject any redirect_uri not
+    # registered for their app -- use the SAME system_settings.
+    # GLOBAL_REDIRECT_BASE the real interactive OAuth flow already uses
+    # (dashboard_server.py's _redirect_base()), since that one is necessarily
+    # correct. Deliberately no hardcoded fallback (e.g. the old
+    # "https://www.google.com" default) -- a wrong guess just reproduces the
+    # same real failure with a different wrong value; better to fail this
+    # step loudly and clearly than silently guess.
+    _redirect_base_url = db.get_setting_sync("GLOBAL_REDIRECT_BASE", "").strip().rstrip("/")
+
     # -- Upstox --
     try:
         creds = db.get_feeder_creds_sync("upstox") or {}
+        if not _redirect_base_url:
+            raise HeadlessTotpAuthError(
+                "Upstox: system_settings.GLOBAL_REDIRECT_BASE is not configured "
+                "(Admin Workspace → Data Feeder → Global Redirect Base)."
+            )
         token = await asyncio.to_thread(
             upstox_totp_login,
             api_key=creds.get("api_key", ""), api_secret=creds.get("secret", ""),
             user_id=creds.get("client_id", ""), password=creds.get("password", ""),
             totp_secret=creds.get("totp_secret", ""),
+            redirect_uri=f"{_redirect_base_url}/callback/upstox",
         )
         if not dry_run:
             now = datetime.now(IST).isoformat()
@@ -153,11 +169,17 @@ async def run_morning_sequence(dry_run: bool = False, zerodha_client_id: str = "
     try:
         from broker_auth.headless_totp_auth_fyers import fyers_totp_login
         creds = db.get_feeder_creds_sync("fyers") or {}
+        if not _redirect_base_url:
+            raise RuntimeError(
+                "Fyers: system_settings.GLOBAL_REDIRECT_BASE is not configured "
+                "(Admin Workspace → Data Feeder → Global Redirect Base)."
+            )
         token = await asyncio.to_thread(
             fyers_totp_login,
             client_id=creds.get("client_id", ""), app_id=creds.get("api_key", ""),
             password=creds.get("password", ""), totp_secret=creds.get("totp_secret", ""),
             pin=creds.get("password", ""),
+            redirect_uri=f"{_redirect_base_url}/callback/fyers",
         )
         if not dry_run:
             now = datetime.now(IST).isoformat()

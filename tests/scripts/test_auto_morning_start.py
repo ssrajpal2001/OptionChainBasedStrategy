@@ -10,6 +10,11 @@ def _fake_db(fyers_ok=True):
         def get_bindings_sync(self, client_id):
             return [{"binding_id": "SA5770", "provider": "zerodha", "api_key": "zk", "api_secret": "zs", "user_id": "zu"}]
 
+        def get_setting_sync(self, key, default=""):
+            if key == "GLOBAL_REDIRECT_BASE":
+                return "https://example.com"
+            return default
+
         async def update_feeder_token(self, *a, **k):
             pass
 
@@ -50,6 +55,11 @@ async def test_dry_run_skips_pm2_and_db_writes_but_runs_logins(monkeypatch):
 
         def get_bindings_sync(self, client_id):
             return [{"binding_id": "SA5770", "provider": "zerodha", "api_key": "zk", "api_secret": "zs", "user_id": "zu"}]
+
+        def get_setting_sync(self, key, default=""):
+            if key == "GLOBAL_REDIRECT_BASE":
+                return "https://example.com"
+            return default
 
         async def update_feeder_token(self, *a, **k):
             calls["db_writes"] += 1
