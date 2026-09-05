@@ -137,6 +137,27 @@ def _dump_field_diagnostics(page) -> str:
             lines.append(f"#{radio_id}.checked={checked}")
         except Exception as exc:
             lines.append(f"#{radio_id}: <lookup error: {exc}>")
+    # 2026-09-06 real incident: the field is confirmed correctly filled (right
+    # value, right visible element) via BOTH .fill() and real keystroke
+    # .type(), yet clientIdSubmit stayed disabled either way -- ruling out a
+    # simple "wrong duplicate" or "fill didn't fire events" explanation.
+    # That combination is the classic signature of an invisible CAPTCHA
+    # token gating the button rather than the field's own value -- check
+    # directly for the usual suspects (reCAPTCHA/hCaptcha/Cloudflare
+    # Turnstile) instead of guessing at more selectors.
+    try:
+        captcha_info = page.evaluate("""() => ({
+            grecaptcha: typeof window.grecaptcha !== 'undefined',
+            hcaptcha: typeof window.hcaptcha !== 'undefined',
+            turnstile: typeof window.turnstile !== 'undefined',
+            recaptcha_iframe: document.querySelectorAll("iframe[src*='recaptcha']").length,
+            hcaptcha_iframe: document.querySelectorAll("iframe[src*='hcaptcha']").length,
+            turnstile_iframe: document.querySelectorAll("iframe[src*='turnstile'], iframe[src*='challenges.cloudflare']").length,
+            g_recaptcha_div: document.querySelectorAll(".g-recaptcha, [data-sitekey]").length,
+        })""")
+        lines.append(f"captcha_check={captcha_info}")
+    except Exception as exc:
+        lines.append(f"captcha_check: <lookup error: {exc}>")
     try:
         form_html = page.eval_on_selector("form", "el => el.outerHTML")
         # 2026-09-06: 1500 chars cut off before ever reaching the actual
