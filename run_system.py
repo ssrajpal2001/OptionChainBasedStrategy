@@ -694,7 +694,6 @@ async def _run_live(
     from execution_bridge import ExecutionRouter
     from strategies.registry import STRATEGY_REGISTRY, create_strategy_manager
     from execution_bridge.straddle_bridge import StraddleExecutionBridge
-    from execution_bridge.cascade_bridge import V4CascadeExecutionBridge
     from management.client_manager import ClientManager
     from management.admin_console import AdminConsole
     from management.risk_manager import RiskManager
@@ -723,7 +722,6 @@ async def _run_live(
 
     # Backward-compat variables consumed by the dashboard and bridges.
     straddle_manager = managers.get("sell_straddle")
-    v4_cascade_manager = managers.get("v4_cascade")
 
     # Crypto (Delta) feed: for any BTC/ETH in monitored_indices or with an active deployment,
     # run a DeltaChainManager that drives a DeltaFeeder onto the same EventBus. If nothing crypto
@@ -787,20 +785,12 @@ async def _run_live(
         bus, registry, router,
         log_dir=os.path.join(cfg.storage.log_dir, "trades"),
     )
-    # V4 Cascade orders always carry their own (client_id, binding_id) — no
-    # ClientRegistry loop needed, routing is a direct per-binding lookup.
-    cascade_bridge = V4CascadeExecutionBridge(
-        bus, router,
-        log_dir=os.path.join(cfg.storage.log_dir, "trades"),
-    )
-    from execution_bridge.fno_bridge import FnOExecutionBridge
-    fno_bridge = FnOExecutionBridge(
-        bus, router,
-        log_dir=os.path.join(cfg.storage.log_dir, "trades"),
-    )
     # 2026-09-06: D1Trap/FVG/OI-Flow/Liquidity Sweep/Liquidity Trap bridges
     # removed along with their strategies -- all fully stopped, direct user
     # decision. Recoverable via git history if ever needed again.
+    # 2026-09-06 (2nd pass): V4CascadeExecutionBridge/cascade_bridge and
+    # FnOExecutionBridge/fno_bridge removed along with v4_cascade/
+    # fno_positional -- scope-clarity only, direct user decision.
     # 2026-08-24: fully standalone bridge -- own Topics (OI_ORB_ORDER_REQUEST/
     # FILL), shares no runtime state with any bridge above. Ported from the
     # standalone Colab OI-Spurt+ORB screener as a connectivity/plumbing proof.
@@ -883,9 +873,6 @@ async def _run_live(
                 risk_manager=risk_mgr,
                 straddle_manager=straddle_manager,
                 straddle_bridge=straddle_bridge,
-                v4_cascade_manager=v4_cascade_manager,
-                fno_positional_manager=managers.get("fno_positional"),
-                hourly_breakout_manager=managers.get("hourly_breakout"),
                 oi_orb_manager=managers.get("oi_orb_screener"),
                 cag_straddle_manager=managers.get("cag_straddle"),
             )
@@ -1025,8 +1012,6 @@ async def _run_live(
     tasks += [
         asyncio.create_task(router.run(),               name="router"),
         asyncio.create_task(straddle_bridge.run(),      name="straddle_bridge"),
-        asyncio.create_task(cascade_bridge.run(),       name="cascade_bridge"),
-        asyncio.create_task(fno_bridge.run(),           name="fno_bridge"),
         asyncio.create_task(straddle_hedge_bridge.run(), name="straddle_hedge_bridge"),
         asyncio.create_task(oi_orb_bridge.run(),        name="oi_orb_bridge"),
         asyncio.create_task(cag_straddle_bridge.run(),  name="cag_straddle_bridge"),
@@ -1067,8 +1052,6 @@ async def _run_live(
     strike_cleanup.stop()
     gap_handler.stop()
     straddle_bridge.stop()
-    cascade_bridge.stop()
-    fno_bridge.stop()
     straddle_hedge_bridge.stop()
     oi_orb_bridge.stop()
     cag_straddle_bridge.stop()

@@ -193,20 +193,21 @@ class Topic:
     SIGNAL           = "signal"
     ORDER_REQUEST    = "order_request"
     IC_ORDER_REQUEST = "ic_order_request"
-    CASCADE_ORDER_REQUEST = "cascade_order_request"  # V4 Cascade order routing (execution_bridge/cascade_bridge.py)
     ORDER_FILL       = "order_fill"
     SYSTEM_EVENT     = "system_event"
     EXIT_AUDIT       = "exit_audit"    # per-tick exit-criteria validation stream (granular UI)
     POSITION_UPDATE  = "position_update"  # strategy book position snapshot (entry/exit/roll)
-    FNO_STOCK_ALERT  = "fno_stock_alert"   # Stage-2 intraday stock monitor alert
-    FNO_STOCK_STATUS = "fno_stock_status"  # live LTP + MTF/LTF state per stock (3s broadcast)
-    FNO_ORDER_REQUEST = "fno_order_request"  # FnO positional option orders (fno_bridge.py)
-    FNO_ORDER_FILL    = "fno_order_fill"     # FnO positional fill confirmations
-    EQUITY_TICK           = "equity_tick"            # FnO stock equity spot ticks (Fyers feed)
+    EQUITY_TICK           = "equity_tick"            # FnO stock equity spot ticks (Fyers feed);
+                                                      # still used by oi_orb_screener's shared
+                                                      # FNO_STOCK_CONFIG infra -- do not remove.
     # 2026-09-06: TRAP_TICK/TRAP_STATE (dead, unused anywhere), D1_TRAP_ORDER_*,
     # FVG_ORDER_*, OI_FLOW_ORDER_*, and LIQUIDITY_SWEEP_ORDER_*/LIQUIDITY_TRAP_
     # ORDER_* removed along with their strategies -- all fully stopped, direct
     # user decision. Recoverable via git history if ever needed again.
+    # 2026-09-06 (2nd pass): CASCADE_ORDER_REQUEST, FNO_STOCK_ALERT/STATUS,
+    # FNO_ORDER_REQUEST/FILL removed along with v4_cascade/fno_positional/
+    # hourly_breakout -- same removal, scope-clarity only (not disk space),
+    # direct user decision. Recoverable via git history if ever needed again.
     STRADDLE_HEDGE_ORDER_REQUEST = "straddle_hedge_order_request"  # SellStraddle EOD hedge-and-carry
     STRADDLE_HEDGE_ORDER_FILL    = "straddle_hedge_order_fill"     # (2026-08-20) -- BUY-to-open/SELL-to-close
                                                       # protective legs. Deliberately its OWN Topic/bridge,

@@ -36,8 +36,8 @@ def _evaluate(client_id: str, binding_id: str, client_db: Any, strategy_name: st
     """Uncached gate evaluation.
 
     Generalized (2026-07-19) — no more per-strategy-name hardcoding. EVERY
-    strategy (sell_straddle, v4_cascade, and any future one) is gated the
-    same way: terminal_connected AND is_trade_enabled AND a running
+    strategy (sell_straddle, oi_orb_screener, and any future one) is gated
+    the same way: terminal_connected AND is_trade_enabled AND a running
     deployment of THIS strategy_name for THIS underlying on THIS binding.
     Previously only sell_straddle got the full check and every other
     strategy silently fell through to a terminal-only check — the exact

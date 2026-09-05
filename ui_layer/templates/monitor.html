@@ -712,9 +712,6 @@ document.addEventListener('alpine:init', () => {
       { id: 'sell_straddle',   name: 'Sell Straddle',       desc: 'ATM straddle — premium decay (theta)' },
       { id: 'd1_trap_index',   name: 'Trap Scanner - Index', desc: 'Index intraday trap — configurable HTF/MTF, MIS, EOD close' },
       { id: 'd1_trap_fno',     name: 'Trap Scanner - FnO',  desc: 'FnO stock positional trap — D1 zones, 1H entry, NRML' },
-      { id: 'fno_positional',  name: 'FnO Positional',      desc: 'FnO stock swing — D1 zones, spot SL + breakeven trail, NRML positional' },
-      // disabled temporarily: { id: 'v4_cascade', name: 'V4 Cascade', ... }
-      // disabled temporarily: { id: 'hourly_breakout', name: 'Hourly Breakout', ... }
     ],
     availableInstruments: ['NIFTY','BANKNIFTY','FINNIFTY','SENSEX','MIDCPNIFTY','CRUDEOIL','GOLDM','BTC','ETH','FNO_STOCKS'],
     csStrategySelections: [], // [{strategy:'sell_straddle', instrument:'NIFTY'}, ...]
@@ -787,7 +784,7 @@ document.addEventListener('alpine:init', () => {
 
     /* ── Per-index strategy config (rule builder) ────────────────────── */
     adminSelectedIndex: 'NIFTY',
-    adminStrategyTab:   'sell_straddle',  // 'sell_straddle' | 'v4_cascade'
+    adminStrategyTab:   'sell_straddle',  // 'sell_straddle' | 'd1_trap' | 'oi_orb_screener'
     adminSubTab:        'entry_begin',    // 'entry_begin' | 'reentry' | 'exit' | 'guardrails' | 'tsl' | 'per_day'
     indexConfig: {},
     indexConfigLoading: false,
@@ -795,46 +792,13 @@ document.addEventListener('alpine:init', () => {
     indexConfigMsg:     '',
     indexConfigOk:      null,
 
-    /* ── V4 Cascade admin controls ──────────────────────────────────── */
-    v4CascadeDeployId:   '',
-    v4CascadeCeOverride: 0,
-    v4CascadePeOverride: 0,
-    v4CascadeMsg:        '',
-    v4CascadeOk:         null,
-    v4TrapZones:         [],
-    v4TrapPosition:      null,
-    v4IndexGate:         null,
-    v4TrapPollTimer:     null,
-
-    startV4TrapPoll() {
-      this.stopV4TrapPoll();
-      this.refreshV4TrapStatus();
-      this.v4TrapPollTimer = setInterval(() => this.refreshV4TrapStatus(), 5000);
-    },
-    stopV4TrapPoll() {
-      if (this.v4TrapPollTimer) { clearInterval(this.v4TrapPollTimer); this.v4TrapPollTimer = null; }
-    },
-    async refreshV4TrapStatus() {
-      if (!this.v4CascadeDeployId) { this.v4CascadeOk = false; this.v4CascadeMsg = 'Enter a deploy_id first.'; return; }
-      try {
-        const r = await fetch(`/api/admin/strategy/${this.v4CascadeDeployId}/v4_trap_status`, {headers: this._v4AuthHeaders()});
-        const d = await r.json();
-        if (d.ok) { this.v4TrapZones = d.zones || []; this.v4TrapPosition = d.position || null; this.v4IndexGate = d.index_gate || null; }
-        else { this.v4CascadeOk = false; this.v4CascadeMsg = d.detail || d.error || 'Failed'; }
-      } catch (e) { this.v4CascadeOk = false; this.v4CascadeMsg = String(e); }
-    },
-
-    _v4AuthHeaders() {
-      return this.authToken
-        ? { 'Authorization': 'Bearer ' + this.authToken, 'Content-Type': 'application/json' }
-        : { 'Content-Type': 'application/json' };
-    },
-    // V4 Cascade T1/T2 are the SAME contract/entry, tracked independently
-    // only because they exit at different times/prices (T1 fixed target,
-    // T2 trailing). Per user request: display them as ONE blended row
-    // while BOTH are still open (summed qty/P&L); the moment either closes,
-    // `legs` naturally shrinks to 1 entry and this returns it unblended --
-    // no special-casing needed for the "split back to 2" behavior.
+    // Some strategies track a position as T1/T2 tranches -- the SAME
+    // contract/entry, tracked independently only because they exit at
+    // different times/prices (T1 fixed target, T2 trailing). Display them
+    // as ONE blended row while BOTH are still open (summed qty/P&L); the
+    // moment either closes, `legs` naturally shrinks to 1 entry and this
+    // returns it unblended -- no special-casing needed for the "split back
+    // to 2" behavior.
     blendLegs(legs) {
       if (!legs || legs.length < 2) return legs || [];
       const groups = {}, order = [];
@@ -867,38 +831,7 @@ document.addEventListener('alpine:init', () => {
       }
       return out;
     },
-    async forceIngestV4Cascade() {
-      if (!this.v4CascadeDeployId) { this.v4CascadeOk = false; this.v4CascadeMsg = 'Enter a deploy_id first.'; return; }
-      try {
-        const r = await fetch(`/api/admin/v4_cascade/force_ingest/${this.v4CascadeDeployId}`, {
-          method: 'POST', headers: this._v4AuthHeaders(),
-        });
-        const d = await r.json();
-        this.v4CascadeOk = !!d.ok;
-        this.v4CascadeMsg = d.ok ? 'Force ingest triggered.' : (d.detail || d.error || 'Failed');
-      } catch (e) { this.v4CascadeOk = false; this.v4CascadeMsg = String(e); }
-    },
-    async lockV4CascadeContract() {
-      if (!this.v4CascadeDeployId) { this.v4CascadeOk = false; this.v4CascadeMsg = 'Enter a deploy_id first.'; return; }
-      try {
-        const r = await fetch(`/api/admin/deployment/${this.v4CascadeDeployId}/v4_cascade/lock_contract`, {
-          method: 'POST', headers: this._v4AuthHeaders(),
-          body: JSON.stringify({ce_strike: this.v4CascadeCeOverride||0, pe_strike: this.v4CascadePeOverride||0}),
-        });
-        const d = await r.json();
-        this.v4CascadeOk = !!d.ok;
-        this.v4CascadeMsg = d.ok ? `Override applied: CE=${d.ce_strike||'auto'} PE=${d.pe_strike||'auto'}` : (d.detail || d.error || 'Failed');
-      } catch (e) { this.v4CascadeOk = false; this.v4CascadeMsg = String(e); }
-    },
 
-    /* ── Stock scanner ──────────────────────────────────────────────── */
-    stockScan: { scan_date: '', nifty_bias: '', nifty_close: 0, nifty_zone: {}, stocks: [], ce_stocks: [], pe_stocks: [], use_nifty_bias: false, loaded: false, error: '' },
-    stockScanBiasToggle: false,
-    stockScanRunning: false,
-    fnoBooks: [],           // FnO positional book states [{client_id, binding_id, positions, ...}]
-    csFnoPositions: [],     // client-scoped FnO books (positions tab)
-    fnoAlerts: [],          // active un-notified intraday alerts
-    fnoStocks: [],          // live LTP + MTF/LTF state per watched stock (3s update)
 
     /* ── Risk command center ─────────────────────────────────────────── */
     riskSummary: { total_capital: 0, total_net_mtm: 0, total_open_lots: 0, avg_slippage_pts: 0, client_count: 0, clients: [], risk_manager_active: false, ts: '' },
@@ -1289,7 +1222,6 @@ document.addEventListener('alpine:init', () => {
       setInterval(() => { if (this.screen === 'admin' && this.adminTab === 'dashboard') { this.loadStrategyRegistry(); } }, 5000);
       setInterval(() => { if (this.screen === 'admin' && this.adminTab === 'strategies') { this.loadStrategyRegistry(); this.loadOiOrbDeployments(); } }, 5000);
       setInterval(() => { if (this.screen === 'admin' && this.adminTab === 'clients') { this.loadClientProfiles(); this.loadPendingClients(); this.loadRiskSummary(); } }, 5000);
-      setInterval(() => { if (this.screen === 'admin' && this.adminTab === 'fno_pos') this.loadFnoPositions(); }, 30000);
       setInterval(() => { if (this.screen === 'client') this.loadClientStatus(); }, 8000);
       // 2026-08-23: poll for a sell_straddle entry whose broker fill confirmation
       // was aborted and is now awaiting the client's own manual price entry --
@@ -1299,14 +1231,11 @@ document.addEventListener('alpine:init', () => {
       // Background P&L refresh for positions tab. Trade events (entry/exit/roll) are
       // pushed instantly via WebSocket, so this poll only needs to catch P&L drift.
       setInterval(() => { if (this.screen === 'client' && this.clientMenu === 'positions') this.loadClientPositions(); }, 2000);
-      setInterval(() => { if (this.screen === 'client' && this.clientMenu === 'positions') this.loadClientFnoPositions(); }, 5000);
     },
 
     /* Hydrate all admin panels — called right after login or session restore */
     _hydrateAdminOnLogin() {
       this.loadFeederStatus(true);   // sync toggle from DB only on login
-      this.loadStockScan();
-      this.loadFnoAlerts();
       this.loadRedirectBase();
       this.loadAuthAlerts();
       this.loadRms();
@@ -1512,7 +1441,6 @@ document.addEventListener('alpine:init', () => {
         // Strategy book position changed (entry / exit / roll) — refresh positions panel.
         if (this.screen === 'client' && (this.clientMenu === 'positions' || this.clientMenu === 'dashboard')) {
           this.loadClientPositions();
-          this.loadClientFnoPositions();
         }
       } else if (msg.type === 'strategy_alert') {
         // Broker rejection / critical strategy alert. Broadcast is global (same
@@ -1828,74 +1756,6 @@ document.addEventListener('alpine:init', () => {
         const r = await this._fetch('/api/admin/audit_log');
         if (r && r.ok) { const d = await r.json(); this.auditLines = d.lines || []; }
       } catch {} finally { this.auditLoading = false; }
-    },
-
-    /* ── Stock scanner ──────────────────────────────────────────────────── */
-    async loadStockScan() {
-      try {
-        const r = await this._fetch('/api/scanner/fno');
-        if (!r) return;
-        const d = await r.json();
-        if (d && d.ok) {
-          this.stockScan = { ...d, loaded: true, error: '' };
-        } else {
-          this.stockScan = { ...this.stockScan, loaded: true, error: (d && d.error) || 'Scan file not found' };
-        }
-      } catch(e) {
-        this.stockScan = { ...this.stockScan, loaded: true, error: String(e) };
-      }
-    },
-    /* ── FnO Positional positions ───────────────────────────────────────── */
-    async loadFnoPositions() {
-      try {
-        const r = await this._fetch('/api/fno/positions');
-        if (!r) return;
-        const d = await r.json();
-        if (d && d.ok) this.fnoBooks = d.books || [];
-      } catch(e) { console.warn('loadFnoPositions', e); }
-    },
-    async loadClientFnoPositions() {
-      try {
-        const r = await this._fetch('/api/client/fno_positions');
-        if (!r) return;
-        const d = await r.json();
-        if (d && d.ok) this.csFnoPositions = d.books || [];
-      } catch(e) { console.warn('loadClientFnoPositions', e); }
-    },
-    async runStockScan() {
-      if (this.stockScanRunning) return;
-      this.stockScanRunning = true;
-      this.stockScan.error = '';
-      try {
-        const r = await this._fetch('/api/scanner/run', { method: 'POST',
-          headers: {'Content-Type':'application/json'},
-          body: JSON.stringify({ nifty_prox_pct: 1.5, stock_prox_pct: 2.0, min_rr: 1.5, use_nifty_bias: this.stockScanBiasToggle })
-        });
-        const d = r ? await r.json() : null;
-        if (d && d.ok) { await this.loadStockScan(); }
-        else { this.stockScan.error = (d && d.error) || 'Scan failed'; }
-      } catch(e) { this.stockScan.error = String(e); }
-      finally { this.stockScanRunning = false; }
-    },
-
-    async loadFnoAlerts() {
-      const r = await this._fetch('/api/scanner/alerts');
-      if (!r) return;
-      const d = await r.json();
-      if (d.ok) this.fnoAlerts = d.alerts || [];
-    },
-
-    async notifyAlert(uid) {
-      this.fnoAlerts = this.fnoAlerts.filter(a => a.uid !== uid);
-      await this._fetch('/api/scanner/alerts/' + encodeURIComponent(uid) + '/notified',
-                        { method: 'POST' });
-    },
-
-    _playAlertSound() {
-      try {
-        const audio = new Audio('/static/alert.wav');
-        audio.play().catch(() => {});
-      } catch(e) {}
     },
 
     /* ── Feeder status ───────────────────────────────────────────────────── */
@@ -2396,7 +2256,7 @@ document.addEventListener('alpine:init', () => {
     async toggleStrategyRun(dep, b) {
       const want = !this.depRunning(dep);
       const did = dep.deploy_id || `${this.authClientId}_${dep.binding_id}_${dep.strategy_name}_${dep.underlying}`;
-      const _stratLabel = {sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'D1 Trap Option',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow',liquidity_sweep:'Liquidity Sweep',liquidity_trap:'Liquidity Trap',oi_orb_screener:'OI-ORB Screener',cag_straddle:'CAG Long Straddle'};
+      const _stratLabel = {sell_straddle:'Sell Straddle',d1_trap_option:'D1 Trap Option',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow',liquidity_sweep:'Liquidity Sweep',liquidity_trap:'Liquidity Trap',oi_orb_screener:'OI-ORB Screener',cag_straddle:'CAG Long Straddle'};
       const _undLabel = u => u==='ALL_FNO'?'All FnO Stocks':u==='WATCHLIST'?'Watchlist (top-5)':u;
       const label = (_stratLabel[dep.strategy_name]||dep.strategy_name)+' · '+_undLabel(dep.underlying);
       const ok = want
@@ -2954,11 +2814,7 @@ document.addEventListener('alpine:init', () => {
           //
           // Open/close action direction is STRATEGY-dependent, not a fixed
           // SELL-to-open/BUY-to-close pair: sell_straddle SELLS to open
-          // (short premium). v4_cascade BUYS to open (long premium) for
-          // every side EXCEPT crypto's PE (bull-trap -> short), which sells
-          // to open, mirroring the legacy scanner's is_short convention.
-          // 2026-07-21 fix: this used to hardcode SELL/BUY for every
-          // strategy, mislabeling every v4_cascade entry as a SELL.
+          // (short premium).
           const flat = [];
           for (const tr of this.csHistory) {
             const isOpen = tr.exit_reason === 'OPEN';
@@ -2969,8 +2825,6 @@ document.addEventListener('alpine:init', () => {
             const strat = tr.strategy || '—', inst = tr.instrument || '—';
             const bindId = tr.binding_id || '';
             const _sk = (lg) => (lg.side ? lg.side + ' ' : '') + (lg.strike || '');
-            const _isCryptoShort = (lg) => strat === 'v4_cascade'
-                && ['BTC', 'ETH'].includes(String(inst).toUpperCase()) && lg.side === 'PE';
             // 2026-08-03 fix: d1_trap_bear_only / d1_trap_option / d1_trap_index /
             // d1_trap_fno / fvg are all buyer-only (BUY to open/pay premium, SELL to
             // close/receive premium) -- previously fell through to the SellStraddle
@@ -2978,12 +2832,8 @@ document.addEventListener('alpine:init', () => {
             // d1_trap_sr added 2026-08-12 -- same option-buyer mechanic, only the entry
             // trigger (S&R ping-pong vs T1/T2) differs from d1_trap_bear_only.
             const _buyerOnlyStrats = ['d1_trap_bear_only', 'd1_trap_sr', 'd1_trap_option', 'd1_trap_index', 'd1_trap_fno', 'fvg', 'oi_flow', 'liquidity_sweep', 'liquidity_trap', 'oi_orb_screener', 'cag_straddle'];
-            const _openAction = (lg) => strat === 'v4_cascade'
-                ? (_isCryptoShort(lg) ? 'SELL' : 'BUY')
-                : _buyerOnlyStrats.includes(strat) ? 'BUY' : 'SELL';
-            const _closeAction = (lg) => strat === 'v4_cascade'
-                ? (_isCryptoShort(lg) ? 'BUY' : 'SELL')
-                : _buyerOnlyStrats.includes(strat) ? 'SELL' : 'BUY';
+            const _openAction = (lg) => _buyerOnlyStrats.includes(strat) ? 'BUY' : 'SELL';
+            const _closeAction = (lg) => _buyerOnlyStrats.includes(strat) ? 'SELL' : 'BUY';
             // OPEN rows. `_ts` = raw timestamp used for chronological sort.
             // Skip junk rows whose price is 0/missing — these are rejected-order / dry fills
             // (no real broker price was ever captured) and only clutter the ledger.
@@ -3700,10 +3550,6 @@ function amoTest() {
             @click="adminTab='feeder'">&#x26A1; DATA FEEDER</button>
     <button class="admin-tab" :class="{active: adminTab==='trap'}"
             @click="adminTab='trap'">&#x1F3AF; TRAP ENGINE</button>
-    <button class="admin-tab" :class="{active: adminTab==='stocks'}"
-            @click="adminTab='stocks'; loadStockScan()">&#x1F4C8; STOCKS</button>
-    <button class="admin-tab" :class="{active: adminTab==='fno_pos'}"
-            @click="adminTab='fno_pos'; loadFnoPositions()">&#x1F4CA; FNO POSITIONS</button>
     <button class="admin-tab" :class="{active: adminTab==='clients'}"
             @click="adminTab='clients'; loadClientProfiles(); loadRiskSummary()">&#x1F465; CLIENT PROFILES</button>
   </div>
@@ -4367,19 +4213,12 @@ function amoTest() {
     <!-- ── Strategy tabs: SELL STRADDLE ──── -->
     <div class="t-card rounded" style="overflow:hidden">
       <div class="flex border-b" style="border-color:var(--t-border)">
-        <button @click="adminStrategyTab='sell_straddle'; stopV4TrapPoll()"
+        <button @click="adminStrategyTab='sell_straddle'"
                 class="font-display font-bold text-xs px-4 py-2.5 transition-all"
                 :style="adminStrategyTab==='sell_straddle'
                   ? 'color:var(--t-cyan);background:rgba(var(--t-cyan-rgb),0.08);border-bottom:2px solid var(--t-cyan)'
                   : 'color:var(--t-muted);border-bottom:2px solid transparent'">
           SELL STRADDLE
-        </button>
-        <button @click="adminStrategyTab='v4_cascade'; startV4TrapPoll()"
-                class="font-display font-bold text-xs px-4 py-2.5 transition-all"
-                :style="adminStrategyTab==='v4_cascade'
-                  ? 'color:var(--t-cyan);background:rgba(var(--t-cyan-rgb),0.08);border-bottom:2px solid var(--t-cyan)'
-                  : 'color:var(--t-muted);border-bottom:2px solid transparent'">
-          V4 CASCADE
         </button>
         <button @click="adminStrategyTab='d1_trap'"
                 class="font-display font-bold text-xs px-4 py-2.5 transition-all"
@@ -4397,121 +4236,6 @@ function amoTest() {
         </button>
         <div class="ml-auto flex items-center px-3">
           <span class="font-mono text-xs" style="color:var(--t-muted)" x-text="adminSelectedIndex"></span>
-        </div>
-      </div>
-
-      <!-- ══ V4 CASCADE admin panel ═══════════════════════════════════════ -->
-      <!-- On/off control reuses the SAME per-deployment Run/Stop toggle every
-           strategy (including sell_straddle) already has — no separate
-           global switch here; start/stop v4_cascade for a client the same
-           way you start/stop their sell_straddle deployment. -->
-      <div x-show="adminStrategyTab==='v4_cascade'" class="p-4 flex flex-col gap-3">
-        <div class="grid grid-cols-3 gap-2 items-end t-card rounded p-3">
-          <div>
-            <label class="sec-label">Deploy ID (for force-ingest / override)</label>
-            <input type="text" class="t-input mt-0.5" placeholder="{client}_{binding}_v4_cascade_NIFTY"
-                   x-model="v4CascadeDeployId">
-          </div>
-          <div>
-            <label class="sec-label">CE Strike Override (0=auto)</label>
-            <input type="number" class="t-input mt-0.5" x-model.number="v4CascadeCeOverride">
-          </div>
-          <div>
-            <label class="sec-label">PE Strike Override (0=auto)</label>
-            <input type="number" class="t-input mt-0.5" x-model.number="v4CascadePeOverride">
-          </div>
-        </div>
-        <div class="flex gap-2">
-          <button @click="forceIngestV4Cascade()" class="t-btn font-display font-bold text-xs px-4 py-2 rounded">
-            Force Ingest Zones
-          </button>
-          <button @click="lockV4CascadeContract()" class="t-btn font-display font-bold text-xs px-4 py-2 rounded">
-            Apply Strike Override
-          </button>
-        </div>
-        <div x-show="v4CascadeMsg" class="rounded px-3 py-2 font-mono text-xs"
-             :style="`background:${v4CascadeOk?'rgba(16,185,129,0.1)':'rgba(239,68,68,0.1)'};border:1px solid ${v4CascadeOk?'rgba(16,185,129,0.3)':'rgba(239,68,68,0.3)'};color:${v4CascadeOk?'var(--t-green)':'var(--t-red)'}`"
-             x-text="v4CascadeMsg"></div>
-
-        <!-- ── Live Trap Status grid + active-trade table ─────────────────── -->
-        <div class="t-card rounded p-3">
-          <div class="flex items-center justify-between mb-2">
-            <div class="font-display font-bold text-xs" style="color:var(--t-text)">Live Trap Status</div>
-            <button @click="refreshV4TrapStatus()" class="t-btn font-mono text-xs px-3 py-1 rounded">Refresh</button>
-          </div>
-          <!-- Index gate summary (2026-07-20: Gate 1 lives on the 75m Index/Futures
-               chart now, separate from the per-side premium zones table below). -->
-          <template x-if="v4IndexGate && v4IndexGate.kind!=='none'">
-            <div class="mb-2 text-xs font-mono" style="color:var(--t-muted)">
-              Index (75m): <span style="color:var(--t-text)" x-text="v4IndexGate.kind"></span>
-              <span x-text="v4IndexGate.armed_side ? (' armed '+v4IndexGate.armed_side) : ''"></span>
-              <template x-if="v4IndexGate.ref_ts"><span> · ref <span style="color:var(--t-text)" x-text="v4IndexGate.ref_ts"></span></span></template>
-              <template x-if="v4IndexGate.confirmed_ts"><span> · confirmed <span style="color:var(--t-text)" x-text="v4IndexGate.confirmed_ts"></span></span></template>
-            </div>
-          </template>
-          <!-- z.model discriminates legacy_two_stage (crypto, HTF+MTF columns) vs
-               index_gated (NIFTY/CRUDEOIL, single ref/entry/sl/timeframe) rows --
-               both render into the same table, unused cells show '—' per row. -->
-          <div class="overflow-x-auto">
-            <table class="w-full font-mono text-xs">
-              <thead>
-                <tr style="color:var(--t-muted)">
-                  <th class="text-left px-1 py-1">Side</th>
-                  <th class="text-left px-1 py-1">Gate State</th>
-                  <th class="text-left px-1 py-1">TF</th>
-                  <th class="text-left px-1 py-1">HTF Ref</th>
-                  <th class="text-right px-1 py-1">HTF Entry</th>
-                  <th class="text-right px-1 py-1">HTF SL</th>
-                  <th class="text-left px-1 py-1">MTF Ref</th>
-                  <th class="text-right px-1 py-1">MTF Entry</th>
-                  <th class="text-right px-1 py-1">Inner Zone Low</th>
-                  <th class="text-right px-1 py-1">Gate 3 Sweep Level</th>
-                  <th class="text-right px-1 py-1">Live Price</th>
-                  <th class="text-right px-1 py-1">Distance to Trap</th>
-                </tr>
-              </thead>
-              <tbody>
-                <template x-for="z in v4TrapZones" :key="z.side+(z.htf_ref_ts||z.ref_ts)">
-                  <tr style="border-top:1px solid var(--t-border)">
-                    <td class="px-1 py-1" x-text="z.side"></td>
-                    <td class="px-1 py-1" style="color:var(--t-cyan)" x-text="z.state"></td>
-                    <td class="px-1 py-1" x-text="z.timeframe ? (z.timeframe+'m') : '75m'"></td>
-                    <td class="px-1 py-1" x-text="z.htf_ref_ts || z.ref_ts || '—'"></td>
-                    <td class="text-right px-1 py-1" x-text="((z.htf_entry!=null?z.htf_entry:z.entry)||0).toFixed(2)"></td>
-                    <td class="text-right px-1 py-1" x-text="((z.htf_sl!=null?z.htf_sl:z.sl)||0).toFixed(2)"></td>
-                    <td class="px-1 py-1" x-text="z.mtf_ref_ts || '—'"></td>
-                    <td class="text-right px-1 py-1" x-text="z.mtf_entry ? z.mtf_entry.toFixed(2) : (z.zone_high ? z.zone_high.toFixed(2) : '—')"></td>
-                    <td class="text-right px-1 py-1" x-text="z.inner_zone_low ? z.inner_zone_low.toFixed(2) : (z.zone_low ? z.zone_low.toFixed(2) : '—')"></td>
-                    <td class="text-right px-1 py-1" x-text="z.limit_entry_price ? z.limit_entry_price.toFixed(2) : '—'"></td>
-                    <td class="text-right px-1 py-1" x-text="z.live_price ? z.live_price.toFixed(2) : '—'"></td>
-                    <td class="text-right px-1 py-1"
-                        :style="`color:${(z.distance_to_trap||0)<0?'var(--t-red)':'var(--t-green)'}`"
-                        x-text="z.distance_to_trap!=null ? z.distance_to_trap.toFixed(2) : '—'"></td>
-                  </tr>
-                </template>
-                <tr x-show="!v4TrapZones.length"><td colspan="9" class="text-center py-2" style="color:var(--t-muted)">No unmitigated zones in memory.</td></tr>
-              </tbody>
-            </table>
-          </div>
-
-          <div x-show="v4TrapPosition" class="mt-3 rounded p-2" style="background:var(--t-surface);border:1px solid var(--t-border)">
-            <div class="font-display font-bold text-xs mb-1" style="color:var(--t-text)">Active Position</div>
-            <div class="grid grid-cols-4 gap-2 font-mono text-xs">
-              <div><span style="color:var(--t-muted)">Side:</span> <span x-text="v4TrapPosition && v4TrapPosition.side"></span></div>
-              <div><span style="color:var(--t-muted)">Entry:</span> <span x-text="v4TrapPosition && (v4TrapPosition.entry_price||0).toFixed(2)"></span></div>
-              <div><span style="color:var(--t-muted)">Live LTP:</span> <span x-text="v4TrapPosition && (v4TrapPosition.live_ltp||0).toFixed(2)"></span></div>
-              <div><span style="color:var(--t-muted)">SL:</span> <span style="color:var(--t-red)" x-text="v4TrapPosition && (v4TrapPosition.sl_price||0).toFixed(2)"></span></div>
-              <div><span style="color:var(--t-muted)">Target A/B1/B2:</span> <span style="color:var(--t-green)" x-text="v4TrapPosition && (v4TrapPosition.target_price||0).toFixed(2)"></span></div>
-              <div><span style="color:var(--t-muted)">Dist to SL:</span> <span x-text="v4TrapPosition && v4TrapPosition.distance_to_sl!=null ? v4TrapPosition.distance_to_sl.toFixed(2) : '—'"></span></div>
-              <div><span style="color:var(--t-muted)">Dist to Target:</span> <span x-text="v4TrapPosition && v4TrapPosition.distance_to_target!=null ? v4TrapPosition.distance_to_target.toFixed(2) : '—'"></span></div>
-              <div><span style="color:var(--t-muted)">T1/T2 status:</span> <span x-text="v4TrapPosition && (v4TrapPosition.t1_status+'/'+v4TrapPosition.t2_status)"></span></div>
-              <div><span style="color:var(--t-muted)">Unrealized P&L:</span>
-                <span :style="`color:${(v4TrapPosition&&v4TrapPosition.unrealized_pnl||0)<0?'var(--t-red)':'var(--t-green)'}`"
-                      x-text="v4TrapPosition && v4TrapPosition.unrealized_pnl!=null ? v4TrapPosition.unrealized_pnl.toFixed(4) : '—'"></span>
-                <span style="color:var(--t-dim)" x-text="v4TrapPosition && v4TrapPosition.contract_value!=1 ? '(cv='+v4TrapPosition.contract_value+')' : ''"></span>
-              </div>
-            </div>
-          </div>
         </div>
       </div>
 
@@ -6147,373 +5871,6 @@ function amoTest() {
 
   </div><!-- end trap tab -->
 
-  <!-- ════════════════════════════════════════════
-       STOCKS TAB — FnO Stock Scanner Morning Alerts
-  ════════════════════════════════════════════════ -->
-  <div x-show="adminTab === 'stocks'" class="flex flex-col gap-3 p-3">
-
-    <!-- Header bar -->
-    <div class="flex flex-wrap items-center gap-3 justify-between">
-      <div class="font-mono text-sm font-bold" style="color:var(--t-fg)">
-        FnO STOCK SCANNER
-        <span class="ml-2 font-normal text-xs" style="color:var(--t-muted)"
-              x-text="stockScan.scan_date ? 'Scan: ' + stockScan.scan_date : 'No scan yet'"></span>
-      </div>
-      <div class="flex items-center gap-3 flex-wrap">
-        <!-- NIFTY bias info -->
-        <span x-show="stockScan.nifty_bias" class="font-mono text-xs px-2 py-0.5 rounded"
-              style="color:var(--t-muted);border:1px solid var(--t-border)"
-              x-text="'NIFTY ' + (stockScan.nifty_close||0).toFixed(0) + ' → ' + stockScan.nifty_bias + ' BIAS'">
-        </span>
-        <!-- NIFTY bias toggle -->
-        <label class="flex items-center gap-1.5 font-mono text-xs cursor-pointer" style="color:var(--t-muted)">
-          <input type="checkbox" x-model="stockScanBiasToggle" class="w-3 h-3">
-          NIFTY filter
-        </label>
-        <!-- Refresh button -->
-        <button @click="loadStockScan()" :disabled="stockScanRunning"
-                class="font-mono text-xs px-2 py-1 rounded"
-                style="border:1px solid var(--t-border);color:var(--t-muted)">
-          &#x21BB;
-        </button>
-        <!-- Run scan button -->
-        <button @click="runStockScan()" :disabled="stockScanRunning"
-                class="font-mono text-xs px-3 py-1 rounded font-bold"
-                :style="stockScanRunning ? 'opacity:0.5;cursor:not-allowed;background:rgba(var(--t-accent-rgb),0.15);color:var(--t-accent);border:1px solid rgba(var(--t-accent-rgb),0.3)' : 'background:rgba(var(--t-accent-rgb),0.15);color:var(--t-accent);border:1px solid rgba(var(--t-accent-rgb),0.3)'">
-          <span x-show="!stockScanRunning">&#x25B6; RUN SCAN</span>
-          <span x-show="stockScanRunning">&#x23F3; SCANNING… (2-3 min)</span>
-        </button>
-      </div>
-    </div>
-
-    <!-- Error -->
-    <div x-show="stockScan.error" class="font-mono text-xs px-3 py-2 rounded"
-         style="background:rgba(var(--t-red-rgb),0.1);color:var(--t-red)"
-         x-text="stockScan.error"></div>
-
-    <!-- No results -->
-    <div x-show="stockScan.loaded && !stockScan.error && (!stockScan.stocks || stockScan.stocks.length === 0)"
-         class="font-mono text-xs" style="color:var(--t-muted)">
-      No qualifying stocks — no fresh zones (≤15 days) approaching from the correct side with R:R ≥ 1.5
-    </div>
-
-    <!-- ── FnO Intraday Alerts ─────────────────────────────────────── -->
-    <template x-if="fnoAlerts.length > 0">
-      <div class="mb-6">
-        <h3 class="text-yellow-400 font-bold text-sm mb-2">⚡ INTRADAY SIGNALS</h3>
-        <template x-for="a in fnoAlerts" :key="a.uid">
-          <div class="border rounded-lg p-4 mb-3"
-               :class="a.direction==='CE' ? 'border-green-600 bg-green-950' : 'border-red-600 bg-red-950'">
-            <div class="flex justify-between items-center mb-2">
-              <span class="font-bold text-white text-base" x-text="a.symbol"></span>
-              <span class="text-xs font-bold px-2 py-0.5 rounded"
-                    :class="a.direction==='CE' ? 'bg-green-700 text-green-100' : 'bg-red-700 text-red-100'"
-                    x-text="'▲ BUY ' + a.direction + ' SIGNAL'"></span>
-              <span class="text-yellow-300 font-bold text-sm" x-text="'R:R ' + a.rr_ratio.toFixed(1) + '×'"></span>
-            </div>
-            <div class="grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-gray-300">
-              <div>D1 Zone</div>
-              <div x-text="'₹' + a.d1_zone_low.toFixed(0) + ' – ' + a.d1_zone_high.toFixed(0) + ' (' + a.d1_zone_date + ')'"></div>
-              <div>Spot Now</div>
-              <div x-text="'₹' + a.spot_price.toFixed(1)"></div>
-              <div>Strike</div>
-              <div x-text="a.strike + ' ' + a.direction + ' (lot ' + a.lot_size + ')'"></div>
-              <div>SL (spot)</div>
-              <div x-text="'₹' + a.sl.toFixed(0) + '  risk ₹' + a.risk_pts.toFixed(0) + '/share'"></div>
-              <div>Target T1</div>
-              <div x-text="'₹' + a.t1.toFixed(0) + '  reward ₹' + a.reward_pts.toFixed(0) + '/share'"></div>
-              <div>MTF 15m</div>
-              <div x-text="'Trapped at ₹' + a.mtf_trap_price.toFixed(1) + ' ✓'" class="text-green-400"></div>
-              <div>LTF 5m</div>
-              <div x-text="'Trapped at ₹' + a.ltf_trap_price.toFixed(1) + ' ✓'" class="text-green-400"></div>
-            </div>
-            <div class="mt-3 text-right">
-              <button @click="notifyAlert(a.uid)"
-                      class="text-xs px-3 py-1 bg-gray-700 hover:bg-gray-600 rounded text-gray-200">
-                Notified ✓
-              </button>
-            </div>
-          </div>
-        </template>
-      </div>
-    </template>
-
-    <!-- CE section -->
-    <!-- Live intraday monitor status (updates every 3s via WebSocket) -->
-    <template x-if="fnoStocks.length > 0">
-      <div class="flex flex-col gap-2">
-        <div class="font-mono text-xs font-bold px-1" style="color:var(--t-amber)">⚡ LIVE MONITOR — Intraday MTF/LTF Cascade</div>
-        <div class="grid gap-2" style="grid-template-columns: repeat(auto-fill, minmax(320px, 1fr))">
-          <template x-for="s in fnoStocks" :key="s.symbol">
-            <div class="rounded border p-3 font-mono text-xs flex flex-col gap-1.5"
-                 :style="s.mtf_state === 'TRAPPED ✓'
-                   ? 'background:var(--t-surface);border-color:rgba(var(--t-amber-rgb),0.5)'
-                   : 'background:var(--t-surface);border-color:var(--t-border)'">
-              <!-- Header -->
-              <div class="flex items-center justify-between">
-                <div class="flex items-center gap-2">
-                  <span class="font-bold text-sm" style="color:var(--t-fg)" x-text="s.symbol"></span>
-                  <span class="text-xs font-bold"
-                        :style="s.direction==='CE' ? 'color:var(--t-green)' : 'color:var(--t-red)'"
-                        x-text="'▲ BUY ' + s.direction"></span>
-                </div>
-                <span class="font-bold text-sm" style="color:var(--t-fg)"
-                      x-text="s.ltp > 0 ? '₹' + s.ltp.toFixed(2) : '—'"></span>
-              </div>
-              <!-- MTF / LTF state -->
-              <div class="flex gap-2">
-                <span class="px-2 py-0.5 rounded text-xs font-bold"
-                      :style="s.mtf_state === 'TRAPPED ✓'
-                        ? 'color:var(--t-amber);background:rgba(var(--t-amber-rgb),0.15);border:1px solid rgba(var(--t-amber-rgb),0.4)'
-                        : 'color:var(--t-muted);background:rgba(128,128,128,0.1);border:1px solid var(--t-border)'"
-                      x-text="'MTF 15m: ' + s.mtf_state"></span>
-                <span class="px-2 py-0.5 rounded text-xs font-bold"
-                      :style="s.ltf_state === 'ARMED'
-                        ? 'color:var(--t-green);background:rgba(var(--t-green-rgb),0.15);border:1px solid rgba(var(--t-green-rgb),0.4)'
-                        : 'color:var(--t-muted);background:rgba(128,128,128,0.1);border:1px solid var(--t-border)'"
-                      x-text="'LTF 5m: ' + s.ltf_state"></span>
-              </div>
-              <!-- SL / T1 / candle counts -->
-              <div class="flex justify-between" style="color:var(--t-muted)">
-                <span>SL <span style="color:var(--t-red)" x-text="'₹' + (s.sl||0).toFixed(0)"></span>
-                  &nbsp;/&nbsp;T1 <span style="color:var(--t-green)" x-text="'₹' + (s.t1||0).toFixed(0)"></span>
-                  &nbsp;R:R <span style="color:var(--t-fg)" x-text="(s.rr_ratio||0).toFixed(1) + '×'"></span>
-                </span>
-                <span x-text="'5m:' + s.bars_5m + ' 15m:' + s.bars_15m + ' bars'"></span>
-              </div>
-            </div>
-          </template>
-        </div>
-      </div>
-    </template>
-
-    <template x-if="stockScan.ce_stocks && stockScan.ce_stocks.length > 0">
-      <div class="flex flex-col gap-2">
-        <div class="font-mono text-xs font-bold px-1" style="color:var(--t-green)">▲ BUY CE — Bear zones (bears trapped → stock up)</div>
-        <div class="grid gap-3" style="grid-template-columns: repeat(auto-fill, minmax(300px, 1fr))">
-          <template x-for="s in stockScan.ce_stocks" :key="s.symbol + '_CE'">
-            <div class="rounded border p-3 font-mono text-xs flex flex-col gap-1.5"
-                 style="background:var(--t-surface);border-color:rgba(var(--t-green-rgb),0.2)">
-              <div class="flex items-center justify-between">
-                <div class="flex items-center gap-2">
-                  <span class="font-bold text-sm" style="color:var(--t-fg)" x-text="s.symbol"></span>
-                  <span class="text-xs" style="color:var(--t-green)">▲ CE</span>
-                </div>
-                <span class="text-xs px-2 py-0.5 rounded font-bold"
-                      :style="s.rr_ratio >= 2.5
-                        ? 'color:var(--t-green);background:rgba(var(--t-green-rgb),0.15);border:1px solid rgba(var(--t-green-rgb),0.3)'
-                        : 'color:var(--t-amber);background:rgba(var(--t-amber-rgb),0.12);border:1px solid rgba(var(--t-amber-rgb),0.3)'"
-                      x-text="'R:R ' + (s.rr_ratio||0).toFixed(1) + '\xd7'"></span>
-              </div>
-              <div class="flex justify-between" style="color:var(--t-muted)">
-                <span>D1 Zone</span>
-                <span style="color:var(--t-fg)" x-text="'&#x20B9;' + (s.zone_low||0).toFixed(0) + ' – ' + (s.zone_high||0).toFixed(0) + '  (' + (s.zone_date||'?') + ')'"></span>
-              </div>
-              <div class="flex justify-between" style="color:var(--t-muted)">
-                <span>Last Close</span>
-                <span style="color:var(--t-fg)" x-text="'&#x20B9;' + (s.last_close||0).toFixed(0) + '  (' + (s.zone_distance_pct||0).toFixed(1) + '% below zone)'"></span>
-              </div>
-              <div class="flex justify-between" style="color:var(--t-muted)">
-                <span>SL / T1</span>
-                <span><span style="color:var(--t-red)" x-text="'&#x20B9;' + (s.stock_sl||0).toFixed(0)"></span><span style="color:var(--t-muted)"> / </span><span style="color:var(--t-green)" x-text="'&#x20B9;' + (s.stock_t1||0).toFixed(0)"></span></span>
-              </div>
-              <div class="flex justify-between" style="color:var(--t-muted)">
-                <span>Strike</span>
-                <span style="color:var(--t-fg)" x-text="(s.suggested_strike||'—') + ' CE  (lot ' + (s.lot_size||'?') + ')'"></span>
-              </div>
-              <div class="flex justify-between pt-1 border-t" style="border-color:var(--t-border);color:var(--t-muted)">
-                <span x-text="'Formed ' + (s.zone_date||'?') + '  |  Tests: ' + (s.zone_tests||0)"></span>
-                <span x-text="'risk &#x20B9;' + (s.risk_pts||0).toFixed(0) + ' / reward &#x20B9;' + (s.reward_pts||0).toFixed(0)"></span>
-              </div>
-            </div>
-          </template>
-        </div>
-      </div>
-    </template>
-
-    <!-- PE section -->
-    <template x-if="stockScan.pe_stocks && stockScan.pe_stocks.length > 0">
-      <div class="flex flex-col gap-2">
-        <div class="font-mono text-xs font-bold px-1" style="color:var(--t-red)">▼ BUY PE — Bull zones (bulls trapped → stock down)</div>
-        <div class="grid gap-3" style="grid-template-columns: repeat(auto-fill, minmax(300px, 1fr))">
-          <template x-for="s in stockScan.pe_stocks" :key="s.symbol + '_PE'">
-            <div class="rounded border p-3 font-mono text-xs flex flex-col gap-1.5"
-                 style="background:var(--t-surface);border-color:rgba(var(--t-red-rgb),0.2)">
-              <div class="flex items-center justify-between">
-                <div class="flex items-center gap-2">
-                  <span class="font-bold text-sm" style="color:var(--t-fg)" x-text="s.symbol"></span>
-                  <span class="text-xs" style="color:var(--t-red)">▼ PE</span>
-                </div>
-                <span class="text-xs px-2 py-0.5 rounded font-bold"
-                      :style="s.rr_ratio >= 2.5
-                        ? 'color:var(--t-green);background:rgba(var(--t-green-rgb),0.15);border:1px solid rgba(var(--t-green-rgb),0.3)'
-                        : 'color:var(--t-amber);background:rgba(var(--t-amber-rgb),0.12);border:1px solid rgba(var(--t-amber-rgb),0.3)'"
-                      x-text="'R:R ' + (s.rr_ratio||0).toFixed(1) + '\xd7'"></span>
-              </div>
-              <div class="flex justify-between" style="color:var(--t-muted)">
-                <span>D1 Zone</span>
-                <span style="color:var(--t-fg)" x-text="'&#x20B9;' + (s.zone_low||0).toFixed(0) + ' – ' + (s.zone_high||0).toFixed(0) + '  (' + (s.zone_date||'?') + ')'"></span>
-              </div>
-              <div class="flex justify-between" style="color:var(--t-muted)">
-                <span>Last Close</span>
-                <span style="color:var(--t-fg)" x-text="'&#x20B9;' + (s.last_close||0).toFixed(0) + '  (' + (s.zone_distance_pct||0).toFixed(1) + '% above zone)'"></span>
-              </div>
-              <div class="flex justify-between" style="color:var(--t-muted)">
-                <span>SL / T1</span>
-                <span><span style="color:var(--t-red)" x-text="'&#x20B9;' + (s.stock_sl||0).toFixed(0)"></span><span style="color:var(--t-muted)"> / </span><span style="color:var(--t-green)" x-text="'&#x20B9;' + (s.stock_t1||0).toFixed(0)"></span></span>
-              </div>
-              <div class="flex justify-between" style="color:var(--t-muted)">
-                <span>Strike</span>
-                <span style="color:var(--t-fg)" x-text="(s.suggested_strike||'—') + ' PE  (lot ' + (s.lot_size||'?') + ')'"></span>
-              </div>
-              <div class="flex justify-between pt-1 border-t" style="border-color:var(--t-border);color:var(--t-muted)">
-                <span x-text="'Formed ' + (s.zone_date||'?') + '  |  Tests: ' + (s.zone_tests||0)"></span>
-                <span x-text="'risk &#x20B9;' + (s.risk_pts||0).toFixed(0) + ' / reward &#x20B9;' + (s.reward_pts||0).toFixed(0)"></span>
-              </div>
-            </div>
-          </template>
-        </div>
-      </div>
-    </template>
-
-  </div><!-- end stocks tab -->
-
-  <!-- ════════════════════════════════════════════
-       FNO POSITIONS TAB — Positional option trades
-  ════════════════════════════════════════════════ -->
-  <div x-show="adminTab === 'fno_pos'" class="flex flex-col gap-3 p-3">
-
-    <!-- Header -->
-    <div class="flex flex-wrap items-center gap-3 justify-between">
-      <div class="font-mono text-sm font-bold" style="color:var(--t-fg)">FnO POSITIONAL POSITIONS</div>
-      <button @click="loadFnoPositions()" class="font-mono text-xs px-2 py-1 rounded"
-              style="border:1px solid var(--t-border);color:var(--t-muted)">&#x21BB; REFRESH</button>
-    </div>
-
-    <!-- No books -->
-    <div x-show="fnoBooks.length === 0"
-         class="font-mono text-xs p-3 rounded" style="color:var(--t-muted);border:1px solid var(--t-border)">
-      No FnO positional books active. Deploy strategy <strong>fno_positional</strong> on a binding to start.
-    </div>
-
-    <!-- Per-book section -->
-    <template x-for="book in fnoBooks" :key="book.client_id + '_' + book.binding_id">
-      <div class="t-card rounded p-3 flex flex-col gap-2">
-        <!-- Book header -->
-        <div class="flex items-center gap-3 flex-wrap">
-          <span class="font-mono text-xs font-bold" style="color:var(--t-fg)"
-                x-text="book.client_id + ' / ' + book.binding_id"></span>
-          <span class="font-mono text-xs px-2 py-0.5 rounded"
-                :style="book.mode==='live' ? 'color:var(--t-green);border:1px solid rgba(var(--t-green-rgb),0.4)' : 'color:var(--t-amber);border:1px solid rgba(var(--t-amber-rgb),0.4)'"
-                x-text="book.mode.toUpperCase()"></span>
-          <span class="font-mono text-xs" style="color:var(--t-muted)"
-                x-text="'Slots ' + book.open_count + '/' + book.max_slots + '  |  Pending: ' + book.pending_count"></span>
-        </div>
-
-        <!-- No positions -->
-        <div x-show="!book.positions || book.positions.length === 0"
-             class="font-mono text-xs" style="color:var(--t-muted)">No positions yet.</div>
-
-        <!-- Positions table -->
-        <div x-show="book.positions && book.positions.length > 0" class="overflow-x-auto">
-          <table class="font-mono text-xs w-full" style="border-collapse:collapse">
-            <thead>
-              <tr style="color:var(--t-muted);border-bottom:1px solid var(--t-border)">
-                <th class="text-left py-1 pr-3">Stock</th>
-                <th class="text-left py-1 pr-3">Type</th>
-                <th class="text-right py-1 pr-3">Strike</th>
-                <th class="text-right py-1 pr-3">Entry</th>
-                <th class="text-right py-1 pr-3">LTP</th>
-                <th class="text-right py-1 pr-3">P&amp;L</th>
-                <th class="text-right py-1 pr-3">Spot</th>
-                <th class="text-right py-1 pr-3">SL</th>
-                <th class="text-right py-1 pr-3">T1</th>
-                <th class="text-left py-1 pr-3">Status</th>
-                <th class="text-left py-1 pr-3">Reason</th>
-              </tr>
-            </thead>
-            <tbody>
-              <template x-for="pos in book.positions" :key="pos.slot_id">
-                <tr :style="pos.status==='CLOSED' ? 'opacity:0.55' : ''"
-                    style="border-bottom:1px solid rgba(var(--t-border-rgb),0.4)">
-                  <td class="py-1 pr-3 font-bold" x-text="pos.symbol"></td>
-                  <td class="py-1 pr-3"
-                      :style="pos.direction==='CE' ? 'color:var(--t-green)' : 'color:var(--t-red)'"
-                      x-text="pos.direction + ' ' + pos.expiry_str"></td>
-                  <td class="py-1 pr-3 text-right" x-text="pos.strike"></td>
-                  <td class="py-1 pr-3 text-right" x-text="(pos.entry_ltp||0).toFixed(2)"></td>
-                  <td class="py-1 pr-3 text-right" x-text="(pos.current_ltp||0).toFixed(2)"></td>
-                  <td class="py-1 pr-3 text-right font-bold"
-                      :style="(pos.pnl||0) >= 0 ? 'color:var(--t-green)' : 'color:var(--t-red)'"
-                      x-text="((pos.pnl||0) >= 0 ? '+' : '') + (pos.pnl||0).toFixed(0)"></td>
-                  <td class="py-1 pr-3 text-right" x-text="(pos.current_spot||0).toFixed(1)"></td>
-                  <td class="py-1 pr-3 text-right" style="color:var(--t-red)"
-                      x-text="(pos.spot_sl||0).toFixed(1)"></td>
-                  <td class="py-1 pr-3 text-right" style="color:var(--t-green)"
-                      x-text="(pos.day_t1||0).toFixed(1)"></td>
-                  <td class="py-1 pr-3" style="color:var(--t-muted)" x-text="pos.status"></td>
-                  <td class="py-1 pr-3" style="color:var(--t-muted)" x-text="pos.close_reason||'-'"></td>
-                </tr>
-              </template>
-            </tbody>
-          </table>
-        </div>
-
-        <!-- T1 alert banner -->
-        <template x-if="book.positions && book.positions.some(p => p.t1_alerted && p.status === 'OPEN')">
-          <div class="font-mono text-xs px-3 py-2 rounded font-bold"
-               style="background:rgba(var(--t-green-rgb),0.08);color:var(--t-green);border:1px solid rgba(var(--t-green-rgb),0.3)">
-            &#x1F4A1; T1 HIT — awaiting action — on:
-            <span x-text="(book.positions||[]).filter(p => p.t1_alerted && p.status==='OPEN').map(p => p.symbol).join(', ')"></span>
-            (consider adding hedge option, or manually close — T1 does not auto-close)
-          </div>
-        </template>
-
-        <!-- Pending watchlist (today's scanned candidates not yet entered) -->
-        <div x-show="book.pending && book.pending.length > 0" class="overflow-x-auto mt-1">
-          <div class="font-mono text-xs mb-1" style="color:var(--t-muted)">
-            WATCHLIST — <span x-text="book.pending.length"></span> pending
-          </div>
-          <table class="font-mono text-xs w-full" style="border-collapse:collapse">
-            <thead>
-              <tr style="color:var(--t-muted);border-bottom:1px solid var(--t-border)">
-                <th class="text-left py-1 pr-3">Stock</th>
-                <th class="text-left py-1 pr-3">Dir</th>
-                <th class="text-left py-1 pr-3">Status</th>
-                <th class="text-right py-1 pr-3">Entry</th>
-                <th class="text-right py-1 pr-3">SL</th>
-                <th class="text-right py-1 pr-3">T1</th>
-                <th class="text-right py-1 pr-3">Dist%</th>
-                <th class="text-right py-1 pr-3">B-R:R</th>
-                <th class="text-left py-1 pr-3"></th>
-              </tr>
-            </thead>
-            <tbody>
-              <template x-for="sig in book.pending" :key="sig.symbol + sig.direction">
-                <tr :style="sig.blocked ? 'opacity:0.5' : ''"
-                    style="border-bottom:1px solid rgba(var(--t-border-rgb),0.4)">
-                  <td class="py-1 pr-3 font-bold" x-text="sig.symbol"></td>
-                  <td class="py-1 pr-3"
-                      :style="sig.direction==='CE' ? 'color:var(--t-green)' : 'color:var(--t-red)'"
-                      x-text="sig.direction"></td>
-                  <td class="py-1 pr-3" style="color:var(--t-muted)" x-text="sig.status"></td>
-                  <td class="py-1 pr-3 text-right" x-text="sig.entry_line.toFixed(2)"></td>
-                  <td class="py-1 pr-3 text-right" style="color:var(--t-red)" x-text="sig.hard_sl.toFixed(2)"></td>
-                  <td class="py-1 pr-3 text-right" style="color:var(--t-green)" x-text="sig.day_t1.toFixed(2)"></td>
-                  <td class="py-1 pr-3 text-right" x-text="sig.dist_pct.toFixed(2) + '%'"></td>
-                  <td class="py-1 pr-3 text-right" x-text="sig.btst_rr.toFixed(2)"></td>
-                  <td class="py-1 pr-3 text-xs" style="color:var(--t-amber)"
-                      x-text="sig.blocked ? 'BLOCKED (stale/stopped)' : ''"></td>
-                </tr>
-              </template>
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </template>
-
-  </div><!-- end fno_pos tab -->
-
   <!-- ════════════════════ CLIENT PROFILES TAB ══════════════════════════════ -->
   <div x-show="adminTab === 'clients'" class="flex flex-col gap-3 flex-1">
 
@@ -7350,7 +6707,7 @@ function amoTest() {
                       <span class="text-xs px-2 py-0.5 rounded font-mono"
                             style="background:rgba(var(--t-cyan-rgb),0.06);border:1px solid rgba(var(--t-cyan-rgb),0.15);color:var(--t-cyan)"
                             :title="'This deployment places orders as '+(dep.product_type||'MIS')+' — the account badge above is only a fallback default, not per-strategy.'"
-                            x-text="(dep.strategy_name==='v4_cascade'?'V4':dep.strategy_name==='fno_positional'?'FNO':dep.strategy_name==='hourly_breakout'?'HB':dep.strategy_name==='d1_trap_option'?'D1':' SS')+' · '+(dep.underlying==='ALL_FNO'?'All FnO':dep.underlying)+' · '+(dep.product_type||'MIS')"></span>
+                            x-text="(dep.strategy_name==='d1_trap_option'?'D1':' SS')+' · '+(dep.underlying==='ALL_FNO'?'All FnO':dep.underlying)+' · '+(dep.product_type||'MIS')"></span>
                     </template>
                     <span x-show="!(clientDeployments||[]).some(d=>d.binding_id===b.binding_id)"
                           class="text-xs" style="color:var(--t-muted)">No strategies deployed</span>
@@ -7571,7 +6928,7 @@ function amoTest() {
                       <span class="text-xs px-2 py-0.5 rounded font-mono"
                             style="background:rgba(var(--t-cyan-rgb),0.06);border:1px solid rgba(var(--t-cyan-rgb),0.15);color:var(--t-cyan)"
                             :title="'This deployment places orders as '+(dep.product_type||'MIS')+' — the account badge above is only a fallback default, not per-strategy.'"
-                            x-text="(dep.strategy_name==='v4_cascade'?'V4':dep.strategy_name==='fno_positional'?'FNO':dep.strategy_name==='hourly_breakout'?'HB':dep.strategy_name==='d1_trap_option'?'D1':' SS')+' · '+(dep.underlying==='ALL_FNO'?'All FnO':dep.underlying)+' · '+(dep.product_type||'MIS')"></span>
+                            x-text="(dep.strategy_name==='d1_trap_option'?'D1':' SS')+' · '+(dep.underlying==='ALL_FNO'?'All FnO':dep.underlying)+' · '+(dep.product_type||'MIS')"></span>
                     </template>
                     <span x-show="!(clientDeployments||[]).some(d=>d.binding_id===b.binding_id)"
                           class="text-xs" style="color:var(--t-muted)">No strategies deployed</span>
@@ -7673,7 +7030,7 @@ function amoTest() {
                         <span class="absolute top-0.5 w-2.5 h-2.5 bg-white rounded-full shadow transition-all"
                               :style="depRunning(dep)?'left:16px':'left:2px'"></span>
                       </span>
-                      <span x-text="({sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'D1 Trap',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow',liquidity_sweep:'Liquidity Sweep',liquidity_trap:'Liquidity Trap'}[dep.strategy_name]||dep.strategy_name)+' · '+(dep.underlying==='ALL_FNO'?'All FnO Stocks':dep.underlying)+' — '+(depRunning(dep)?'RUNNING':'stopped')"></span>
+                      <span x-text="({sell_straddle:'Sell Straddle',d1_trap_option:'D1 Trap',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow',liquidity_sweep:'Liquidity Sweep',liquidity_trap:'Liquidity Trap'}[dep.strategy_name]||dep.strategy_name)+' · '+(dep.underlying==='ALL_FNO'?'All FnO Stocks':dep.underlying)+' — '+(depRunning(dep)?'RUNNING':'stopped')"></span>
                     </button>
                   </template>
                   <span x-show="!(clientDeployments||[]).some(d=>d.binding_id===b.binding_id)"
@@ -7795,12 +7152,12 @@ function amoTest() {
                 <div class="flex items-center gap-3">
                   <span class="font-mono text-xs font-bold px-2 py-0.5 rounded"
                         style="background:rgba(var(--t-cyan-rgb),0.12);color:var(--t-cyan)"
-                        x-text="({sell_straddle:'SS',v4_cascade:'V4',fno_positional:'FNO',hourly_breakout:'HB',d1_trap_option:'D1',d1_trap_index:'TI',d1_trap_fno:'TF',d1_trap_bear_only:'BT',d1_trap_sr:'SR',fvg:'FVG',oi_flow:'OIF',liquidity_sweep:'LSW',liquidity_trap:'LTR',oi_orb_screener:'ORB'})[dep.strategy_name]||'??'"></span>
+                        x-text="({sell_straddle:'SS',d1_trap_option:'D1',d1_trap_index:'TI',d1_trap_fno:'TF',d1_trap_bear_only:'BT',d1_trap_sr:'SR',fvg:'FVG',oi_flow:'OIF',liquidity_sweep:'LSW',liquidity_trap:'LTR',oi_orb_screener:'ORB'})[dep.strategy_name]||'??'"></span>
                   <div>
                     <div class="font-mono text-xs font-bold" style="color:var(--t-bright)"
-                         x-text="({sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'D1 Trap Option',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow',liquidity_sweep:'Liquidity Sweep',liquidity_trap:'Liquidity Trap'})[dep.strategy_name]||dep.strategy_name)+' · '+(dep.underlying==='ALL_FNO'?'All FnO Stocks':dep.underlying)"></div>
+                         x-text="({sell_straddle:'Sell Straddle',d1_trap_option:'D1 Trap Option',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow',liquidity_sweep:'Liquidity Sweep',liquidity_trap:'Liquidity Trap'})[dep.strategy_name]||dep.strategy_name)+' · '+(dep.underlying==='ALL_FNO'?'All FnO Stocks':dep.underlying)"></div>
                     <div class="font-mono text-xs" style="color:var(--t-muted)"
-                         x-text="(dep.strategy_name==='fno_positional'||dep.strategy_name==='d1_trap_fno')
+                         x-text="(dep.strategy_name==='d1_trap_fno')
                            ? 'Lots: '+dep.lot_multiplier+' · '+(dep.product_type||'NRML')
                            : 'Lots: '+dep.lot_multiplier+' · SQ: '+dep.squareoff_time"></div>
                   </div>
@@ -7882,10 +7239,6 @@ function amoTest() {
                           deployForm.product_type='MIS';
                           deployForm.underlying='SENSEX';
                           deployForm.squareoff_time='15:15';
-                        } else if(deployForm.strategy_name==='fno_positional'){
-                          deployForm.product_type='NRML';
-                          deployForm.underlying='FNO_STOCKS';
-                          deployForm.squareoff_time='';
                         } else if(deployForm.strategy_name==='oi_orb_screener'){
                           // No dedicated advanced-params UI yet -- '{}' (set
                           // below) lets OiOrbScreenerBookManager._parse_params()
@@ -7935,7 +7288,6 @@ function amoTest() {
                      Liquidity Trap deploy options removed -- fully stopped, direct
                      user decision. Backend also rejects these strategy_names now
                      (see allowed_strategies in ui_layer/dashboard_server.py). -->
-                <option value="fno_positional">FnO Positional (Swing, All FnO Stocks)</option>
                 <option value="oi_orb_screener">OI-ORB Screener (F&amp;O Stocks, EOD-only)</option>
                 <option value="cag_straddle">CAG Long Straddle (15:00-15:35 R1/S1 Breach)</option>
               </select>
@@ -7950,13 +7302,6 @@ function amoTest() {
                   <option value="ALL_FNO">All 30 FnO Stocks</option>
                 </select>
               </template>
-              <!-- FnO Positional: single sentinel underlying, no per-index choice -->
-              <template x-if="deployForm.strategy_name === 'fno_positional'">
-                <select class="t-input" x-model="deployForm.underlying"
-                        x-init="deployForm.underlying='FNO_STOCKS'" disabled>
-                  <option value="FNO_STOCKS">All FnO Stocks (offline watchlist scan)</option>
-                </select>
-              </template>
               <!-- OI-ORB Screener: single sentinel underlying -- the screener itself
                    picks real F&O stocks dynamically every day, not a per-index choice -->
               <template x-if="deployForm.strategy_name === 'oi_orb_screener'">
@@ -7965,7 +7310,7 @@ function amoTest() {
                   <option value="SCREENER">Screener-Selected Stocks (dynamic, daily)</option>
                 </select>
               </template>
-              <template x-if="deployForm.strategy_name !== 'd1_trap_fno' && deployForm.strategy_name !== 'fno_positional' && deployForm.strategy_name !== 'oi_orb_screener'">
+              <template x-if="deployForm.strategy_name !== 'd1_trap_fno' && deployForm.strategy_name !== 'oi_orb_screener'">
                 <select x-model="deployForm.underlying" class="t-input"
                         @change="
                           if(deployForm.strategy_name==='d1_trap_bear_only'){
@@ -8148,7 +7493,7 @@ function amoTest() {
               <p class="text-[10px] mt-0.5" style="color:var(--t-muted)" x-show="_crypto"
                  x-text="'1 contract = '+((deployForm.underlying||'').toUpperCase()==='ETH'?'0.01 ETH':'0.001 BTC')+'  →  '+((deployForm.lot_multiplier||0)*((deployForm.underlying||'').toUpperCase()==='ETH'?0.01:0.001)).toFixed(3)+' '+((deployForm.underlying||'').toUpperCase()||'BTC')"></p>
             </div>
-            <div x-show="deployForm.strategy_name !== 'fno_positional' && deployForm.strategy_name !== 'd1_trap_fno'">
+            <div x-show="deployForm.strategy_name !== 'd1_trap_fno'">
               <label class="sec-label mb-1">CARRY FORWARD</label>
               <div class="flex gap-2 mt-1">
                 <button type="button"
@@ -8170,7 +7515,7 @@ function amoTest() {
                 only if explicitly selected here.
               </p>
             </div>
-            <div x-show="deployForm.strategy_name !== 'fno_positional' && deployForm.strategy_name !== 'd1_trap_fno' && !deployForm.carry_forward">
+            <div x-show="deployForm.strategy_name !== 'd1_trap_fno' && !deployForm.carry_forward">
               <label class="sec-label mb-1">SQUARE-OFF TIME</label>
               <input type="text" class="t-input font-mono" x-model="deployForm.squareoff_time"
                      placeholder="15:15"/>
@@ -8372,7 +7717,7 @@ function amoTest() {
     </div>
 
     <!-- ════ MENU: POSITIONS ══════════════════════════════════════════════════ -->
-    <div x-show="clientMenu === 'positions'" class="space-y-4" x-init="if(clientMenu==='positions'){ loadClientPositions(); loadClientFnoPositions(); }">
+    <div x-show="clientMenu === 'positions'" class="space-y-4" x-init="if(clientMenu==='positions'){ loadClientPositions(); }">
 
       <!-- Market strip -->
       <div class="t-card rounded p-4">
@@ -8458,18 +7803,9 @@ function amoTest() {
             <div class="flex flex-col gap-3">
               <!-- Index/option trap + straddle + others: always show (zone tracking / IDLE state is useful).
                    FnO trap (individual stocks): only show when a position is open to avoid 30-card clutter.
-                   ALL_FNO sentinel: always show as the single aggregated FnO card.
-                   fno_positional: EXCLUDED here -- this card's live-legs display only understands the
-                   single-"legs"-array shape used by sell_straddle/d1_trap_bear_only/fvg. fno_positional's
-                   data model is fundamentally different (multiple positions per book, own field names) and
-                   was never wired into csPositions, so this card could only ever show the empty-state
-                   fallback for it regardless of real state -- the dedicated "FnO Positional Positions" table
-                   elsewhere on this page (reads /api/client/fno_positions directly) is the real, correct
-                   display for this strategy; showing both was confusing and the wrong one always looked
-                   broken (2026-08-04). -->
+                   ALL_FNO sentinel: always show as the single aggregated FnO card. -->
               <template x-for="dep in (clientDeployments||[]).filter(d=>
                 d.binding_id===b.binding_id &&
-                d.strategy_name!=='fno_positional' &&
                 (d.strategy_name!=='d1_trap_fno' || d.underlying==='ALL_FNO' || d.underlying==='WATCHLIST' ||
                  ((csPositions[b.binding_id]||{})[d.deploy_id]||{legs:[]}).legs.length>0)
               )" :key="dep.deploy_id">
@@ -8478,11 +7814,11 @@ function amoTest() {
                   <div class="flex items-center justify-between mb-3">
                     <div>
                       <div class="font-ui font-bold text-sm" style="color:var(--t-bright)"
-                           x-text="({sell_straddle:'Sell Straddle',v4_cascade:'V4 Cascade',fno_positional:'FnO Positional',hourly_breakout:'Hourly Breakout',d1_trap_option:'Trap Scanner',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow',liquidity_sweep:'Liquidity Sweep',liquidity_trap:'Liquidity Trap',oi_orb_screener:'OI-ORB Screener',cag_straddle:'CAG Long Straddle'}[dep.strategy_name]||dep.strategy_name)"></div>
+                           x-text="({sell_straddle:'Sell Straddle',d1_trap_option:'Trap Scanner',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow',liquidity_sweep:'Liquidity Sweep',liquidity_trap:'Liquidity Trap',oi_orb_screener:'OI-ORB Screener',cag_straddle:'CAG Long Straddle'}[dep.strategy_name]||dep.strategy_name)"></div>
                       <div class="flex items-center gap-2 mt-0.5">
                         <span class="font-mono text-xs" style="color:var(--t-cyan)" x-text="dep.underlying==='ALL_FNO'?'All 30 FnO Stocks':dep.underlying==='WATCHLIST'?'Watchlist (top-5)':dep.underlying"></span>
                         <span class="font-mono text-xs" style="color:var(--t-muted)"
-                              x-text="(dep.strategy_name==='fno_positional'||dep.strategy_name==='d1_trap_fno')
+                              x-text="(dep.strategy_name==='d1_trap_fno')
                                 ? dep.lot_multiplier+'L · '+(dep.product_type||'NRML')
                                 : dep.lot_multiplier+'L · SQ '+(dep.squareoff_time||'—')"></span>
                       </div>
@@ -10017,114 +9353,6 @@ function amoTest() {
           </div>
         </template>
       </div>
-
-      <!-- ════ FnO POSITIONAL POSITIONS ════ -->
-      <template x-if="csFnoPositions.length > 0">
-        <div class="t-card rounded">
-          <div class="flex items-center justify-between px-5 py-3 border-b" style="border-color:var(--t-border)">
-            <div class="font-ui font-bold text-base" style="color:var(--t-bright)">FnO Positional Positions</div>
-            <button class="text-xs px-3 py-1 rounded border font-mono" style="border-color:var(--t-border);color:var(--t-muted)"
-                    @click="loadClientFnoPositions()">↻ Refresh</button>
-          </div>
-          <template x-for="book in csFnoPositions" :key="book.client_id+'_'+book.binding_id">
-            <div class="px-4 py-3 border-b last:border-0" style="border-color:var(--t-border)">
-              <!-- Book meta -->
-              <div class="flex items-center gap-3 mb-2 flex-wrap">
-                <span class="font-mono text-xs font-bold" style="color:var(--t-fg)" x-text="book.binding_id"></span>
-                <span class="font-mono text-xs px-2 py-0.5 rounded"
-                      :style="book.mode==='live' ? 'color:var(--t-green);border:1px solid rgba(var(--t-green-rgb),0.4)' : 'color:var(--t-amber);border:1px solid rgba(var(--t-amber-rgb),0.4)'"
-                      x-text="book.mode.toUpperCase()"></span>
-                <span class="font-mono text-xs" style="color:var(--t-muted)"
-                      x-text="book.open_count + ' open / ' + book.max_slots + ' slots'"></span>
-              </div>
-
-              <!-- Watchlist stocks being tracked (not yet entered) -- 2026-08-07: the backend
-                   already returns this via get_state()'s "pending" field, the UI just never
-                   rendered it, so a healthy book watching several real stocks looked
-                   identical to an idle one with nothing tracked at all. -->
-              <div x-show="book.pending && book.pending.length > 0" class="mb-2 overflow-x-auto">
-                <div class="font-mono text-xs font-bold mb-1" style="color:var(--t-cyan)"
-                     x-text="'WATCHING ('+book.pending.length+')'"></div>
-                <table class="font-mono text-xs w-full" style="border-collapse:collapse">
-                  <thead>
-                    <tr class="text-right" style="color:var(--t-muted);border-bottom:1px solid var(--t-border)">
-                      <th class="text-left py-1 pr-3 font-normal">Stock</th>
-                      <th class="text-left py-1 pr-3 font-normal">Dir</th>
-                      <th class="text-left py-1 pr-3 font-normal">Status</th>
-                      <th class="py-1 pr-3 font-normal">Entry Line</th>
-                      <th class="py-1 pr-3 font-normal">Dist%</th>
-                      <th class="py-1 pr-3 font-normal">Hard SL</th>
-                      <th class="py-1 font-normal">T1</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <template x-for="sig in book.pending" :key="sig.symbol+'_'+sig.direction">
-                      <tr :style="sig.blocked ? 'opacity:0.5' : ''" style="border-bottom:1px solid rgba(var(--t-border-rgb),0.3)">
-                        <td class="py-1 pr-3 font-bold" style="color:var(--t-bright)" x-text="sig.symbol"></td>
-                        <td class="py-1 pr-3" :style="sig.direction==='CE'?'color:var(--t-green)':'color:var(--t-red)'" x-text="sig.direction"></td>
-                        <td class="py-1 pr-3" :style="sig.status==='TRIGGERED'?'color:var(--t-amber);font-weight:600':'color:var(--t-muted)'"
-                            x-text="sig.status + (sig.blocked ? ' · blocked' : '')"></td>
-                        <td class="py-1 pr-3 text-right" x-text="sig.entry_line"></td>
-                        <td class="py-1 pr-3 text-right" :style="Math.abs(sig.dist_pct)<2?'color:var(--t-amber)':'color:var(--t-muted)'"
-                            x-text="(sig.dist_pct>0?'+':'')+sig.dist_pct+'%'"></td>
-                        <td class="py-1 pr-3 text-right" style="color:var(--t-red)" x-text="sig.hard_sl"></td>
-                        <td class="py-1 text-right" style="color:var(--t-green)" x-text="sig.day_t1"></td>
-                      </tr>
-                    </template>
-                  </tbody>
-                </table>
-              </div>
-              <div x-show="!book.pending || book.pending.length === 0"
-                   class="font-mono text-xs py-1" style="color:var(--t-dim)">No stocks currently being watched.</div>
-
-              <!-- No positions -->
-              <div x-show="!book.positions || book.positions.length === 0"
-                   class="font-mono text-xs py-2" style="color:var(--t-muted)">No positions yet.</div>
-              <!-- Positions table -->
-              <div x-show="book.positions && book.positions.length > 0" class="overflow-x-auto">
-                <table class="font-mono text-xs w-full" style="border-collapse:collapse">
-                  <thead>
-                    <tr class="text-right" style="color:var(--t-muted);border-bottom:1px solid var(--t-border)">
-                      <th class="text-left py-1 pr-3 font-normal">Stock</th>
-                      <th class="text-left py-1 pr-3 font-normal">Type / Expiry</th>
-                      <th class="py-1 pr-3 font-normal">Strike</th>
-                      <th class="py-1 pr-3 font-normal">Entry</th>
-                      <th class="py-1 pr-3 font-normal">LTP</th>
-                      <th class="py-1 pr-3 font-normal">P&amp;L</th>
-                      <th class="py-1 pr-3 font-normal">Spot</th>
-                      <th class="py-1 pr-3 font-normal">SL</th>
-                      <th class="py-1 pr-3 font-normal">T1</th>
-                      <th class="text-left py-1 font-normal">Status</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <template x-for="pos in book.positions" :key="pos.slot_id">
-                      <tr :style="pos.status==='CLOSED' ? 'opacity:0.5' : ''"
-                          style="border-bottom:1px solid rgba(var(--t-border-rgb),0.3)">
-                        <td class="py-1 pr-3 font-bold" style="color:var(--t-bright)" x-text="pos.symbol"></td>
-                        <td class="py-1 pr-3" :style="pos.direction==='CE'?'color:var(--t-green)':'color:var(--t-red)'"
-                            x-text="pos.direction + ' ' + (pos.expiry_str||'')"></td>
-                        <td class="py-1 pr-3 text-right" x-text="pos.strike"></td>
-                        <td class="py-1 pr-3 text-right" x-text="(pos.entry_ltp||0).toFixed(2)"></td>
-                        <td class="py-1 pr-3 text-right price-live" style="color:var(--t-bright)"
-                            x-text="(pos.current_ltp||0).toFixed(2)"></td>
-                        <td class="py-1 pr-3 text-right font-bold"
-                            :style="(pos.pnl||0)>=0?'color:var(--t-green)':'color:var(--t-red)'"
-                            x-text="((pos.pnl||0)>=0?'+':'')+'₹'+(pos.pnl||0).toFixed(0)"></td>
-                        <td class="py-1 pr-3 text-right" x-text="(pos.current_spot||0).toFixed(1)"></td>
-                        <td class="py-1 pr-3 text-right" style="color:var(--t-red)" x-text="(pos.spot_sl||0).toFixed(1)"></td>
-                        <td class="py-1 pr-3 text-right" style="color:var(--t-green)" x-text="(pos.day_t1||0).toFixed(1)"></td>
-                        <td class="py-1 font-mono text-xs" style="color:var(--t-muted)"
-                            x-text="pos.status + (pos.close_reason ? ' · '+pos.close_reason : '')"></td>
-                      </tr>
-                    </template>
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </template>
-        </div>
-      </template>
 
       <!-- Refresh -->
       <div class="flex justify-end">

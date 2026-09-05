@@ -9,9 +9,6 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 from strategies.sell_straddle import StraddleBookManager
-from strategies.v4_cascade_book_manager import V4CascadeBookManager
-from strategies.fno_positional import FnOPositionalBookManager
-from strategies.hourly_breakout import HourlyBreakoutBookManager
 from strategies.oi_orb_screener import OiOrbScreenerBookManager
 from strategies.cag_straddle import CagStraddleBookManager
 
@@ -21,18 +18,10 @@ STRATEGY_REGISTRY: Dict[str, Dict[str, Any]] = {
         "manager_class": StraddleBookManager,
         "per_binding": True,
     },
-    "v4_cascade": {
-        "manager_class": V4CascadeBookManager,
-        "per_binding": True,
-    },
-    "fno_positional": {
-        "manager_class": FnOPositionalBookManager,
-        "per_binding": True,
-    },
-    "hourly_breakout": {
-        "manager_class": HourlyBreakoutBookManager,
-        "per_binding": True,
-    },
+    # 2026-09-06 (2nd pass): v4_cascade, fno_positional, and hourly_breakout
+    # removed entirely -- same scope-clarity decision as the removal below
+    # (not disk space; user confirmed only sell_straddle/oi_orb_screener/
+    # cag_straddle are the actively-used 3). Recoverable via git history.
     # 2026-09-06: d1_trap_option, fvg, oi_flow, liquidity_sweep, and
     # liquidity_trap were removed entirely (code, bridges, tests, backtest
     # scripts) -- direct user decision, all fully stopped and not needed

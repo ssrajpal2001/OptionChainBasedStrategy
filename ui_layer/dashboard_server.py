@@ -392,10 +392,6 @@ try:
     class _ExpiryModeSchema(_PydanticBase):
         expiry_mode: str  # current|next_week|monthly|YYYY-MM-DD
 
-    class _V4LockContractSchema(_PydanticBase):
-        ce_strike: int = 0   # 0 = clear override, revert to auto ATM-200 derivation
-        pe_strike: int = 0   # 0 = clear override, revert to auto ATM+200 derivation
-
     class _SaveUpstoxCredsSchema(_PydanticBase):
         client_id: str = ""
         api_key:   str = ""
@@ -536,12 +532,6 @@ try:
         itm_offset:      int   = 300
         gap_dir_filter:  bool  = True        # True = on gap day trade only with gap direction
         require_gap:     bool  = True        # False = cascade on ALL days (no gap filter)
-
-    class _ScannerRunSchema(_PydanticBase):
-        nifty_prox_pct:  float = 1.5
-        stock_prox_pct:  float = 2.0
-        min_rr:          float = 1.5
-        use_nifty_bias:  bool  = False
 
 except ImportError:
     _HAS_FASTAPI = False
@@ -766,9 +756,6 @@ class DashboardServer:
         sell_straddles=None, # List[SellStraddleStrategy] (legacy per-index; optional)
         straddle_manager=None, # StraddleBookManager — per-binding books (live list + find)
         straddle_bridge=None, # StraddleExecutionBridge — for per-broker square-off on Trade/Terminal OFF
-        v4_cascade_manager=None, # V4CascadeBookManager — per-binding books (live list + find)
-        fno_positional_manager=None, # FnOPositionalBookManager — stock positional option books
-        hourly_breakout_manager=None, # HourlyBreakoutBookManager — 1H trap + 5M retest books
         oi_orb_manager=None,  # OiOrbScreenerBookManager — OI-Spurt + ORB screener books (F&O stocks)
         cag_straddle_manager=None,  # CagStraddleBookManager — 15:00-15:35 R1/S1 breach books
     ) -> None:
@@ -782,12 +769,8 @@ class DashboardServer:
         self._straddle_manager = straddle_manager
         self._sell_straddles_static: list = sell_straddles or []
         self._straddle_bridge = straddle_bridge
-        self._v4_cascade_manager = v4_cascade_manager
-        self._fno_positional_manager = fno_positional_manager
-        self._hourly_breakout_manager = hourly_breakout_manager
         self._oi_orb_manager = oi_orb_manager
         self._cag_straddle_manager = cag_straddle_manager
-        self._fno_monitor = None          # set via set_fno_monitor()
         self._ws_bridge = WsBridge(bus, cfg=cfg)
         self._uvicorn_server = None
 
@@ -822,10 +805,6 @@ class DashboardServer:
     @property
     def ws_bridge(self) -> WsBridge:
         return self._ws_bridge
-
-    def set_fno_monitor(self, monitor) -> None:
-        """Attach a live FnoStockMonitor so alert endpoints can query it."""
-        self._fno_monitor = monitor
 
     # ── FastAPI application ───────────────────────────────────────────────────
 
@@ -2330,13 +2309,6 @@ class DashboardServer:
                         cid, bid, _srv._sell_straddles, underlying=und)
                 except Exception as exc:
                     logger.error("deployment_run square-off failed for %s: %s", deploy_id, exc)
-            elif not running and strat == "v4_cascade":
-                book = _srv._find_v4_book(cid, bid, und)
-                if book is not None:
-                    try:
-                        squared = await book.square_off(reason="deployment_stop")
-                    except Exception as exc:
-                        logger.error("v4_cascade square-off failed for %s: %s", deploy_id, exc)
             await _srv._client_db.set_deployment_running(deploy_id, cid, running)
             logger.info("Dashboard: strategy RUN %s → %s (squared=%d)",
                         deploy_id, "ON" if running else "OFF", squared)
@@ -2452,81 +2424,6 @@ class DashboardServer:
             logger.info("Dashboard: OI window set to ±%d strikes", int(body.n))
             return {"ok": True, "window": int(max(0, body.n))}
 
-        def _all_fno_positional_books():
-            """Both the legacy fno_positional module AND D1TrapFnOSRBook (d1_trap_fno_sr)
-            expose a get_state() in the same shape (2026-08-12) -- combine both managers'
-            books here so this table isn't blind to whichever one a deployment actually
-            uses. hasattr-gated, same pattern as /api/d1trap/zones's monitoring_zones()
-            check, so any future book type without get_state() is silently skipped rather
-            than erroring the whole endpoint."""
-            books = list(getattr(_srv._fno_positional_manager, "books", None) or [])
-            d1_mgr = getattr(_srv, "_d1_trap_manager", None)
-            if d1_mgr is not None:
-                books += [b for b in (d1_mgr.books or []) if hasattr(b, "get_state")]
-            return books
-
-        @app.get("/api/fno/positions", tags=["Admin"])
-        async def api_fno_positions(_: dict = Depends(_require_admin)):
-            """Return all FnO positional book states (open + closed positions)."""
-            books_state = []
-            for book in _all_fno_positional_books():
-                try:
-                    books_state.append(book.get_state())
-                except Exception:
-                    pass
-            return {"ok": True, "books": books_state}
-
-        @app.get("/api/client/fno_positions", tags=["Client"])
-        async def api_client_fno_positions(user: dict = Depends(_require_client)):
-            """Return FnO positional book states for the requesting client."""
-            cid = user.get("client_id", "")
-            books_state = []
-            for book in _all_fno_positional_books():
-                try:
-                    state = book.get_state()
-                    if state.get("client_id") == cid:
-                        books_state.append(state)
-                except Exception:
-                    pass
-            return {"ok": True, "books": books_state}
-
-        @app.post("/api/admin/v4_cascade/force_ingest/{deploy_id}", tags=["Admin"])
-        async def api_admin_v4_force_ingest(deploy_id: str, _: dict = Depends(_require_admin)):
-            """Re-trigger the 3-week deep-history ingestion pipeline on a live
-            v4_cascade book on demand."""
-            parts = deploy_id.split("_")
-            if len(parts) < 3:
-                raise HTTPException(400, f"Malformed deploy_id '{deploy_id}'.")
-            cid, bid, und = parts[0], parts[1], parts[-1]
-            if _srv._v4_cascade_manager is None:
-                raise HTTPException(503, "v4_cascade strategy is not enabled on this instance.")
-            ok = _srv._v4_cascade_manager.force_ingest(cid, bid, und)
-            if not ok:
-                raise HTTPException(404, f"No live v4_cascade book for deploy_id '{deploy_id}'.")
-            return {"ok": True, "deploy_id": deploy_id, "ingest_triggered": True}
-
-        @app.post("/api/admin/deployment/{deploy_id}/v4_cascade/lock_contract", tags=["Admin"])
-        async def api_admin_v4_lock_contract(
-            deploy_id: str, body: _V4LockContractSchema, _: dict = Depends(_require_admin),
-        ):
-            """Manual CE/PE tracking-contract override — bypasses the automatic
-            09:15 ATM-200/ATM+200 derivation. Pass 0 for either field to clear
-            that side's override and revert to auto-derivation. Admin-gated —
-            called from the admin V4 Cascade rule-builder panel with an
-            arbitrary deploy_id, same as force_ingest above."""
-            parts = deploy_id.split("_")
-            if len(parts) < 3:
-                raise HTTPException(400, f"Malformed deploy_id '{deploy_id}'.")
-            cid, bid, und = parts[0], parts[1], parts[-1]
-            book = _srv._find_v4_book(cid, bid, und)
-            if book is None:
-                raise HTTPException(404, "No live v4_cascade book for this deployment.")
-            ce = body.ce_strike or None
-            pe = body.pe_strike or None
-            book.set_locked_strikes(ce, pe)
-            logger.info("Dashboard: v4_cascade lock_contract %s CE=%s PE=%s", deploy_id, ce, pe)
-            return {"ok": True, "deploy_id": deploy_id, "ce_strike": ce, "pe_strike": pe}
-
         # ── CLIENT — 1-min combined-premium chart series (VWAP/RSI/SLOPE) ─────
         @app.get("/api/client/strategy/{deploy_id}/premium_series", tags=["Client"])
         async def api_client_premium_series(
@@ -2605,210 +2502,6 @@ class DashboardServer:
                 raise HTTPException(400, msg)
             return {"ok": True, "message": msg}
 
-        # ── ADMIN — V4 Cascade: live trap-zone status + active-trade distances ──
-        @app.get("/api/admin/strategy/{deploy_id}/v4_trap_status", tags=["Admin"])
-        async def api_admin_v4_trap_status(
-            deploy_id: str, _: dict = Depends(_require_admin),
-        ):
-            """Every in-flight HTF/MTF setup (Live Trap Status grid) plus the
-            live position's real-time distance to Target A / B1(1:2) / B2(1:3)
-            / SL (active-trade table). Admin-gated — called from the admin V4
-            Cascade rule-builder panel with an arbitrary deploy_id, same as
-            force_ingest above (was previously client-gated, which silently
-            403'd every poll from the admin panel's admin-scoped token)."""
-            parts = deploy_id.split("_")
-            if len(parts) < 3:
-                raise HTTPException(400, f"Malformed deploy_id '{deploy_id}'.")
-            cid, bid, und = parts[0], parts[1], parts[-1]
-            book = _srv._find_v4_book(cid, bid, und)
-            if book is None:
-                return {"ok": True, "deploy_id": deploy_id, "zones": [], "position": None}
-
-            from strategies.v4_cascade.dataclasses import GateState
-            from strategies.v4_cascade.book import _CRYPTO_CONTRACT_VALUE
-            zones = []
-            live_price = getattr(book, "_live_price", {}) or {}
-            _use_pool = bool(getattr(book, "_use_pool_engine", False))
-
-            def _zone_dist(ltp, lo, hi):
-                if not ltp or lo is None or hi is None:
-                    return float("inf")
-                if lo <= ltp <= hi:
-                    return 0.0
-                return min(abs(ltp - lo), abs(ltp - hi))
-
-            if _use_pool:
-                # 2026-07-24: full pool dump (every _ZoneSlot, not just one
-                # "selected" summary) -- this is what the client dashboard's
-                # tracking block deliberately does NOT show (it picks one
-                # nearest-to-price slot per side for a compact card); this
-                # admin endpoint is the place to see everything actually in
-                # the pool at once, sorted nearest-to-price first per side.
-                pe = getattr(book, "_pool_engine", None)
-                for side in ("CE", "PE"):
-                    side_ltp = float(live_price.get(side) or 0.0)
-                    pool = []
-                    if pe is not None:
-                        for _k, _slots in pe._pool.items():
-                            if _k[0] == side:
-                                pool.extend(_slots)
-                    pool.sort(key=lambda s: _zone_dist(side_ltp, s.zone_low, s.zone_high))
-                    for slot in pool:
-                        limit_price = round(slot.zone_low + pe._entry_offset, 2) if pe else None
-                        dist = _zone_dist(side_ltp, slot.zone_low, slot.zone_high)
-                        z = slot.zone
-                        zones.append({
-                            "model": "pool_engine", "side": side, "strike": int(slot.strike),
-                            "state": ("limit_armed" if slot.pending_entry
-                                      else "tracking" if slot.tracking else "zone_found"),
-                            "ref_ts": z.reference_low_ts.isoformat() if z and z.reference_low_ts else None,
-                            "trap_ts": z.lock_ts.isoformat() if z and z.lock_ts else None,
-                            "timeframe": 75,
-                            "zone_low": round(slot.zone_low, 2), "zone_high": round(slot.zone_high, 2),
-                            "limit_entry_price": limit_price,
-                            "live_price": side_ltp or None,
-                            "distance_to_trap": None if dist == float("inf") else round(dist, 2),
-                            "reentry_ts": slot.reentry_ts.isoformat() if slot.reentry_ts else None,
-                            "trigger_ts": slot.trigger_ts.isoformat() if slot.trigger_ts else None,
-                        })
-                index_gate = None
-                pos = book._active_position
-                position = None
-                if pos is not None and pos.is_open:
-                    live_ltp = float(live_price.get(pos.side) or 0.0)
-                    _qty = (pos.t1.qty if pos.t1 else 0) + (pos.t2.qty if pos.t2 else 0)
-                    pnl_pts = (live_ltp - pos.t1.entry_price) if (pos.t1 and live_ltp) else 0.0
-                    _dist_sl = (live_ltp - pos.t1.sl_price) if (pos.t1 and live_ltp) else None
-                    _dist_tgt = (pos.t1.target_price - live_ltp) if (pos.t1 and live_ltp and pos.t1.target_price) else None
-                    position = {
-                        "side": pos.side, "status": pos.status,
-                        "entry_price": pos.t1.entry_price if pos.t1 else None,
-                        "sl_price": pos.t1.sl_price if pos.t1 else None,
-                        "target_price": pos.t1.target_price if pos.t1 else None,
-                        "live_ltp": live_ltp,
-                        "distance_to_sl": _dist_sl,
-                        "distance_to_target": _dist_tgt,
-                        "unrealized_pnl": round(pnl_pts * _qty, 4),
-                        "t1_status": pos.t1.status if pos.t1 else None,
-                        "t2_status": pos.t2.status if pos.t2 else None,
-                        "t2_trail_stop": pos.t2.trail_stop_price if pos.t2 else None,
-                    }
-                return {"ok": True, "deploy_id": deploy_id, "zones": zones, "position": position,
-                        "index_gate": index_gate}
-
-            for side in ("CE", "PE"):
-                scanner = book._engine._scanners.get(side)
-                if scanner is None:
-                    continue
-                side_ltp = float(live_price.get(side) or 0.0)
-                for setup in scanner.setups:
-                    # model discriminator: the new IndexGatedPremiumScanner's
-                    # _PremiumSetup has ONE zone (.zone); the legacy (crypto)
-                    # PremiumGateScanner's _HTFSetup has TWO (.htf_zone/.mtf_zone).
-                    if hasattr(setup, "zone"):
-                        z_obj = setup.zone
-                        target_level = setup.limit_entry_price or (z_obj.entry_line if z_obj else None)
-                        distance = (side_ltp - target_level) if (side_ltp and target_level is not None) else None
-                        z = {
-                            "model": "index_gated", "side": side, "state": setup.state.value,
-                            "ref_ts": setup.ref_ts.isoformat() if setup.ref_ts else None,
-                            "timeframe": setup.timeframe,
-                            "entry": z_obj.entry_line if z_obj else None,
-                            "sl": z_obj.sl_level if z_obj else None,
-                            "zone_low": z_obj.sweep_low if z_obj else None,
-                            "zone_high": z_obj.entry_line if z_obj else None,
-                            "limit_entry_price": setup.limit_entry_price,
-                            "live_price": side_ltp or None,
-                            "distance_to_trap": distance,
-                        }
-                    else:
-                        # "how far is market from the trap" -- distance from the
-                        # live price to whichever level is currently most relevant:
-                        # the pending limit price once armed, else the HTF entry line.
-                        target_level = setup.limit_entry_price or (
-                            setup.htf_zone.entry_line if setup.htf_zone else None)
-                        distance = (side_ltp - target_level) if (side_ltp and target_level is not None) else None
-                        z = {
-                            "model": "legacy_two_stage", "side": side, "state": setup.state.value,
-                            "htf_ref_ts": setup.htf_ref_ts.isoformat() if setup.htf_ref_ts else None,
-                            "htf_entry": setup.htf_zone.entry_line if setup.htf_zone else None,
-                            "htf_sl": setup.htf_zone.sl_level if setup.htf_zone else None,
-                            "mtf_ref_ts": setup.mtf_zone.reference_low_ts.isoformat()
-                                          if setup.mtf_zone and setup.mtf_zone.reference_low_ts else None,
-                            "mtf_entry": setup.mtf_zone.entry_line if setup.mtf_zone else None,
-                            "inner_zone_low": setup.mtf_zone.sweep_low if setup.mtf_zone else None,
-                            "limit_entry_price": setup.limit_entry_price,
-                            "live_price": side_ltp or None,
-                            "distance_to_trap": distance,
-                        }
-                    zones.append(z)
-
-            index_gate = None
-            _sc = getattr(book._engine, "_spot_confirm", None)
-            if _sc is not None:
-                _iz = getattr(_sc, "current_zone", None)
-                index_gate = {
-                    "kind": getattr(_sc.current_kind, "value", str(_sc.current_kind)),
-                    "armed_side": "CE" if _sc.confirms("CE") else ("PE" if _sc.confirms("PE") else None),
-                    "timeframe": 75,
-                    "ref_ts": _iz.reference_low_ts.isoformat() if _iz and _iz.reference_low_ts else None,
-                    "confirmed_ts": _iz.lock_ts.isoformat() if _iz and _iz.lock_ts else None,
-                    "entry_line": _iz.entry_line if _iz else None,
-                    "sl_level": _iz.sl_level if _iz else None,
-                }
-
-            position = None
-            pos = book._engine.position
-            if pos is not None and pos.is_open:
-                live_ltp = 0.0
-                _is_crypto_pos = und.upper() in ("BTC", "ETH")
-                try:
-                    # 2026-07-21 fix: the EXECUTION contract (one strike OTM
-                    # from live spot) is what's actually traded, a DIFFERENT
-                    # instrument than the tracking contract's 5m bars used
-                    # below. Crypto has no separate execution instrument
-                    # (perpetual is both), so it correctly stays on the
-                    # tracking bars.
-                    if not _is_crypto_pos:
-                        live_ltp = float(getattr(book, "_exec_live_price", {}).get(pos.side) or 0.0)
-                    if live_ltp <= 0:
-                        bars = book._bars_5m.get(pos.side) or []
-                        if bars:
-                            live_ltp = float(bars[-1].close)
-                except Exception:
-                    pass
-                # Contract value: BTC=0.001, ETH=0.01 (1 lot = this fraction of
-                # a coin, matches Delta's real contract_value API field and
-                # sell_straddle's same 2026-07-19 convention) -- NIFTY = 1.0.
-                _cv = _CRYPTO_CONTRACT_VALUE.get(und.upper(), 1.0)
-                _qty = (pos.t1.qty if pos.t1 else 0) + (pos.t2.qty if pos.t2 else 0)
-                # crypto PE = short (bull-trap -> bearish); everything else = long.
-                _is_short_pos = und.upper() in ("BTC", "ETH") and pos.side == "PE"
-                if _is_short_pos:
-                    pnl_pts = (pos.t1.entry_price - live_ltp) if (pos.t1 and live_ltp) else 0.0
-                    _dist_sl = (pos.t1.sl_price - live_ltp) if (pos.t1 and live_ltp) else None
-                    _dist_tgt = (live_ltp - pos.t1.target_price) if (pos.t1 and live_ltp) else None
-                else:
-                    pnl_pts = (live_ltp - pos.t1.entry_price) if (pos.t1 and live_ltp) else 0.0
-                    _dist_sl = (live_ltp - pos.t1.sl_price) if (pos.t1 and live_ltp) else None
-                    _dist_tgt = (pos.t1.target_price - live_ltp) if (pos.t1 and live_ltp) else None
-                position = {
-                    "side": pos.side, "status": pos.status,
-                    "entry_price": pos.t1.entry_price if pos.t1 else None,
-                    "sl_price": pos.t1.sl_price if pos.t1 else None,
-                    "target_price": pos.t1.target_price if pos.t1 else None,
-                    "live_ltp": live_ltp,
-                    "distance_to_sl": _dist_sl,
-                    "distance_to_target": _dist_tgt,
-                    "unrealized_pnl": round(pnl_pts * _qty * _cv, 4),
-                    "contract_value": _cv,
-                    "t1_status": pos.t1.status if pos.t1 else None,
-                    "t2_status": pos.t2.status if pos.t2 else None,
-                    "t2_trail_stop": pos.t2.trail_stop_price if pos.t2 else None,
-                }
-            return {"ok": True, "deploy_id": deploy_id, "zones": zones, "position": position,
-                    "index_gate": index_gate}
-
         # ── CLIENT — set target index ─────────────────────────────────────────
 
         @app.post("/api/client/set_index", tags=["Client"])
@@ -2847,7 +2540,7 @@ class DashboardServer:
             body: _StrategySelectionsSchema, user: dict = Depends(_require_client),
         ):
             cid = user.get("client_id", "")
-            allowed_strategies = {"sell_straddle", "v4_cascade", "fno_positional", "hourly_breakout"}
+            allowed_strategies = {"sell_straddle", "oi_orb_screener", "cag_straddle"}
             allowed_instruments = {"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY", "CRUDEOIL", "GOLDM"}
             import json as _json
             validated = []
@@ -3255,349 +2948,6 @@ class DashboardServer:
                                         }
                                 except Exception:
                                     pass
-                    elif sname == "v4_cascade":
-                        book = _srv._find_v4_book(cid, bid, underlying)
-                        if book is not None:
-                            from strategies.v4_cascade.dataclasses import GateState
-                            from strategies.v4_cascade.book import _CRYPTO_CONTRACT_VALUE
-                            # Booked = sum of TODAY's closed-tranche P&L from the History ledger
-                            # (mirrors sell_straddle's booked computation above) -- this was
-                            # previously left at the outer default of 0.0 always, never wired up
-                            # for v4_cascade, so a leg that already closed today (e.g. T1 hit its
-                            # SL while T2 is still running) silently vanished from the dashboard's
-                            # Booked P&L instead of being counted. cascade_bridge._record_history
-                            # already writes pnl in real currency units (₹/$, qty-multiplied), so
-                            # unlike sell_straddle's points-based fallback, no lot_size scaling
-                            # is needed here.
-                            try:
-                                from data_layer import trade_history as _th
-                                _today = datetime.now(IST).date().isoformat()
-                                _recs = _th.load(cid, 500)
-                                booked = round(sum(
-                                    float(r.get("pnl", 0) or 0) for r in _recs
-                                    if str(r.get("ts", ""))[:10] == _today
-                                    and r.get("strategy") == "v4_cascade"
-                                    and str(r.get("instrument", "")).upper() == str(underlying).upper()
-                                    and str(r.get("binding_id", "")) == bid
-                                ), 2)
-                            except Exception:
-                                booked = 0.0
-                            _is_crypto = str(underlying).upper() in ("BTC", "ETH")
-                            live_price = getattr(book, "_live_price", {}) or {}
-                            exec_live_price = getattr(book, "_exec_live_price", {}) or {}
-                            pos = book._active_position
-                            if pos is not None and pos.is_open:
-                                # Crypto trades the underlying's own spot/perpetual price directly —
-                                # there is no option chain for BTC/ETH, so CE/PE here are only the
-                                # engine's internal bear-scan/bull-scan side labels, never real
-                                # strikes; the UI must not present them as option contracts.
-                                _cv = _CRYPTO_CONTRACT_VALUE.get(str(underlying).upper(), 1.0)
-                                ccy = "$" if _is_crypto else "₹"
-                                # crypto PE = short (bull-trap -> bearish); everything else = long.
-                                _is_short_pos = _is_crypto and pos.side == "PE"
-                                for leg in (pos.t1, pos.t2):
-                                    if leg is None or leg.status != "open":
-                                        continue
-                                    # 2026-07-21 fix: while a position is open, the EXECUTION
-                                    # contract (one strike OTM from live spot) is what's actually
-                                    # traded -- a DIFFERENT instrument than the tracking contract
-                                    # (live_price), which is only ever the scanning reference.
-                                    # Crypto has no separate execution instrument (perpetual is
-                                    # both), so it correctly stays on live_price.
-                                    _exec_ltp = exec_live_price.get(pos.side) if not _is_crypto else None
-                                    ltp = float(_exec_ltp or live_price.get(pos.side) or leg.entry_price)
-                                    qty = int(leg.qty)
-                                    _pnl = round(((leg.entry_price - ltp) if _is_short_pos
-                                                  else (ltp - leg.entry_price)) * qty * _cv, 2)
-                                    _instr = (f"{underlying} SPOT {leg.tranche}" if _is_crypto
-                                              else f"{underlying} {int(leg.strike)} {pos.side} {leg.tranche}")
-                                    # sl_price/target_price below are TRACKING-contract-native
-                                    # (the exit logic in engine.py._check_exits deliberately
-                                    # watches the SCANNED contract's own bars against these
-                                    # levels, by design) -- tracking_ltp/tracking_strike/
-                                    # tracking_label surface that context explicitly next to
-                                    # them, so the UI can label them clearly as belonging to
-                                    # the contract being scanned, not the one actually traded.
-                                    # 2026-07-24: was getattr(book, f"_{pos.side.lower()}_strike", 0),
-                                    # which under multi-strike pool-engine scanning is only the
-                                    # FIRST of up to 5 candidates -- if the trade actually fired on
-                                    # candidate #2-5, that read the wrong strike. leg.strike is the
-                                    # TrancheLeg's own real traded strike, always correct.
-                                    _tracking_strike = 0 if _is_crypto else int(leg.strike or 0)
-                                    legs.append({
-                                        "symbol": _instr, "instrument": _instr,
-                                        "type": leg.tranche,
-                                        "side": "SELL" if _is_short_pos else "BUY", "ccy": ccy,
-                                        "qty": qty, "lot_size": 1, "lots": 1,
-                                        "entry_price": round(leg.entry_price, 2),
-                                        "sell_avg": round(leg.entry_price, 2) if _is_short_pos else 0.0,
-                                        "buy_avg": 0.0 if _is_short_pos else round(leg.entry_price, 2),
-                                        "ltp": round(ltp, 2), "pnl": _pnl, "mtm": _pnl,
-                                        "sl_price": round(leg.sl_price, 2) if leg.sl_price else None,
-                                        "target_price": round(leg.target_price, 2) if leg.target_price else None,
-                                        "trail_stop_price": round(leg.trail_stop_price, 2)
-                                                             if leg.trail_stop_price else None,
-                                        "tracking_ltp": round(float(live_price.get(pos.side) or 0.0), 2),
-                                        "tracking_strike": _tracking_strike,
-                                        "tracking_label": ("BEAR" if _is_crypto and pos.side == "CE"
-                                                            else "BULL" if _is_crypto else pos.side),
-                                        "entry_reason": leg.entry_reason or "",
-                                        "entry_time": leg.entry_time.isoformat(timespec="seconds")
-                                                      if leg.entry_time else None,
-                                    })
-                            # 2026-07-21: tracking/scanning info is now ALWAYS built, not just
-                            # when no position is open -- the engine keeps scanning BOTH sides
-                            # continuously even while one side holds a trade (structural flip
-                            # can fire at any time), so hiding it during an open position was
-                            # hiding exactly the info that explains what could flip the trade.
-                            if True:
-                                _use_pool = bool(getattr(book, "_use_pool_engine", False))
-                                _bias = "none"
-                                _sc = None if _use_pool else getattr(book._engine, "_spot_confirm", None)
-                                _index_gate = None
-                                if _sc is not None:
-                                    _bias = getattr(_sc.current_kind, "value", str(_sc.current_kind))
-                                    _iz = getattr(_sc, "current_zone", None)
-                                    _index_gate = {
-                                        "kind": _bias,
-                                        "armed_side": ("CE" if _sc.confirms("CE")
-                                                       else ("PE" if _sc.confirms("PE") else None)),
-                                        "timeframe": 75,
-                                        "ref_ts": (_iz.reference_low_ts.isoformat(timespec="minutes")
-                                                   if _iz and _iz.reference_low_ts else None),
-                                        "confirmed_ts": (_iz.lock_ts.isoformat(timespec="minutes")
-                                                          if _iz and _iz.lock_ts else None),
-                                        "entry_line": (round(_iz.entry_line, 2)
-                                                       if _iz and _iz.entry_line is not None else None),
-                                        "sl_level": (round(_iz.sl_level, 2)
-                                                     if _iz and _iz.sl_level is not None else None),
-                                    }
-                                if _is_crypto:
-                                    _atm, _dte, _offset, _expiry_str = 0, "—", 0, None   # atm filled in below (= live spot)
-                                else:
-                                    _atm = round(float(book._atm_open or 0.0), 2)
-                                    _dte = ((book._expiry - datetime.now(IST).date()).days
-                                            if book._expiry else "—")
-                                    _offset = int(book._tracking_offset)
-                                    _expiry_str = book._expiry.isoformat() if book._expiry else None
-                                # "model" discriminator: crypto keeps the legacy two-stage
-                                # HTF(75m premium)+MTF(5m/15m premium) shape byte-for-byte
-                                # (GateState/PremiumGateScanner, untouched); NIFTY/CRUDEOIL on the
-                                # OLD engine gets the 2026-07-20 Index/Premium-decoupled shape
-                                # (PremiumZoneState/IndexGatedPremiumScanner) plus the index_gate
-                                # block above; NIFTY on the NEW pool engine (2026-07-24) has no
-                                # Index Gate 1 concept at all -- bias/index_gate stay at their
-                                # empty defaults, "pool_engine" tells the frontend not to expect
-                                # them populated.
-                                tracking = {"is_crypto": _is_crypto,
-                                            "model": "pool_engine" if _use_pool else ("legacy" if _is_crypto else "index_gated"),
-                                            "atm": _atm, "dte": _dte, "offset": _offset,
-                                            "expiry": _expiry_str, "phase": "", "bias": _bias,
-                                            "index_gate": _index_gate}
-                                _phases = []
-
-                                def _zone_bounds(z):
-                                    if z is None or z.entry_line is None or z.sweep_low is None:
-                                        return None, None
-                                    return (round(min(z.entry_line, z.sweep_low), 2),
-                                            round(max(z.entry_line, z.sweep_low), 2))
-
-                                if _use_pool:
-                                    # 2026-07-24: pool-engine zone pool (strategies/v4_cascade/
-                                    # pool_engine.py) has no HTF/MTF gate-state-machine at all --
-                                    # each side just has a POOL of concurrently-tracked _ZoneSlot
-                                    # objects. Show whichever zone is CLOSEST to the current live
-                                    # price (0 if price is already inside the zone bounds) -- the
-                                    # zone most likely to actually matter next, regardless of
-                                    # whether it happens to have a pending limit order yet. A
-                                    # zone with a "pending" order that's now far from price (e.g.
-                                    # aged but not yet past the 10-day cutoff) is exactly the
-                                    # stale/misleading case this replaces (confirmed live 2026-07-24
-                                    # -- a ~9-day-old PE zone with limit=58.5 was shown as the
-                                    # headline zone while LTP was 292.2, an ~80% move away and
-                                    # never realistically reachable).
-                                    def _zone_dist(ltp, lo, hi):
-                                        if not ltp or lo is None or hi is None:
-                                            return float("inf")
-                                        if lo <= ltp <= hi:
-                                            return 0.0
-                                        return min(abs(ltp - lo), abs(ltp - hi))
-
-                                    pe = getattr(book, "_pool_engine", None)
-                                    for side, label in (("CE", "CE"), ("PE", "PE")):
-                                        side_ltp = float(live_price.get(side) or 0.0)
-                                        pool = []
-                                        if pe is not None:
-                                            for _k, _slots in pe._pool.items():
-                                                if _k[0] == side:
-                                                    pool.extend(_slots)
-                                        slot = None
-                                        if pool:
-                                            slot = min(pool, key=lambda s: _zone_dist(side_ltp, s.zone_low, s.zone_high))
-                                        if slot is not None:
-                                            zone_low, zone_high = round(slot.zone_low, 2), round(slot.zone_high, 2)
-                                            if slot.pending_entry:
-                                                side_state = "limit_armed"
-                                            elif slot.tracking:
-                                                side_state = "tracking"
-                                            else:
-                                                side_state = "zone_found"
-                                            timeframe = 75
-                                            limit_price = round(slot.zone_low + pe._entry_offset, 2)
-                                            _z = slot.zone
-                                            ref_ts = (_z.reference_low_ts.isoformat(timespec="minutes")
-                                                      if _z and _z.reference_low_ts else None)
-                                            trap_ts = (_z.lock_ts.isoformat(timespec="minutes")
-                                                       if _z and _z.lock_ts else None)
-                                        else:
-                                            zone_low = zone_high = limit_price = timeframe = None
-                                            ref_ts = trap_ts = None
-                                            side_state = "—"
-                                        strike = (int(slot.strike) if slot is not None
-                                                  else int(getattr(book, f"_{side.lower()}_strike", 0) or 0))
-                                        tracking[f"{side.lower()}_label"] = label
-                                        tracking[f"{side.lower()}_strike"] = strike
-                                        tracking[f"{side.lower()}_ltp"] = round(side_ltp, 2)
-                                        tracking[side.lower()] = {
-                                            "state": side_state, "timeframe": timeframe,
-                                            "traps": len(pool),
-                                            "zone_low": zone_low, "zone_high": zone_high,
-                                            "limit_entry_price": limit_price,
-                                            "ref_ts": ref_ts, "trap_ts": trap_ts,
-                                            # 2026-07-24 temporary debug field: every zone
-                                            # currently in this side's pool, not just the
-                                            # selected one, sorted nearest-to-price first --
-                                            # lets the client verify "nearest zone" selection
-                                            # is correct via DevTools without needing a
-                                            # separate admin token. Safe to remove once the
-                                            # nearest-to-price logic is confirmed correct live.
-                                            "all_zones_debug": [
-                                                {
-                                                    "strike": int(s.strike),
-                                                    "zone_low": round(s.zone_low, 2),
-                                                    "zone_high": round(s.zone_high, 2),
-                                                    "distance": (None if _zone_dist(side_ltp, s.zone_low, s.zone_high) == float("inf")
-                                                                 else round(_zone_dist(side_ltp, s.zone_low, s.zone_high), 2)),
-                                                    "pending_entry": s.pending_entry,
-                                                    "tracking": s.tracking,
-                                                    "ref_ts": (s.zone.reference_low_ts.isoformat(timespec="minutes")
-                                                               if s.zone and s.zone.reference_low_ts else None),
-                                                }
-                                                for s in sorted(pool, key=lambda s: _zone_dist(side_ltp, s.zone_low, s.zone_high))
-                                            ],
-                                        }
-                                        _phases.append(side_state)
-                                elif _is_crypto:
-                                    _gate_order = list(GateState)
-                                    _htf_idx = _gate_order.index(GateState.HTF_LOCKED)
-                                    _mtf_idx = _gate_order.index(GateState.MTF_SCANNING_5M)
-                                    for side, label in (("CE", "BEAR"), ("PE", "BULL")):
-                                        scanner = book._engine._scanners.get(side)
-                                        side_ltp = float(live_price.get(side) or 0.0)
-                                        setup = None
-                                        if scanner is not None and scanner.setups:
-                                            # Show the single MOST-RECENTLY-DISCOVERED setup (newest
-                                            # HTF reference candle) -- recomputed fresh every poll,
-                                            # so once that setup gets invalidated (dropped from
-                                            # scanner.setups) this naturally "moves back" to whichever
-                                            # setup is next most recent, with no separate fallback
-                                            # logic needed. Note: this can show a brand-new
-                                            # HTF_LOCKED setup OVER an older one that's already
-                                            # further along (e.g. LIMIT_ARMED, about to actually
-                                            # fire) -- recency, not trade-proximity, is the sort key
-                                            # here, per explicit user choice.
-                                            setup = max(scanner.setups,
-                                                        key=lambda s: s.htf_ref_ts or datetime.min.replace(tzinfo=IST))
-                                        if setup is not None:
-                                            # LOW·HIGH always shows THIS setup's own HTF zone (Gate 1)
-                                            # — never switches to the MTF zone -- so the MTF zone can
-                                            # be shown separately, clearly nested UNDER it (same
-                                            # setup, never a different one), instead of the two being
-                                            # conflated into one column or confused with an unrelated
-                                            # setup's zone.
-                                            level_l, level_h = _zone_bounds(setup.htf_zone)
-                                            if level_l is None:
-                                                level_l = level_h = 0
-                                            mtf_low, mtf_high = _zone_bounds(setup.mtf_zone)
-                                            side_state = setup.state.value
-                                            # HTF/MTF are sequential sub-gates of the SAME setup, not
-                                            # two independent states — once past HTF_LOCKED the HTF
-                                            # column just confirms "locked" and the MTF column
-                                            # carries the actual current phase, so the two columns
-                                            # never show the identical raw value.
-                                            _idx = _gate_order.index(setup.state)
-                                            htf_disp = side_state if _idx < _htf_idx else "locked"
-                                            mtf_disp = side_state if _idx >= _mtf_idx else "—"
-                                            limit_price = (round(setup.limit_entry_price, 2)
-                                                           if setup.limit_entry_price is not None else None)
-                                            mtf_tf = setup.mtf_timeframe
-                                            _hz = setup.htf_zone
-                                            ref_ts = (_hz.reference_low_ts.isoformat(timespec="minutes")
-                                                      if _hz and _hz.reference_low_ts else None)
-                                            trap_ts = (_hz.lock_ts.isoformat(timespec="minutes")
-                                                       if _hz and _hz.lock_ts else None)
-                                        else:
-                                            level_l = level_h = 0
-                                            mtf_low = mtf_high = limit_price = mtf_tf = None
-                                            ref_ts = trap_ts = None
-                                            side_state = htf_disp = mtf_disp = "—"
-                                        strike = round(side_ltp)
-                                        tracking[f"{side.lower()}_label"] = label
-                                        tracking[f"{side.lower()}_strike"] = strike
-                                        tracking[f"{side.lower()}_ltp"] = round(side_ltp, 2)
-                                        tracking[side.lower()] = {
-                                            "htf_state": htf_disp, "mtf_state": mtf_disp,
-                                            "traps": len(scanner.setups) if scanner else 0,
-                                            "mtf_low": mtf_low, "mtf_high": mtf_high, "mtf_timeframe": mtf_tf,
-                                            "limit_entry_price": limit_price,
-                                            "level_l": round(level_l, 2), "level_h": round(level_h, 2),
-                                            "ref_ts": ref_ts, "trap_ts": trap_ts,
-                                        }
-                                        _phases.append(side_state)
-                                else:
-                                    for side, label in (("CE", "CE"), ("PE", "PE")):
-                                        scanner = book._engine._scanners.get(side)
-                                        side_ltp = float(live_price.get(side) or 0.0)
-                                        setup = None
-                                        if scanner is not None and scanner.setups:
-                                            # Same "most-recently-discovered" recency sort as the
-                                            # crypto branch above, on the single (no more HTF/MTF
-                                            # split) zone per setup.
-                                            setup = max(scanner.setups,
-                                                        key=lambda s: s.ref_ts or datetime.min.replace(tzinfo=IST))
-                                        if setup is not None:
-                                            zone_low, zone_high = _zone_bounds(setup.zone)
-                                            if zone_low is None:
-                                                zone_low = zone_high = 0
-                                            side_state = setup.state.value
-                                            timeframe = setup.timeframe
-                                            limit_price = (round(setup.limit_entry_price, 2)
-                                                           if setup.limit_entry_price is not None else None)
-                                            _z = setup.zone
-                                            ref_ts = (_z.reference_low_ts.isoformat(timespec="minutes")
-                                                      if _z and _z.reference_low_ts else None)
-                                            trap_ts = (_z.lock_ts.isoformat(timespec="minutes")
-                                                       if _z and _z.lock_ts else None)
-                                        else:
-                                            zone_low = zone_high = limit_price = timeframe = None
-                                            ref_ts = trap_ts = None
-                                            side_state = "—"
-                                        strike = int(getattr(book, f"_{side.lower()}_strike", 0) or 0)
-                                        tracking[f"{side.lower()}_label"] = label
-                                        tracking[f"{side.lower()}_strike"] = strike
-                                        tracking[f"{side.lower()}_ltp"] = round(side_ltp, 2)
-                                        tracking[side.lower()] = {
-                                            "state": side_state, "timeframe": timeframe,
-                                            "traps": len(scanner.setups) if scanner else 0,
-                                            "zone_low": zone_low, "zone_high": zone_high,
-                                            "limit_entry_price": limit_price,
-                                            "ref_ts": ref_ts, "trap_ts": trap_ts,
-                                        }
-                                        _phases.append(side_state)
-                                tracking["phase"] = "/".join(_phases)
-                                if _is_crypto:
-                                    tracking["atm"] = round(
-                                        float(live_price.get("CE") or live_price.get("PE") or 0.0), 2)
                     elif sname in ("d1_trap_index", "d1_trap_fno", "d1_trap_option", "d1_trap_bear_only"):
 
                         def _trap_leg_from_book(tb, dep_product):
@@ -4452,8 +3802,7 @@ class DashboardServer:
                 return {"ok": False, "error": f"Invalid squareoff_time '{sq}'. Use HH:MM format."}
 
             allowed_strategies = {
-                "sell_straddle", "v4_cascade", "fno_positional", "hourly_breakout",
-                "oi_orb_screener", "cag_straddle",
+                "sell_straddle", "oi_orb_screener", "cag_straddle",
             }
             if body.strategy_name not in allowed_strategies:
                 return {"ok": False, "error": f"Unknown strategy '{body.strategy_name}'."}
@@ -6530,69 +5879,6 @@ pm2 save
             except Exception as exc:
                 return {"ok": False, "error": str(exc)}
 
-        # ── FnO Stock Scanner ────────────────────────────────────────────────
-        @app.get("/api/scanner/fno", tags=["Scanner"])
-        async def get_fno_scan():
-            """Return today's FnO stock scan result (or most recent available)."""
-            import glob as _glob
-            import json as _json
-            scan_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
-            pattern  = os.path.join(scan_dir, "fno_scan_*.json")
-            files    = sorted(_glob.glob(pattern), reverse=True)
-            if not files:
-                return {"ok": False, "error": "No scan file found — run the nightly scanner first"}
-            try:
-                with open(files[0]) as f:
-                    data = _json.load(f)
-                return {"ok": True, **data}
-            except Exception as exc:
-                return {"ok": False, "error": str(exc)}
-
-        @app.get("/api/scanner/alerts", tags=["Scanner"])
-        async def get_fno_alerts(token_data: dict = Depends(verify_token)):
-            """Return active FnO stock monitor alerts (fired but not yet notified)."""
-            monitor = _srv._fno_monitor
-            if not monitor:
-                return {"ok": True, "alerts": []}
-            alerts = monitor.get_active_alerts()
-            from datetime import datetime as _dt
-            for a in alerts:
-                if isinstance(a.get("fired_at"), _dt):
-                    a["fired_at"] = a["fired_at"].isoformat()
-            return {"ok": True, "alerts": alerts}
-
-        @app.post("/api/scanner/alerts/{uid}/notified", tags=["Scanner"])
-        async def mark_alert_notified(uid: str, token_data: dict = Depends(verify_token)):
-            """Mark a specific alert as notified (removes it from active list)."""
-            monitor = _srv._fno_monitor
-            if monitor:
-                monitor.mark_notified(uid)
-            return {"ok": True}
-
-        @app.post("/api/scanner/run", tags=["Scanner"])
-        async def run_fno_scan(params: _ScannerRunSchema, _: dict = Depends(_require_admin)):
-            """Admin: trigger a fresh FnO scan synchronously (takes ~2-3 min)."""
-            try:
-                import sys as _sys
-                _scripts = os.path.join(os.path.dirname(os.path.dirname(__file__)), "scripts")
-                if _scripts not in _sys.path:
-                    _sys.path.insert(0, _scripts)
-                from fno_stock_scanner import run_scan as _run_scan, _get_token as _tok
-                token = _tok()
-                if not token:
-                    return {"ok": False, "error": "No Upstox token — connect feeder first"}
-                output = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        _run_scan, token,
-                        params.nifty_prox_pct, params.stock_prox_pct, params.min_rr,
-                        params.use_nifty_bias,
-                    ),
-                    timeout=900.0,
-                )
-                return {"ok": True, **output}
-            except Exception as exc:
-                return {"ok": False, "error": str(exc)}
-
         self._register_oi_orb_routes(app)
         self._register_cag_straddle_routes(app)
         return app
@@ -6790,18 +6076,6 @@ pm2 save
                        "manager or fallback scan, UI will show no position", client_id, binding_id, underlying)
         return None
 
-    @property
-    def _v4_cascades(self) -> list:
-        """Live list of V4Cascade books — per-binding from the manager."""
-        if self._v4_cascade_manager is not None:
-            return self._v4_cascade_manager.books
-        return []
-
-    def _find_v4_book(self, client_id: str, binding_id: str, underlying: str):
-        if self._v4_cascade_manager is not None:
-            return self._v4_cascade_manager.find(client_id, binding_id, underlying)
-        return None
-
     def _find_trap_book(self, client_id: str, binding_id: str, underlying: str):
         """D1 Trap removed 2026-09-06 -- always returns None now, kept as a
         stub since callers already handle a None trap book gracefully."""
@@ -6956,45 +6230,6 @@ pm2 save
                         "exit_remark": ("Hedged positional carry (NRML)"
                                         if getattr(pos, "is_hedged_positional", False)
                                         else "Live open position"),
-                        "pnl": round(sum(l["pnl"] for l in _legs), 2),
-                        "legs": _legs,
-                    })
-
-            elif sname == "v4_cascade":
-                book = self._find_v4_book(cid, bid, underlying)
-                pos = book._active_position if book is not None else None
-                if pos is None or not pos.is_open:
-                    continue
-                _is_crypto = str(underlying).upper() in ("BTC", "ETH")
-                _is_short = _is_crypto and pos.side == "PE"
-                live_price = getattr(book, "_live_price", {}) or {}
-                ltp = float(live_price.get(pos.side) or 0.0)
-                _legs = []
-                for leg in (pos.t1, pos.t2):
-                    if leg is None or leg.status != "open":
-                        continue
-                    _lp = ltp or leg.entry_price
-                    _pnl = (leg.entry_price - _lp) if _is_short else (_lp - leg.entry_price)
-                    strike = int(leg.strike) if not _is_crypto else 0
-                    _legs.append({
-                        "side": pos.side, "strike": strike,
-                        "entry": round(leg.entry_price, 2), "exit": 0,
-                        "pnl": round(_pnl * leg.qty, 2),
-                        "entry_ts": _ts(leg.entry_time),
-                        "exit_ts": None,
-                        "entry_reason": leg.entry_reason or "",
-                        "tranche": leg.tranche,
-                    })
-                if _legs:
-                    rows.append({
-                        "date": _ts(pos.open_time) or datetime.now(IST).isoformat(timespec="seconds"),
-                        "strategy": "v4_cascade",
-                        "instrument": str(underlying).upper(),
-                        "binding_id": bid,
-                        "entry_price": round(sum(l["entry"] for l in _legs) / max(len(_legs), 1), 2),
-                        "exit_price": 0,
-                        "exit_reason": "OPEN",
-                        "exit_remark": _legs[0]["entry_reason"] if _legs else "Live open position",
                         "pnl": round(sum(l["pnl"] for l in _legs), 2),
                         "legs": _legs,
                     })
