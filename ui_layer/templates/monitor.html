@@ -5703,26 +5703,31 @@ function amoTest() {
                        autocomplete="off" spellcheck="false"/>
               </div>
             </div>
-            <!-- Password/TOTP — OPTIONAL for Upstox/Upstox2 (only used by the unattended
-                 daily automation, scripts/auto_morning_start.py; leaving them blank changes
-                 nothing about the normal interactive OAuth toggle-ON flow above).
-                 REQUIRED for AngelOne -- it has no OAuth fallback at all, headless-only. -->
-            <div class="font-mono text-xs" style="color:var(--t-muted)"
-                 x-text="p==='angelone'?'Required — AngelOne has no OAuth login, this is the only way to connect':'For automated daily login (optional) — leave blank to keep OAuth-only'"></div>
-            <div class="grid grid-cols-2 gap-2">
+            <!-- Password/TOTP — 2026-09-06: ONLY AngelOne reads these now.
+                 Upstox/Upstox2/Fyers connect via manual OAuth exclusively
+                 (headless auto-login attempt removed entirely, confirmed
+                 non-viable for both -- Cloudflare bot protection). Hidden
+                 outright for those providers rather than shown-but-unused,
+                 so the form doesn't ask for something that does nothing. -->
+            <template x-if="p==='angelone'">
               <div>
-                <div class="sec-label mb-1">PASSWORD / PIN</div>
-                <input class="t-input" type="password" x-model="feederEditCreds[p].password"
-                       placeholder="leave blank to keep existing"
-                       autocomplete="new-password" spellcheck="false"/>
+                <div class="font-mono text-xs" style="color:var(--t-muted)">Required — AngelOne has no OAuth login, this is the only way to connect</div>
+                <div class="grid grid-cols-2 gap-2 mt-2">
+                  <div>
+                    <div class="sec-label mb-1">PASSWORD / PIN</div>
+                    <input class="t-input" type="password" x-model="feederEditCreds[p].password"
+                           placeholder="leave blank to keep existing"
+                           autocomplete="new-password" spellcheck="false"/>
+                  </div>
+                  <div>
+                    <div class="sec-label mb-1">TOTP SECRET (base32)</div>
+                    <input class="t-input" type="password" x-model="feederEditCreds[p].totp_secret"
+                           placeholder="leave blank to keep existing"
+                           autocomplete="new-password" spellcheck="false"/>
+                  </div>
+                </div>
               </div>
-              <div>
-                <div class="sec-label mb-1">TOTP SECRET (base32)</div>
-                <input class="t-input" type="password" x-model="feederEditCreds[p].totp_secret"
-                       placeholder="leave blank to keep existing"
-                       autocomplete="new-password" spellcheck="false"/>
-              </div>
-            </div>
+            </template>
             <div class="flex items-center gap-3">
               <button @click="saveFeederCreds(p)" :disabled="feederEditSaving[p]"
                       class="font-ui font-bold text-xs px-4 py-1.5 rounded border"
