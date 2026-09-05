@@ -7,6 +7,19 @@ credentials, real AWS. I intentionally did not touch any of this from here
 (no SSH access, and broker passwords/TOTP secrets should never be typed into
 a chat).
 
+> **⚠️ 2026-09-06 update, confirmed via real live testing on the server:**
+> Fyers headless login is **confirmed non-viable** — Cloudflare Turnstile is
+> loaded on Fyers' login page and withholds its token from the automated
+> browser session (verified directly: the field fills correctly, the tab
+> switches correctly, the submit button still never enables). This is not a
+> bug and not fixable by adjusting the Playwright script — Turnstile
+> validates the browsing session/behavior, not the form. Per the original
+> design spec's own pre-approved fallback, **Fyers stays manual-login only**
+> going forward. Upstox and Zerodha headless login are NOT affected by this
+> and remain worth pursuing — see `broker_auth/headless_totp_auth_fyers.py`'s
+> own module docstring for the full evidence trail if this ever needs
+> re-litigating.
+
 ## 1. Merge and pull
 
     git checkout nifty-cascade-v4-indicators   # or master, your call

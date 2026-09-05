@@ -8,6 +8,40 @@ daily-lifecycle-design.md, "Open risks") -- this module attempts a real
 headless-browser login instead, per direct user decision to try anyway.
 Explicitly allowed to fail; scripts/auto_morning_start.py treats this as a
 best-effort step that never blocks Upstox/Zerodha or strategy resume.
+
+⚠️ CONFIRMED NON-VIABLE (2026-09-06), real-server root cause found via a
+live debugging session -- do NOT re-attempt selector/event-timing fixes on
+this without new evidence:
+    1. The tab-switch to Client ID mode was confirmed working
+       (clientId_rb.checked=True via direct DOM property read).
+    2. The client_id field was confirmed correctly filled -- right value,
+       right VISIBLE element (not a hidden duplicate) -- via BOTH .fill()
+       and real keystroke-by-keystroke .type().
+    3. Despite (1) and (2) both being correct, clientIdSubmit stayed
+       disabled every time.
+    4. A direct JS check (window.turnstile) confirmed Cloudflare Turnstile
+       is loaded on the page.
+A submit button that won't enable regardless of how correctly its own
+paired field is filled, on a page running Cloudflare Turnstile, is
+Turnstile withholding its token because it doesn't trust the browsing
+session -- not a field-validation problem. Turnstile validates the
+SESSION/BEHAVIOR (mouse movement, timing entropy, real browser
+fingerprint signals accumulated over the page's lifetime), not the form.
+No amount of selector or event-dispatch tweaking on the form fields
+changes this, by design -- that's the whole point of the protection
+working correctly. Confirms the original vagator-API Cloudflare-block
+finding from before this Playwright approach was ever tried; it's the
+same underlying protection, just encountered at a different layer.
+
+Per the design spec's own explicitly pre-approved fallback: "If this
+proves completely unworkable during implementation/testing, falling back
+to 'Fyers stays manual' is an acceptable outcome." This is that outcome.
+Fyers should be treated as always-manual-login going forward -- the
+morning script's own best-effort framing already handles this gracefully
+(logs the failure, never blocks Upstox/Zerodha/strategy resume), so no
+further code change is required to "handle" this, only an expectation
+reset: don't expect this function to ever succeed against Fyers' current
+Cloudflare configuration.
 """
 from __future__ import annotations
 
