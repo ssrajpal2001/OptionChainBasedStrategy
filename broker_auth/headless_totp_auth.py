@@ -169,7 +169,35 @@ def upstox_totp_login(
     # Step 2: generate OTP
     r2 = session.post(f"{_SVC}/login/open/v6/auth/1fa/otp/generate",
                        json={"data": {"mobileNumber": user_id, "userId": sess_user_id}})
-    d2 = _upstox_parse(r2, step="Step 2 (otp/generate)")
+    try:
+        d2 = _upstox_parse(r2, step="Step 2 (otp/generate)")
+    except HeadlessTotpAuthError as exc:
+        # 2026-09-06 real incident: "1017016: Something went wrong" is a
+        # generic, undocumented Upstox error (confirmed via their own
+        # community forum -- no info beyond "wait and retry"), and it
+        # recurred identically across many attempts spread over hours, not
+        # a one-off transient blip. Cross-checked the exact endpoint/JSON
+        # payload against upstox-totp (an actively-maintained third-party
+        # library) -- byte-for-byte identical to what we send, ruling out a
+        # stale/changed endpoint. Two remaining live hypotheses: (a) a
+        # required cookie from Step 1 isn't being carried into this
+        # request, or (b) Upstox's anti-bot layer is flagging this
+        # datacenter/EC2-origin request specifically for this unofficial
+        # flow (a real browser session from a residential IP wouldn't hit
+        # this). Dump the session's cookie jar + this response's own
+        # headers so the next occurrence is diagnosable without yet
+        # another live round-trip.
+        try:
+            _cookies = dict(getattr(session, "cookies", {}) or {})
+        except Exception:
+            _cookies = "<could not read cookie jar>"
+        try:
+            _headers = dict(getattr(r2, "headers", {}) or {})
+        except Exception:
+            _headers = "<could not read response headers>"
+        raise HeadlessTotpAuthError(
+            f"{exc} | session_cookies={_cookies} | response_headers={_headers}"
+        )
     validate_otp_token = (d2 or {}).get("validateOTPToken") or (d2 or {}).get("validateOtpToken")
     if not validate_otp_token:
         raise HeadlessTotpAuthError(f"Upstox: Step 2 failed — validateOTPToken missing. data={d2}")

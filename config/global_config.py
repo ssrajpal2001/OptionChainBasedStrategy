@@ -434,8 +434,12 @@ class GlobalConfig:
     primary_feeder_provider: Literal["upstox", "upstox2", "fyers", "dhan", "angelone", "mock", "shared"] = "upstox"
 
     # Secondary / backup feeder. Used in dual-feed mode when its token is also valid.
-    # Set to "fyers" for Upstox+Fyers, or "upstox2" for two independent Upstox accounts.
-    secondary_feeder_provider: Literal["fyers", "upstox2", "upstox", "none"] = "fyers"
+    # Set to "angelone" for Upstox+AngelOne (2026-09-06: the live default -- Fyers'
+    # own headless login is confirmed non-viable, Cloudflare Turnstile-blocked; see
+    # broker_auth/headless_totp_auth_fyers.py's own docstring for the full evidence
+    # trail), "fyers" for the old Upstox+Fyers pairing, or "upstox2" for two
+    # independent Upstox accounts.
+    secondary_feeder_provider: Literal["angelone", "fyers", "upstox2", "upstox", "none"] = "angelone"
 
     # How many seconds the primary feed can be silent before the secondary is promoted.
     feeder_failover_stale_sec: float = 3.0

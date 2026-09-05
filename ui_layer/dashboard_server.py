@@ -101,12 +101,28 @@ async def _start_feeder_stream(feeder, provider: str, api_key: str, token: str, 
     from broker_auth.headless_auth import _token_is_fresh
 
     primary   = (getattr(cfg, "primary_feeder_provider", "upstox") or "upstox").lower() if cfg else "upstox"
-    secondary = (getattr(cfg, "secondary_feeder_provider", "fyers") or "none").lower() if cfg else "fyers"
+    secondary = (getattr(cfg, "secondary_feeder_provider", "angelone") or "none").lower() if cfg else "angelone"
     if secondary in ("none", primary):
         secondary = ""
 
     def _load_creds(p: str) -> dict:
         row = client_db.get_feeder_creds_sync(p) or {} if client_db is not None else {}
+        if p == "angelone":
+            # 2026-09-06: AngelOneFeeder does its OWN headless auth inside
+            # connect() (client_code+password+TOTP -> jwtToken+feedToken),
+            # unlike Upstox/Fyers which need a pre-existing access_token
+            # obtained via a SEPARATE OAuth/headless step before this
+            # function is ever called. Pass the raw credential fields
+            # through instead of requiring access_token.
+            if not (row.get("client_id") and row.get("api_key")
+                    and row.get("password") and row.get("totp_secret")):
+                return {}
+            return {
+                "client_id": row.get("client_id", ""),
+                "api_key": row.get("api_key", ""),
+                "password": row.get("password", ""),
+                "totp_secret": row.get("totp_secret", ""),
+            }
         if not row.get("access_token"):
             return {}
         if not _token_is_fresh(row.get("token_generated_at", ""), row.get("token_expiry_at", "")):
@@ -1604,6 +1620,45 @@ class DashboardServer:
                 except Exception:
                     pass
 
+        @app.post("/api/admin/feeder/angelone/connect", tags=["Admin"])
+        async def api_feeder_angelone_connect(_: dict = Depends(_require_admin)):
+            """
+            2026-09-06: real toggle-ON for AngelOne in the LIVE production
+            feeder (as opposed to /angelone/test above, which only ever
+            spins up a throwaway isolated instance). AngelOne has no OAuth
+            flow at all -- unlike the generic {provider}/connect endpoint
+            below, there's no "cached token" / "redirect to broker login
+            page" fallback ladder to walk; it's headless-only, so this is
+            a single straight path: validate creds are saved, then hand off
+            to the same _start_feeder_stream() every other provider uses
+            (which internally re-derives real creds for whichever provider
+            is configured as primary/secondary via _load_creds -- AngelOne
+            is the default secondary_feeder_provider as of this pass).
+            """
+            creds = _srv._client_db.get_feeder_creds_sync("angelone") or {}
+            if not (creds.get("client_id") and creds.get("api_key")
+                    and creds.get("password") and creds.get("totp_secret")):
+                return {
+                    "ok": False,
+                    "error": "AngelOne credentials incomplete — need Client ID, API Key, "
+                             "PASSWORD / PIN, and TOTP SECRET saved first.",
+                }
+            try:
+                await _start_feeder_stream(_srv._feeder, "angelone", "", "", _srv._client_db, _srv._cfg)
+            except Exception as exc:
+                logger.error("[Feeder/Toggle] [angelone] stream start failed: %s", exc)
+                return {"ok": False, "error": f"AngelOne connect failed: {exc}"}
+            active = getattr(_srv._feeder, "active_provider", None) if _srv._feeder else None
+            if active not in ("angelone", "dual"):
+                return {
+                    "ok": False,
+                    "error": "AngelOne login/socket setup did not complete — check server logs "
+                             "for the real failure (bad TOTP, SmartAPI rejection, etc.).",
+                }
+            logger.info("[Feeder/Toggle] [angelone] live stream connected (active_provider=%s).", active)
+            return {"ok": True, "connected": True, "flow": "headless",
+                     "message": "AngelOne feeder connected and streaming."}
+
         @app.post("/api/admin/feeder/{provider}/connect", tags=["Admin"])
         async def api_feeder_provider_connect(
             provider: str,
@@ -1760,7 +1815,7 @@ class DashboardServer:
         ):
             """Toggle OFF for admin feeder — stops the active feeder for this provider."""
             p = provider.lower()
-            if p not in {"upstox", "upstox2", "fyers"}:
+            if p not in {"upstox", "upstox2", "fyers", "angelone"}:
                 return {"ok": False, "error": f"Unsupported feeder provider '{p}'."}
 
             feeder = _srv._feeder
@@ -6668,7 +6723,7 @@ pm2 save
             from broker_auth.headless_auth import _token_is_fresh
 
             primary   = (self._cfg.primary_feeder_provider or "upstox").lower()
-            secondary = (getattr(self._cfg, "secondary_feeder_provider", "fyers") or "none").lower()
+            secondary = (getattr(self._cfg, "secondary_feeder_provider", "angelone") or "none").lower()
             if secondary in ("none", primary):
                 secondary = ""
 

@@ -635,21 +635,24 @@ document.addEventListener('alpine:init', () => {
     tokenOk:       null,
 
     /* ── Admin feeder toggles ───────────────────────────────────────── */
-    feederToggle:        { upstox: false, upstox2: false, fyers: false },
-    feederToggleLoading: { upstox: false, upstox2: false, fyers: false },
-    feederEditOpen:      { upstox: false, upstox2: false, fyers: false },
-    // password/totp_secret: OPTIONAL, only used by the unattended daily
-    // automation (scripts/auto_morning_start.py, see broker_auth/
-    // headless_totp_auth.py + headless_totp_auth_fyers.py) — leaving them
-    // blank changes nothing about the normal interactive OAuth "toggle ON" flow.
+    // 2026-09-06: fyers -> angelone (Fyers headless confirmed non-viable,
+    // Cloudflare Turnstile-blocked; AngelOne is free and genuinely headless).
+    feederToggle:        { upstox: false, upstox2: false, angelone: false },
+    feederToggleLoading: { upstox: false, upstox2: false, angelone: false },
+    feederEditOpen:      { upstox: false, upstox2: false, angelone: false },
+    // password/totp_secret: OPTIONAL for upstox/upstox2, only used by the
+    // unattended daily automation (scripts/auto_morning_start.py, see
+    // broker_auth/headless_totp_auth.py) — leaving them blank changes nothing
+    // about the normal interactive OAuth "toggle ON" flow. REQUIRED for
+    // angelone (no OAuth fallback exists for it at all).
     feederEditCreds:     {
-      upstox:  { client_id:'', api_key:'', secret:'', password:'', totp_secret:'' },
-      upstox2: { client_id:'', api_key:'', secret:'', password:'', totp_secret:'' },
-      fyers:   { client_id:'', api_key:'', secret:'', password:'', totp_secret:'' },
+      upstox:   { client_id:'', api_key:'', secret:'', password:'', totp_secret:'' },
+      upstox2:  { client_id:'', api_key:'', secret:'', password:'', totp_secret:'' },
+      angelone: { client_id:'', api_key:'', secret:'', password:'', totp_secret:'' },
     },
-    feederEditSaving:    { upstox: false, upstox2: false, fyers: false },
-    feederEditMsg:       { upstox: '', upstox2: '', fyers: '' },
-    feederMsg:           { upstox: '', upstox2: '', fyers: '' },
+    feederEditSaving:    { upstox: false, upstox2: false, angelone: false },
+    feederEditMsg:       { upstox: '', upstox2: '', angelone: '' },
+    feederMsg:           { upstox: '', upstox2: '', angelone: '' },
     // AngelOne (2026-09-06): free, genuinely headless (no browser/OAuth/
     // Cloudflare dependency) candidate data feeder built to replace Fyers,
     // whose own headless login is confirmed non-viable (Cloudflare
@@ -5616,9 +5619,13 @@ function amoTest() {
            x-text="redirectBaseMsg"></div>
     </div>
 
-    <!-- Feeder toggle rows — Upstox + Upstox2 (CrudeOil) + Fyers -->
+    <!-- Feeder toggle rows — Upstox + Upstox2 (CrudeOil) + AngelOne -->
+    <!-- 2026-09-06: Fyers replaced with AngelOne here -- Fyers' own headless
+         login is confirmed non-viable (Cloudflare Turnstile-blocked, see
+         broker_auth/headless_totp_auth_fyers.py's own docstring for the full
+         evidence trail); AngelOne is free and genuinely headless. -->
     <div class="space-y-3">
-      <template x-for="p in ['upstox','upstox2','fyers']" :key="p">
+      <template x-for="p in ['upstox','upstox2','angelone']" :key="p">
         <div class="rounded p-3 flex flex-col gap-2" style="background:var(--t-surface);border:1px solid var(--t-border)">
 
           <!-- Row: name + status + gear + toggle -->
@@ -5626,7 +5633,7 @@ function amoTest() {
             <div class="flex-1 min-w-0">
               <div class="font-ui font-bold text-sm tracking-widest"
                    :style="p==='upstox'?'color:var(--t-cyan)':p==='upstox2'?'color:var(--t-green)':'color:var(--t-amber)'"
-                   x-text="p==='upstox'?'UPSTOX API v2 (NIFTY/SENSEX)':p==='upstox2'?'UPSTOX API v2 (CRUDEOIL)':'FYERS API v3'"></div>
+                   x-text="p==='upstox'?'UPSTOX API v2 (NIFTY/SENSEX)':p==='upstox2'?'UPSTOX API v2 (CRUDEOIL)':'ANGELONE SMARTAPI'"></div>
               <div class="font-mono text-xs mt-0.5">
                 <span x-show="(systemStatus.providers||{})[p]?.token_fresh"
                       style="color:var(--t-green)">&#x25CF; TOKEN FRESH</span>
@@ -5689,17 +5696,19 @@ function amoTest() {
                        :placeholder="(systemStatus.providers||{})[p]?.creds_present?'[stored ✓]':'API key'"
                        autocomplete="off" spellcheck="false"/>
               </div>
-              <div>
+              <div x-show="p!=='angelone'">
                 <div class="sec-label mb-1">SECRET</div>
                 <input class="t-input" type="password" x-model="feederEditCreds[p].secret"
                        :placeholder="(systemStatus.providers||{})[p]?.creds_present?'[stored ✓]':'App secret'"
                        autocomplete="off" spellcheck="false"/>
               </div>
             </div>
-            <!-- Password/TOTP — OPTIONAL, only used by the unattended daily automation
-                 (scripts/auto_morning_start.py). Leaving these blank changes nothing
-                 about the normal interactive OAuth toggle-ON flow above. -->
-            <div class="font-mono text-xs" style="color:var(--t-muted)">For automated daily login (optional) — leave blank to keep OAuth-only</div>
+            <!-- Password/TOTP — OPTIONAL for Upstox/Upstox2 (only used by the unattended
+                 daily automation, scripts/auto_morning_start.py; leaving them blank changes
+                 nothing about the normal interactive OAuth toggle-ON flow above).
+                 REQUIRED for AngelOne -- it has no OAuth fallback at all, headless-only. -->
+            <div class="font-mono text-xs" style="color:var(--t-muted)"
+                 x-text="p==='angelone'?'Required — AngelOne has no OAuth login, this is the only way to connect':'For automated daily login (optional) — leave blank to keep OAuth-only'"></div>
             <div class="grid grid-cols-2 gap-2">
               <div>
                 <div class="sec-label mb-1">PASSWORD / PIN</div>

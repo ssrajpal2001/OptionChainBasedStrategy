@@ -1679,9 +1679,10 @@ class DualFeeder:
         self._staleness_alerted: set = set()
 
     _FEEDER_CLS: Dict[str, type] = {
-        "upstox":  UpstoxFeeder,
-        "upstox2": UpstoxFeeder,
-        "fyers":   FyersFeeder,
+        "upstox":   UpstoxFeeder,
+        "upstox2":  UpstoxFeeder,
+        "fyers":    FyersFeeder,
+        "angelone": AngelOneFeeder,
     }
 
     async def start(self, upstox_creds: Dict[str, str], fyers_creds: Dict[str, str]) -> None:
@@ -1999,7 +2000,7 @@ class GlobalFeeder:
         """
         self._running = True
         primary = self._cfg.primary_feeder_provider.lower()
-        secondary = (getattr(self._cfg, "secondary_feeder_provider", "fyers") or "none").lower()
+        secondary = (getattr(self._cfg, "secondary_feeder_provider", "angelone") or "none").lower()
         if secondary in ("none", primary):
             secondary = ""
 
@@ -2257,7 +2258,15 @@ class GlobalFeeder:
             self._dual_feeder = None
         await self._stop_initial_feeder()
         dual = DualFeeder(self._bus, self._cfg)
-        await dual.start_providers({provider: creds} if creds and creds.get("access_token") else {})
+        # 2026-09-06: AngelOne (and any future headless-only provider) has no
+        # pre-existing access_token -- its own connect() does the full
+        # client_code+password+TOTP auth internally. Gate on EITHER shape so
+        # start_single("angelone", ...) doesn't silently start with an empty
+        # creds_map (the old access_token-only check always failed for it).
+        _has_usable_creds = bool(creds) and (
+            creds.get("access_token") or (creds.get("client_id") and creds.get("password"))
+        )
+        await dual.start_providers({provider: creds} if _has_usable_creds else {})
         self._dual_feeder = dual
         self._active_provider = provider
         await self._bus.publish(
