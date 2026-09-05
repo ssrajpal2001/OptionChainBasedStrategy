@@ -75,6 +75,55 @@ def _fill_and_enable(page, selectors: list, value: str, submit_selector: str,
     return matched_sel
 
 
+def _dump_field_diagnostics(page) -> str:
+    """2026-09-06 real incident: after two guess-and-check rounds (viewport,
+    then tab-click + type()-fallback) still didn't enable Fyers' own submit
+    button, guessing a THIRD time isn't a good use of another live
+    round-trip -- get real ground truth instead. Reports, for every
+    selector this module knows about, whether it exists, is visible, is
+    disabled, and its current value -- so a mismatch (e.g. our fill landed
+    in a hidden duplicate, or the real field has a different id entirely)
+    is visible directly from the log instead of inferred from a timeout
+    message alone. Every check is independently wrapped -- one failing
+    lookup never blocks the others from reporting."""
+    selectors = [
+        "input[id='fy_client_id']", "input[name='fy_client_id']",
+        "input[placeholder*='Client ID' i]", "button[id='clientIdSubmit']",
+        "input[id='fy_totp']", "button[id='totpSubmit']",
+        "input[id='fy_pin']", "button[id='pinSubmit']",
+    ]
+    lines = []
+    for sel in selectors:
+        try:
+            loc = page.locator(sel)
+            n = loc.count()
+            if n == 0:
+                lines.append(f"{sel}: count=0")
+                continue
+            first = loc.first
+            try:
+                vis = first.is_visible()
+            except Exception:
+                vis = "<n/a>"
+            try:
+                val = first.input_value()
+            except Exception:
+                val = "<n/a (not an input?)>"
+            try:
+                disabled = first.is_disabled()
+            except Exception:
+                disabled = "<n/a>"
+            lines.append(f"{sel}: count={n} visible={vis} disabled={disabled} value={val!r}")
+        except Exception as exc:
+            lines.append(f"{sel}: <lookup error: {exc}>")
+    try:
+        form_html = page.eval_on_selector("form", "el => el.outerHTML")
+        lines.append(f"form_html={form_html[:1500]!r}")
+    except Exception as exc:
+        lines.append(f"form_html: <no <form> found or eval failed: {exc}>")
+    return " || ".join(lines)
+
+
 def fyers_totp_login(
     client_id: str, app_id: str, password: str, totp_secret: str, pin: str,
     redirect_uri: str = "",
@@ -179,7 +228,11 @@ def fyers_totp_login(
                         _title = page.title()
                         _url = page.url
                         _body = page.inner_text("body")[:300]
-                        _diag = f" | page_title={_title!r} page_url={_url!r} body_snippet={_body!r}"
+                        _fields = _dump_field_diagnostics(page)
+                        _diag = (
+                            f" | page_title={_title!r} page_url={_url!r} "
+                            f"body_snippet={_body!r} | fields: {_fields}"
+                        )
                     except Exception:
                         _diag = " | (could not capture page diagnostics)"
                 if isinstance(exc, FyersHeadlessLoginError):
