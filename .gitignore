@@ -62,7 +62,6 @@ data/btc_*.txt
 # Backtest runtime data (large JSON downloads + result CSVs)
 backtest/*/data_cache/
 backtest/*/results/
-backtest/nifty_liquidity_sweep/
 
 # Ad-hoc / temporary scripts
 scan_js.sh

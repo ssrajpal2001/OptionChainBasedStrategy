@@ -187,7 +187,7 @@ sys.path.insert(0, ".")
 
 from data_layer.historical_candles import fetch_upstox_range_1m, fetch_upstox_intraday_1m, _http_get_json, _parse_candles
 from data_layer.instrument_registry import REGISTRY
-from strategies.d1_trap_option.support_resistance import SupportResistanceCalculator
+from strategies.core.support_resistance import SupportResistanceCalculator
 
 TOKEN = sys.argv[1] if len(sys.argv) > 1 else ""
 SPOT_KEY = "NSE_INDEX|Nifty 50"

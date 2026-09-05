@@ -17,7 +17,7 @@ from strategies.sell_straddle.audit import (
     audit_exit_exec,
 )
 from strategies.sell_straddle.dataclasses import format_exit_eval
-from strategies.d1_trap_option.support_resistance import SupportResistanceCalculator
+from strategies.core.support_resistance import SupportResistanceCalculator
 
 if TYPE_CHECKING:
     from strategies.sell_straddle.dataclasses import StraddlePosition

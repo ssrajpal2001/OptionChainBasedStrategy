@@ -51,7 +51,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, List, Optional
 
-from strategies.d1_trap_option.support_resistance import SupportResistanceCalculator
+from strategies.core.support_resistance import SupportResistanceCalculator
 
 # The strict ping-pong sense of "R1/S1 is breached" -- a phase transition
 # FROM one of these secondary-tracking phases INTO R1_TRACKING/S1_TRACKING.

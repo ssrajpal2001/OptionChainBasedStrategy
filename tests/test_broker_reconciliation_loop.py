@@ -325,11 +325,42 @@ async def test_single_leg_reconcile_malformed_position_skips_gracefully():
 # ── loop-level defensiveness ──────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_pass_survives_a_manager_raising_and_still_checks_other_managers():
+async def test_pass_survives_a_manager_raising():
     """A manager whose .books property itself raises must not kill the
-    whole reconciliation pass for the OTHER strategies' managers -- the
-    "good" manager's book must still get reconciled (and flagged) in the
-    SAME pass."""
+    whole reconciliation pass. 2026-09-06: OI-Flow and Liquidity Trap were
+    removed (fully stopped, direct user decision) -- sell_straddle is now
+    the ONLY entry in _broker_reconciliation_pass's own loop, so there's no
+    second registered strategy left to prove "still checks other managers"
+    with. This now just proves the sole manager raising doesn't propagate
+    (see test_broker_reconciliation_pass_multi_strategy_isolation below for
+    the still-meaningful multi-manager isolation property, driven directly
+    against a synthetic reconciler list rather than the hardcoded
+    production one)."""
+    class _BoomManager:
+        @property
+        def books(self):
+            raise RuntimeError("simulated manager failure")
+
+    managers = {"sell_straddle": _BoomManager()}
+    broker = _FakeBroker(positions=[_FakePosition("NIFTY24AUG24500CE", 75)])
+    router = _fake_router(broker, "c", "b")
+    bus = _CapturingBus()
+
+    await _broker_reconciliation_pass(managers, router, bus)   # must not raise
+
+    mismatches = [e for t, e in bus.published if t == Topic.SYSTEM_EVENT and e.code == SysEvent.POSITION_MISMATCH]
+    assert mismatches == []
+
+
+@pytest.mark.asyncio
+async def test_broker_reconciliation_pass_multi_strategy_isolation():
+    """Same defensiveness property the removed test above used to cover
+    with real oi_flow/liquidity_trap entries: with TWO reconcilers in the
+    pass, one raising must not stop the other from running in the same
+    pass. Drives the REAL _broker_reconciliation_pass via its `specs`
+    override (added 2026-09-06 for exactly this) instead of reimplementing
+    the loop, so this still exercises the real iteration/isolation logic
+    regardless of which strategies are currently registered."""
     class _BoomManager:
         @property
         def books(self):
@@ -341,18 +372,30 @@ async def test_pass_survives_a_manager_raising_and_still_checks_other_managers()
     class _GoodManager:
         books = [good_book]
 
-    managers = {"sell_straddle": _BoomManager(), "oi_flow": _GoodManager(), "liquidity_trap": None}
+    async def _boom_reconciler(book, router, bus, label):
+        raise RuntimeError("should never be reached for a raising .books")
+
+    calls = []
+
+    async def _good_reconciler(book, router, bus, label):
+        calls.append((book, label))
+        await _reconcile_single_leg_book(book, router, bus, label)
+
+    specs = (
+        ("boom_strategy", _boom_reconciler, "Boom"),
+        ("good_strategy", _good_reconciler, "Good"),
+    )
+
+    managers = {"boom_strategy": _BoomManager(), "good_strategy": _GoodManager()}
     broker = _FakeBroker(positions=[_FakePosition("NIFTY24AUG24500CE", 75)])
     router = _fake_router(broker, "c", "b")
     bus = _CapturingBus()
 
-    await _broker_reconciliation_pass(managers, router, bus)   # must not raise
+    await _broker_reconciliation_pass(managers, router, bus, specs=specs)   # must not raise
 
+    assert len(calls) == 1, "the 'good' manager's book must still be reconciled even though 'boom' raised"
     mismatches = [e for t, e in bus.published if t == Topic.SYSTEM_EVENT and e.code == SysEvent.POSITION_MISMATCH]
-    assert len(mismatches) == 1, (
-        "the OI-Flow ('good') manager's book must still be reconciled and its "
-        "heuristic mismatch flagged, even though sell_straddle's manager raised"
-    )
+    assert len(mismatches) == 1
 
 
 @pytest.mark.asyncio

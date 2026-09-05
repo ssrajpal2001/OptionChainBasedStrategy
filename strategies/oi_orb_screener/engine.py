@@ -59,7 +59,7 @@ from matrix_engine.option_matrix import ChainRow, ChainSnapshot, OptionMatrix
 from strategies.core.base_book import AbstractStrategyBook
 # Shared hard ₹/lot risk-cap constant (not the S&R tracker itself, which OI-ORB
 # no longer uses as of 2026-08-27 -- see _update_vwap_sl_and_check's own docstring).
-from strategies.d1_trap_option.support_resistance import (
+from strategies.core.support_resistance import (
     _MAX_RISK_RS_PER_LOT as _SR_MAX_RISK_RS_PER_LOT,
 )
 from strategies.oi_orb_screener import filters as oi_filters
@@ -1752,9 +1752,9 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
 
         Returns True the instant a genuine entry fires (caller emits the
         Signal + tags the fresh position "sl_mechanic": "trap")."""
-        from strategies.liquidity_trap.detector import BarAccumulator as _TrapAcc
-        from strategies.d1_trap_option.bear_only_book import _collapse_nearby_zones
-        from strategies.d1_trap_option.support_resistance import SupportResistanceCalculator
+        from strategies.core.trap_zone_utils import BarAccumulator as _TrapAcc
+        from strategies.core.trap_zone_utils import _collapse_nearby_zones
+        from strategies.core.support_resistance import SupportResistanceCalculator
 
         acc1 = self._trap_1m_acc.setdefault(sym, _TrapAcc(timeframe_min=1))
         acc3 = self._trap_3m_acc.setdefault(sym, _TrapAcc(timeframe_min=3))
@@ -1849,8 +1849,8 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             return False   # already fired for this symbol this session
         if self._orb_frozen.get(sym) is None:
             return False   # ORB hasn't frozen for this symbol yet
-        from strategies.d1_trap_option.support_resistance import SupportResistanceCalculator
-        from strategies.liquidity_trap.detector import BarAccumulator as _TrapAcc
+        from strategies.core.support_resistance import SupportResistanceCalculator
+        from strategies.core.trap_zone_utils import BarAccumulator as _TrapAcc
         self._immediate_tsl_calc[sym] = SupportResistanceCalculator()
         self._immediate_tsl_acc[sym] = _TrapAcc(timeframe_min=15)
         self._immediate_tsl_fed_bars[sym] = 0
@@ -1884,7 +1884,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         orb_h, orb_l = orb_lvl
         sl_level = orb_l if side == "CALL" else orb_h
 
-        from strategies.liquidity_trap.detector import BarAccumulator as _TrapAcc
+        from strategies.core.trap_zone_utils import BarAccumulator as _TrapAcc
         acc = self._immediate_tsl_acc.setdefault(sym, _TrapAcc(timeframe_min=15))
         acc.on_tick(ts, ltp)
         calc = self._immediate_tsl_calc.get(sym)
@@ -1961,7 +1961,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         protects every position on every option tick regardless of whether
         this structural TSL has armed yet -- a position is never genuinely
         naked while waiting for a level to establish."""
-        from strategies.liquidity_trap.detector import BarAccumulator as _TrapAcc
+        from strategies.core.trap_zone_utils import BarAccumulator as _TrapAcc
 
         pos = self._positions.get(sym)
         if pos is None or sym in self._eod_closing:

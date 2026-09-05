@@ -12,11 +12,6 @@ from strategies.sell_straddle import StraddleBookManager
 from strategies.v4_cascade_book_manager import V4CascadeBookManager
 from strategies.fno_positional import FnOPositionalBookManager
 from strategies.hourly_breakout import HourlyBreakoutBookManager
-from strategies.d1_trap_option import D1TrapOptionBookManager
-from strategies.fvg import FVGBookManager
-from strategies.oi_flow import OIFlowBookManager
-from strategies.liquidity_sweep import LiquiditySweepBookManager
-from strategies.liquidity_trap import LiquidityTrapBookManager
 from strategies.oi_orb_screener import OiOrbScreenerBookManager
 from strategies.cag_straddle import CagStraddleBookManager
 
@@ -38,42 +33,16 @@ STRATEGY_REGISTRY: Dict[str, Dict[str, Any]] = {
         "manager_class": HourlyBreakoutBookManager,
         "per_binding": True,
     },
-    # d1_trap_option is the canonical launch key for ALL trap scanner variants.
-    # d1_trap_index and d1_trap_fno are deployment-level names stored in the DB;
-    # the single D1TrapOptionBookManager._wanted() scans all three names and
-    # spawns one book per (client, binding, underlying) regardless of which
-    # variant the deployment was saved as.
-    "d1_trap_option": {
-        "manager_class": D1TrapOptionBookManager,
-        "per_binding": True,
-    },
-    "fvg": {
-        "manager_class": FVGBookManager,
-        "per_binding": True,
-    },
-    # 2026-08-12: fully standalone -- shares no runtime infra (Topics,
-    # events, bridge, book manager) with any other strategy above. See
-    # strategies/oi_flow/__init__.py.
-    "oi_flow": {
-        "manager_class": OIFlowBookManager,
-        "per_binding": True,
-    },
-    # 2026-08-19: fully standalone -- shares no runtime infra (Topics,
-    # events, bridge, book manager) with any other strategy above, same
-    # mandate as oi_flow. See strategies/liquidity_sweep/__init__.py.
-    "liquidity_sweep": {
-        "manager_class": LiquiditySweepBookManager,
-        "per_binding": True,
-    },
-    # 2026-08-21: fully standalone -- shares no runtime infra (Topics,
-    # events, bridge, book manager) with any other strategy above, same
-    # mandate as oi_flow/liquidity_sweep. See strategies/liquidity_trap/
-    # __init__.py. Built and validated as a real-data (1yr SENSEX spot)
-    # backtest first -- scripts/liquidity_trap_backtest.py.
-    "liquidity_trap": {
-        "manager_class": LiquidityTrapBookManager,
-        "per_binding": True,
-    },
+    # 2026-09-06: d1_trap_option, fvg, oi_flow, liquidity_sweep, and
+    # liquidity_trap were removed entirely (code, bridges, tests, backtest
+    # scripts) -- direct user decision, all fully stopped and not needed
+    # going forward. Current focus is sell_straddle, oi_orb_screener, and
+    # cag_straddle only. Recoverable via git history if ever needed again.
+    # NOTE: oi_orb_screener's own trap-zone detection (screener.py's
+    # bull_trap_zones/sharp_bear_zones) and its S1/R1 ratchet TSL still
+    # depend on primitives that were RESCUED (not deleted) into
+    # strategies/core/support_resistance.py and
+    # strategies/core/trap_zone_utils.py before this removal.
     # 2026-08-24: fully standalone -- shares no runtime infra (Topics,
     # events, bridge, book manager) with any other strategy above, same
     # mandate as oi_flow/liquidity_sweep/liquidity_trap. See

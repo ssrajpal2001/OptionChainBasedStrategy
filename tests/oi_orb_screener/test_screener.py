@@ -203,7 +203,7 @@ def test_build_shortlist_filters_and_ranks(monkeypatch):
 def _tbar(minute_offset, o, h, l, c):
     from datetime import datetime, timedelta
     from config.global_config import IST
-    from strategies.liquidity_trap.detector import Bar
+    from strategies.core.trap_zone_utils import Bar
     base = datetime(2026, 8, 31, 9, 15, tzinfo=IST)
     return Bar(ts=base + timedelta(minutes=minute_offset), open=o, high=h, low=l, close=c)
 
@@ -260,7 +260,7 @@ def test_sharp_bear_zones_merges_with_collapse_nearby_zones():
     """Confirms the zone dicts produced are structurally compatible with
     the real _collapse_nearby_zones merge (same keys it reads: zone_lo,
     zone_hi, ref_idx, lock_ts, entry_line, ref_ts)."""
-    from strategies.d1_trap_option.bear_only_book import _collapse_nearby_zones
+    from strategies.core.trap_zone_utils import _collapse_nearby_zones
     bars = [
         _tbar(0, 100, 105, 95, 102),
         _tbar(3, 102, 110, 101, 108),

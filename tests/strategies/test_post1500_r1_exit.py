@@ -216,7 +216,7 @@ def test_day_low_reversal_never_fires_on_a_surviving_single_leg():
     s._post1500_pair = s._day_low_tracked_pair
     s._post1500_armed = True
     s._post1500_leg_closed = {"CE": False, "PE": True}
-    from strategies.d1_trap_option.support_resistance import SupportResistanceCalculator
+    from strategies.core.support_resistance import SupportResistanceCalculator
     s._post1500_calc = {"CE": SupportResistanceCalculator(), "PE": SupportResistanceCalculator()}
     s._post1500_bar_acc = {}
 
@@ -292,7 +292,7 @@ def test_both_legs_closing_independently_finalizes_the_position():
     s._position.ce_leg_closed = True
 
     import strategies.sell_straddle.exits as exits_mod
-    from strategies.d1_trap_option.support_resistance import SupportResistanceCalculator
+    from strategies.core.support_resistance import SupportResistanceCalculator
     s._post1500_calc = {"CE": SupportResistanceCalculator(), "PE": SupportResistanceCalculator()}
     s._post1500_bar_acc = {}
 
@@ -344,7 +344,7 @@ def _armed_post1500_state(s, pos):
     the only thing that legitimately runs -- matches what _check_exits()
     expects to already exist once single-leg (set by an earlier tick's
     _check_post1500_r1_exit call in real operation)."""
-    from strategies.d1_trap_option.support_resistance import SupportResistanceCalculator
+    from strategies.core.support_resistance import SupportResistanceCalculator
     s._post1500_exit_enabled = True
     s._post1500_pair = (int(pos.ce_leg.strike), int(pos.pe_leg.strike))
     s._post1500_armed = True

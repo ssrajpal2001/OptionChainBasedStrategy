@@ -1574,7 +1574,7 @@ class _FakeSRCalc:
 
 
 def _rig_trap_tsl(book, sym, side, level, key, entry_price=100.0, qty=10):
-    from strategies.liquidity_trap.detector import BarAccumulator as _TrapAcc
+    from strategies.core.trap_zone_utils import BarAccumulator as _TrapAcc
     book._positions[sym] = {
         "contract": type("C", (), {"option_type": "CE" if side == "CALL" else "PE", "strike": 100,
                                      "expiry": date(2026, 9, 29)})(),
@@ -1732,7 +1732,7 @@ def test_immediate_check_entry_does_not_refire():
 
 
 def _rig_immediate_tsl(book, sym, side, level, key, entry_price=100.0, qty=10):
-    from strategies.liquidity_trap.detector import BarAccumulator as _TrapAcc
+    from strategies.core.trap_zone_utils import BarAccumulator as _TrapAcc
     book._positions[sym] = {
         "contract": type("C", (), {"option_type": "CE" if side == "CALL" else "PE", "strike": 100,
                                      "expiry": date(2026, 9, 29)})(),

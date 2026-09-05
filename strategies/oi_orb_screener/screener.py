@@ -392,7 +392,7 @@ def sharp_bear_zones(bars_3m: list) -> List[dict]:
     engine.py re-scans the whole list on every new 3-min bar close, same
     "re-scan growing bar list" pattern strategies/liquidity_trap/engine.py
     itself already uses to guarantee zero drift from a validated design."""
-    from strategies.liquidity_trap.detector import find_all_setups
+    from strategies.core.trap_zone_utils import find_all_setups
     setups = [s for s in find_all_setups(bars_3m) if s.direction == "BEAR"]
     out = []
     for s in setups:
@@ -415,7 +415,7 @@ def sharp_bear_zones(bars_3m: list) -> List[dict]:
 def bull_trap_zones(bars_3m: list) -> List[dict]:
     """Mirror of sharp_bear_zones for OI-ORB's PUT side (bearish underlying),
     ported verbatim from scripts/oi_orb_bull_trap_tatapower_backtest.py."""
-    from strategies.liquidity_trap.detector import find_all_setups
+    from strategies.core.trap_zone_utils import find_all_setups
     setups = [s for s in find_all_setups(bars_3m) if s.direction == "BULL"]
     out = []
     for s in setups:

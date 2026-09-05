@@ -42,7 +42,7 @@ from config.global_config import IST, FNO_STOCK_CONFIG  # noqa: E402
 from data_layer.client_db import ClientDB  # noqa: E402
 from strategies.d1_trap_option.book import _fetch_bars, _Bar  # noqa: E402
 from strategies.v4_cascade.rolling_base import find_all_bear_zones, find_all_bull_zones  # noqa: E402
-from strategies.d1_trap_option.support_resistance import PositionalSRTracker  # noqa: E402
+from strategies.core.support_resistance import PositionalSRTracker  # noqa: E402
 
 # 2026-08-09: expanded from a 10-stock representative subset to the FULL
 # FNO_STOCK_CONFIG universe per direct user request ("check backtest for 30

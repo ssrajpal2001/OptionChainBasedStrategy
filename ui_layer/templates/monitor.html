@@ -7931,18 +7931,10 @@ function amoTest() {
                           : JSON.stringify({htf:deployForm._htf||'D1',mtf:deployForm._mtf||'1H',itm:deployForm._itm||1});
                       ">
                 <option value="sell_straddle">Sell Straddle</option>
-                <!-- disabled 2026-07-30: focusing on Sell Straddle + Bear Trap Only.
-                     Not deleted -- existing deployments keep running; re-enable by
-                     uncommenting if needed.
-                <option value="d1_trap_index">Trap Scanner - Index (Intraday)</option>
-                <option value="d1_trap_fno">Trap Scanner - FnO (Positional)</option>
-                -->
-                <option value="d1_trap_bear_only">Bear Trap Only (Option-Native, T1/T2)</option>
-                <option value="d1_trap_sr">D1 Trap S&amp;R (Option-Native, S&amp;R Ping-Pong)</option>
-                <option value="fvg">FVG (Fair Value Gap, NIFTY)</option>
-                <option value="oi_flow">OI-Flow Pre-Breakout</option>
-                <option value="liquidity_sweep">Liquidity Sweep (Sweep+FVG+Retest)</option>
-                <option value="liquidity_trap">Liquidity Trap (Multi-Ref 20m/3m + 60m Trend Filter)</option>
+                <!-- 2026-09-06: D1 Trap (all variants)/FVG/OI-Flow/Liquidity Sweep/
+                     Liquidity Trap deploy options removed -- fully stopped, direct
+                     user decision. Backend also rejects these strategy_names now
+                     (see allowed_strategies in ui_layer/dashboard_server.py). -->
                 <option value="fno_positional">FnO Positional (Swing, All FnO Stocks)</option>
                 <option value="oi_orb_screener">OI-ORB Screener (F&amp;O Stocks, EOD-only)</option>
                 <option value="cag_straddle">CAG Long Straddle (15:00-15:35 R1/S1 Breach)</option>

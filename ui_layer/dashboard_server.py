@@ -769,11 +769,6 @@ class DashboardServer:
         v4_cascade_manager=None, # V4CascadeBookManager — per-binding books (live list + find)
         fno_positional_manager=None, # FnOPositionalBookManager — stock positional option books
         hourly_breakout_manager=None, # HourlyBreakoutBookManager — 1H trap + 5M retest books
-        d1_trap_manager=None,  # D1TrapOptionBookManager — trap scanner (index + FnO)
-        fvg_manager=None,  # FVGBookManager — Fair Value Gap SMC books
-        oi_flow_manager=None,  # OIFlowBookManager — OI-Flow Pre-Breakout books
-        liquidity_sweep_manager=None,  # LiquiditySweepBookManager — Sweep+Displacement+FVG+Retest books
-        liquidity_trap_manager=None,  # LiquidityTrapBookManager — 15m/5m/1m cascade + CHoCH + scale-in books
         oi_orb_manager=None,  # OiOrbScreenerBookManager — OI-Spurt + ORB screener books (F&O stocks)
         cag_straddle_manager=None,  # CagStraddleBookManager — 15:00-15:35 R1/S1 breach books
     ) -> None:
@@ -790,11 +785,6 @@ class DashboardServer:
         self._v4_cascade_manager = v4_cascade_manager
         self._fno_positional_manager = fno_positional_manager
         self._hourly_breakout_manager = hourly_breakout_manager
-        self._d1_trap_manager = d1_trap_manager
-        self._fvg_manager = fvg_manager
-        self._oi_flow_manager = oi_flow_manager
-        self._liquidity_sweep_manager = liquidity_sweep_manager
-        self._liquidity_trap_manager = liquidity_trap_manager
         self._oi_orb_manager = oi_orb_manager
         self._cag_straddle_manager = cag_straddle_manager
         self._fno_monitor = None          # set via set_fno_monitor()
@@ -4463,10 +4453,7 @@ class DashboardServer:
 
             allowed_strategies = {
                 "sell_straddle", "v4_cascade", "fno_positional", "hourly_breakout",
-                "d1_trap_option", "d1_trap_index", "d1_trap_fno", "d1_trap_bear_only",
-                "d1_trap_sr", "d1_trap_fno_sr",
-                "fvg", "oi_flow", "liquidity_sweep", "liquidity_trap", "oi_orb_screener",
-                "cag_straddle",
+                "oi_orb_screener", "cag_straddle",
             }
             if body.strategy_name not in allowed_strategies:
                 return {"ok": False, "error": f"Unknown strategy '{body.strategy_name}'."}
@@ -6606,12 +6593,7 @@ pm2 save
             except Exception as exc:
                 return {"ok": False, "error": str(exc)}
 
-        self._register_d1trap_routes(app)
-        self._register_fvg_routes(app)
-        self._register_oi_flow_routes(app)
-        self._register_liquidity_sweep_routes(app)
         self._register_oi_orb_routes(app)
-        self._register_liquidity_trap_routes(app)
         self._register_cag_straddle_routes(app)
         return app
 
@@ -6801,144 +6783,20 @@ pm2 save
         return None
 
     def _find_trap_book(self, client_id: str, binding_id: str, underlying: str):
-        """Find a single D1TrapOptionBook by (client, binding, underlying)."""
-        if self._d1_trap_manager is not None:
-            return self._d1_trap_manager.find(client_id, binding_id, underlying)
+        """D1 Trap removed 2026-09-06 -- always returns None now, kept as a
+        stub since callers already handle a None trap book gracefully."""
         return None
 
     def _find_trap_books_for_binding(self, client_id: str, binding_id: str):
-        """Return all D1Trap books for a given (client, binding) — used for ALL_FNO aggregation."""
-        if self._d1_trap_manager is None:
-            return []
-        return [b for b in self._d1_trap_manager.books
-                if getattr(b, "_client_id", "") == client_id
-                and getattr(b, "_binding_id", "") == binding_id]
+        """D1 Trap removed 2026-09-06 -- always returns [] now, kept as a
+        stub since callers already handle an empty list gracefully."""
+        return []
 
-    # ── D1 Trap zone monitoring endpoint ──────────────────────────────────────
-
-    def _register_d1trap_routes(self, app) -> None:
-        _srv = self
-
-        @app.get("/api/d1trap/zones")
-        async def d1trap_zones():
-            """Return live monitoring state for all active D1 trap books."""
-            if _srv._d1_trap_manager is None:
-                return {"ok": True, "books": []}
-            books = _srv._d1_trap_manager.books
-            result = []
-            for b in books:
-                if not hasattr(b, "monitoring_zones"):
-                    logger.warning(
-                        "d1trap_zones: book %s (%s) has no monitoring_zones() -- silently "
-                        "invisible to the WATCHLIST TRACKER panel.",
-                        getattr(b, "_underlying", "?"), type(b).__name__,
-                    )
-                    continue
-                try:
-                    result.append(b.monitoring_zones())
-                except Exception:
-                    # 2026-08-12: this used to swallow silently -- a book whose
-                    # monitoring_zones() raised (e.g. a genuinely-running FnO
-                    # WATCHLIST stock book) would just vanish from the panel with
-                    # zero trace anywhere, indistinguishable from "never spawned."
-                    logger.exception(
-                        "d1trap_zones: monitoring_zones() raised for %s (%s) -- "
-                        "dropped from the WATCHLIST TRACKER panel.",
-                        getattr(b, "_underlying", "?"), type(b).__name__,
-                    )
-            # Sort: books with MONITORING zones or pending first, then by symbol
-            result.sort(key=lambda r: (
-                0 if (r.get("pending") or any(z["state"] == "MONITORING" for z in r.get("zones", []))) else 1,
-                r.get("underlying", "")
-            ))
-            return {"ok": True, "books": result}
-
-    # ── FVG monitoring endpoint ──────────────────────────────────────────────
-
-    def _register_fvg_routes(self, app) -> None:
-        _srv = self
-
-        @app.get("/api/fvg/status")
-        async def fvg_status():
-            """Return live monitoring state for all active FVG books -- same shape/
-            intent as /api/d1trap/zones above (FVGStrategy had no dashboard surface
-            at all before this; monitoring_fvgs() already existed, just unused)."""
-            if _srv._fvg_manager is None:
-                return {"ok": True, "books": []}
-            books = getattr(_srv._fvg_manager, "books", [])
-            result = []
-            for b in books:
-                if not hasattr(b, "monitoring_fvgs"):
-                    continue
-                try:
-                    result.append(b.monitoring_fvgs())
-                except Exception:
-                    pass
-            # Books with an open position or an active high-liquidity FVG first.
-            result.sort(key=lambda r: (
-                0 if (r.get("position") or any(z.get("high_liquidity") for z in r.get("zones", []))) else 1,
-                r.get("underlying", "")
-            ))
-            return {"ok": True, "books": result}
-
-    # ── OI-Flow monitoring endpoint ──────────────────────────────────────────
-
-    def _register_oi_flow_routes(self, app) -> None:
-        _srv = self
-
-        @app.get("/api/oiflow/status")
-        async def oi_flow_status():
-            """Return live monitoring state for all active OI-Flow books --
-            same shape/intent as /api/d1trap/zones and /api/fvg/status above:
-            OI wall + buildup per strike, the recent remarks trail, and the
-            open position with running P&L, straight from OIFlowStrategy.
-            monitoring_state() (strategies/oi_flow/engine.py)."""
-            if _srv._oi_flow_manager is None:
-                return {"ok": True, "books": []}
-            books = getattr(_srv._oi_flow_manager, "books", [])
-            result = []
-            for b in books:
-                if not hasattr(b, "monitoring_state"):
-                    continue
-                try:
-                    result.append(b.monitoring_state())
-                except Exception:
-                    logger.exception(
-                        "oi_flow_status: monitoring_state() raised for %s -- dropped from panel.",
-                        getattr(b, "_underlying", "?"),
-                    )
-            # Books with an open position first, then by underlying.
-            result.sort(key=lambda r: (0 if r.get("position") else 1, r.get("underlying", "")))
-            return {"ok": True, "books": result}
-
-    # ── Liquidity Sweep monitoring endpoint ──────────────────────────────────
-
-    def _register_liquidity_sweep_routes(self, app) -> None:
-        _srv = self
-
-        @app.get("/api/liqsweep/status")
-        async def liquidity_sweep_status():
-            """Same shape/intent as /api/oiflow/status above: pipeline state
-            (idle/awaiting_displacement/awaiting_fvg/retest_armed), bias,
-            active liquidity level, the recent remarks trail, and the open
-            position with running P&L, straight from LiquiditySweepStrategy.
-            monitoring_state() (strategies/liquidity_sweep/engine.py)."""
-            if _srv._liquidity_sweep_manager is None:
-                return {"ok": True, "books": []}
-            books = getattr(_srv._liquidity_sweep_manager, "books", [])
-            result = []
-            for b in books:
-                if not hasattr(b, "monitoring_state"):
-                    continue
-                try:
-                    result.append(b.monitoring_state())
-                except Exception:
-                    logger.exception(
-                        "liquidity_sweep_status: monitoring_state() raised for %s -- dropped from panel.",
-                        getattr(b, "_underlying", "?"),
-                    )
-            result.sort(key=lambda r: (0 if r.get("position") else 1, r.get("underlying", "")))
-            return {"ok": True, "books": result}
+    # 2026-09-06: D1 Trap/FVG/OI-Flow/Liquidity Sweep/Liquidity Trap monitoring
+    # endpoints (/api/d1trap/zones, /api/fvg/status, /api/oiflow/status,
+    # /api/liqsweep/status, /api/liqtrap/status) removed along with their
+    # strategies -- all fully stopped, direct user decision. Recoverable via
+    # git history if ever needed again.
 
     def _register_oi_orb_routes(self, app) -> None:
         _srv = self
@@ -6966,33 +6824,6 @@ pm2 save
                         getattr(b, "_client_id", "?"), getattr(b, "_binding_id", "?"),
                     )
             result.sort(key=lambda r: (0 if r.get("positions") else 1, r.get("client_id", "")))
-            return {"ok": True, "books": result}
-
-    def _register_liquidity_trap_routes(self, app) -> None:
-        _srv = self
-
-        @app.get("/api/liqtrap/status")
-        async def liquidity_trap_status():
-            """Same shape/intent as /api/liqsweep/status above: pipeline
-            stage (bias/sl_hit/confirmed), the open position with running
-            lots/P&L, and the recent remarks trail, straight from
-            LiquidityTrapStrategy.monitoring_state() (strategies/
-            liquidity_trap/engine.py)."""
-            if _srv._liquidity_trap_manager is None:
-                return {"ok": True, "books": []}
-            books = getattr(_srv._liquidity_trap_manager, "books", [])
-            result = []
-            for b in books:
-                if not hasattr(b, "monitoring_state"):
-                    continue
-                try:
-                    result.append(b.monitoring_state())
-                except Exception:
-                    logger.exception(
-                        "liquidity_trap_status: monitoring_state() raised for %s -- dropped from panel.",
-                        getattr(b, "_underlying", "?"),
-                    )
-            result.sort(key=lambda r: (0 if r.get("position") else 1, r.get("underlying", "")))
             return {"ok": True, "books": result}
 
     def _register_cag_straddle_routes(self, app) -> None:
@@ -7193,30 +7024,8 @@ pm2 save
                         p = getattr(s, "_position", None) if s else None
                         if p and getattr(p, "status", "open") == "open":
                             running += float(getattr(p, "unrealized_pnl", 0.0) or 0.0) * _lot(u)
-                    elif sname == "d1_trap_bear_only" and self._d1_trap_manager is not None:
-                        # 2026-08-03 fix: header P&L was sell_straddle-only -- an open Bear Trap
-                        # leg's live unrealized P&L never counted toward the header/admin total,
-                        # only its booked (closed) P&L via History. qty here is already
-                        # lot_size*lot_multiplier (see D1TrapBearOnlyBook._leg_view), so no
-                        # separate _lot(u) multiply like the sell_straddle branch above.
-                        book = self._d1_trap_manager.find(c.client_id, d.get("binding_id", ""), u)
-                        if book is not None:
-                            try:
-                                for leg in book.status().get("positions") or []:
-                                    ltp = leg.get("ltp")
-                                    entry = leg.get("entry")
-                                    qty = leg.get("qty") or 0
-                                    # 2026-08-03 fix: _OptionSeries.last_ltp defaults to 0.0 (not
-                                    # None) until the first real tick lands -- right after a
-                                    # restart with a restored open position, "ltp is not None"
-                                    # passed with ltp=0.0, producing a fake ~100% loss per leg
-                                    # that tripped RiskManager's daily-loss halt on a phantom
-                                    # number within seconds of startup. Require ltp > 0 (a real
-                                    # quote has actually arrived) before counting it.
-                                    if ltp is not None and entry is not None and float(ltp) > 0:
-                                        running += (float(ltp) - float(entry)) * float(qty)
-                            except Exception:
-                                pass
+                    # 2026-09-06: d1_trap_bear_only P&L branch removed along with
+                    # D1 Trap -- fully stopped, direct user decision.
                 try:
                     c._daily_pnl = round(booked + running, 2)
                 except Exception:

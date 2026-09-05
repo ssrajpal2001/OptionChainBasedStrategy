@@ -198,26 +198,15 @@ class Topic:
     SYSTEM_EVENT     = "system_event"
     EXIT_AUDIT       = "exit_audit"    # per-tick exit-criteria validation stream (granular UI)
     POSITION_UPDATE  = "position_update"  # strategy book position snapshot (entry/exit/roll)
-    TRAP_TICK        = "trap_tick"     # trap scanner per-tick telemetry (real-time LTP + zone status)
-    TRAP_STATE       = "trap_state"   # trap scanner state snapshot — published on every meaningful change
     FNO_STOCK_ALERT  = "fno_stock_alert"   # Stage-2 intraday stock monitor alert
     FNO_STOCK_STATUS = "fno_stock_status"  # live LTP + MTF/LTF state per stock (3s broadcast)
     FNO_ORDER_REQUEST = "fno_order_request"  # FnO positional option orders (fno_bridge.py)
     FNO_ORDER_FILL    = "fno_order_fill"     # FnO positional fill confirmations
-    D1_TRAP_ORDER_REQUEST = "d1_trap_order_request"  # Trap Scanner orders (d1_trap_bridge.py)
-    D1_TRAP_ORDER_FILL    = "d1_trap_order_fill"     # Trap Scanner fill confirmations
     EQUITY_TICK           = "equity_tick"            # FnO stock equity spot ticks (Fyers feed)
-    FVG_ORDER_REQUEST     = "fvg_order_request"      # Fair Value Gap strategy orders (fvg_bridge.py)
-    FVG_ORDER_FILL        = "fvg_order_fill"         # Fair Value Gap fill confirmations
-    OI_FLOW_ORDER_REQUEST = "oi_flow_order_request"  # OI-Flow Pre-Breakout strategy orders (oi_flow_bridge.py)
-    OI_FLOW_ORDER_FILL    = "oi_flow_order_fill"     # OI-Flow Pre-Breakout fill confirmations -- fully
-                                                      # standalone strategy, own Topics by design (shares
-                                                      # no runtime infra with D1Trap/FVG/SellStraddle)
-    LIQUIDITY_SWEEP_ORDER_REQUEST = "liquidity_sweep_order_request"  # Liquidity Sweep strategy orders
-    LIQUIDITY_SWEEP_ORDER_FILL    = "liquidity_sweep_order_fill"     # Liquidity Sweep fill confirmations --
-                                                      # fully standalone strategy (same mandate as OI-Flow),
-                                                      # own Topics, shares no runtime infra with any other
-                                                      # strategy in this codebase
+    # 2026-09-06: TRAP_TICK/TRAP_STATE (dead, unused anywhere), D1_TRAP_ORDER_*,
+    # FVG_ORDER_*, OI_FLOW_ORDER_*, and LIQUIDITY_SWEEP_ORDER_*/LIQUIDITY_TRAP_
+    # ORDER_* removed along with their strategies -- all fully stopped, direct
+    # user decision. Recoverable via git history if ever needed again.
     STRADDLE_HEDGE_ORDER_REQUEST = "straddle_hedge_order_request"  # SellStraddle EOD hedge-and-carry
     STRADDLE_HEDGE_ORDER_FILL    = "straddle_hedge_order_fill"     # (2026-08-20) -- BUY-to-open/SELL-to-close
                                                       # protective legs. Deliberately its OWN Topic/bridge,
@@ -225,11 +214,6 @@ class Topic:
                                                       # SellStraddle flow), which is hardcoded SELL-to-open
                                                       # only -- keeps the new BUY-to-open path from ever
                                                       # touching the existing live sold-leg order flow.
-    LIQUIDITY_TRAP_ORDER_REQUEST = "liquidity_trap_order_request"  # Liquidity Trap strategy orders
-    LIQUIDITY_TRAP_ORDER_FILL    = "liquidity_trap_order_fill"     # (2026-08-21) -- fully standalone
-                                                      # strategy (same mandate as OI-Flow/Liquidity Sweep),
-                                                      # own Topics, shares no runtime infra with any other
-                                                      # strategy in this codebase.
     OI_ORB_ORDER_REQUEST = "oi_orb_order_request"  # OI-Spurt + ORB screener strategy orders
     OI_ORB_ORDER_FILL    = "oi_orb_order_fill"     # (2026-08-24) -- fully standalone strategy (same
                                                       # mandate as OI-Flow/Liquidity Sweep/Liquidity Trap),

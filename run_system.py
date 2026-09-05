@@ -587,19 +587,25 @@ _RECONCILIATION_INITIAL_DELAY_SEC = 60.0    # let books fully spawn/restore/warm
 _RECONCILIATION_INTERVAL_SEC = 300.0        # 5 min thereafter
 
 
-async def _broker_reconciliation_pass(managers: dict, router, bus) -> None:
+_RECONCILE_SPECS = (
+    ("sell_straddle", _reconcile_sell_straddle_book, "SellStraddle"),
+)
+
+
+async def _broker_reconciliation_pass(managers: dict, router, bus, specs=None) -> None:
     """One reconciliation pass across every live strategy's every book,
     split out of _broker_reconciliation_loop's own sleep loop so it's
     directly unit-testable without needing to wait through real 60s/5min
     intervals. A manager whose own .books property raises (or any other
     per-manager failure) must not stop the OTHER managers' books from
-    being checked in the same pass."""
+    being checked in the same pass.
+
+    `specs` defaults to the real production list (_RECONCILE_SPECS) --
+    overridable for tests that want to exercise the multi-manager
+    isolation property without depending on whichever strategies happen
+    to be currently registered."""
     logger = logging.getLogger(__name__)
-    for name, reconciler, label in (
-        ("sell_straddle", _reconcile_sell_straddle_book, "SellStraddle"),
-        ("oi_flow", _reconcile_single_leg_book, "OI-Flow"),
-        ("liquidity_trap", _reconcile_single_leg_book, "Liquidity Trap"),
-    ):
+    for name, reconciler, label in (specs if specs is not None else _RECONCILE_SPECS):
         manager = managers.get(name)
         if manager is None:
             continue
@@ -693,11 +699,7 @@ async def _run_live(
     from management.admin_console import AdminConsole
     from management.risk_manager import RiskManager
 
-    # Normalise trap variant names → canonical registry key so any of
-    # "d1_trap_index" / "d1_trap_fno" passed on the CLI still boots the manager.
-    _TRAP_ALIASES = {"d1_trap_index", "d1_trap_fno", "d1_trap_bear_only"}
-    _raw_strats = {s.strip().lower() for s in (strategies or "").split(",") if s.strip()}
-    _enabled_strats = {("d1_trap_option" if s in _TRAP_ALIASES else s) for s in _raw_strats}
+    _enabled_strats = {s.strip().lower() for s in (strategies or "").split(",") if s.strip()}
     logger.info("run_system: enabled strategies = %s", sorted(_enabled_strats) or "ALL")
 
     bus = EventBus()
@@ -796,38 +798,9 @@ async def _run_live(
         bus, router,
         log_dir=os.path.join(cfg.storage.log_dir, "trades"),
     )
-    from execution_bridge.d1_trap_bridge import D1TrapExecutionBridge
-    d1_trap_bridge = D1TrapExecutionBridge(
-        bus, router,
-        log_dir=os.path.join(cfg.storage.log_dir, "trades"),
-    )
-    from execution_bridge.fvg_bridge import FVGExecutionBridge
-    fvg_bridge = FVGExecutionBridge(
-        bus, router,
-        log_dir=os.path.join(cfg.storage.log_dir, "trades"),
-    )
-    # 2026-08-12: fully standalone bridge -- own Topics (OI_FLOW_ORDER_REQUEST/
-    # FILL), shares no runtime state with the D1Trap/FVG bridges above despite
-    # the identical construction pattern.
-    from execution_bridge.oi_flow_bridge import OIFlowExecutionBridge
-    oi_flow_bridge = OIFlowExecutionBridge(
-        bus, router,
-        log_dir=os.path.join(cfg.storage.log_dir, "trades"),
-    )
-    # 2026-08-19: fully standalone bridge -- own Topics (LIQUIDITY_SWEEP_
-    # ORDER_REQUEST/FILL), shares no runtime state with any bridge above.
-    from execution_bridge.liquidity_sweep_bridge import LiquiditySweepExecutionBridge
-    liquidity_sweep_bridge = LiquiditySweepExecutionBridge(
-        bus, router,
-        log_dir=os.path.join(cfg.storage.log_dir, "trades"),
-    )
-    # 2026-08-21: fully standalone bridge -- own Topics (LIQUIDITY_TRAP_
-    # ORDER_REQUEST/FILL), shares no runtime state with any bridge above.
-    from execution_bridge.liquidity_trap_bridge import LiquidityTrapExecutionBridge
-    liquidity_trap_bridge = LiquidityTrapExecutionBridge(
-        bus, router,
-        log_dir=os.path.join(cfg.storage.log_dir, "trades"),
-    )
+    # 2026-09-06: D1Trap/FVG/OI-Flow/Liquidity Sweep/Liquidity Trap bridges
+    # removed along with their strategies -- all fully stopped, direct user
+    # decision. Recoverable via git history if ever needed again.
     # 2026-08-24: fully standalone bridge -- own Topics (OI_ORB_ORDER_REQUEST/
     # FILL), shares no runtime state with any bridge above. Ported from the
     # standalone Colab OI-Spurt+ORB screener as a connectivity/plumbing proof.
@@ -913,11 +886,6 @@ async def _run_live(
                 v4_cascade_manager=v4_cascade_manager,
                 fno_positional_manager=managers.get("fno_positional"),
                 hourly_breakout_manager=managers.get("hourly_breakout"),
-                d1_trap_manager=managers.get("d1_trap_option"),
-                fvg_manager=managers.get("fvg"),
-                oi_flow_manager=managers.get("oi_flow"),
-                liquidity_sweep_manager=managers.get("liquidity_sweep"),
-                liquidity_trap_manager=managers.get("liquidity_trap"),
                 oi_orb_manager=managers.get("oi_orb_screener"),
                 cag_straddle_manager=managers.get("cag_straddle"),
             )
@@ -1059,12 +1027,7 @@ async def _run_live(
         asyncio.create_task(straddle_bridge.run(),      name="straddle_bridge"),
         asyncio.create_task(cascade_bridge.run(),       name="cascade_bridge"),
         asyncio.create_task(fno_bridge.run(),           name="fno_bridge"),
-        asyncio.create_task(d1_trap_bridge.run(),       name="d1_trap_bridge"),
-        asyncio.create_task(fvg_bridge.run(),           name="fvg_bridge"),
-        asyncio.create_task(oi_flow_bridge.run(),       name="oi_flow_bridge"),
-        asyncio.create_task(liquidity_sweep_bridge.run(), name="liquidity_sweep_bridge"),
         asyncio.create_task(straddle_hedge_bridge.run(), name="straddle_hedge_bridge"),
-        asyncio.create_task(liquidity_trap_bridge.run(), name="liquidity_trap_bridge"),
         asyncio.create_task(oi_orb_bridge.run(),        name="oi_orb_bridge"),
         asyncio.create_task(cag_straddle_bridge.run(),  name="cag_straddle_bridge"),
         asyncio.create_task(client_mgr.run(),           name="client_mgr"),
@@ -1106,12 +1069,7 @@ async def _run_live(
     straddle_bridge.stop()
     cascade_bridge.stop()
     fno_bridge.stop()
-    d1_trap_bridge.stop()
-    fvg_bridge.stop()
-    oi_flow_bridge.stop()
-    liquidity_sweep_bridge.stop()
     straddle_hedge_bridge.stop()
-    liquidity_trap_bridge.stop()
     oi_orb_bridge.stop()
     cag_straddle_bridge.stop()
     await router.stop()
