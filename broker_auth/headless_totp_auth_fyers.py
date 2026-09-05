@@ -100,25 +100,49 @@ def _dump_field_diagnostics(page) -> str:
             if n == 0:
                 lines.append(f"{sel}: count=0")
                 continue
-            first = loc.first
-            try:
-                vis = first.is_visible()
-            except Exception:
-                vis = "<n/a>"
-            try:
-                val = first.input_value()
-            except Exception:
-                val = "<n/a (not an input?)>"
-            try:
-                disabled = first.is_disabled()
-            except Exception:
-                disabled = "<n/a>"
-            lines.append(f"{sel}: count={n} visible={vis} disabled={disabled} value={val!r}")
+            # 2026-09-06 real incident: a prior version only ever inspected
+            # .first -- when count>1 (confirmed real: fy_client_id matched 2
+            # elements), the SECOND one could be the one the submit button's
+            # own validation is actually wired to, silently unfilled, while
+            # .first looked perfectly filled. Inspect every match, not just
+            # the first, so a mismatch between duplicates is visible.
+            per_element = []
+            for i in range(n):
+                el = loc.nth(i)
+                try:
+                    vis = el.is_visible()
+                except Exception:
+                    vis = "<n/a>"
+                try:
+                    val = el.input_value()
+                except Exception:
+                    val = "<n/a (not an input?)>"
+                try:
+                    disabled = el.is_disabled()
+                except Exception:
+                    disabled = "<n/a>"
+                per_element.append(f"[{i}]visible={vis},disabled={disabled},value={val!r}")
+            lines.append(f"{sel}: count={n} " + " ".join(per_element))
         except Exception as exc:
             lines.append(f"{sel}: <lookup error: {exc}>")
+    # Radio state (2026-09-06): the form_html snapshot showed mobile_rb's
+    # `checked=""` HTML ATTRIBUTE still present even after our "Client ID"
+    # text click -- but that attribute reflects the ORIGINAL server-rendered
+    # markup, not necessarily the live DOM/React state after a click. Query
+    # the actual runtime .checked PROPERTY directly to know for certain
+    # whether the tab switch really took effect.
+    for radio_id in ("mobile_rb", "clientId_rb"):
+        try:
+            checked = page.eval_on_selector(f"#{radio_id}", "el => el.checked")
+            lines.append(f"#{radio_id}.checked={checked}")
+        except Exception as exc:
+            lines.append(f"#{radio_id}: <lookup error: {exc}>")
     try:
         form_html = page.eval_on_selector("form", "el => el.outerHTML")
-        lines.append(f"form_html={form_html[:1500]!r}")
+        # 2026-09-06: 1500 chars cut off before ever reaching the actual
+        # Client ID input section (only the now-hidden mobile section was
+        # captured) -- widened substantially so the real section renders.
+        lines.append(f"form_html={form_html[:6000]!r}")
     except Exception as exc:
         lines.append(f"form_html: <no <form> found or eval failed: {exc}>")
     return " || ".join(lines)
