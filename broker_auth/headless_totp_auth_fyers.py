@@ -49,6 +49,32 @@ def _fill_first_match(page, selectors: list, value: str, timeout: int = 10000) -
     raise last_exc
 
 
+def _fill_and_enable(page, selectors: list, value: str, submit_selector: str,
+                      fill_timeout: int = 10000, enable_timeout: int = 3000) -> str:
+    """2026-09-06 real incident: .fill() alone left Fyers' own submit button
+    permanently disabled -- the value visibly landed in the field (we got
+    past the earlier fill-timeout error entirely) but the button's own
+    client-side validation (a React-controlled-input pattern that validates
+    on its real onChange/onBlur handlers) never fired, because .fill()'s
+    synthetic value-set doesn't always trigger those on every framework.
+    Sequence: fill -> Tab (blur, the most common validation trigger) -> if
+    the submit button is still disabled, clear and retry with real
+    keystroke-by-keystroke .type() (dispatches genuine per-character input
+    events no framework can miss) -> Tab again."""
+    matched_sel = _fill_first_match(page, selectors, value, fill_timeout)
+    page.keyboard.press("Tab")
+    try:
+        page.wait_for_selector(f"{submit_selector}:not([disabled])", timeout=enable_timeout)
+        return matched_sel
+    except Exception:
+        pass
+    page.fill(matched_sel, "")
+    page.type(matched_sel, value, delay=50)
+    page.keyboard.press("Tab")
+    page.wait_for_selector(f"{submit_selector}:not([disabled])", timeout=enable_timeout * 2)
+    return matched_sel
+
+
 def fyers_totp_login(
     client_id: str, app_id: str, password: str, totp_secret: str, pin: str,
     redirect_uri: str = "",
@@ -109,15 +135,15 @@ def fyers_totp_login(
                 # a few candidate selectors for the input itself since the
                 # exact id may also have changed since this was first written.
                 _click_if_present(page, "Client ID")
-                _fill_first_match(page, [
+                _fill_and_enable(page, [
                     "input[id='fy_client_id']:visible",
                     "input[name='fy_client_id']:visible",
                     "input[placeholder*='Client ID' i]:visible",
-                ], client_id)
+                ], client_id, "button[id='clientIdSubmit']")
                 page.click("button[id='clientIdSubmit']:visible")
-                page.fill("input[id='fy_totp']:visible", totp_code)
+                _fill_and_enable(page, ["input[id='fy_totp']:visible"], totp_code, "button[id='totpSubmit']")
                 page.click("button[id='totpSubmit']:visible")
-                page.fill("input[id='fy_pin']:visible", pin)
+                _fill_and_enable(page, ["input[id='fy_pin']:visible"], pin, "button[id='pinSubmit']")
                 page.click("button[id='pinSubmit']:visible")
                 page.wait_for_url("**/api-login/redirect-uri/**", timeout=20000)
                 final_url = page.url
