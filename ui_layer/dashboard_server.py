@@ -1525,6 +1525,85 @@ class DashboardServer:
                 ),
             }
 
+        @app.post("/api/admin/feeder/angelone/test", tags=["Admin"])
+        async def api_feeder_angelone_test(_: dict = Depends(_require_admin)):
+            """
+            2026-09-06, direct user spec: verify AngelOne can genuinely stream
+            live market data BEFORE trusting it as a Fyers replacement in the
+            real Upstox+Fyers DualFeeder pair. Deliberately built as a fully
+            ISOLATED connect-subscribe-wait-teardown against a throwaway
+            AngelOneFeeder + its own private EventBus -- never touches
+            _srv._feeder or any live state, so a test click carries zero risk
+            to the currently-running production feed. Reports whether a real
+            NIFTY tick was received within a short window; does NOT wire
+            AngelOne into the live feed even on success -- that is a
+            separate, deliberate decision the user makes once this proves
+            out (see broker_auth/headless_totp_auth_fyers.py's own docstring
+            for why Fyers specifically needed replacing).
+            """
+            import time as _time
+            from data_layer.base_feeder import EventBus as _TestBus
+            from data_layer.global_feeder import AngelOneFeeder
+            from config.global_config import Topic as _T
+
+            creds = _srv._client_db.get_feeder_creds_sync("angelone") or {}
+            if not (creds.get("client_id") and creds.get("api_key")
+                    and creds.get("password") and creds.get("totp_secret")):
+                return {
+                    "ok": False,
+                    "error": "AngelOne credentials incomplete — need Client ID, API Key, "
+                             "PASSWORD / PIN, and TOTP SECRET saved first.",
+                }
+
+            t0 = _time.monotonic()
+            test_bus = _TestBus()
+            feeder = AngelOneFeeder(test_bus, _srv._cfg)
+            feeder.set_credentials(creds)
+            tick_q = test_bus.subscribe(_T.INDEX_TICK)
+            run_task = None
+            try:
+                connected = await asyncio.wait_for(feeder.connect(), timeout=20)
+                if not connected:
+                    return {"ok": False, "error": "AngelOne authentication/socket setup failed — check credentials and logs."}
+                run_task = asyncio.create_task(feeder.run())
+                deadline = _time.monotonic() + 12
+                while _time.monotonic() < deadline and not feeder.is_connected:
+                    await asyncio.sleep(0.2)
+                if not feeder.is_connected:
+                    return {"ok": False, "error": "AngelOne WebSocket did not report connected within 12s."}
+                await feeder._index_subscribe_all()
+                try:
+                    tick = await asyncio.wait_for(tick_q.get(), timeout=10)
+                except asyncio.TimeoutError:
+                    return {
+                        "ok": False,
+                        "error": "Connected, but no NIFTY tick received within 10s — "
+                                 "check that the index tokens in global_feeder.py are still "
+                                 "correct (see AngelOneFeeder's own module docstring).",
+                    }
+                elapsed = (_time.monotonic() - t0) * 1000
+                return {
+                    "ok": True,
+                    "message": f"AngelOne feed verified — received {tick.symbol} tick "
+                               f"@ {tick.ltp} in {elapsed:.0f}ms.",
+                }
+            except asyncio.TimeoutError:
+                return {"ok": False, "error": "AngelOne connect() timed out after 20s."}
+            except Exception as exc:
+                logger.error("[Feeder/AngelOne test] error: %s", exc)
+                return {"ok": False, "error": f"AngelOne test failed: {exc}"}
+            finally:
+                if run_task is not None:
+                    run_task.cancel()
+                    try:
+                        await run_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                try:
+                    await feeder.disconnect()
+                except Exception:
+                    pass
+
         @app.post("/api/admin/feeder/{provider}/connect", tags=["Admin"])
         async def api_feeder_provider_connect(
             provider: str,

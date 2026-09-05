@@ -1292,6 +1292,364 @@ class FyersFeeder(BaseFeeder):
                 logger.debug("FyersFeeder: option tick parse error for %s: %s", symbol_fyers, _exc)
 
 
+_ANGELONE_INDEX_TOKENS: Dict[str, Tuple[int, str]] = {
+    # underlying -> (exchangeType, token). exchangeType per SmartAPI WebSocket2:
+    # 1=nse_cm, 2=nse_fo, 3=bse_cm, 4=bse_fo, 5=mcx_fo. These are AngelOne's own
+    # well-known, documented index tokens (NOT derived from a scrip search --
+    # indices aren't in the equity/derivative scrip master the same way options
+    # are). 2026-09-06: NOT yet live-verified against a real AngelOne WebSocket
+    # session -- confirm these are still correct on first real connect before
+    # trusting this feeder's index ticks broadly (same "verify on first real
+    # day" discipline every other new integration in this codebase follows).
+    "NIFTY":     (1, "99926000"),
+    "BANKNIFTY": (1, "99926009"),
+    "SENSEX":    (3, "99919000"),
+}
+_ANGELONE_TOKEN_TO_INTERNAL: Dict[Tuple[int, str], str] = {
+    v: k for k, v in _ANGELONE_INDEX_TOKENS.items()
+}
+
+
+class AngelOneFeeder(BaseFeeder):
+    """
+    Live AngelOne SmartAPI data feeder using SmartWebSocketV2.
+
+    2026-09-06: built as a free, genuinely headless (no browser/OAuth/Cloudflare
+    dependency) replacement candidate for Fyers in the admin Data Feeder panel
+    -- Fyers headless auto-login was confirmed non-viable (Cloudflare Turnstile
+    gates its login page; see broker_auth/headless_totp_auth_fyers.py's own
+    docstring for the full evidence trail). AngelOne's MPIN+TOTP headless auth
+    (SmartConnect.generateSession) was ALREADY built and proven working in this
+    codebase for the CLIENT EXECUTION broker (execution_bridge/broker_angel.py)
+    -- this feeder reuses the exact same auth mechanic for market DATA instead.
+
+    ⚠️ Deliberately NOT wired into the live DualFeeder Upstox+Fyers failover
+    pair by this change -- that's a live-trading-critical swap the user should
+    make explicitly, once they've verified via the admin panel's own toggle
+    that this feeder actually streams real ticks. Registered in
+    _FEEDER_REGISTRY and exposed in the admin Data Feeder panel as its own
+    independently-toggleable feed for exactly that verification step.
+
+    ⚠️ The WebSocket message field names/scaling below (paise vs rupees,
+    exact dict keys) are written from SmartAPI's documented WebSocket2
+    contract, NOT verified against a real live session in this codebase --
+    unlike Upstox/Fyers, which have been running in production. Treat the
+    first real connection as a verification pass, same discipline as every
+    other "not yet live-verified" integration already documented in this
+    codebase (OI-Flow, Liquidity Sweep, etc.) -- watch the logs, not just
+    "did it connect."
+    """
+
+    def __init__(self, bus: EventBus, cfg: GlobalConfig = None) -> None:  # type: ignore[assignment]
+        super().__init__(bus)
+        self._cfg = cfg
+        self._creds: Dict[str, str] = {}
+        self._smartapi = None
+        self._socket = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        # token -> (underlying, strike, opt_type, expiry) for options; used to
+        # reconstruct an OptionTick from a WS message that only carries the
+        # bare numeric token, not the human-readable symbol.
+        self._token_meta: Dict[str, Tuple[str, float, str, date]] = {}
+        self._subscribed: Dict[int, set] = {}   # exchangeType -> set of tokens
+        self._scrip_cache: Dict[str, str] = {}  # (exchange, tradingsymbol) -> token, flattened key
+        try:
+            import SmartApi  # noqa: F401
+            self._sdk_available = True
+        except ImportError:
+            self._sdk_available = False
+
+    def set_credentials(self, creds: Dict[str, str]) -> None:
+        self._creds = creds
+
+    async def connect(self) -> bool:
+        if not self._sdk_available:
+            logger.warning(
+                "AngelOneFeeder: smartapi-python SDK not installed — "
+                "pip install smartapi-python pyotp.  Feeder will not connect."
+            )
+            return False
+        client_code = self._creds.get("client_id", "")
+        api_key     = self._creds.get("api_key", "")
+        password    = self._creds.get("password", "")
+        totp_secret = self._creds.get("totp_secret", "")
+        if not (client_code and api_key and password and totp_secret):
+            logger.warning(
+                "AngelOneFeeder: missing client_id/api_key/password/totp_secret "
+                "in admin feeder credentials — cannot connect."
+            )
+            return False
+
+        self._loop = asyncio.get_running_loop()
+
+        from SmartApi import SmartConnect
+        import pyotp
+
+        self._smartapi = SmartConnect(api_key=api_key)
+        totp_code = pyotp.TOTP(totp_secret).now()
+        # Same generateSession() call already proven working in
+        # execution_bridge/broker_angel.py's headless client-execution path.
+        session = await asyncio.to_thread(
+            self._smartapi.generateSession, client_code, password, totp_code,
+        )
+        if not (session and session.get("status")):
+            logger.error("AngelOneFeeder: headless auth failed: %s", session)
+            return False
+        data = session.get("data") or {}
+        jwt_token  = data.get("jwtToken", "")
+        feed_token = data.get("feedToken", "") or await asyncio.to_thread(self._smartapi.getfeedToken)
+        if not (jwt_token and feed_token):
+            logger.error("AngelOneFeeder: auth succeeded but jwtToken/feedToken missing: %s", data)
+            return False
+        if jwt_token.startswith("Bearer "):
+            jwt_token = jwt_token[7:]
+
+        from SmartApi.smartWebSocketV2 import SmartWebSocketV2
+
+        def _on_data(wsapp, message) -> None:
+            if self._loop and not self._loop.is_closed():
+                asyncio.run_coroutine_threadsafe(self._parse_frame(message), self._loop)
+
+        def _on_open(wsapp) -> None:
+            self._connected = True
+            logger.info("AngelOneFeeder: WebSocket connected.")
+            # Re-assert all known subscriptions on every (re)connect.
+            if self._subscribed:
+                token_list = [
+                    {"exchangeType": et, "tokens": list(toks)}
+                    for et, toks in self._subscribed.items() if toks
+                ]
+                if token_list and self._socket:
+                    try:
+                        self._socket.subscribe("angelone_feed", 3, token_list)
+                    except Exception as exc:
+                        logger.warning("AngelOneFeeder: on_open re-subscribe failed: %s", exc)
+
+        def _on_error(wsapp, error) -> None:
+            logger.warning("AngelOneFeeder: WS error: %s", error)
+
+        def _on_close(wsapp) -> None:
+            logger.info("AngelOneFeeder: WebSocket closed.")
+            self._connected = False
+
+        self._socket = SmartWebSocketV2(jwt_token, api_key, client_code, feed_token)
+        self._socket.on_open = _on_open
+        self._socket.on_data = _on_data
+        self._socket.on_error = _on_error
+        self._socket.on_close = _on_close
+        logger.info("AngelOneFeeder: authenticated, socket created — will connect in _ws_loop.")
+        return True
+
+    async def disconnect(self) -> None:
+        self._running = False
+        self._connected = False
+        if self._socket:
+            try:
+                self._socket.close_connection()
+            except Exception:
+                pass
+            self._socket = None
+
+    async def _ws_loop(self) -> None:
+        if not self._socket:
+            return
+        self._running = True
+        try:
+            await asyncio.to_thread(self._socket.connect)
+            while self._running and self._connected:
+                await asyncio.sleep(1.0)
+        except Exception as exc:
+            logger.error("AngelOneFeeder: _ws_loop ended with error: %s", exc)
+        finally:
+            self._connected = False
+            self._running = False
+
+    def _resolve_option_token(self, underlying: str, strike: float, opt_type: str, expiry: date) -> Optional[str]:
+        """Pure lookup -- resolve the numeric AngelOne symboltoken for an
+        option contract via the scrip master search, caching the result.
+        Mirrors execution_bridge/broker_angel.py's own _lookup_symbol,
+        independently reimplemented here (fresh code, no import) since a
+        feeder has no reason to depend on the execution broker's own
+        internal state, same standalone-mandate precedent as every other
+        strategy/component pair in this codebase. Deliberately does NOT
+        touch self._subscribed -- subscription bookkeeping belongs solely
+        to subscribe_tokens/unsubscribe_tokens, so there is exactly one
+        place that ever decides "is this token already subscribed.\""""
+        from data_layer.symbol_translator import InternalSymbol, SymbolTranslator
+        internal = InternalSymbol(underlying=underlying, strike=strike, option_type=opt_type, expiry=expiry)
+        tradingsymbol = SymbolTranslator.to_angelone(internal)
+        exchange = "BFO" if underlying.upper() == "SENSEX" else "NFO"
+        cache_key = f"{exchange}:{tradingsymbol}"
+        if cache_key in self._scrip_cache:
+            token = self._scrip_cache[cache_key]
+            if token:
+                self._token_meta[token] = (underlying, strike, opt_type, expiry)
+            return token or None
+        if not self._smartapi:
+            return None
+        try:
+            res = self._smartapi.searchScrip(exchange, tradingsymbol)
+            token = ""
+            if res and res.get("status") and res.get("data"):
+                for it in res["data"]:
+                    if it.get("tradingsymbol") == tradingsymbol:
+                        token = str(it.get("symboltoken", ""))
+                        break
+            self._scrip_cache[cache_key] = token
+            if token:
+                self._token_meta[token] = (underlying, strike, opt_type, expiry)
+            return token or None
+        except Exception as exc:
+            logger.warning("AngelOneFeeder: scrip search failed for %s: %s", tradingsymbol, exc)
+            return None
+
+    def _resolve_any_token(self, token: str) -> Optional[Tuple[str, int]]:
+        """Accept an Upstox key / Fyers symbol / internal canonical token
+        (whatever format strike_rebalancer.py's cross-feeder broadcast sends)
+        and resolve it to (real_angelone_token, exchange_type) via the scrip
+        master. Pure lookup -- never mutates subscription state. Mirrors
+        FyersFeeder._to_fyers_symbol's own cross-format acceptance pattern."""
+        from data_layer.instrument_registry import REGISTRY
+        from data_layer.symbol_translator import SymbolTranslator
+        meta = None
+        if "|" in token:  # Upstox instrument key
+            for und, kmap in REGISTRY._upstox_keys.items():
+                for (exp_str, strike, ot), stored in kmap.items():
+                    if stored == token:
+                        meta = (und, float(strike), ot, date.fromisoformat(exp_str))
+                        break
+                if meta:
+                    break
+        elif token.startswith(("NSE:", "BSE:")):  # Fyers symbol
+            parsed = SymbolTranslator.from_fyers(token.split(":", 1)[1])
+            if parsed:
+                meta = (parsed.underlying, parsed.strike, parsed.option_type, parsed.expiry)
+        else:
+            parsed = SymbolTranslator.from_angelone(token)
+            if parsed:
+                meta = (parsed.underlying, parsed.strike, parsed.option_type, parsed.expiry)
+        if not meta:
+            return None
+        und, strike, ot, exp = meta
+        real_token = self._resolve_option_token(und, strike, ot, exp)
+        if not real_token:
+            return None
+        exchange_type = 4 if und.upper() == "SENSEX" else 2
+        return (real_token, exchange_type)
+
+    async def subscribe_tokens(self, tokens: List[str]) -> None:
+        new_by_exchange: Dict[int, List[str]] = {}
+        for t in tokens:
+            resolved = self._resolve_any_token(t)
+            if not resolved:
+                logger.debug("AngelOneFeeder: could not resolve token %s", t)
+                continue
+            real_token, exchange_type = resolved
+            if real_token not in self._subscribed.get(exchange_type, set()):
+                new_by_exchange.setdefault(exchange_type, []).append(real_token)
+        if not new_by_exchange:
+            return
+        for et, toks in new_by_exchange.items():
+            self._subscribed.setdefault(et, set()).update(toks)
+        if self._socket and self._connected:
+            token_list = [{"exchangeType": et, "tokens": toks} for et, toks in new_by_exchange.items()]
+            try:
+                self._socket.subscribe("angelone_feed", 3, token_list)
+                logger.info("AngelOneFeeder: subscribed to %d new option token(s).",
+                            sum(len(v) for v in new_by_exchange.values()))
+            except Exception as exc:
+                logger.warning("AngelOneFeeder: subscribe_tokens error: %s", exc)
+
+    async def unsubscribe_tokens(self, tokens: List[str]) -> None:
+        by_exchange: Dict[int, List[str]] = {}
+        for t in tokens:
+            resolved = self._resolve_any_token(t)
+            if not resolved:
+                continue
+            real_token, exchange_type = resolved
+            if real_token in self._subscribed.get(exchange_type, set()):
+                self._subscribed[exchange_type].discard(real_token)
+                by_exchange.setdefault(exchange_type, []).append(real_token)
+        if by_exchange and self._socket and self._connected:
+            token_list = [{"exchangeType": et, "tokens": toks} for et, toks in by_exchange.items()]
+            try:
+                self._socket.unsubscribe("angelone_feed", 3, token_list)
+            except Exception as exc:
+                logger.debug("AngelOneFeeder: unsubscribe_tokens error: %s", exc)
+
+    async def _index_subscribe_all(self) -> None:
+        """Subscribe to every monitored index's fixed AngelOne token at connect time."""
+        indices = (
+            self._cfg.monitored_indices
+            if self._cfg and hasattr(self._cfg, "monitored_indices")
+            else list(_ANGELONE_INDEX_TOKENS.keys())
+        )
+        by_exchange: Dict[int, List[str]] = {}
+        for i in indices:
+            pair = _ANGELONE_INDEX_TOKENS.get(i.upper())
+            if pair:
+                et, tok = pair
+                self._subscribed.setdefault(et, set()).add(tok)
+                by_exchange.setdefault(et, []).append(tok)
+        if by_exchange and self._socket:
+            token_list = [{"exchangeType": et, "tokens": toks} for et, toks in by_exchange.items()]
+            try:
+                self._socket.subscribe("angelone_feed", 3, token_list)
+            except Exception as exc:
+                logger.warning("AngelOneFeeder: index subscribe failed: %s", exc)
+
+    async def _parse_frame(self, raw: Any) -> None:
+        if not isinstance(raw, dict):
+            return
+        if not hasattr(self, "_logged_first_tick"):
+            self._logged_first_tick = True
+            logger.info("AngelOneFeeder: first TICK frame keys=%s sample=%r",
+                        list(raw.keys()), str(raw)[:400])
+        exchange_type = raw.get("exchange_type")
+        token = str(raw.get("token", ""))
+        ltp_paise = raw.get("last_traded_price")
+        if exchange_type is None or not token or ltp_paise is None:
+            return
+        ltp = float(ltp_paise) / 100.0
+
+        idx_internal = _ANGELONE_TOKEN_TO_INTERNAL.get((exchange_type, token))
+        if idx_internal:
+            tick = IndexTick(
+                symbol=idx_internal,
+                ltp=ltp,
+                open=float(raw.get("open_price_of_the_day", ltp_paise)) / 100.0,
+                high=float(raw.get("high_price_of_the_day", ltp_paise)) / 100.0,
+                low=float(raw.get("low_price_of_the_day", ltp_paise)) / 100.0,
+                close=float(raw.get("closed_price", ltp_paise)) / 100.0,
+                volume=int(raw.get("volume_trade_for_the_day", 0) or 0),
+                timestamp=datetime.now(IST),
+            )
+            await self._publish_index(tick)
+            return
+
+        meta = self._token_meta.get(token)
+        if meta:
+            underlying, strike, opt_type, expiry = meta
+            opt_tick = OptionTick(
+                symbol=token,  # symbol field is informational only downstream; strategies key off underlying/strike/option_type/expiry
+                underlying=underlying,
+                strike=strike,
+                option_type=opt_type,
+                expiry=expiry,
+                ltp=ltp,
+                bid=ltp,
+                ask=ltp,
+                oi=int(raw.get("open_interest", 0) or 0),
+                change_oi=0,
+                volume=int(raw.get("volume_trade_for_the_day", 0) or 0),
+                iv=0.0,
+                delta=0.0,
+                timestamp=datetime.now(IST),
+                atp=float(raw.get("average_traded_price", ltp_paise)) / 100.0,
+            )
+            await self._publish_option(opt_tick)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # DualFeeder — concurrent active-active dual-provider feed manager
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1551,14 +1909,14 @@ def _load_shared_client():
 
 
 _FEEDER_REGISTRY: Dict[str, type] = {
-    "mock":    MockFeeder,
-    "upstox":  UpstoxFeeder,
-    "upstox2": UpstoxFeeder,
-    "fyers":   FyersFeeder,
-    "shared":  None,   # populated on first access via register_feeder("shared", ...)
+    "mock":     MockFeeder,
+    "upstox":   UpstoxFeeder,
+    "upstox2":  UpstoxFeeder,
+    "fyers":    FyersFeeder,
+    "angelone": AngelOneFeeder,
+    "shared":   None,   # populated on first access via register_feeder("shared", ...)
     # "shoonya": ShoonyaFeeder,
     # "dhan": DhanFeeder,
-    # "angelone": AngelOneFeeder,
 }
 
 

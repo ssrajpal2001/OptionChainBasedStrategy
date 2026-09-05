@@ -5,7 +5,12 @@ from data_layer.client_db import ClientDB
 @pytest.fixture
 def db(tmp_path):
     instance = ClientDB(str(tmp_path / "test.db"))
-    asyncio.get_event_loop().run_until_complete(instance.initialise())
+    # asyncio.get_event_loop() raises RuntimeError once any earlier test in the
+    # same session has called asyncio.run() (which explicitly unsets the
+    # thread's event loop on completion) -- asyncio.run() is the correct,
+    # loop-lifecycle-safe replacement, matching the pattern already used
+    # throughout the rest of this test suite.
+    asyncio.run(instance.initialise())
     return instance
 
 def test_get_running_straddle_deployments_empty(db):
@@ -14,13 +19,13 @@ def test_get_running_straddle_deployments_empty(db):
 
 def test_admin_password_hash_roundtrip(db):
     assert db.get_admin_password_hash_sync() == ""
-    asyncio.get_event_loop().run_until_complete(
+    asyncio.run(
         db.set_admin_password_hash("salt:hash_value")
     )
     assert db.get_admin_password_hash_sync() == "salt:hash_value"
 
 def test_create_and_consume_reset_token(db):
-    token = asyncio.get_event_loop().run_until_complete(
+    token = asyncio.run(
         db.create_reset_token("client", "alice")
     )
     assert len(token) > 20
@@ -28,7 +33,7 @@ def test_create_and_consume_reset_token(db):
     assert result == ("client", "alice")
 
 def test_consume_token_twice_fails(db):
-    token = asyncio.get_event_loop().run_until_complete(
+    token = asyncio.run(
         db.create_reset_token("client", "alice")
     )
     db.consume_reset_token_sync(token)

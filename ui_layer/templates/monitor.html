@@ -650,6 +650,19 @@ document.addEventListener('alpine:init', () => {
     feederEditSaving:    { upstox: false, upstox2: false, fyers: false },
     feederEditMsg:       { upstox: '', upstox2: '', fyers: '' },
     feederMsg:           { upstox: '', upstox2: '', fyers: '' },
+    // AngelOne (2026-09-06): free, genuinely headless (no browser/OAuth/
+    // Cloudflare dependency) candidate data feeder built to replace Fyers,
+    // whose own headless login is confirmed non-viable (Cloudflare
+    // Turnstile). Deliberately a "test connection" card, NOT a live toggle
+    // like the ones above -- verifying it actually streams real ticks is a
+    // separate, safer step before ever wiring it into the live Upstox+Fyers
+    // feed (that swap is the user's own deliberate follow-up decision).
+    angelOneCreds:       { client_id:'', api_key:'', password:'', totp_secret:'' },
+    angelOneSaving:      false,
+    angelOneSaveMsg:      '',
+    angelOneTestLoading: false,
+    angelOneTestMsg:     '',
+    angelOneTestOk:      null,
     positions: [], posLoading: false, posTs: '',
 
     /* ── RMS ─────────────────────────────────────────────────────────── */
@@ -1730,6 +1743,38 @@ document.addEventListener('alpine:init', () => {
         }
       } catch { this.feederEditMsg[p] = 'Request failed.'; }
       finally { this.feederEditSaving[p] = false; }
+    },
+
+    async saveAngelOneFeederCreds() {
+      this.angelOneSaving = true; this.angelOneSaveMsg = '';
+      try {
+        const r = await this._fetch('/api/admin/feeder/save-creds', {
+          json: {
+            provider:    'angelone',
+            client_id:   this.angelOneCreds.client_id,
+            api_key:     this.angelOneCreds.api_key,
+            secret:      '',
+            password:    this.angelOneCreds.password,
+            totp_secret: this.angelOneCreds.totp_secret,
+          }
+        });
+        if (!r) return;
+        const d = await r.json();
+        this.angelOneSaveMsg = d.ok ? '✓ Saved.' : (d.error || 'Save failed.');
+      } catch { this.angelOneSaveMsg = 'Request failed.'; }
+      finally { this.angelOneSaving = false; }
+    },
+
+    async testAngelOneFeed() {
+      this.angelOneTestLoading = true; this.angelOneTestMsg = ''; this.angelOneTestOk = null;
+      try {
+        const r = await this._fetch('/api/admin/feeder/angelone/test', { method: 'POST' });
+        if (!r) return;
+        const d = await r.json();
+        this.angelOneTestOk  = d.ok;
+        this.angelOneTestMsg = d.message || d.error || 'Test finished with no detail.';
+      } catch { this.angelOneTestOk = false; this.angelOneTestMsg = 'Request failed.'; }
+      finally { this.angelOneTestLoading = false; }
     },
 
     /* ── RMS ─────────────────────────────────────────────────────────────── */
@@ -5686,6 +5731,63 @@ function amoTest() {
 
         </div>
       </template>
+
+      <!-- AngelOne — TEST-ONLY card, deliberately NOT a live toggle like the
+           providers above. Free + genuinely headless (MPIN+TOTP, no browser/
+           OAuth/Cloudflare) candidate built to replace Fyers, whose own
+           headless login is confirmed non-viable. Verify it actually streams
+           real ticks here BEFORE ever wiring it into the live Upstox+Fyers
+           feed -- that swap is a separate, deliberate decision. -->
+      <div class="rounded p-3 flex flex-col gap-2" style="background:var(--t-surface);border:1px solid rgba(var(--t-green-rgb),0.3)">
+        <div class="flex items-center gap-3">
+          <div class="flex-1 min-w-0">
+            <div class="font-ui font-bold text-sm tracking-widest" style="color:var(--t-green)">ANGELONE SMARTAPI (TEST)</div>
+            <div class="font-mono text-xs mt-0.5" style="color:var(--t-muted)">Free · headless MPIN+TOTP · candidate replacement for Fyers</div>
+          </div>
+        </div>
+        <div class="grid grid-cols-2 gap-2">
+          <div>
+            <div class="sec-label mb-1">CLIENT ID (e.g. A123456)</div>
+            <input class="t-input" type="text" x-model="angelOneCreds.client_id" autocomplete="off" spellcheck="false"/>
+          </div>
+          <div>
+            <div class="sec-label mb-1">SMARTAPI API KEY</div>
+            <input class="t-input" type="text" x-model="angelOneCreds.api_key" autocomplete="off" spellcheck="false"/>
+          </div>
+        </div>
+        <div class="grid grid-cols-2 gap-2">
+          <div>
+            <div class="sec-label mb-1">MPIN (4-digit password)</div>
+            <input class="t-input" type="password" x-model="angelOneCreds.password" placeholder="leave blank to keep existing" autocomplete="new-password"/>
+          </div>
+          <div>
+            <div class="sec-label mb-1">TOTP SECRET (base32)</div>
+            <input class="t-input" type="password" x-model="angelOneCreds.totp_secret" placeholder="leave blank to keep existing" autocomplete="new-password"/>
+          </div>
+        </div>
+        <div class="flex items-center gap-3">
+          <button @click="saveAngelOneFeederCreds()" :disabled="angelOneSaving"
+                  class="font-ui font-bold text-xs px-4 py-1.5 rounded border"
+                  style="border-color:rgba(var(--t-green-rgb),0.4);color:var(--t-green);background:rgba(var(--t-green-rgb),0.06)">
+            <span x-show="!angelOneSaving">&#x1F4BE; SAVE</span>
+            <span x-show="angelOneSaving">Saving…</span>
+          </button>
+          <button @click="testAngelOneFeed()" :disabled="angelOneTestLoading"
+                  class="font-ui font-bold text-xs px-4 py-1.5 rounded border"
+                  style="border-color:rgba(var(--t-cyan-rgb),0.4);color:var(--t-cyan);background:rgba(var(--t-cyan-rgb),0.06)"
+                  title="Isolated test — connects, subscribes to NIFTY, waits for a real tick, then fully disconnects. Never touches the live feed.">
+            <span x-show="!angelOneTestLoading">&#x25B6; TEST CONNECTION</span>
+            <span x-show="angelOneTestLoading">Connecting &amp; waiting for a tick (up to ~30s)…</span>
+          </button>
+          <div x-show="angelOneSaveMsg" class="font-mono text-xs"
+               :style="angelOneSaveMsg.startsWith('✓')?'color:var(--t-green)':'color:var(--t-red)'"
+               x-text="angelOneSaveMsg"></div>
+        </div>
+        <div x-show="angelOneTestMsg" class="font-mono text-xs px-2 py-1.5 rounded"
+             :style="angelOneTestOk ? 'color:var(--t-green);background:rgba(var(--t-green-rgb),0.08);border:1px solid rgba(var(--t-green-rgb),0.2)'
+                                    : 'color:var(--t-red);background:rgba(var(--t-red-rgb),0.08);border:1px solid rgba(var(--t-red-rgb),0.2)'"
+             x-text="angelOneTestMsg"></div>
+      </div>
     </div>
   </div>
 
