@@ -6683,12 +6683,32 @@ pm2 save
             if secondary in ("none", primary):
                 secondary = ""
 
-            providers = [p for p in {primary, secondary, "upstox", "upstox2", "fyers"} if p]
+            # 2026-09-06: candidate set now always includes all three real
+            # data-feed providers (not just primary/secondary) -- same
+            # "run all of upstox/fyers/angelone in parallel" spec already
+            # applied to _start_feeder_stream and GlobalFeeder.start().
+            providers = [p for p in {primary, secondary, "upstox", "upstox2", "fyers", "angelone"} if p]
             creds_map: dict = {}
             present: List[str] = []
 
             for p in providers:
                 row = self._client_db.get_feeder_creds_sync(p) or {}
+                if p == "angelone":
+                    # AngelOne authenticates internally (client_code+password+
+                    # TOTP -> jwtToken+feedToken inside AngelOneFeeder.connect())
+                    # -- no access_token/OAuth concept at all, so the generic
+                    # shape below (built for upstox/upstox2/fyers) doesn't apply.
+                    if not (row.get("client_id") and row.get("api_key")
+                            and row.get("password") and row.get("totp_secret")):
+                        continue
+                    creds_map[p] = {
+                        "client_id": row.get("client_id", ""),
+                        "api_key": row.get("api_key", ""),
+                        "password": row.get("password", ""),
+                        "totp_secret": row.get("totp_secret", ""),
+                    }
+                    present.append(p)
+                    continue
                 has_creds = bool(row.get("client_id") or row.get("api_key"))
                 if not has_creds:
                     continue
