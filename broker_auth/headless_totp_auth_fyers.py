@@ -18,6 +18,37 @@ class FyersHeadlessLoginError(Exception):
     """Fyers headless login failed at a specific step (often Cloudflare)."""
 
 
+def _click_if_present(page, text: str, timeout: int = 3000) -> bool:
+    """Best-effort click on visible text -- a no-op (returns False) if the
+    element doesn't exist or isn't clickable, never raises. Used for the
+    Mobile-number/Client-ID tab toggle, which may or may not be present
+    depending on Fyers' current page state."""
+    try:
+        loc = page.get_by_text(text, exact=True)
+        if loc.count() > 0:
+            loc.first.click(timeout=timeout)
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _fill_first_match(page, selectors: list, value: str, timeout: int = 10000) -> str:
+    """Try each selector in order, filling the first one that resolves.
+    Raises the LAST exception seen (most likely to be the most informative,
+    since earlier candidates in the list are usually the primary/expected
+    one) if none work -- keeps the real Fyers page's exact DOM structure
+    from being a single point of failure for this whole login attempt."""
+    last_exc = None
+    for sel in selectors:
+        try:
+            page.fill(sel, value, timeout=timeout)
+            return sel
+        except Exception as exc:
+            last_exc = exc
+    raise last_exc
+
+
 def fyers_totp_login(
     client_id: str, app_id: str, password: str, totp_secret: str, pin: str,
     redirect_uri: str = "",
@@ -67,7 +98,22 @@ def fyers_totp_login(
                 # for some other reason.
                 page = browser.new_page(viewport={"width": 1366, "height": 900})
                 page.goto("https://login.fyers.in/")
-                page.fill("input[id='fy_client_id']:visible", client_id)
+                # 2026-09-06, second real incident (viewport fix alone wasn't
+                # enough): captured page content showed the real login page
+                # presents a "Mobile number" / "Client ID" TOGGLE with a "+91"
+                # country-code prefix visible by default -- strongly implying
+                # Mobile Number is the default-active tab and the Client ID
+                # input only becomes visible after switching to that tab.
+                # Click it first (best-effort -- a no-op if it's already the
+                # active tab or this specific toggle doesn't exist), then try
+                # a few candidate selectors for the input itself since the
+                # exact id may also have changed since this was first written.
+                _click_if_present(page, "Client ID")
+                _fill_first_match(page, [
+                    "input[id='fy_client_id']:visible",
+                    "input[name='fy_client_id']:visible",
+                    "input[placeholder*='Client ID' i]:visible",
+                ], client_id)
                 page.click("button[id='clientIdSubmit']:visible")
                 page.fill("input[id='fy_totp']:visible", totp_code)
                 page.click("button[id='totpSubmit']:visible")

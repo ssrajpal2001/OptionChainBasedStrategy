@@ -55,15 +55,22 @@ def _upstox_session():
     return cffi_requests.Session(impersonate="chrome131", headers=headers)
 
 
-def _upstox_parse(resp):
+def _upstox_parse(resp, step: str = ""):
+    """step (2026-09-06 real incident): a bare "Upstox 1017016: Something
+    went wrong" gave no clue which of the 6 steps produced it -- Upstox's
+    own community forum has zero documentation for that specific code
+    beyond a generic "wait and retry." Every call site now passes its own
+    step label so a real failure is at least localizable to one of the 6
+    HTTP calls without needing another live round-trip to find out."""
+    _prefix = f"Upstox {step}: " if step else "Upstox: "
     try:
         body = resp.json()
     except Exception:
         raise HeadlessTotpAuthError(
-            f"Upstox: non-JSON response (HTTP {resp.status_code}): {resp.text[:300]}"
+            f"{_prefix}non-JSON response (HTTP {resp.status_code}): {resp.text[:300]}"
         )
     if not isinstance(body, dict):
-        raise HeadlessTotpAuthError(f"Upstox: unexpected response shape: {body!r}")
+        raise HeadlessTotpAuthError(f"{_prefix}unexpected response shape: {body!r}")
     if "success" not in body:
         return body
     if not body.get("success", True):
@@ -71,8 +78,8 @@ def _upstox_parse(resp):
         if isinstance(err, dict):
             code = err.get("errorCode") or err.get("code") or ""
             msg = err.get("message") or err.get("msg") or str(err)
-            raise HeadlessTotpAuthError(f"Upstox {code}: {msg}".strip(": "))
-        raise HeadlessTotpAuthError(f"Upstox login failed: {body}")
+            raise HeadlessTotpAuthError(f"{_prefix}{code}: {msg}".strip(": "))
+        raise HeadlessTotpAuthError(f"{_prefix}login failed: {body}")
     return body.get("data")
 
 
@@ -162,7 +169,7 @@ def upstox_totp_login(
     # Step 2: generate OTP
     r2 = session.post(f"{_SVC}/login/open/v6/auth/1fa/otp/generate",
                        json={"data": {"mobileNumber": user_id, "userId": sess_user_id}})
-    d2 = _upstox_parse(r2)
+    d2 = _upstox_parse(r2, step="Step 2 (otp/generate)")
     validate_otp_token = (d2 or {}).get("validateOTPToken") or (d2 or {}).get("validateOtpToken")
     if not validate_otp_token:
         raise HeadlessTotpAuthError(f"Upstox: Step 2 failed — validateOTPToken missing. data={d2}")
@@ -172,7 +179,7 @@ def upstox_totp_login(
     live_totp = pyotp.TOTP(totp_secret_clean).now()
     r3 = session.post(f"{_SVC}/login/open/v4/auth/1fa/otp-totp/verify",
                        json={"data": {"otp": live_totp, "validateOtpToken": validate_otp_token}})
-    _upstox_parse(r3)
+    _upstox_parse(r3, step="Step 3 (totp/verify)")
     time.sleep(1)
 
     # Step 4: submit PIN
@@ -183,7 +190,7 @@ def upstox_totp_login(
         json={"data": {"twoFAMethod": "SECRET_PIN", "inputText": pin_b64}},
         allow_redirects=True,
     )
-    _upstox_parse(r4)
+    _upstox_parse(r4, step="Step 4 (2fa/PIN)")
     time.sleep(1)
 
     # Step 5: OAuth approve -> auth code
@@ -195,7 +202,7 @@ def upstox_totp_login(
         json={"data": {"userOAuthApproval": True}},
         allow_redirects=True,
     )
-    d5 = _upstox_parse(r5)
+    d5 = _upstox_parse(r5, step="Step 5 (oauth/authorize)")
     oauth_redirect = (d5 or {}).get("redirectUri", "")
     qs5 = parse_qs(urlparse(oauth_redirect).query)
     auth_code = (qs5.get("code") or [""])[0]
@@ -211,7 +218,7 @@ def upstox_totp_login(
               f"&redirect_uri={redirect_uri}&grant_type=authorization_code"),
         headers={"accept": "application/json", "content-type": "application/x-www-form-urlencoded"},
     )
-    d6 = _upstox_parse(r6)
+    d6 = _upstox_parse(r6, step="Step 6 (token exchange)")
     access_token = (d6 or {}).get("access_token", "")
     if not access_token:
         raise HeadlessTotpAuthError(f"Upstox: Step 6 failed — access_token missing. data={d6}")
