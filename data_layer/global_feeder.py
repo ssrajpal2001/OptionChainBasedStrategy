@@ -1971,12 +1971,25 @@ class GlobalFeeder:
         self._rebalancer = None
 
     def _load_feeder_creds(self, provider: str) -> Dict[str, str]:
-        """Load {api_key, api_secret, user_id, access_token} for a provider from DB."""
+        """Load {api_key, api_secret, user_id, access_token} for a provider from DB.
+
+        2026-09-06: AngelOne authenticates internally (client_code+password+
+        TOTP -> jwtToken+feedToken inside AngelOneFeeder.connect()) and has
+        no access_token/secret concept at all -- returns its own real
+        credential shape instead of the OAuth-style one every other
+        provider here uses."""
         creds: Dict[str, str] = {}
         if self._client_db is None or not provider:
             return creds
         try:
             row = self._client_db.get_feeder_creds_sync(provider) or {}
+            if provider == "angelone":
+                return {
+                    "client_id": row.get("client_id", ""),
+                    "api_key": row.get("api_key", ""),
+                    "password": row.get("password", ""),
+                    "totp_secret": row.get("totp_secret", ""),
+                }
             creds = {
                 "api_key": row.get("api_key", ""),
                 "api_secret": row.get("secret", ""),
@@ -1993,32 +2006,55 @@ class GlobalFeeder:
         """
         Create feeder, connect, and launch run + heartbeat tasks.
 
-        If both the configured primary and secondary feeders have valid-looking
-        tokens in the DB, they are started together as an active-passive dual
-        feed (primary drives prices; secondary takes over when primary is stale).
-        Otherwise a single-provider feed is used.
+        2026-09-06, direct user spec ("run all data feeder upstox1, fyers,
+        angel parallel — if one fails other can immediately take its
+        position, we will not ever lose any tick"): every one of
+        upstox/fyers/angelone with usable, currently-saved credentials is
+        started TOGETHER at boot, not just whichever two are configured as
+        primary/secondary. The configured primary still drives prices
+        (DedupBuffer.set_primary); every other connected provider is a hot
+        standby. Falls back to a genuine single-provider feed only if just
+        one of the three ends up with usable creds.
+
+        Fixed alongside this (real bug, same class as the admin-toggle
+        version already fixed in ui_layer.dashboard_server._start_feeder_
+        stream): the old check (`secondary_creds.get("access_token")`)
+        always evaluated False for AngelOne, which authenticates internally
+        via client_code+password+TOTP and has no access_token field at all
+        — AngelOne could never be picked up here even with valid creds
+        saved. `_usable()` now accepts either credential shape.
         """
         self._running = True
         primary = self._cfg.primary_feeder_provider.lower()
-        secondary = (getattr(self._cfg, "secondary_feeder_provider", "angelone") or "none").lower()
-        if secondary in ("none", primary):
-            secondary = ""
 
-        primary_creds = self._load_feeder_creds(primary) if primary not in ("mock", "shared") else {}
-        secondary_creds = self._load_feeder_creds(secondary) if secondary and secondary not in ("mock", "shared") else {}
+        def _usable(p: str, creds: dict) -> bool:
+            if not creds:
+                return False
+            if p == "angelone":
+                return bool(creds.get("client_id") and creds.get("password"))
+            return bool(creds.get("access_token"))
 
-        # If a secondary token is available, start them as a hot-standby pair.
-        if secondary and secondary_creds.get("access_token"):
-            creds_map = {primary: primary_creds}
-            if primary_creds.get("access_token"):
-                creds_map[secondary] = secondary_creds
-            else:
-                # Primary has no token but secondary does — start secondary as the active feed.
-                creds_map = {secondary: secondary_creds}
+        candidates = {primary, "upstox", "fyers", "angelone"} - {"", "mock", "shared", "upstox2"}
+        creds_map: Dict[str, Dict[str, str]] = {}
+        for p in candidates:
+            creds = self._load_feeder_creds(p)
+            if _usable(p, creds):
+                creds_map[p] = creds
+
+        if len(creds_map) >= 2:
             await self.start_providers(creds_map)
             return
+        if creds_map:
+            p, c = next(iter(creds_map.items()))
+            await self._start_single_internal(p, c)
+            return
 
-        # Single-provider fallback.
+        # Nothing usable anywhere — single-provider fallback keeps the
+        # original behavior (attempt the configured primary, even with
+        # empty/stale creds, so existing reconnect/heartbeat logic still
+        # engages and surfaces a clear FEEDER_DOWN rather than silently
+        # doing nothing).
+        primary_creds = self._load_feeder_creds(primary) if primary not in ("mock", "shared") else {}
         await self._start_single_internal(primary, primary_creds)
 
     async def _start_single_internal(self, provider: str, creds: Dict[str, str]) -> None:

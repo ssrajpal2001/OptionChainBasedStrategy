@@ -89,10 +89,21 @@ async def _start_feeder_stream(feeder, provider: str, api_key: str, token: str, 
     """
     Switch GlobalFeeder to the given live provider.
 
-    If the configured secondary provider (or any other cached feeder) also has a
-    fresh token in DB, starts a DualFeeder active-passive pair.  Otherwise starts
-    a single-provider stream.  The configured primary always drives prices; the
-    other connected providers are hot standbys.
+    2026-09-06, direct user spec ("run all data feeder upstox1, fyers, angel
+    parallel — if one fails other can immediately take its position, we
+    will not ever lose any tick"): every one of upstox/fyers/angelone that
+    has usable, currently-saved credentials is started TOGETHER, not just
+    whichever two are configured as primary/secondary — DualFeeder.
+    start_providers() already runs each provider as its own independent
+    asyncio task and already tolerates any number of them (nothing about
+    it is hardcoded to exactly two), so this only had to stop artificially
+    limiting the candidate set to a primary+secondary pair. The configured
+    primary still drives prices (DedupBuffer.set_primary) — every OTHER
+    connected provider, regardless of how many, is a hot standby whose
+    ticks get accepted the instant the primary goes stale for a given
+    symbol (per-symbol failover, see DedupBuffer.accept()'s own docstring).
+    Falls back to a genuine single-provider stream only if just one
+    provider ends up with usable creds.
     """
     if feeder is None:
         logger.warning("[Feeder/Toggle] GlobalFeeder not wired — cannot start stream.")
@@ -102,8 +113,13 @@ async def _start_feeder_stream(feeder, provider: str, api_key: str, token: str, 
 
     primary   = (getattr(cfg, "primary_feeder_provider", "upstox") or "upstox").lower() if cfg else "upstox"
     secondary = (getattr(cfg, "secondary_feeder_provider", "angelone") or "none").lower() if cfg else "angelone"
-    if secondary in ("none", primary):
+    if secondary == primary:
         secondary = ""
+    # 2026-09-06: candidate set is now ALL THREE real data-feed providers
+    # (upstox2 excluded -- that's the separate CrudeOil-only feed, a
+    # different index entirely), not just the configured primary/secondary
+    # pair -- see this function's own docstring above.
+    _candidates = {primary, secondary, "upstox", "fyers", "angelone"} - {"", "none", "upstox2"}
 
     def _load_creds(p: str) -> dict:
         row = client_db.get_feeder_creds_sync(p) or {} if client_db is not None else {}
@@ -138,8 +154,9 @@ async def _start_feeder_stream(feeder, provider: str, api_key: str, token: str, 
     if provider and token:
         creds_map[provider] = {"api_key": api_key, "access_token": token}
 
-    # Add the configured primary + secondary if they have tokens.
-    for p in {primary, secondary}:
+    # Add every other candidate provider that has usable, currently-saved
+    # creds — upstox/fyers/angelone all run together, not just primary+secondary.
+    for p in _candidates:
         if p and p not in creds_map:
             c = _load_creds(p)
             if c:
@@ -148,7 +165,8 @@ async def _start_feeder_stream(feeder, provider: str, api_key: str, token: str, 
     try:
         if len(creds_map) >= 2:
             await feeder.start_providers(creds_map)
-            logger.info("[Feeder/Toggle] DUAL stream started — providers=%s.", list(creds_map.keys()))
+            logger.info("[Feeder/Toggle] PARALLEL stream started — providers=%s (primary=%s drives, "
+                        "rest are hot standbys).", list(creds_map.keys()), primary)
         elif creds_map:
             p, c = next(iter(creds_map.items()))
             await feeder.start_single(p, c)
@@ -1724,57 +1742,16 @@ class DashboardServer:
                     "[Feeder/Toggle] [%s] cached token rejected in %.1fms", p, elapsed,
                 )
 
-            # Step 1.5 (2026-09-06, direct user spec): if password/TOTP secret are
-            # saved for this provider, attempt the SAME headless login
-            # scripts/auto_morning_start.py uses, right here, synchronously, so
-            # Terminal ON itself answers "did auto-login work, or do I still need
-            # to log in on the broker's website" -- instead of only finding out
-            # the next unattended morning. On any failure (wrong creds, broker
-            # site changed, Fyers Cloudflare/selector issues, etc.) this falls
-            # straight through to the existing OAuth flow below, unchanged.
-            password    = db_row.get("password", "")
-            totp_secret = db_row.get("totp_secret", "")
-            if password and totp_secret:
-                try:
-                    if p in ("upstox", "upstox2"):
-                        from broker_auth.headless_totp_auth import upstox_totp_login
-                        # 2026-09-06 real incident: Upstox rejected the default
-                        # redirect_uri ("UDAPI100068 ... client_id and redirect_uri
-                        # ... incorrect") -- it must be one of the URIs actually
-                        # registered for this api_key's app. Use the SAME base the
-                        # real interactive OAuth flow below already uses, which is
-                        # necessarily correct since that flow works today.
-                        _redirect_uri = f"{_redirect_base(request, _srv._client_db)}/callback/upstox"
-                        new_token = await asyncio.to_thread(
-                            upstox_totp_login, api_key=api_key, api_secret=secret,
-                            user_id=user_id, password=password, totp_secret=totp_secret,
-                            redirect_uri=_redirect_uri,
-                        )
-                    else:  # fyers
-                        from broker_auth.headless_totp_auth_fyers import fyers_totp_login
-                        _redirect_uri = f"{_redirect_base(request, _srv._client_db)}/callback/fyers"
-                        new_token = await asyncio.to_thread(
-                            fyers_totp_login, client_id=user_id, app_id=api_key,
-                            password=password, totp_secret=totp_secret, pin=password,
-                            redirect_uri=_redirect_uri,
-                        )
-                    now = datetime.now(IST).isoformat()
-                    await _srv._client_db.update_feeder_token(p, new_token, generated_at=now)
-                    await _start_feeder_stream(_srv._feeder, p, api_key, new_token, _srv._client_db, _srv._cfg)
-                    elapsed = (_time.monotonic() - t0) * 1000
-                    logger.info(
-                        "[Feeder/Toggle] [%s] headless auto-login succeeded in %.1fms", p, elapsed,
-                    )
-                    return {
-                        "ok": True, "connected": True, "flow": "headless",
-                        "message": f"{p.upper()} feeder connected via automated login.",
-                    }
-                except Exception as exc:
-                    elapsed = (_time.monotonic() - t0) * 1000
-                    logger.warning(
-                        "[Feeder/Toggle] [%s] headless auto-login failed in %.1fms (%s) — "
-                        "falling back to manual OAuth login.", p, elapsed, exc,
-                    )
+            # 2026-09-06, direct user decision: headless auto-login for the ADMIN
+            # data feeder is retired for upstox/upstox2/fyers -- both confirmed
+            # non-viable (Cloudflare Bot Management on Upstox's otp/generate
+            # endpoint; Cloudflare Turnstile on Fyers' login page -- see
+            # broker_auth/headless_totp_auth.py and config/global_config.py's own
+            # docstrings for the full evidence trail). Data-feeder enable is a
+            # deliberate MANUAL action (open URL, log in, click toggle) every
+            # trading day -- go straight to OAuth, no auto-attempt to fall back
+            # FROM. AngelOne has its own dedicated /angelone/connect endpoint
+            # above (genuinely headless, no OAuth needed at all).
 
             # Step 2: generate OAuth URL
             base_url     = _redirect_base(request, _srv._client_db)
@@ -4201,7 +4178,12 @@ class DashboardServer:
             # Fyers). On any failure (wrong creds, broker site changed,
             # Fyers Cloudflare/selector issues, etc.) this falls straight
             # through to the existing OAuth flow below, unchanged.
-            if provider in ("zerodha", "upstox", "fyers") and b.get("password") and b.get("totp_secret"):
+            # 2026-09-06: Fyers headless dropped here too -- confirmed non-viable
+            # everywhere (Cloudflare Turnstile blocks the automated session
+            # regardless of which credentials/account attempt it), not just for
+            # the admin data feeder. Zerodha/Upstox headless remain here,
+            # unconfirmed either way for this specific per-client-binding flow.
+            if provider in ("zerodha", "upstox") and b.get("password") and b.get("totp_secret"):
                 try:
                     if provider == "zerodha":
                         from broker_auth.headless_totp_auth import zerodha_totp_login
@@ -4210,7 +4192,7 @@ class DashboardServer:
                             user_id=user_id, password=b.get("password", ""),
                             totp_secret=b.get("totp_secret", ""),
                         )
-                    elif provider == "upstox":
+                    else:  # upstox
                         from broker_auth.headless_totp_auth import upstox_totp_login
                         # 2026-09-06 real incident: must use the SAME registered
                         # redirect_uri the real OAuth flow below already uses --
@@ -4221,14 +4203,6 @@ class DashboardServer:
                             upstox_totp_login, api_key=api_key, api_secret=api_secret,
                             user_id=user_id, password=b.get("password", ""),
                             totp_secret=b.get("totp_secret", ""), redirect_uri=_redirect_uri,
-                        )
-                    else:  # fyers
-                        from broker_auth.headless_totp_auth_fyers import fyers_totp_login
-                        _redirect_uri = f"{_redirect_base(request, _srv._client_db)}/callback/fyers"
-                        new_token = await asyncio.to_thread(
-                            fyers_totp_login, client_id=user_id, app_id=api_key,
-                            password=b.get("password", ""), totp_secret=b.get("totp_secret", ""),
-                            pin=b.get("password", ""), redirect_uri=_redirect_uri,
                         )
                     await _srv._client_db.update_access_token(
                         cid, binding_id, new_token, generated_at=datetime.now(IST).isoformat())
