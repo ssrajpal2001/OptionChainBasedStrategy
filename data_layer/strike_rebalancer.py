@@ -294,7 +294,7 @@ class StrikeRebalancer:
         state = self._state[underlying]
 
         # NSE/BSE: block initial subscription AND unsubscribe after 15:30 IST to free
-        # Upstox/Fyers WS slots for MCX evening session (crude/gold run until ~23:30).
+        # Upstox/Fyers WS slots once the NSE/BSE session is done for the day.
         if underlying in _NSE_INDICES:
             now_t = tick.timestamp.astimezone(IST).time()
             if now_t >= _NSE_CLOSE:

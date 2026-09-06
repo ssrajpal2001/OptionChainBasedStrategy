@@ -290,13 +290,13 @@ class UpstoxFeeder(BaseFeeder):
 
     def _index_instrument_keys(self) -> List[str]:
         """
-        Upstox instrument keys for monitored instruments. MCX commodities use the
-        near-month FUTURES instrument_key from the registry as the ATM source --
-        2026-08-26: so does any underlying listed in cfg.futures_atm_underlyings
-        (see GlobalConfig's own docstring for that field for the full rationale).
+        Upstox instrument keys for monitored instruments. Any underlying listed
+        in cfg.futures_atm_underlyings additionally subscribes to its near-month
+        FUTURES instrument_key from the registry (see GlobalConfig's own
+        docstring for that field for the full rationale).
         """
         from data_layer.symbol_translator import SymbolTranslator
-        from data_layer.instrument_registry import REGISTRY, _MCX_UNDERLYINGS
+        from data_layer.instrument_registry import REGISTRY
         indices = (
             self._cfg.monitored_indices
             if self._cfg and hasattr(self._cfg, "monitored_indices")
@@ -305,14 +305,7 @@ class UpstoxFeeder(BaseFeeder):
         _futures_atm = {u.upper() for u in (getattr(self._cfg, "futures_atm_underlyings", None) or [])}
         keys: List[str] = []
         for i in indices:
-            if i.upper() in _MCX_UNDERLYINGS:
-                fk = REGISTRY.get_futures_upstox(i.upper())
-                if fk:
-                    keys.append(fk)
-                # MCX has no separate "spot index" key to fall back to -- unchanged
-                # from before this 2026-08-26 change: no futures key yet means no
-                # subscription this cycle, same as it always has.
-            elif i.upper() in _futures_atm:
+            if i.upper() in _futures_atm:
                 # 2026-08-26, direct user spec revision: SellStraddle now wants BOTH
                 # the real spot AND the futures price simultaneously (to compute their
                 # mean for ATM), not futures-instead-of-spot -- so subscribe to both
@@ -430,20 +423,18 @@ class UpstoxFeeder(BaseFeeder):
         return "|" in token
 
     def _to_upstox_key(self, token: str) -> Optional[str]:
-        """Convert Fyers symbols / internal canonical / MCX symbols into Upstox instrument keys."""
+        """Convert Fyers symbols / internal canonical symbols into Upstox instrument keys."""
         if self._is_upstox_key(token):
             return token
         from data_layer.symbol_translator import SymbolTranslator
         from data_layer.instrument_registry import REGISTRY
-        # Fyers index symbol (NSE:NIFTY50-INDEX, MCX:CRUDEOIL26JUNFUT)
-        internal_idx = _FYERS_TO_INTERNAL.get(token) or _mcx_fyers_fut_to_internal(token)
+        # Fyers index symbol (NSE:NIFTY50-INDEX, NSE:NIFTY26JUNFUT)
+        internal_idx = _FYERS_TO_INTERNAL.get(token) or _fyers_fut_to_internal(token)
         if internal_idx:
             return SymbolTranslator.to_upstox_index(internal_idx)
         # Fyers option symbol
-        if token.startswith(("NSE:", "BSE:", "MCX:")):
+        if token.startswith(("NSE:", "BSE:")):
             sym = SymbolTranslator.from_fyers(token)
-            if sym is None:
-                sym = _parse_mcx_fyers_option(token)
             if sym is not None:
                 if isinstance(sym, tuple):
                     und, strike, ot, exp = sym
@@ -567,9 +558,9 @@ class UpstoxFeeder(BaseFeeder):
                 self._subscribed_keys.remove(t)
         # NOTE: intentionally NOT calling self._streamer.unsubscribe() here.
         # The Upstox SDK unsubscribe call triggers a WS reconnect which kills ALL
-        # subscriptions (including MCX options). Removing from _subscribed_keys
-        # is enough — the keys won't re-subscribe on reconnect and the extra ticks
-        # from already-subscribed NSE strikes are ignored harmlessly.
+        # subscriptions. Removing from _subscribed_keys is enough — the keys
+        # won't re-subscribe on reconnect and the extra ticks from
+        # already-subscribed NSE strikes are ignored harmlessly.
 
     async def fetch_option_chain(self, underlying_key: str, expiry_date: date) -> Optional[Dict[str, Any]]:
         """Fetch Upstox /v2/option/chain for the underlying + expiry. Returns plain dict."""
@@ -716,21 +707,13 @@ class UpstoxFeeder(BaseFeeder):
         now = datetime.now(IST)
 
         for inst_key, feed_data in feeds.items():
-            # Diagnostic: log first MCX option tick received (one-shot)
-            if inst_key.startswith("MCX_FO|") and not inst_key == "MCX_FO|499095":
-                _dk = f"_mcxoptlog_{inst_key}"
-                if not getattr(self, _dk, False):
-                    setattr(self, _dk, True)
-                    ltp_raw = self._extract_ltp(feed_data)
-                    logger.info("UpstoxFeeder: MCX option tick received key=%s ltp=%s", inst_key, ltp_raw)
-
             ltp = self._extract_ltp(feed_data)
             if ltp is None or ltp == 0.0:
                 continue
 
             # ── Index tick ──────────────────────────────────────────────────
             _spot_name = _UPSTOX_INDEX_KEY_TO_INTERNAL.get(inst_key) or self._extra_spot_keys.get(inst_key)
-            _fut_name = None if _spot_name else _mcx_upstox_fut_to_internal(inst_key)
+            _fut_name = None if _spot_name else _upstox_fut_to_internal(inst_key)
             internal_name = _spot_name or _fut_name
             if internal_name:
                 # 2026-08-26, direct user spec: futures_atm underlyings now carry BOTH
@@ -811,14 +794,13 @@ _FYERS_INDEX_SYMBOLS: Dict[str, str] = {
 _FYERS_TO_INTERNAL: Dict[str, str] = {v: k for k, v in _FYERS_INDEX_SYMBOLS.items()}
 
 
-def _mcx_fyers_fut_to_internal(symbol: str) -> Optional[str]:
-    """Map a futures Fyers symbol (e.g. MCX:CRUDEOIL26JUNFUT, or NSE:NIFTY...FUT
-    for any underlying in cfg.futures_atm_underlyings) back to its internal name
-    (e.g. 'CRUDEOIL', 'NIFTY'). 2026-08-26: scans every underlying REGISTRY has
-    ever resolved a futures key for, not just _MCX_UNDERLYINGS -- a futures tick
-    only ever arrives here at all if something upstream (_index_symbols) chose
-    to subscribe to it, so a broader match here is safe and needs no separate
-    cfg threading through this free function."""
+def _fyers_fut_to_internal(symbol: str) -> Optional[str]:
+    """Map a futures Fyers symbol (e.g. NSE:NIFTY...FUT for any underlying in
+    cfg.futures_atm_underlyings) back to its internal name (e.g. 'NIFTY').
+    Scans every underlying REGISTRY has ever resolved a futures key for -- a
+    futures tick only ever arrives here at all if something upstream
+    (_index_symbols) chose to subscribe to it, so a broad match here is safe
+    and needs no separate cfg threading through this free function."""
     from data_layer.instrument_registry import REGISTRY
     if not symbol:
         return None
@@ -828,11 +810,11 @@ def _mcx_fyers_fut_to_internal(symbol: str) -> Optional[str]:
     return None
 
 
-def _mcx_upstox_fut_to_internal(ikey: str) -> Optional[str]:
-    """Map a futures Upstox instrument_key (e.g. MCX_FO|499095, or NIFTY's own
-    futures key for any underlying in cfg.futures_atm_underlyings) back to its
-    internal name. See _mcx_fyers_fut_to_internal's own docstring for why this
-    scans every resolved futures key, not just MCX."""
+def _upstox_fut_to_internal(ikey: str) -> Optional[str]:
+    """Map a futures Upstox instrument_key (e.g. NIFTY's own futures key for
+    any underlying in cfg.futures_atm_underlyings) back to its internal name.
+    See _fyers_fut_to_internal's own docstring for why this scans every
+    resolved futures key."""
     from data_layer.instrument_registry import REGISTRY
     if not ikey:
         return None
@@ -840,47 +822,6 @@ def _mcx_upstox_fut_to_internal(ikey: str) -> Optional[str]:
         if key == ikey:
             return u
     return None
-
-
-import re as _re
-_MCX_FY_OPT_RE = _re.compile(r"^MCX:([A-Z]+?)(\d{2})([A-Z]{3})(\d+)(CE|PE)$")
-
-
-def _parse_mcx_fyers_option(symbol: str):
-    """Parse 'MCX:CRUDEOIL26JUN8850CE' -> (underlying, strike, opt_type, expiry).
-
-    Resolves the expiry actually ENCODED in the symbol (yy+mon), not just
-    "whatever the registry currently considers active" -- mirrors
-    SymbolTranslator.from_fyers()'s own monthly-format resolution
-    (data_layer/symbol_translator.py), which already learned this lesson
-    (see get_active_expiry_strict's 2026-08-09 incident docstring: silently
-    substituting the active/nearest expiry for a specific requested one fed
-    real historical prices for the WRONG contract, valid-looking data with a
-    wrong-month bug). A stale/rolled tick for a symbol whose exact month
-    isn't in the currently-loaded registry falls back to get_active_expiry
-    (logged, since that fallback path is the one that can silently mismatch).
-    """
-    m = _MCX_FY_OPT_RE.match(symbol or "")
-    if not m:
-        return None
-    underlying, yy, mon3, strike, ot = m.groups()
-    from data_layer.instrument_registry import REGISTRY
-    from data_layer.symbol_translator import _MONTH_3
-    exp = None
-    try:
-        year = 2000 + int(yy)
-        month = _MONTH_3.index(mon3) + 1
-        month_exps = [e for e in REGISTRY.all_expiries(underlying) if e.year == year and e.month == month]
-        if month_exps:
-            exp = max(month_exps)
-    except Exception:
-        exp = None
-    if exp is None:
-        logger.warning("_parse_mcx_fyers_option: no loaded expiry matches %s%s in symbol %r -- "
-                        "falling back to the current active expiry (may be a different contract).",
-                        yy, mon3, symbol)
-        exp = REGISTRY.get_active_expiry(underlying)
-    return (underlying, float(strike), ot, exp)
 
 
 class FyersFeeder(BaseFeeder):
@@ -1012,14 +953,13 @@ class FyersFeeder(BaseFeeder):
 
     def _index_symbols(self) -> List[str]:
         """
-        Fyers-format 'index' symbols for all monitored instruments. For MCX
-        commodities (CRUDEOIL) the ATM source is the near-month FUTURES symbol
-        from the registry (e.g. MCX:CRUDEOIL26JUNFUT), not a spot index --
-        2026-08-26: so is any underlying listed in cfg.futures_atm_underlyings.
+        Fyers-format 'index' symbols for all monitored instruments. Any
+        underlying listed in cfg.futures_atm_underlyings additionally
+        subscribes to its near-month FUTURES symbol from the registry.
         """
         if not _FYERS_CARRIES_INDEX_OPTIONS:
             return []
-        from data_layer.instrument_registry import REGISTRY, _MCX_UNDERLYINGS
+        from data_layer.instrument_registry import REGISTRY
         indices = (
             self._cfg.monitored_indices
             if self._cfg and hasattr(self._cfg, "monitored_indices")
@@ -1028,12 +968,7 @@ class FyersFeeder(BaseFeeder):
         _futures_atm = {u.upper() for u in (getattr(self._cfg, "futures_atm_underlyings", None) or [])}
         syms: List[str] = []
         for i in indices:
-            if i.upper() in _MCX_UNDERLYINGS:
-                fut = REGISTRY.get_futures_fyers(i.upper())
-                if fut:
-                    syms.append(fut)
-                # MCX has no separate spot symbol to fall back to -- unchanged.
-            elif i.upper() in _futures_atm:
+            if i.upper() in _futures_atm:
                 # 2026-08-26, direct user spec revision: subscribe to BOTH spot and
                 # futures for a futures_atm underlying (mean-based ATM), not futures-
                 # instead-of-spot -- see UpstoxFeeder._index_instrument_keys' matching
@@ -1056,35 +991,10 @@ class FyersFeeder(BaseFeeder):
     def _is_fyers_symbol(token: str) -> bool:
         """
         Fyers symbols start with an exchange prefix: NSE:NIFTY... / BSE:SENSEX...
-        / MCX:CRUDEOIL... (commodities). Excludes the internal canonical format
-        (NIFTY:02JUN26:...) which has no exchange prefix, and Upstox keys (...|...).
+        Excludes the internal canonical format (NIFTY:02JUN26:...) which has no
+        exchange prefix, and Upstox keys (...|...).
         """
-        return token.startswith(("NSE:", "BSE:", "MCX:")) and "|" not in token
-
-    def _upstox_mcx_to_fyers(self, upstox_key: str) -> Optional[str]:
-        """Convert MCX_FO|<id> Upstox key → MCX:CRUDEOIL26JUL7000CE Fyers format."""
-        try:
-            from data_layer.instrument_registry import REGISTRY
-            from data_layer.symbol_translator import SymbolTranslator
-            from data_layer.instrument_registry import is_monthly_expiry
-            meta = None
-            for und, kmap in REGISTRY._upstox_keys.items():
-                for (exp_str, strike, ot), key in kmap.items():
-                    if key == upstox_key:
-                        from datetime import date as _date
-                        exp = _date.fromisoformat(exp_str)
-                        meta = (und, strike, ot, exp)
-                        break
-                if meta:
-                    break
-            if not meta:
-                return None
-            und, strike, ot, exp = meta
-            from data_layer.symbol_translator import InternalSymbol
-            internal = InternalSymbol(underlying=und, expiry=exp, strike=strike, option_type=ot)
-            return SymbolTranslator.to_fyers(internal, is_monthly=is_monthly_expiry(exp, und))
-        except Exception:
-            return None
+        return token.startswith(("NSE:", "BSE:")) and "|" not in token
 
     def _meta_from_upstox_key(self, key: str) -> Optional[Tuple[str, float, str, date]]:
         """Reverse-map an Upstox instrument key → (underlying, strike, opt_type, expiry)."""
@@ -1096,7 +1006,7 @@ class FyersFeeder(BaseFeeder):
         return None
 
     def _to_fyers_symbol(self, token: str) -> Optional[str]:
-        """Convert Upstox keys / internal canonical / MCX symbols into Fyers format."""
+        """Convert Upstox keys / internal canonical symbols into Fyers format."""
         if self._is_fyers_symbol(token):
             return token
         # Upstox instrument key → lookup via registry
@@ -1107,17 +1017,11 @@ class FyersFeeder(BaseFeeder):
                 from data_layer.instrument_registry import REGISTRY
                 return REGISTRY.get_broker_symbol(und, exp, int(strike), ot, "fyers")
             return None
-        # Fyers MCX option fallback parser
-        mcx = _parse_mcx_fyers_option(token)
-        if mcx is not None:
-            und, strike, ot, exp = mcx
-            from data_layer.instrument_registry import REGISTRY
-            return REGISTRY.get_broker_symbol(und, exp, int(strike), ot, "fyers")
         return None
 
     async def subscribe_tokens(self, tokens: List[str]) -> None:
         # In dual mode the rebalancer usually sends Upstox-format keys.  Convert any
-        # non-Fyers token (Upstox key / MCX / BSE / NSE) into the matching Fyers symbol.
+        # non-Fyers token (Upstox key / BSE / NSE) into the matching Fyers symbol.
         mine: List[str] = []
         for t in tokens:
             if self._is_fyers_symbol(t):
@@ -1214,7 +1118,7 @@ class FyersFeeder(BaseFeeder):
             logger.info("FyersFeeder: first TICK frame keys=%s sample=%r", list(raw.keys()), str(raw)[:400])
 
         _spot_internal = _FYERS_TO_INTERNAL.get(symbol_fyers)
-        _fut_internal = None if _spot_internal else _mcx_fyers_fut_to_internal(symbol_fyers)
+        _fut_internal = None if _spot_internal else _fyers_fut_to_internal(symbol_fyers)
         internal = _spot_internal or _fut_internal
         if internal:
             # 2026-08-26: tag spot vs futures -- see UpstoxFeeder's matching comment.
@@ -1257,17 +1161,13 @@ class FyersFeeder(BaseFeeder):
             # stock (drives d1_trap_fno C2 state machine via CANDLE_CLOSE events).
             await self._bus.publish(Topic.INDEX_TICK, equity_tick)
         else:
-            # Option tick — parse Fyers symbol (NSE or MCX) and publish OptionTick
+            # Option tick — parse Fyers symbol (NSE/BSE) and publish OptionTick
             try:
                 from data_layer.symbol_translator import SymbolTranslator
                 _u = _s = _ot = _exp = None
                 sym = SymbolTranslator.from_fyers(symbol_fyers)
                 if sym is not None:
                     _u, _s, _ot, _exp = sym.underlying, sym.strike, sym.option_type, sym.expiry
-                else:
-                    mcx = _parse_mcx_fyers_option(symbol_fyers)
-                    if mcx is not None:
-                        _u, _s, _ot, _exp = mcx
                 if _u is not None and _exp is not None:
                     from data_layer.base_feeder import OptionTick
                     opt_tick = OptionTick(
@@ -2386,13 +2286,13 @@ class GlobalFeeder:
 
     @staticmethod
     def _is_nse_bse_token(token: str) -> bool:
-        """True for NSE/BSE equity/F&O/index tokens (excludes MCX and Delta crypto)."""
+        """True for NSE/BSE equity/F&O/index tokens (excludes Delta crypto)."""
         t = str(token).upper()
         return t.startswith("NSE_") or t.startswith("BSE_") or t.startswith("NSE|") or t.startswith("BSE|")
 
     async def _market_close_loop(self) -> None:
         """Daily at 15:40 IST unsubscribe all NSE/BSE option/index feeds to free WS slots.
-        MCX/crypto evening sessions are left untouched."""
+        Crypto's own evening session is left untouched."""
         from datetime import time as _dtime
         _close_time = _dtime(15, 40)
         while self._running:

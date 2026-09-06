@@ -135,9 +135,8 @@ def _parse_args() -> argparse.Namespace:
         help="2026-08-26, direct user spec: comma-list of underlyings whose live 'index' tick "
              "(the SAME tick self._spot reads everywhere -- ATM/strike selection, ITM/OTM "
              "classification, P&L, day-low, hedge triggers, exits) is sourced from the "
-             "near-month FUTURES contract instead of the real spot index. Generalizes the "
-             "pattern MCX commodities already use unconditionally. Empty by default -- zero "
-             "behavior change unless explicitly set, e.g. --futures-atm-underlyings NIFTY. "
+             "near-month FUTURES contract instead of the real spot index. Empty by default -- "
+             "zero behavior change unless explicitly set, e.g. --futures-atm-underlyings NIFTY. "
              "NSE/BSE options still SETTLE against real spot, not futures -- this is a "
              "deliberate, accepted tradeoff, not an oversight (see GlobalConfig's own "
              "docstring for futures_atm_underlyings).",
@@ -522,13 +521,11 @@ async def _refresh_upstox_instrument_maps(cfg, router, client_db) -> None:
     callers share identical logic -- no risk of the periodic path drifting
     from the boot-time path."""
     from data_layer.instrument_registry import REGISTRY as _instrument_registry
-    from data_layer.instrument_registry import _MCX_UNDERLYINGS as _MCX_SET
     logger = logging.getLogger(__name__)
     _upstox_creds = await asyncio.to_thread(client_db.get_feeder_creds_sync, "upstox")
     _upstox_token = (_upstox_creds or {}).get("access_token", "")
     for _idx in cfg.monitored_indices:
-        _is_mcx = _idx.upper() in _MCX_SET
-        if not _is_mcx and not _upstox_token:
+        if not _upstox_token:
             continue
         try:
             await asyncio.wait_for(
@@ -821,7 +818,6 @@ async def _run_live(
     risk_mgr      = RiskManager(bus, registry, router=router)
 
     # ── Instrument registry — load active contracts from Upstox API ───────────
-    # MCX commodities (CRUDEOIL) load from the public MCX master — no token needed.
     # NSE/BSE indices need the Upstox token for get_option_contracts. See
     # _refresh_upstox_instrument_maps's own docstring for why this now ALSO
     # runs periodically (_upstox_instrument_map_refresh_loop, added to `tasks`
@@ -846,9 +842,6 @@ async def _run_live(
     if straddle_manager is not None and hasattr(straddle_manager, "set_delta_chain_manager"):
         straddle_manager.set_delta_chain_manager(delta_chain)
         logger.info("DeltaChainManager wired to StraddleBookManager for crypto leg pinning.")
-    # Dedicated Upstox2 feeder for MCX (CrudeOil/Gold) option subscriptions + tick delivery.
-    # Upstox1+Fyers handle NSE/BSE; Upstox2 handles MCX. Both publish to the same EventBus.
-    _mcx_feeder = None  # Upstox1 handles MCX options (Upstox2 lacks MCX options data plan)
     strike_cleanup = StrikeCleanup(bus, cfg, feeder, rebalancer)
     gap_handler    = GapHandler(bus, cfg, candle_cache=candle_cache)
 

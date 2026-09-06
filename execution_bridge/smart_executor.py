@@ -1,7 +1,7 @@
 """
 execution_bridge/smart_executor.py — slippage-aware order execution (all scripts).
 
-Goal: stop giving away the bid/ask spread on illiquid options (BTC/ETH, CRUDEOIL, far-OTM), and
+Goal: stop giving away the bid/ask spread on illiquid options (BTC/ETH, far-OTM), and
 ONLY book a position from a CONFIRMED real fill — never an optimistic feed LTP.
 
 Per leg, when use_limit=True:
@@ -10,7 +10,7 @@ Per leg, when use_limit=True:
     3. not filled → CANCEL, then RE-CHECK status (cancel-race: it may have just filled — book that,
        only chase the truly-unfilled remainder), re-price to the NEW mid, repeat up to chase_attempts
     4. chase exhausted → MARKET the remainder (guaranteed completion — never hold a naked straddle leg)
-use_limit=False → straight MARKET (NSE/MCX default — liquid, fills near LTP).
+use_limit=False → straight MARKET (NSE/BSE default — liquid, fills near LTP).
 
 Returns a LegFill with the REAL volume-weighted average fill price and filled qty. The bridge books
 the position ONLY from this (both legs reconciled first). Broker-agnostic: works against any object
@@ -57,7 +57,7 @@ class SmartOrderExecutor:
         self._chases = chase_attempts
         self._poll = poll_interval
         self._settle = settle_timeout_sec   # max wait for a cancelled order to reach a TERMINAL state
-        # 2026-08-06: plain MARKET orders (NSE/MCX, use_limit=False) have been observed taking
+        # 2026-08-06: plain MARKET orders (NSE/BSE, use_limit=False) have been observed taking
         # well over fill_timeout_sec to settle on the broker side under real conditions -- Zerodha
         # confirmed via a failed cancel_order ("Order cannot be cancelled as it is being
         # processed") that an order our own poll had already given up on was still genuinely

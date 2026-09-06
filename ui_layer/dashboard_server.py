@@ -514,25 +514,6 @@ try:
         opt_type:     str = "CE"
         qty:          int = 1                # in lots (1 lot = exchange lot_size)
 
-    class _BacktestCrudeSchema(_PydanticBase):
-        token:           str
-        days:            int   = 7
-        lots:            int   = 2
-        gap_threshold:   float = 0.008
-        htf_min_zone:    int   = 60
-        htf_min_cascade: int   = 30
-        sl_buf:          float = 20.0
-        min_zone_width:    float = 30.0
-        max_zone_age_days: int   = 5
-        combo:             str   = "all"
-        fut_key:         str   = "MCX_FO|520702"
-        start_date:      str   = ""   # YYYY-MM-DD; overrides days when set with end_date
-        end_date:        str   = ""   # YYYY-MM-DD
-        ltf_source:      str   = "futures"
-        itm_offset:      int   = 300
-        gap_dir_filter:  bool  = True        # True = on gap day trade only with gap direction
-        require_gap:     bool  = True        # False = cascade on ALL days (no gap filter)
-
 except ImportError:
     _HAS_FASTAPI = False
 
@@ -2649,7 +2630,7 @@ class DashboardServer:
                 """(currency_symbol, contract_value) per exchange. Crypto (Delta) P&L is in USD
                 and each lot is a fraction of a coin (BTC 0.001, ETH 0.01 — reverted 2026-07-19,
                 same day, later: confirmed correct after all, matches Delta's real contract_value
-                API field), so premium-points P&L is scaled by contract value. NSE/MCX = ₹, ×1."""
+                API field), so premium-points P&L is scaled by contract value. NSE/BSE = ₹, ×1."""
                 u = str(underlying).upper()
                 if u == "BTC":
                     return ("$", 0.001)
@@ -5798,84 +5779,6 @@ pm2 save
                 if not token:
                     return {"ok": False, "error": "No Upstox token found — connect feeder first"}
                 return {"ok": True, "token": token}
-            except Exception as exc:
-                return {"ok": False, "error": str(exc)}
-
-        @app.post("/api/backtest/zones", tags=["Backtest"])
-        async def backtest_zone_debug(params: _BacktestCrudeSchema):
-            """Show every HTF zone detected from 10-day lookback for a given trade_date."""
-            try:
-                token = params.token
-                if not token:
-                    creds = await asyncio.to_thread(
-                        _srv._client_db.get_feeder_creds_sync, "upstox"
-                    )
-                    token = (creds or {}).get("access_token", "")
-                if not token:
-                    return {"ok": False, "error": "No Upstox token — connect feeder first"}
-                import sys as _sys, os as _os
-                _scripts = _os.path.join(_os.path.dirname(_os.path.dirname(__file__)), "scripts")
-                if _scripts not in _sys.path:
-                    _sys.path.insert(0, _scripts)
-                from backtest_engine import run_zone_debug as _zdbg
-                p = params.dict(exclude={"token"})
-                p["trade_date"] = p.get("start_date") or ""
-                result = await asyncio.wait_for(
-                    asyncio.to_thread(_zdbg, p, token),
-                    timeout=300.0,
-                )
-                return result
-            except Exception as exc:
-                return {"ok": False, "error": str(exc)}
-
-        @app.post("/api/backtest/crude", tags=["Backtest"])
-        async def run_crude_backtest_api(params: _BacktestCrudeSchema):
-            try:
-                token = params.token
-                if not token:
-                    creds = await asyncio.to_thread(
-                        _srv._client_db.get_feeder_creds_sync, "upstox"
-                    )
-                    token = (creds or {}).get("access_token", "")
-                if not token:
-                    return {"ok": False, "error": "No Upstox token — connect feeder first"}
-                import sys as _sys
-                import os as _os
-                _scripts = _os.path.join(_os.path.dirname(_os.path.dirname(__file__)), "scripts")
-                if _scripts not in _sys.path:
-                    _sys.path.insert(0, _scripts)
-                from backtest_engine import run_crude_backtest as _run
-                result = await asyncio.wait_for(
-                    asyncio.to_thread(_run, params.dict(exclude={"token"}), token),
-                    timeout=600.0,
-                )
-                return result
-            except Exception as exc:
-                return {"ok": False, "error": str(exc)}
-
-        @app.post("/api/backtest/batch", tags=["Backtest"])
-        async def run_batch_backtest_api(params: _BacktestCrudeSchema):
-            """Fetch data ONCE, apply zone widths [10,20,30,40,50] in memory. ~3-5min total."""
-            try:
-                token = params.token
-                if not token:
-                    creds = await asyncio.to_thread(
-                        _srv._client_db.get_feeder_creds_sync, "upstox"
-                    )
-                    token = (creds or {}).get("access_token", "")
-                if not token:
-                    return {"ok": False, "error": "No Upstox token — connect feeder first"}
-                import sys as _sys
-                import os as _os
-                _scripts = _os.path.join(_os.path.dirname(_os.path.dirname(__file__)), "scripts")
-                if _scripts not in _sys.path:
-                    _sys.path.insert(0, _scripts)
-                from backtest_engine import run_batch_backtest as _run_batch
-                result = await asyncio.wait_for(
-                    asyncio.to_thread(_run_batch, params.dict(exclude={"token"}), token),
-                    timeout=900.0,   # 15 min — one fetch, 5 width passes
-                )
-                return result
             except Exception as exc:
                 return {"ok": False, "error": str(exc)}
 

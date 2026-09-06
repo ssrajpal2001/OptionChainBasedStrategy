@@ -1,7 +1,7 @@
 """tests/data_layer/test_instrument_registry_futures_fyers.py -- regression for the
 2026-08-26 real incident: InstrumentRegistry._resolve_futures_key (the INDEX
-underlying path used by NIFTY/SENSEX/etc, as opposed to _load_mcx's commodity
-path) only ever populated self._futures_upstox, never self._futures_fyers.
+underlying path used by NIFTY/SENSEX/etc) only ever populated
+self._futures_upstox, never self._futures_fyers.
 get_futures_fyers("NIFTY") therefore always returned "" -- not a timing race
 that would self-correct, a permanent gap. Confirmed live: UpstoxFeeder
 correctly subscribed to the futures key (a real NSE_FO|... instrument, tick
@@ -154,14 +154,3 @@ def test_resolve_futures_key_re_resolves_once_cached_contract_has_expired():
     finally:
         _MASTER_CACHE.pop(f"NSE:{day1.isoformat()}", None)
         _MASTER_CACHE.pop(f"NSE:{date(2026, 9, 25).isoformat()}", None)
-
-
-def test_resolve_futures_key_no_op_for_mcx_underlyings():
-    """MCX underlyings are resolved entirely by _load_mcx -- _resolve_futures_key
-    must remain a no-op for them, unchanged."""
-    reg = InstrumentRegistry()
-    today = date(2026, 8, 26)
-    diag = []
-    reg._resolve_futures_key("CRUDEOIL", today, diag)
-    assert reg.get_futures_upstox("CRUDEOIL") == ""
-    assert reg.get_futures_fyers("CRUDEOIL") == ""

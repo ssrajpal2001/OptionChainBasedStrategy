@@ -115,9 +115,8 @@ class AngelBroker(BaseBroker):
         searchScrip for the same contract (the rate-limit cause). Strategy:
           1. exact match on our symbol (works for NSE),
           2. else search by UNDERLYING NAME (cached once per underlying) and match
-             the contract by strike + option type + expiry month/year. Needed for
-             MCX where Angel's tradingsymbol format differs from ours
-             (e.g. our CRUDEOIL26JUN8800CE ≠ Angel's master symbol)."""
+             the contract by strike + option type + expiry month/year -- covers
+             any case where Angel's tradingsymbol format differs from ours."""
         import re
         key = (exchange, tradingsymbol)
         if key in self._tok_cache:
@@ -159,7 +158,7 @@ class AngelBroker(BaseBroker):
             OrderType.MARKET: "MARKET", OrderType.LIMIT: "LIMIT",
             OrderType.SL_M: "STOPLOSS_MARKET", OrderType.SL_L: "STOPLOSS_LIMIT",
         }
-        # Resolve symboltoken + Angel's own tradingsymbol (cached; handles MCX).
+        # Resolve symboltoken + Angel's own tradingsymbol (cached).
         symbol_token, resolved_symbol = await asyncio.to_thread(
             self._lookup_symbol, req.exchange, req.broker_symbol
         )

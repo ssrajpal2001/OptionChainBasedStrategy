@@ -7200,8 +7200,9 @@ function amoTest() {
                           // price_move_min_pct=2, regime_filter_enabled=true).
                           // Underlying is always the SCREENER sentinel -- real
                           // stocks are chosen dynamically each day, not here.
-                          // 2026-08-24: EOD-square-off-only connectivity proof,
-                          // no SL/target yet -- see CLAUDE.md's own section.
+                          // 2026-09-06 FROZEN spec: VWAP-retest entry + 15-min
+                          // HA-shape/StochRSI(9,9) exit, EOD square-off as the
+                          // fallback (not the only exit) -- see CLAUDE.md.
                           deployForm.product_type='MIS';
                           deployForm.underlying='SCREENER';
                           deployForm.squareoff_time='15:15';
@@ -7242,7 +7243,7 @@ function amoTest() {
                      Liquidity Trap deploy options removed -- fully stopped, direct
                      user decision. Backend also rejects these strategy_names now
                      (see allowed_strategies in ui_layer/dashboard_server.py). -->
-                <option value="oi_orb_screener">OI-ORB Screener (F&amp;O Stocks, EOD-only)</option>
+                <option value="oi_orb_screener">OI-ORB Screener (F&amp;O Stocks, VWAP-retest + HA/StochRSI exit)</option>
                 <option value="cag_straddle">CAG Long Straddle (15:00-15:35 R1/S1 Breach)</option>
               </select>
             </div>
@@ -8222,8 +8223,9 @@ function amoTest() {
                        shortlisted stock, unlike every other panel here) with live LTP.
                        One book per (client,binding) -- matched on binding_id only, since
                        the deployment's own underlying is always the SCREENER sentinel.
-                       EOD-square-off-only connectivity proof -- no SL/target/P&L math
-                       shown here yet, see CLAUDE.md's own OI-ORB Screener section. -->
+                       2026-09-06 FROZEN spec: VWAP-retest entry + 15-min HA-shape/
+                       StochRSI(9,9) exit, EOD square-off as the fallback -- see
+                       CLAUDE.md's own OI-ORB Screener section. -->
                   <template x-if="dep.strategy_name==='oi_orb_screener'">
                     <div class="rounded p-3 mb-2 text-xs font-mono" style="background:rgba(var(--t-cyan-rgb),0.04);border:1px solid rgba(var(--t-cyan-rgb),0.18)"
                          x-data="{
@@ -8256,9 +8258,9 @@ function amoTest() {
                             </span>
                           </div>
 
-                          <!-- Open positions (can be several at once). No SL/target this pass
-                               (EOD-only exit) -- labeled explicitly rather than implying a
-                               normal managed position, since that's genuinely true here. -->
+                          <!-- Open positions (can be several at once). Exit is the frozen
+                               15-min HA-shape/StochRSI(9,9) mechanic + EOD square-off
+                               fallback -- see CLAUDE.md's own OI-ORB Screener section. -->
                           <template x-if="Object.keys(_bk.positions||{}).length>0">
                             <div class="mb-1.5 pb-1.5" style="border-bottom:1px solid var(--t-border)">
                               <template x-for="(p,sym) in (_bk.positions||{})" :key="sym">

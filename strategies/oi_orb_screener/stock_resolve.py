@@ -14,7 +14,7 @@ to do so.
 Confirmed via direct code inspection (2026-08-24): InstrumentRegistry.
 load_sync(underlying) already resolves real option contracts/expiries for
 ARBITRARY NSE F&O stocks, not just indices -- it falls back to
-_load_from_master_json() for anything not in the index/MCX-only
+_load_from_master_json() for anything not in the index-only
 _UPSTOX_UNDERLYING_KEY map, and that fallback works WITHOUT an access_token
 (confirmed 2026-08-09 fix comment in instrument_registry.py: "RELIANCE
 resolves real 2026-08-25/09-29/10-27 monthly expiries"). What the registry

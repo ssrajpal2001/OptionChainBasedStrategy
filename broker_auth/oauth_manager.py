@@ -37,8 +37,9 @@ logger = logging.getLogger(__name__)
 
 _OAUTH_PROVIDERS = {"fyers", "upstox", "upstox2", "zerodha", "dhan", "angelone", "aliceblue"}
 
-# upstox2 = second Upstox account used exclusively for CrudeOil/MCX data feed.
-# It uses the identical OAuth flow and API endpoints as "upstox".
+# upstox2 = a second, independent Upstox account (e.g. dual-feed redundancy,
+# OI-ORB Screener's own stock-tick subscription). Identical OAuth flow and
+# API endpoints as "upstox".
 _UPSTOX_FAMILY = {"upstox", "upstox2"}
 _MANUAL_TOKEN_PROVIDERS: set = set()  # empty — all supported brokers now use OAuth redirect
 

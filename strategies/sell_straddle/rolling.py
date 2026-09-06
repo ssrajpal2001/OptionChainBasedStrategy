@@ -431,7 +431,7 @@ class RollingMixin:
 
     @property
     def _contract_cv(self) -> float:
-        """Contract value multiplier: BTC=0.001, ETH=0.01, NSE/MCX=1.0.
+        """Contract value multiplier: BTC=0.001, ETH=0.01, NSE/BSE=1.0.
         Reverted 2026-07-19 (same day, later) — user confirmed 1 lot = 0.001
         BTC is correct after all (matches Delta's real product API
         contract_value field, see execution_bridge/broker_delta.py
@@ -732,8 +732,9 @@ class RollingMixin:
         """Block re-entry until the next boundary of the max timeframe among
         `rule_key`'s rules. This makes the cooldown dynamic: if an exit happens
         mid-candle, re-entry is allowed only after that candle/tf closes.
-        Additionally honours `sl_cooldown_minutes` from config so crude/MCX can rest
-        longer between failed rolls without changing the indicator timeframe.
+        Additionally honours `sl_cooldown_minutes` from config so an underlying
+        can rest longer between failed rolls without changing the indicator
+        timeframe.
 
         `rule_key` defaults to entry_rules_reentry (every existing caller — a
         failed roll/SL on an already-running day). The hedge-cumulative-profit

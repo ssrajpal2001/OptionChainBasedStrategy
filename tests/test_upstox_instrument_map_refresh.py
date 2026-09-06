@@ -81,8 +81,8 @@ async def test_refresh_injects_into_every_broker_with_the_method(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_refresh_skips_non_mcx_index_when_no_upstox_token(monkeypatch):
-    cfg = SimpleNamespace(monitored_indices=["NIFTY"])   # NIFTY is not MCX
+async def test_refresh_skips_index_when_no_upstox_token(monkeypatch):
+    cfg = SimpleNamespace(monitored_indices=["NIFTY"])
     client_db = _FakeClientDB({})   # no access_token
 
     calls = []
@@ -91,19 +91,6 @@ async def test_refresh_skips_non_mcx_index_when_no_upstox_token(monkeypatch):
     await _refresh_upstox_instrument_maps(cfg, SimpleNamespace(_brokers={}), client_db)
 
     assert calls == []   # never even attempted to load NIFTY without a token
-
-
-@pytest.mark.asyncio
-async def test_refresh_still_loads_mcx_index_without_upstox_token(monkeypatch):
-    cfg = SimpleNamespace(monitored_indices=["CRUDEOIL"])   # MCX -- no token needed
-    client_db = _FakeClientDB({})
-
-    calls = []
-    monkeypatch.setattr(REGISTRY, "load_sync", lambda *a, **kw: calls.append(a))
-
-    await _refresh_upstox_instrument_maps(cfg, SimpleNamespace(_brokers={}), client_db)
-
-    assert len(calls) == 1
 
 
 @pytest.mark.asyncio

@@ -54,9 +54,6 @@ _UPSTOX_UNDERLYING_KEY: Dict[str, str] = {
     "SENSEX":      "BSE_INDEX|SENSEX",
 }
 
-# MCX commodities — loaded from the MCX master JSON (futures-driven ATM).
-_MCX_UNDERLYINGS: Set[str] = {"CRUDEOIL", "CRUDEOILM", "NATURALGAS", "GOLD", "GOLDM", "SILVER"}
-_MCX_MASTER_URL = "https://assets.upstox.com/market-quote/instruments/exchange/MCX.json.gz"
 _MONTH_ABBR_UP = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN",
                   "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
 
@@ -89,9 +86,9 @@ class InstrumentRegistry:
         self._loaded: Set[str] = set()
         # {underlying: list of diagnostic strings from last load attempt}
         self._diag: Dict[str, List[str]] = {}
-        # MCX commodities: near-month FUTURES symbols (the ATM source)
-        self._futures_upstox: Dict[str, str] = {}   # underlying -> "MCX_FO|499095"
-        self._futures_fyers: Dict[str, str] = {}     # underlying -> "MCX:CRUDEOIL26JUNFUT"
+        # futures_atm_underlyings: near-month FUTURES symbols (the ATM source)
+        self._futures_upstox: Dict[str, str] = {}   # underlying -> "NSE_FO|..."
+        self._futures_fyers: Dict[str, str] = {}     # underlying -> "NSE:NIFTY26JUNFUT"
         self._futures_expiry: Dict[str, date] = {}
 
     # ── Loading ───────────────────────────────────────────────────────────────
@@ -107,11 +104,6 @@ class InstrumentRegistry:
 
         today = date.today()
 
-        # MCX commodities load from the MCX master JSON (no Upstox SDK needed).
-        if underlying.upper() in _MCX_UNDERLYINGS:
-            self._load_mcx(underlying.upper(), today, diag)
-            return
-
         # BSE indices (SENSEX, BANKEX) — load from BSE master JSON directly.
         # The API's weekday-based expiry math is unreliable for BSE weekly options,
         # so we use the actual exchange master register instead of calendar days.
@@ -122,7 +114,7 @@ class InstrumentRegistry:
         underlying_key = _UPSTOX_UNDERLYING_KEY.get(underlying)
         if not underlying_key:
             # 2026-08-09 fix: individual FnO stocks (RELIANCE, HDFCBANK, ...) were
-            # never in _UPSTOX_UNDERLYING_KEY (that dict only has indices/MCX), so
+            # never in _UPSTOX_UNDERLYING_KEY (that dict only has indices), so
             # this used to just log an error and return -- self._expiries[underlying]
             # was NEVER populated for any FnO stock, meaning get_active_expiry()
             # always returned None and _get_expiry() (strategies/d1_trap_option/
@@ -133,7 +125,7 @@ class InstrumentRegistry:
             # arbitrary NSE F&O underlyings (confirmed: RELIANCE resolves real
             # 2026-08-25/09-29/10-27 monthly expiries) -- it just was never called
             # here. Route non-index underlyings through it instead of erroring out.
-            diag.append(f"'{underlying}' not in _UPSTOX_UNDERLYING_KEY (index/MCX only) "
+            diag.append(f"'{underlying}' not in _UPSTOX_UNDERLYING_KEY (index only) "
                         f"-- falling back to master JSON for FnO stock expiry/contract data")
             self._load_from_master_json(underlying, today, diag)
             return
@@ -247,19 +239,15 @@ class InstrumentRegistry:
 
         2026-08-26 fix (real incident, confirmed live): this used to populate
         ONLY self._futures_upstox, never self._futures_fyers, for ANY index
-        underlying (_load_mcx, the commodity sibling of this method, derives
-        both). get_futures_fyers() always returned "" for NIFTY as a result --
-        not a timing race that would self-correct, a PERMANENT gap. Confirmed
-        live: UpstoxFeeder correctly got the futures tick (NSE_FO|... key,
-        ltp diverging ~177pts from real spot as expected for cost-of-carry),
-        while FyersFeeder fell back to real spot every single connect, forever
-        -- a standing ~177pt mismatch between the primary and standby feed
-        that would have made self._spot jump instantly on any Fyers failover.
-        Now derives the Fyers symbol the same way _load_mcx already does for
-        commodities (yy + 3-letter month + "FUT"), with the correct NSE/BSE
-        exchange prefix."""
-        if underlying.upper() in _MCX_UNDERLYINGS:
-            return
+        underlying. get_futures_fyers() always returned "" for NIFTY as a
+        result -- not a timing race that would self-correct, a PERMANENT gap.
+        Confirmed live: UpstoxFeeder correctly got the futures tick (NSE_FO|...
+        key, ltp diverging ~177pts from real spot as expected for
+        cost-of-carry), while FyersFeeder fell back to real spot every single
+        connect, forever -- a standing ~177pt mismatch between the primary and
+        standby feed that would have made self._spot jump instantly on any
+        Fyers failover. Now derives the Fyers symbol (yy + 3-letter month +
+        "FUT"), with the correct NSE/BSE exchange prefix."""
         # 2026-08-31 fix (real gap found before first-ever activation of
         # GlobalConfig.futures_atm_underlyings in production): this used to
         # be a plain `underlying in self._futures_upstox` guard -- resolve
@@ -346,10 +334,10 @@ class InstrumentRegistry:
             f_exp, f_ikey = fut_candidates[0]
             self._futures_upstox[underlying] = f_ikey
             self._futures_expiry[underlying] = f_exp
-            # 2026-08-26 fix: derive the Fyers symbol too (same yy+mon3+"FUT"
-            # convention _load_mcx already uses for commodities) -- previously
-            # never set for index underlyings at all, see this method's own
-            # updated docstring for the real incident this caused.
+            # 2026-08-26 fix: derive the Fyers symbol too (yy+mon3+"FUT"
+            # convention) -- previously never set for index underlyings at
+            # all, see this method's own updated docstring for the real
+            # incident this caused.
             _yy = f_exp.strftime("%y")
             _mon3 = _MONTH_ABBR_UP[f_exp.month - 1]
             self._futures_fyers[underlying] = f"{_exch}:{underlying}{_yy}{_mon3}FUT"
@@ -360,106 +348,7 @@ class InstrumentRegistry:
         else:
             diag.append("futures key lookup: no FUT instrument matched in master JSON")
 
-    def _load_mcx(self, underlying: str, today: date, diag: List[str]) -> None:
-        """
-        Load an MCX commodity (e.g. CRUDEOIL) option chain + near-month futures
-        from the Upstox MCX master JSON. Stores option instrument_keys, expiries,
-        and the near FUTURES key (Upstox) + derived Fyers futures symbol (the ATM
-        source). trading_symbol format is spaced, e.g.:
-          option : 'CRUDEOIL 8500 CE 16 JUN 26'   ikey 'MCX_FO|565901'
-          futures: 'CRUDEOIL FUT 18 JUN 26'        ikey 'MCX_FO|499095'
-        """
-        import gzip, json
-        from urllib.request import urlopen, Request
-
-        cache_key = "MCX:" + today.isoformat()
-        data = _MASTER_CACHE.get(cache_key)
-        if data is None:
-            try:
-                import ssl as _ssl
-                ctx = _ssl.create_default_context()
-                ctx.check_hostname = False
-                ctx.verify_mode = _ssl.CERT_NONE
-                req = Request(_MCX_MASTER_URL, headers={"Accept-Encoding": "gzip"})
-                with urlopen(req, timeout=60, context=ctx) as r:
-                    raw = r.read()
-                try:
-                    data = json.loads(gzip.decompress(raw))
-                except Exception:
-                    data = json.loads(raw)
-                _MASTER_CACHE[cache_key] = data
-                diag.append(f"MCX master loaded: {len(data)} instruments")
-            except Exception as exc:
-                diag.append(f"MCX master download failed: {exc}")
-                logger.error("InstrumentRegistry MCX[%s]: download failed: %s", underlying, exc)
-                self._loaded.add(underlying)
-                return
-
-        def _parse_ts_date(parts: List[str]):
-            # parts end with [DD, MON, YY]; returns a date or None
-            try:
-                dd = int(parts[-3]); mon = _MONTH_ABBR_UP.index(parts[-2].upper()) + 1
-                yy = 2000 + int(parts[-1])
-                return date(yy, mon, dd)
-            except Exception:
-                return None
-
-        keys: Dict[Tuple[str, int, str], str] = {}
-        expiry_set: Set[date] = set()
-        fut_candidates: List[Tuple[date, str]] = []   # (expiry, ikey)
-
-        for inst in data:
-            ikey, ts, strike_raw, _exp = self._parse_instrument(inst)
-            if not ikey or not ikey.startswith("MCX_FO|") or not ts:
-                continue
-            parts = ts.split()
-            if not parts or parts[0].upper() != underlying:   # EXACT underlying (CRUDEOIL != CRUDEOILM)
-                continue
-            # Futures: 'CRUDEOIL FUT 18 JUN 26'
-            if len(parts) >= 2 and parts[1].upper() == "FUT":
-                exp = _parse_ts_date(parts)
-                if exp and exp >= today:
-                    fut_candidates.append((exp, ikey))
-                continue
-            # Options: 'CRUDEOIL 8500 CE 16 JUN 26'
-            opt_type = "CE" if " CE " in f" {ts} " else ("PE" if " PE " in f" {ts} " else None)
-            if not opt_type:
-                continue
-            exp = _parse_ts_date(parts)
-            if not exp or exp < today:
-                continue
-            try:
-                strike = int(round(float(strike_raw or 0)))
-                if strike <= 0:
-                    # fall back to the numeric token in ts (parts[1])
-                    strike = int(round(float(parts[1])))
-            except (ValueError, TypeError):
-                continue
-            if strike <= 0:
-                continue
-            keys[(exp.isoformat(), strike, opt_type)] = ikey
-            expiry_set.add(exp)
-
-        self._upstox_keys[underlying] = keys
-        self._expiries[underlying] = sorted(expiry_set)
-        self._loaded.add(underlying)
-
-        # Near-month futures = nearest expiry on/after today → ATM source.
-        if fut_candidates:
-            fut_candidates.sort(key=lambda x: x[0])
-            f_exp, f_ikey = fut_candidates[0]
-            self._futures_upstox[underlying] = f_ikey
-            self._futures_expiry[underlying] = f_exp
-            yy = f_exp.strftime("%y"); mon = _MONTH_ABBR_UP[f_exp.month - 1]
-            self._futures_fyers[underlying] = f"MCX:{underlying}{yy}{mon}FUT"
-            diag.append(f"futures: upstox={f_ikey} fyers={self._futures_fyers[underlying]} expiry={f_exp}")
-
-        diag.append(f"MCX[{underlying}] result: {len(keys)} options across "
-                    f"{len(expiry_set)} expiries: {', '.join(e.isoformat() for e in sorted(expiry_set)[:4])}")
-        logger.info("InstrumentRegistry MCX[%s]: %d options, futures=%s",
-                    underlying, len(keys), self._futures_fyers.get(underlying, "?"))
-
-    # ── MCX futures accessors (ATM source for commodities) ─────────────────────
+    # ── Futures accessors (ATM source for futures_atm_underlyings) ─────────────
 
     def get_futures_fyers(self, underlying: str) -> str:
         return self._futures_fyers.get(underlying.upper(), "")
@@ -470,7 +359,7 @@ class InstrumentRegistry:
     def load_futures_only_sync(self, underlying: str, today: date = None) -> None:
         """Resolve just the near-month futures instrument_key for an arbitrary
         NSE F&O underlying via the master JSON. load_sync's options-API path
-        only works for underlyings in _UPSTOX_UNDERLYING_KEY (indices/MCX) and
+        only works for underlyings in _UPSTOX_UNDERLYING_KEY (indices) and
         returns early for anything else -- this bypasses that restriction for
         callers that only need the futures key (e.g. OI-buildup checks on
         individual F&O stocks), not the full option-contract map. Cheap to call
@@ -764,8 +653,9 @@ class InstrumentRegistry:
 
     def historical_instrument_key(self, underlying: str) -> str:
         """Upstox instrument_key to use for the underlying's HISTORICAL candles.
-        MCX commodities → the loaded near-month FUTURES key (the ATM source);
-        index underlyings → the static index key. Empty if not resolvable."""
+        futures_atm_underlyings → the loaded near-month FUTURES key (the ATM
+        source); index underlyings → the static index key. Empty if not
+        resolvable."""
         u = underlying.upper()
         if u in self._futures_upstox:
             return self._futures_upstox[u]
@@ -800,19 +690,6 @@ class InstrumentRegistry:
         )
 
         p = provider.lower()
-
-        # ── MCX commodities (CRUDEOIL etc.) — monthly format, exchange MCX ──────
-        if underlying.upper() in _MCX_UNDERLYINGS:
-            yy = expiry.strftime("%y")
-            mon = _MONTH_ABBR_UP[expiry.month - 1]
-            core = f"{underlying.upper()}{yy}{mon}{int(strike)}{opt_type}"  # CRUDEOIL26JUN8500CE
-            if p == "fyers":
-                return f"MCX:{core}"
-            if p == "zerodha":
-                return core
-            if p == "upstox":
-                return self.get_upstox_key(underlying.upper(), expiry, int(strike), opt_type)
-            return core
 
         if p == "upstox":
             key = self.get_upstox_key(underlying, expiry, strike, opt_type)

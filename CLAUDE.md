@@ -18,6 +18,23 @@ Complete codebase reference for Claude Code. Updated after each major phase.
 > the user explicitly reopens that door. When starting a new session, read the OI-ORB
 > Screener and CAG Long Straddle sections below first (SellStraddle's own section is
 > long-established and mature).
+>
+> **MCX REMOVED (2026-09-06), direct user decision — this application now targets ONLY
+> NSE and BSE.** All MCX-specific code was deleted: `ExchangeConfig.mcx_market_open/
+> close`/`mcx_underlyings`/`is_mcx()`, `InstrumentRegistry._load_mcx()` (the whole MCX
+> master-JSON commodity option-chain loader) + `_MCX_UNDERLYINGS`/`_MCX_MASTER_URL`,
+> the MCX branch of `order_exchange()`/`get_broker_symbol()`, the Fyers `MCX:` option
+> symbol parser (`_parse_mcx_fyers_option`), MCX exchange-segment mapping in the Dhan/
+> Zerodha broker adapters, the `_ss_index_default()` MCX session-hours override in
+> `runtime_config.py`, and 7 standalone MCX/CrudeOil tool/backtest scripts (`tools/
+> discover_mcx.py`, `tools/clone_nifty_straddle_to_crudeoil.py`, `tools/
+> start_crude_test.py`, `scripts/find_crude_key{,2,3}.py`, `scripts/smoke_crudeoil.py`).
+> Two functions (`_fyers_fut_to_internal`/`_upstox_fut_to_internal` in
+> `data_layer/global_feeder.py`, previously named `_mcx_*`) were RENAMED not deleted —
+> they were widened in Aug 2026 into generic futures-symbol resolvers genuinely used by
+> `futures_atm_underlyings` (e.g. NIFTY), unrelated to MCX despite the old naming.
+> `monitored_indices`/`active_index` defaults changed from `"CRUDEOIL"` to `"NIFTY"`.
+> Do NOT resurrect MCX/commodity support without an explicit new decision.
 
 ---
 
@@ -250,7 +267,7 @@ ATM straddle/strangle selling for theta decay. Ported from Option_Selling_May_20
   - **`upsert_binding`** preserves `source_ip` when an edit omits it (was wiped); fixed asymmetric `assigned_instrument` CASE.
   - **Theta ENTRY basis** (`entry_basis`=ltp|theta + `theta_target`): MIN floor on raw LTP or per-leg TIME VALUE (`straddle_selection.leg_entry_value`); threaded into beginning/re-entry/roll; balance stays on LTP; `ltp` basis byte-identical to legacy. **Theta TSL basis** (`tsl_scalable.basis`=ltp|theta): staircase trails time-value decay vs LTP P&L. Theta = `theta_calc.py` intrinsic/time-value, never Black-Scholes.
   - **UI**: PRODUCT TYPE → MIS/NRML toggle (native `<select>` was dark-on-dark); rule rows wrap below `xl` (was `md`) → no 100%-zoom overflow, ✕ reachable; broker-specific **⊗ Square Off** + `/api/client/broker/{id}/squareoff`; ENTRY/TSL basis selectors; positions panel = broker-style ledger (Instrument·Type·Qty·Sell·Buy·LTP·P&L·MTM + TOTAL).
-- **Ops**: `python run_system.py --mode live --ui --index <IDX> --strategies sell_straddle`. `scripts/fresh_start.sh <IDX>` pulls + WIPES positions/history/logs + restarts (skip if preserving data; plain `git reset --hard` never touches gitignored `data/`). `pm2 restart` reuses old args — use fresh_start / explicit `pm2 start` to change `--index`/`--strategies`. HTTPS broker callbacks on a raw EC2 IP: `scripts/setup_https.sh` (Caddy + sslip.io). **Footguns**: MCX `squareoff_time` must be ~23:25 (15:15 default instantly EOD-exits MCX); NIFTY lot=75 (65 rejected); MCX needs Zerodha single-ledger activation.
+- **Ops**: `python run_system.py --mode live --ui --index <IDX> --strategies sell_straddle`. `scripts/fresh_start.sh <IDX>` pulls + WIPES positions/history/logs + restarts (skip if preserving data; plain `git reset --hard` never touches gitignored `data/`). `pm2 restart` reuses old args — use fresh_start / explicit `pm2 start` to change `--index`/`--strategies`. HTTPS broker callbacks on a raw EC2 IP: `scripts/setup_https.sh` (Caddy + sslip.io). **Footguns**: NIFTY lot=75 (65 rejected).
 
 ### D1 Trap FnO / Index (`strategies/d1_trap_option/`)
 > ⚠️ **REMOVED 2026-09-06** — direct user decision, fully stopped, code deleted entirely (see git history / commit 217e6b8). Kept below as historical reference only.

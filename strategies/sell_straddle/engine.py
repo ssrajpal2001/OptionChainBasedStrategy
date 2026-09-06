@@ -1913,13 +1913,11 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
             self.reset_session()
 
         if self._market_open_dt is None or self._session_day(self._market_open_dt) != self._session_day(now):
-            _mcx = set(getattr(self._cfg, "mcx_underlyings", ())) if self._cfg else set()
             if self._is_crypto:
                 self._market_open_dt = now.replace(second=0, microsecond=0)
             else:
-                _open = dtime(9, 0) if self._underlying in _mcx else _MARKET_OPEN
                 self._market_open_dt = now.replace(
-                    hour=_open.hour, minute=_open.minute, second=0, microsecond=0,
+                    hour=_MARKET_OPEN.hour, minute=_MARKET_OPEN.minute, second=0, microsecond=0,
                 )
             self._primed = False
 

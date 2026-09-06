@@ -44,7 +44,6 @@ logger = logging.getLogger(__name__)
 # Zerodha exchange constants (matched to kiteconnect strings)
 _EXCHANGE_NFO = "NFO"
 _EXCHANGE_BFO = "BFO"
-_EXCHANGE_MCX = "MCX"
 
 
 def _bind_session_source_ip(kite, source_ip: str) -> None:
@@ -79,8 +78,6 @@ def _resolve_exchange(req_exchange: str) -> str:
     e = (req_exchange or "").upper()
     if e == "BFO":
         return _EXCHANGE_BFO
-    if e == "MCX":
-        return _EXCHANGE_MCX
     return _EXCHANGE_NFO
 
 # Month abbreviations for monthly expiry symbol construction

@@ -904,7 +904,7 @@ class StraddleExecutionBridge:
         if _ss_product not in ("MIS", "NRML"):
             _ss_product = "MIS"
 
-        # Crypto (Delta, wide spreads) → LIMIT-at-mid with chase→market via SmartOrderExecutor; NSE/MCX
+        # Crypto (Delta, wide spreads) → LIMIT-at-mid with chase→market via SmartOrderExecutor; NSE/BSE
         # → MARKET. Both legs execute CONCURRENTLY so neither sits half-on while the other is worked
         # (minimises naked-leg risk during a chase). Position is booked from the REAL fill, not LTP.
         _use_limit = (order_exchange(ev.underlying) == "DELTA")
@@ -1081,7 +1081,7 @@ class StraddleExecutionBridge:
                             # kept up. ENTRY only (the observed failure mode); EXIT keeps the
                             # existing conservative behavior since "did the qty reduce" is a
                             # harder match to make safely without the pre-exit baseline.
-                            # NSE/MCX only -- Delta (crypto) has its own dedicated, battle-tested
+                            # NSE/BSE only -- Delta (crypto) has its own dedicated, battle-tested
                             # late-residual-fill reconcile further down this handler (2026-06-13
                             # cancel-race fix); this earlier check must not preempt it.
                             _confirmed_via_position = False

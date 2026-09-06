@@ -6,11 +6,10 @@ No live broker connection is required.
 import asyncio
 
 import pytest
-from datetime import date
 
 from data_layer.base_feeder import EventBus
 from data_layer.global_feeder import FyersFeeder, UpstoxFeeder
-from data_layer.instrument_registry import REGISTRY, _MCX_UNDERLYINGS
+from data_layer.instrument_registry import REGISTRY
 
 
 @pytest.fixture
@@ -29,47 +28,13 @@ def test_fyers_normalizes_prefixed_access_token(bus):
 def test_fyers_futures_symbol_recognized(bus):
     f = FyersFeeder(bus)
     assert f._is_fyers_symbol("NSE:NIFTY50-INDEX")
-    assert f._is_fyers_symbol("MCX:CRUDEOIL26JUNFUT")
-    assert f._is_fyers_symbol("MCX:CRUDEOIL26JUN7000CE")
     assert not f._is_fyers_symbol("NSE_FO|12345")
     assert not f._is_fyers_symbol("NIFTY:02JUN26:24500:CE")
 
 
-def test_fyers_converts_upstox_mcx_option_key(bus):
-    f = FyersFeeder(bus)
-    # Pretend the registry knows this MCX_FO key.
-    exp = date(2026, 7, 20)
-    REGISTRY._upstox_keys.setdefault("CRUDEOIL", {})[(exp.isoformat(), 7000, "CE")] = "MCX_FO|123456"
-    try:
-        sym = f._to_fyers_symbol("MCX_FO|123456")
-        assert sym == "MCX:CRUDEOIL26JUL7000CE"
-    finally:
-        REGISTRY._upstox_keys["CRUDEOIL"].pop((exp.isoformat(), 7000, "CE"), None)
-
-
-def test_upstox_converts_fyers_mcx_option_symbol(bus):
-    u = UpstoxFeeder(bus)
-    exp = date(2026, 7, 20)
-    REGISTRY._upstox_keys.setdefault("CRUDEOIL", {})[(exp.isoformat(), 7000, "CE")] = "MCX_FO|123456"
-    REGISTRY._expiries.setdefault("CRUDEOIL", [])
-    if exp not in REGISTRY._expiries["CRUDEOIL"]:
-        REGISTRY._expiries["CRUDEOIL"].append(exp)
-    try:
-        key = u._to_upstox_key("MCX:CRUDEOIL26JUL7000CE")
-        assert key == "MCX_FO|123456"
-    finally:
-        REGISTRY._upstox_keys["CRUDEOIL"].pop((exp.isoformat(), 7000, "CE"), None)
-        if exp in REGISTRY._expiries["CRUDEOIL"]:
-            REGISTRY._expiries["CRUDEOIL"].remove(exp)
-
-
-def test_mcx_underlyings_include_crudeoil():
-    assert "CRUDEOIL" in _MCX_UNDERLYINGS
-
-
 # ── futures_atm_underlyings (2026-08-26, direct user spec) ─────────────────
-# Generalizes the MCX "futures is a real-time ATM input" pattern to any
-# configured underlying (e.g. NIFTY). 2026-08-26 revision: SellStraddle now
+# Lets any configured underlying (e.g. NIFTY) source its ATM input from the
+# near-month futures price alongside real spot. 2026-08-26 revision: SellStraddle now
 # wants BOTH the real spot AND the futures price simultaneously (to compute
 # their mean for ATM), not futures-instead-of-spot -- so both keys are
 # subscribed together for a futures_atm underlying.
@@ -104,18 +69,6 @@ def test_upstox_subscribes_spot_only_when_futures_key_not_yet_resolved(bus):
     assert keys == [SymbolTranslator.to_upstox_index("NIFTY")]
 
 
-def test_upstox_mcx_still_has_no_fallback_when_futures_key_missing(bus):
-    """MCX behavior must stay byte-identical to before this change -- no spot
-    fallback exists for commodities (there is no plain spot index for them)."""
-    from config.global_config import GlobalConfig
-    cfg = GlobalConfig()
-    cfg.monitored_indices = ["CRUDEOIL"]
-    u = UpstoxFeeder(bus, cfg=cfg)
-    REGISTRY._futures_upstox.pop("CRUDEOIL", None)
-    keys = u._index_instrument_keys()
-    assert keys == []
-
-
 def test_fyers_subscribes_both_spot_and_futures_symbol_for_configured_underlying(bus):
     from config.global_config import GlobalConfig
     cfg = GlobalConfig()
@@ -141,17 +94,17 @@ def test_fyers_subscribes_spot_only_when_futures_symbol_not_yet_resolved(bus):
     assert syms == ["NSE:NIFTY50-INDEX"]
 
 
-def test_futures_tick_maps_back_to_internal_underlying_for_non_mcx():
-    """The reverse-mapping helpers used to only scan _MCX_UNDERLYINGS -- a
-    NIFTY futures tick must now resolve back to 'NIFTY' too."""
-    from data_layer.global_feeder import _mcx_upstox_fut_to_internal, _mcx_fyers_fut_to_internal
+def test_futures_tick_maps_back_to_internal_underlying_for_any_futures_atm_underlying():
+    """The reverse-mapping helpers scan every underlying REGISTRY has resolved
+    a futures key for -- a NIFTY futures tick must resolve back to 'NIFTY'."""
+    from data_layer.global_feeder import _upstox_fut_to_internal, _fyers_fut_to_internal
     REGISTRY._futures_upstox["NIFTY"] = "NSE_FO|999999"
     REGISTRY._futures_fyers["NIFTY"] = "NSE:NIFTY26AUGFUT"
     try:
-        assert _mcx_upstox_fut_to_internal("NSE_FO|999999") == "NIFTY"
-        assert _mcx_fyers_fut_to_internal("NSE:NIFTY26AUGFUT") == "NIFTY"
-        assert _mcx_upstox_fut_to_internal("NSE_FO|000000") is None
-        assert _mcx_fyers_fut_to_internal("") is None
+        assert _upstox_fut_to_internal("NSE_FO|999999") == "NIFTY"
+        assert _fyers_fut_to_internal("NSE:NIFTY26AUGFUT") == "NIFTY"
+        assert _upstox_fut_to_internal("NSE_FO|000000") is None
+        assert _fyers_fut_to_internal("") is None
     finally:
         REGISTRY._futures_upstox.pop("NIFTY", None)
         REGISTRY._futures_fyers.pop("NIFTY", None)

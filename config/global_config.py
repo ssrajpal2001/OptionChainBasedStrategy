@@ -34,15 +34,6 @@ class ExchangeConfig:
     market_close: time = time(15, 30, 0)         # Halt processing, flush all buffers
     eod_cleanup: time = time(15, 45, 0)          # Rotate log/parquet files
 
-    # MCX (commodity) session — open well past the NSE/BSE close.
-    # Used for CRUDEOIL etc. so the after-hours test (and live commodity trading)
-    # is not force-squared-off at 15:30.
-    mcx_market_open: time = time(9, 0, 0)
-    mcx_market_close: time = time(23, 30, 0)     # MCX evening session close (~23:30 IST)
-
-    # Underlyings that trade on MCX (commodity segment, futures-driven ATM)
-    mcx_underlyings: tuple = ("CRUDEOIL", "CRUDEOILM", "NATURALGAS", "GOLD", "GOLDM", "SILVER")
-
     # Crypto (Delta Exchange) underlyings — DAILY options, 24/7, expire 17:30 IST.
     crypto_underlyings: tuple = ("BTC", "ETH")
 
@@ -55,40 +46,22 @@ class ExchangeConfig:
         "FINNIFTY": 50.0,
         "SENSEX": 100.0,
         "MIDCPNIFTY": 50.0,
-        # MCX commodities — round ATM to 100 (50-step crude strikes are illiquid)
-        "CRUDEOIL": 100.0,
-        "CRUDEOILM": 100.0,
-        "NATURALGAS": 5.0,
-        "GOLD": 100.0,
-        "GOLDM": 100.0,
-        "SILVER": 100.0,
         # Crypto (Delta) — fallback near-ATM step; discover_chain overrides live
         "BTC": 200.0,
         "ETH": 20.0,
     })
 
-    # Standard lot sizes (NSE/BSE current values + MCX commodity lots)
+    # Standard lot sizes (NSE/BSE current values)
     lot_sizes: Dict[str, int] = field(default_factory=lambda: {
         "NIFTY": 65,
         "BANKNIFTY": 30,
         "FINNIFTY": 60,
         "SENSEX": 20,
         "MIDCPNIFTY": 120,
-        # MCX commodities (verify against current contract spec before live)
-        "CRUDEOIL": 100,        # 100 barrels
-        "CRUDEOILM": 10,        # mini = 10 barrels
-        "NATURALGAS": 1250,
-        "GOLD": 100,
-        "GOLDM": 100,
-        "SILVER": 30,
         # Crypto (Delta) — order size is in CONTRACTS (1 = min). lot_multiplier scales it.
         "BTC": 1,
         "ETH": 1,
     })
-
-    def is_mcx(self, underlying: str) -> bool:
-        """True if this underlying trades on MCX (commodity session + segment)."""
-        return underlying.upper() in self.mcx_underlyings
 
     def is_crypto(self, underlying: str) -> bool:
         """True if this underlying trades on Delta Exchange (crypto daily options, 24/7)."""
@@ -96,10 +69,10 @@ class ExchangeConfig:
 
     def session_close(self, underlying: str) -> time:
         """Force-exit/close time per exchange. Crypto daily options expire 17:30 IST (the rollover
-        boundary) — that's the natural square-off; MCX ~23:30; NSE 15:30."""
+        boundary) — that's the natural square-off; NSE/BSE 15:30."""
         if self.is_crypto(underlying):
             return time(17, 30, 0)
-        return self.mcx_market_close if self.is_mcx(underlying) else self.market_close
+        return self.market_close
 
     def load_from_db(self, db) -> None:
         """Override strike_steps and lot_sizes from system_settings table if DB values exist.
@@ -126,17 +99,14 @@ class ExchangeConfig:
 
 # Module-level set + helper so execution bridges can pick the order exchange
 # without threading a config object through (kept in sync with ExchangeConfig).
-_MCX_UNDERLYINGS = {"CRUDEOIL", "CRUDEOILM", "NATURALGAS", "GOLD", "GOLDM", "SILVER"}
 _CRYPTO_UNDERLYINGS = {"BTC", "ETH"}
 
 
 def order_exchange(underlying: str) -> str:
-    """Broker order exchange for an underlying: DELTA (crypto), MCX (commodity), BFO (SENSEX), else NFO."""
+    """Broker order exchange for an underlying: DELTA (crypto), BFO (SENSEX), else NFO."""
     u = (underlying or "").upper()
     if u in _CRYPTO_UNDERLYINGS:
         return "DELTA"
-    if u in _MCX_UNDERLYINGS:
-        return "MCX"
     if u == "SENSEX":
         return "BFO"
     return "NFO"
@@ -386,9 +356,9 @@ class GlobalConfig:
     # symbols). Add back others only if the count stays under the cap (watch the
     # "EXCEEDS the ~50/connection WS limit" warning).
     monitored_indices: List[str] = field(
-        default_factory=lambda: ["CRUDEOIL"]
+        default_factory=lambda: ["NIFTY"]
     )
-    active_index: str = "CRUDEOIL"
+    active_index: str = "NIFTY"
 
     # OTM/ITM depth for chain subscription. ATM ± chain_depth strikes. Keep small so the
     # WS subscription stays under the ~50/connection cap (SS pool only needs ≈ ±4).
@@ -396,16 +366,15 @@ class GlobalConfig:
 
     # 2026-08-26, direct user spec: underlyings in this list get their live "index"
     # tick sourced from the near-month FUTURES contract instead of the real spot
-    # index -- generalizes the pattern MCX commodities already use unconditionally
-    # (see UpstoxFeeder._index_instrument_keys / FyersFeeder._index_symbols, and
-    # InstrumentRegistry.get_futures_upstox/get_futures_fyers, both already live).
-    # Every consumer of self._spot downstream (ATM/strike selection, ITM/OTM
-    # classification, day-low tracking, hedge triggers, exits -- literally
-    # everything, since it's the SAME tick the whole system already treats as
-    # "spot") switches automatically for any underlying listed here -- no
-    # per-strategy code changes needed, same as MCX needed none. Empty by
-    # default: zero behavior change for anyone until an underlying is explicitly
-    # added here. NSE/BSE index options still SETTLE against real spot, not
+    # index (see UpstoxFeeder._index_instrument_keys / FyersFeeder._index_symbols,
+    # and InstrumentRegistry.get_futures_upstox/get_futures_fyers, both already
+    # live). Every consumer of self._spot downstream (ATM/strike selection,
+    # ITM/OTM classification, day-low tracking, hedge triggers, exits --
+    # literally everything, since it's the SAME tick the whole system already
+    # treats as "spot") switches automatically for any underlying listed here --
+    # no per-strategy code changes needed. Empty by default: zero behavior
+    # change for anyone until an underlying is explicitly added here. NSE/BSE
+    # index options still SETTLE against real spot, not
     # futures -- this is a deliberate, direct user choice to treat the futures
     # price as the reference for computed P&L/ITM/exits too, not just entry
     # anchor selection; the resulting divergence from real settlement price is
