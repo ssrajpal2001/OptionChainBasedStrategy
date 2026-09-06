@@ -93,7 +93,14 @@ CONFIG = {
     "RANK_WINDOW_END": "09:30",
     "RANK_POLL_INTERVAL_SEC": 90.0,
     "RANK_TOP_N": 10,
-    "TWO_SESSION_SCAN_ENABLED": True,
+    # 2026-09-07, direct user spec, REVERSES the 2026-08-27 spec below:
+    # "understand stocks which got scanned at 9.25 will be considered for
+    # complete day, no need to scan fresh stocks after 9.25am." Default
+    # flipped to False -- the shortlist built once at/after ORB_END (09:25)
+    # is now used for the whole trading day; _maybe_run_afternoon_scan()
+    # itself is left in place (still opt-in via strategy_params) rather than
+    # deleted, in case this is revisited again.
+    "TWO_SESSION_SCAN_ENABLED": False,
     "AFTERNOON_SCAN_START": "12:00",
     "AFTERNOON_SCAN_END": "15:00",
     "AFTERNOON_SCAN_INTERVAL_SEC": 300.0,

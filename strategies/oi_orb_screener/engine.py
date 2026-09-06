@@ -2495,12 +2495,30 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 "sl": self._live_sl.get(sym),
                 "target": self._live_target.get(sym),
             }
+        # 2026-09-07, direct user spec: "when stocks are scanned the ui should
+        # show how far is ltp from vwap as we have already subscribed to all
+        # the stocks after 9.25 when they got scanned" -- self._live_spot_ltp
+        # is populated for every shortlisted symbol (not just open positions,
+        # see the 2026-09-06 tick-loop change above), and self._vwap tracks a
+        # running VWAP per symbol from the same subscribed feed, so both are
+        # already available with no new subscription needed.
+        shortlist_vwap = {}
+        for sym in self._shortlist_symbols:
+            ltp = self._live_spot_ltp.get(sym)
+            vwap = self._vwap.current(sym)
+            dist = round(ltp - vwap, 2) if (ltp is not None and vwap) else None
+            dist_pct = round((ltp - vwap) / vwap * 100.0, 2) if (ltp is not None and vwap) else None
+            shortlist_vwap[sym] = {
+                "ltp": ltp, "vwap": round(vwap, 2) if vwap is not None else None,
+                "vwap_dist": dist, "vwap_dist_pct": dist_pct,
+            }
         return {
             "client_id": self._client_id,
             "binding_id": self._binding_id,
             "today": self._today.isoformat() if self._today else None,
             "shortlist": self._shortlist_symbols,
             "shortlist_pchange": self._shortlist_pchange,
+            "shortlist_vwap": shortlist_vwap,
             "regime": self._regime,
             "orb_frozen": self._orb_frozen,
             "positions": positions,

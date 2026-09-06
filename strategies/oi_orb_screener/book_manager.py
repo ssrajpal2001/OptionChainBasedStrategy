@@ -57,7 +57,11 @@ _DEFAULT_PARAMS = {
     # while entries can still fire), ADDING any newly-qualifying stock. No
     # scanning happens outside these two windows. Both default ON.
     "scan_start": "09:26",
-    "two_session_scan_enabled": True,
+    # 2026-09-07, direct user spec, REVERSES the 2026-08-27 spec above: "stocks
+    # which got scanned at 9.25 will be considered for complete day, no need
+    # to scan fresh stocks after 9.25am." Default flipped to False; still
+    # opt-in per deployment via strategy_params if ever revisited.
+    "two_session_scan_enabled": False,
     "afternoon_scan_start": "12:00",
     "afternoon_scan_end": "15:00",
     "afternoon_scan_interval_sec": 300.0,

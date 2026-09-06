@@ -1399,6 +1399,57 @@ every prior entry/exit note above:**
 - **First live deployment (paper_route) scheduled 2026-09-07**, alongside `sell_straddle`
   and `cag_straddle` — see each strategy's own section for its own readiness state.
 
+**Afternoon rescan (12:00-15:00) DISABLED by default, 2026-09-07, real-data-backed
+decision** — `TWO_SESSION_SCAN_ENABLED`/`two_session_scan_enabled` default flipped
+`True → False` in `screener.py`/`book_manager.py`. This reverses the 2026-08-27 spec
+that added `_maybe_run_afternoon_scan()` (still present in `engine.py`, not deleted —
+opt-in per deployment via `strategy_params` if ever revisited). Direct user spec:
+"stocks which got scanned at 9.25 will be considered for complete day, no need to scan
+fresh stocks after 9.25am."
+
+Before making the change, cross-referenced real recorded data from `data/
+oi_orb_screener.db` (`signal_events` where `event_type='afternoon_scan_added'`, joined
+against `positions` by symbol/date, keeping only trades whose `entry_ts` came AFTER
+that symbol's own afternoon-add timestamp) rather than relying on stated preference
+alone — an afternoon-rescan backtest against NSE's *historical* OI-spurt/price-move
+data is NOT possible (`fetch_oi_spurts_nse`/`fetch_fno_price_universe` are both
+live-snapshot-only NSE endpoints, no dated/historical query parameter — same
+structural wall as OI-Flow's own documented OI-history gap), so this analysis used
+real forward paper-trading data already recorded across 2026-08-31 to 2026-09-04
+instead of a synthetic replay:
+
+| Date | Afternoon-sourced trades | Net P&L (afternoon) | Morning-only net P&L |
+|---|---|---|---|
+| 08-31 | CAMS, AUROPHARMA | −₹206.25 | −₹6,982.20 |
+| 09-01 | BAJAJ-AUTO, FORCEMOT, ASHOKLEY | +₹1,685.00 | +₹4,201.25 |
+| 09-02 | COALINDIA, HEROMOTOCO, EICHERMOT, BOSCHLTD, VOLTAS, SWIGGY, BSE, KEI | −₹3,647.50 | ₹0 (nothing else fired) |
+| 09-03 | 9 added, 0 ever fired a signal | ₹0 | +₹10,806.25 |
+| 09-04 | 3 added, 0 ever fired a signal | ₹0 | +₹5,303.75 |
+| **Total** | **12 trades** | **−₹2,168.75** | **+₹13,329.05** |
+
+Net contribution of the afternoon rescan over this real 5-day sample: **−₹2,168.75**.
+Small sample (12 trades) and lumpy — one FORCEMOT trade (+1,606.25) drives almost all
+of 09-01's gain, one bad day (09-02) drives almost all the loss, and 17 of 29
+afternoon-added symbols across the 5 days never fired a signal at all (dead weight on
+the shared chain-subscription budget for nothing). On 09-02 specifically, EVERY trade
+that day came from the afternoon rescan — the morning scan found nothing tradeable,
+so disabling it doesn't just avoid that day's loss, it also means a quiet morning
+stays quiet instead of the afternoon rescan manufacturing activity the 09:25 scan
+didn't organically find. Not a large-sample, fully conclusive result, but consistently
+negative in direction — no evidence in this data supports keeping it on. Revisit only
+with a materially larger forward sample if this is ever reconsidered.
+
+**UI: LTP-vs-VWAP distance shown for shortlisted stocks, 2026-09-07** — direct user
+spec: "when stocks are scanned the ui should show how far is ltp from vwap as we have
+already subscribed to all the stocks after 9.25 when they got scanned."
+`OiOrbScreenerStrategy.monitoring_state()` now returns a `shortlist_vwap` dict per
+shortlisted symbol (`ltp`, `vwap`, `vwap_dist`, `vwap_dist_pct`) built from data
+already flowing in from the subscriptions made at scan time (`self._live_spot_ltp` is
+populated for every shortlisted symbol, not just open positions, since a 2026-09-06
+change; `self._vwap` is the same running `VwapState` `_vwap_check_entry` itself
+reads) — no new feed calls needed. Rendered in `monitor.html`'s shortlist row,
+green/red by direction.
+
 ---
 
 ### CAG Long Straddle Strategy (`strategies/cag_straddle/`)

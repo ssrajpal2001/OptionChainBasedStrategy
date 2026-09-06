@@ -8307,7 +8307,7 @@ function amoTest() {
                           <template x-if="(_bk.shortlist||[]).length===0">
                             <div class="text-center py-1" style="color:var(--t-dim)">No shortlist yet — scanning</div>
                           </template>
-                          <template x-for="row in (_bk.shortlist||[]).slice(0,8).map(s => ({sym: s, pc: (_bk.shortlist_pchange||{})[s]}))" :key="row.sym">
+                          <template x-for="row in (_bk.shortlist||[]).slice(0,8).map(s => ({sym: s, pc: (_bk.shortlist_pchange||{})[s], vw: (_bk.shortlist_vwap||{})[s]}))" :key="row.sym">
                             <div class="flex items-center justify-between mb-1">
                               <span class="px-1.5 py-0.5 rounded font-bold"
                                     :style="row.pc>0?'background:rgba(16,185,129,0.15);color:var(--t-green)':'background:rgba(239,68,68,0.15);color:var(--t-red)'"
@@ -8315,6 +8315,9 @@ function amoTest() {
                               <span style="color:var(--t-text)" x-text="row.sym"></span>
                               <span style="color:var(--t-muted)"
                                     x-text="(_bk.orb_frozen && _bk.orb_frozen[row.sym]) ? ('ORB '+fmt(_bk.orb_frozen[row.sym][1])+'–'+fmt(_bk.orb_frozen[row.sym][0])) : 'ORB pending'"></span>
+                              <span :style="!row.vw||row.vw.vwap_dist==null?'color:var(--t-dim)':(row.vw.vwap_dist>=0?'color:var(--t-green)':'color:var(--t-red)')"
+                                    :title="row.vw&&row.vw.vwap!=null?('LTP '+fmt(row.vw.ltp)+' vs VWAP '+fmt(row.vw.vwap)):'VWAP not warm yet'"
+                                    x-text="!row.vw||row.vw.vwap_dist==null?'VWAP —':((row.vw.vwap_dist>=0?'+':'')+row.vw.vwap_dist.toFixed(2)+' ('+(row.vw.vwap_dist_pct>=0?'+':'')+row.vw.vwap_dist_pct.toFixed(2)+'%) vs VWAP')"></span>
                             </div>
                           </template>
                           <div x-show="(_bk.shortlist||[]).length>8" class="mt-1 text-right" style="color:var(--t-dim);font-size:10px"
