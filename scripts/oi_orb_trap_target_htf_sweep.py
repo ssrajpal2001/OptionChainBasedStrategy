@@ -57,7 +57,7 @@ sys.path.insert(0, ".")
 
 from data_layer.historical_candles import fetch_upstox_range_1m
 from strategies.core.support_resistance import SupportResistanceCalculator
-from strategies.liquidity_trap.detector import Bar
+from strategies.core.trap_zone_utils import Bar
 from scripts.oi_orb_entry_mode_backtest import (
     ROWS, SIDE, ORB_START, ORB_END, ENTRY_WINDOW_END, _key_range,
     resolve_eq_key, to_bars, volume_by_ts, compute_orb,

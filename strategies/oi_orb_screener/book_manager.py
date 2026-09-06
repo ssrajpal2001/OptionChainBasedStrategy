@@ -45,7 +45,7 @@ _DEFAULT_PARAMS = {
     "max_monitor_minutes": 90,
     "rejection_min_rise_pct": 2.0,
     "rejection_retrace_fraction": 0.5,
-    "strike_otm_pct": 2.0,
+    "strike_otm_pct": 0.0,  # 2026-09-06: ATM (was 2% OTM) -- direct user correction
     "orb_start": "09:15",
     "orb_end": "09:25",
     # 2026-08-27, direct user spec: TWO scan sessions. Session 1 is a single

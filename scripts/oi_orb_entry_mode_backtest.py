@@ -53,9 +53,8 @@ from typing import Dict, List, Optional
 sys.path.insert(0, ".")
 
 from data_layer.historical_candles import fetch_upstox_range_1m
-from strategies.d1_trap_option.bear_only_book import _collapse_nearby_zones
+from strategies.core.trap_zone_utils import _collapse_nearby_zones, Bar
 from strategies.core.support_resistance import SupportResistanceCalculator
-from strategies.liquidity_trap.detector import Bar
 from strategies.oi_orb_screener import screener
 
 TOKEN = os.environ.get("UPSTOX_TOKEN", "")
@@ -132,18 +131,12 @@ def volume_by_ts(rows: List[dict]) -> Dict[datetime, float]:
     return {datetime.fromisoformat(r["ts"]): float(r.get("volume", 0.0) or 0.0) for r in rows}
 
 
-def to_n_min_bars(bars_1m: List[Bar], n: int) -> List[Bar]:
-    buckets: Dict[tuple, list] = {}
-    for b in bars_1m:
-        floored = (b.ts.minute // n) * n
-        key = (b.ts.hour, floored)
-        buckets.setdefault(key, []).append(b)
-    out = []
-    for key in sorted(buckets.keys()):
-        g = sorted(buckets[key], key=lambda x: x.ts)
-        out.append(Bar(ts=g[0].ts, open=g[0].open, high=max(x.high for x in g),
-                        low=min(x.low for x in g), close=g[-1].close))
-    return out
+# 2026-09-06: to_n_min_bars moved to strategies/core/candle_indicators.py
+# (ported into the live oi_orb_screener engine) -- imported here (and
+# re-exported for the many other scripts that already do
+# `from scripts.oi_orb_entry_mode_backtest import to_n_min_bars`), not
+# duplicated, so this backtest can never drift from the live version.
+from strategies.core.candle_indicators import to_n_min_bars  # noqa: E402,F401
 
 
 def _key_range(bars: List[Bar], start_hhmm: str, end_hhmm: str) -> List[Bar]:

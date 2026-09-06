@@ -13,7 +13,7 @@ Confirms multiple concurrent stock positions are tracked independently
 stock allowed, not capped to 1).
 """
 import asyncio
-from datetime import date, datetime, time as dtime
+from datetime import date, datetime, time as dtime, timedelta
 
 import pytest
 
@@ -1900,3 +1900,217 @@ async def test_on_fill_tags_trap_when_reason_is_trap_retest(monkeypatch):
     await book._on_fill(fill)
 
     assert book._positions["ITC"]["sl_mechanic"] == "trap"
+
+
+# ── 2026-09-06: _ha_stoch_check_exit -- the confirmed HA-shape + StochRSI(9,9)
+# exit ported from this week's real-data backtest series into the live
+# engine. These tests isolate the NEW orchestration code (BarAccumulator
+# feed, closed-bar-only guard, once-per-bar dedup, eod_closing claim,
+# _emit_close call) from the already-validated pure math (to_heikin_ashi/
+# compute_stoch_rsi/ha_stoch_shape_exit_signal) by monkeypatching the shape/
+# cross check itself -- the math functions have their own coverage via the
+# backtest cross-check against the unmodified original script this session.
+
+def _rig_ha_stoch_position(book, sym, side, entry_price=100.0, qty=10):
+    book._positions[sym] = {
+        "contract": type("C", (), {"option_type": "CE" if side == "CALL" else "PE", "strike": 100,
+                                     "expiry": date(2026, 9, 29)})(),
+        "qty": qty, "entry_price": entry_price, "paper_mode": True,
+        "opened_at": datetime.now(IST), "sl_mechanic": "vwap",
+    }
+
+
+async def _feed_one_closed_15m_bar(book, sym, side, start_ts, base_price=100.0):
+    """Feeds exactly 16 one-minute ticks (start_ts, start_ts+1min, ...,
+    start_ts+15min) -- the 16th tick is what closes the first 15-min bucket
+    (start_ts's own minute floored to a 15-min boundary), matching
+    BarAccumulator.on_tick's own "a new bucket started" semantics. Prices
+    are flat/trivial -- the actual HA-shape/StochRSI condition is
+    monkeypatched in these tests, not genuinely computed from these prices."""
+    ts = start_ts
+    for i in range(16):
+        await book._ha_stoch_check_exit(sym, side, base_price + i * 0.01, ts)
+        ts = ts + timedelta(minutes=1)
+    return ts
+
+
+@pytest.mark.asyncio
+async def test_ha_stoch_exit_fires_when_condition_confirms(monkeypatch):
+    monkeypatch.setattr(
+        "strategies.core.candle_indicators.ha_stoch_shape_exit_signal",
+        lambda *a, **k: True,
+    )
+    bus = _FakeBus()
+    book = _make_book(bus)
+    _rig_ha_stoch_position(book, "ITC", "CALL")
+
+    closed = []
+    async def _fake_emit_close(sym, pos, reason):
+        closed.append((sym, reason))
+    book._emit_close = _fake_emit_close
+
+    start = datetime(2026, 9, 8, 9, 15, tzinfo=IST)
+    await _feed_one_closed_15m_bar(book, "ITC", "CALL", start)
+
+    assert closed == [("ITC", "ha_stoch_exit")]
+    assert "ITC" in book._eod_closing
+
+
+@pytest.mark.asyncio
+async def test_ha_stoch_exit_does_not_fire_when_condition_false(monkeypatch):
+    monkeypatch.setattr(
+        "strategies.core.candle_indicators.ha_stoch_shape_exit_signal",
+        lambda *a, **k: False,
+    )
+    bus = _FakeBus()
+    book = _make_book(bus)
+    _rig_ha_stoch_position(book, "ITC", "CALL")
+
+    closed = []
+    async def _fake_emit_close(sym, pos, reason):
+        closed.append((sym, reason))
+    book._emit_close = _fake_emit_close
+
+    start = datetime(2026, 9, 8, 9, 15, tzinfo=IST)
+    await _feed_one_closed_15m_bar(book, "ITC", "CALL", start)
+
+    assert closed == []
+    assert "ITC" not in book._eod_closing
+
+
+@pytest.mark.asyncio
+async def test_ha_stoch_exit_skips_still_forming_bar(monkeypatch):
+    """Fewer than 16 ticks -- the first 15-min bucket hasn't genuinely
+    closed yet (wall-clock hasn't reached its own +15min boundary), so the
+    condition must never even be evaluated, regardless of what it would
+    return."""
+    monkeypatch.setattr(
+        "strategies.core.candle_indicators.ha_stoch_shape_exit_signal",
+        lambda *a, **k: True,
+    )
+    bus = _FakeBus()
+    book = _make_book(bus)
+    _rig_ha_stoch_position(book, "ITC", "CALL")
+
+    closed = []
+    async def _fake_emit_close(sym, pos, reason):
+        closed.append((sym, reason))
+    book._emit_close = _fake_emit_close
+
+    start = datetime(2026, 9, 8, 9, 15, tzinfo=IST)
+    ts = start
+    for i in range(10):   # only 10 of the needed 16 ticks
+        await book._ha_stoch_check_exit("ITC", "CALL", 100.0, ts)
+        ts = ts + timedelta(minutes=1)
+
+    assert closed == []
+    assert "ITC" not in book._eod_closing
+
+
+@pytest.mark.asyncio
+async def test_ha_stoch_exit_no_op_when_no_position(monkeypatch):
+    monkeypatch.setattr(
+        "strategies.core.candle_indicators.ha_stoch_shape_exit_signal",
+        lambda *a, **k: True,
+    )
+    bus = _FakeBus()
+    book = _make_book(bus)   # no position rigged for "ITC" at all
+
+    closed = []
+    async def _fake_emit_close(sym, pos, reason):
+        closed.append((sym, reason))
+    book._emit_close = _fake_emit_close
+
+    start = datetime(2026, 9, 8, 9, 15, tzinfo=IST)
+    await _feed_one_closed_15m_bar(book, "ITC", "CALL", start)
+
+    assert closed == []
+
+
+@pytest.mark.asyncio
+async def test_ha_stoch_exit_respects_already_closing_guard(monkeypatch):
+    """A position another exit check already claimed this cycle
+    (self._eod_closing) must not also be closed a second time by this
+    check."""
+    monkeypatch.setattr(
+        "strategies.core.candle_indicators.ha_stoch_shape_exit_signal",
+        lambda *a, **k: True,
+    )
+    bus = _FakeBus()
+    book = _make_book(bus)
+    _rig_ha_stoch_position(book, "ITC", "CALL")
+    book._eod_closing.add("ITC")
+
+    closed = []
+    async def _fake_emit_close(sym, pos, reason):
+        closed.append((sym, reason))
+    book._emit_close = _fake_emit_close
+
+    start = datetime(2026, 9, 8, 9, 15, tzinfo=IST)
+    await _feed_one_closed_15m_bar(book, "ITC", "CALL", start)
+
+    assert closed == []
+
+
+# ── 2026-09-06: VWAP-retest is the active entry mechanic again (matching
+# this week's entire validated backtest series) -- _trap_check_entry (bear/
+# bull-trap zone entry) was found to be the engine's real active entry
+# mechanic while porting this week's exit work, a mismatch never covered by
+# any backtest this session ran. These tests cover the new _vwap_check_entry
+# wrapper and the _on_fill tagging branch for its "vwap_retest" reason.
+
+def test_vwap_check_entry_arms_then_fires_on_retest():
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._vwap.update("ITC", 100.0, 10.0)   # vwap = 100.0
+
+    # CALL: not yet armed, ltp above vwap -- arms, no fire yet.
+    fire = book._vwap_check_entry("ITC", "CALL", 105.0)
+    assert fire is False
+    assert book._vwap_armed["ITC"] is True
+
+    # Price comes back down onto vwap from above -- fires.
+    fire = book._vwap_check_entry("ITC", "CALL", 100.0)
+    assert fire is True
+
+
+def test_vwap_check_entry_put_side_mirrors_call():
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._vwap.update("KEI", 200.0, 10.0)   # vwap = 200.0
+
+    fire = book._vwap_check_entry("KEI", "PUT", 195.0)
+    assert fire is False
+    assert book._vwap_armed["KEI"] is True
+
+    fire = book._vwap_check_entry("KEI", "PUT", 200.0)
+    assert fire is True
+
+
+def test_vwap_check_entry_no_fire_before_vwap_exists():
+    bus = _FakeBus()
+    book = _make_book(bus)   # self._vwap never updated for this symbol
+
+    fire = book._vwap_check_entry("ITC", "CALL", 100.0)
+    assert fire is False
+    assert "ITC" not in book._vwap_armed
+
+
+@pytest.mark.asyncio
+async def test_on_fill_tags_vwap_when_reason_is_vwap_retest(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    contract = _contract("ITC", 270, "CE")
+    eid = "evt3"
+    book._pending_fills[eid] = {
+        "symbol": "ITC", "contract": contract, "qty": 375,
+        "entry_price": 10.0, "reason": "vwap_retest",
+    }
+    fill = OiOrbFillEvent(
+        client_id=_TEST_CLIENT_ID, binding_id=_TEST_BINDING_ID, event_id=eid,
+        action="BUY", underlying="ITC", option_type="CE", strike=270,
+        qty=375, fill_price=10.0, paper_mode=True,
+    )
+    await book._on_fill(fill)
+
+    assert book._positions["ITC"]["sl_mechanic"] == "vwap"

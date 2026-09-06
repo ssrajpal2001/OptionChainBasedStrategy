@@ -140,10 +140,11 @@ CONFIG = {
     "SMA_EXIT_CONSEC_CLOSES": 2,
     "SMA_TF_MIN": 5,
     "SMA_SEED_LOOKBACK_DAYS": 5,
-    # 2026-08-24, direct user spec: strike is 2% OTM (above spot for a
-    # CALL, below spot for a PUT), not ATM -- see resolve_strike_step_for_
-    # price's caller in engine.py for where this is actually applied.
-    "STRIKE_OTM_PCT": 2.0,
+    # 2026-09-06, direct user correction (supersedes the 2026-08-24 2% OTM
+    # spec): strike is ATM -- 0% offset from the spot trigger price, which
+    # resolve_contract then rounds to the nearest real listed strike step.
+    # See the caller in engine.py for where this is actually applied.
+    "STRIKE_OTM_PCT": 0.0,
     # Live default (unlike the 2026-08-24 one-off Colab comparison run, which
     # temporarily set this False for calibration only) -- the real regime
     # table stays enforced. strategy_params can still override per-deployment.

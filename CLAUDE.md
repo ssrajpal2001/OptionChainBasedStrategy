@@ -1338,6 +1338,50 @@ broker's own EOD squareoff already flattened it in reality). Tests:
 `tests/oi_orb_screener/test_store.py`, plus the restore-specific tests in
 `tests/oi_orb_screener/test_engine.py`.
 
+**Entry/exit mechanic FROZEN 2026-09-06, direct user decision — live spec, supersedes
+every prior entry/exit note above:**
+- **Entry**: VWAP-retest (`screener.check_vwap_retest_entry` via `_vwap_check_entry` in
+  `engine.py`) — arms when spot LTP crosses to the correct side of the intraday VWAP, fires
+  on a genuine retest back across it. Both the ORB-window immediate fire and the ongoing
+  live bar-by-bar scan through `ENTRY_WINDOW_END` use this same condition.
+  `_trap_check_entry`/`_immediate_check_entry` (older trap-zone/immediate-ORB mechanics)
+  remain in the file, unused, not deleted.
+- **Exit**: 15-min Heikin-Ashi shape + StochRSI(9,9,3) inclusive cross
+  (`_ha_stoch_check_exit`, shared logic in `strategies/core/candle_indicators.py`) — runs
+  unconditionally for every open position ahead of any other exit mechanic, plus the
+  existing EOD square-off fallback.
+- **Both entry and exit trigger off SPOT ticks, never option premium** — `_live_price(sym,
+  live)` (tick-primary via the upstox2 subscription seeded at shortlist time, 20s NSE-poll
+  fallback) reads the underlying stock's own LTP; the option is only ever used to *price*
+  the actual fill (`_await_first_ltp` on the resolved contract at entry, live option LTP
+  for P&L thereafter) — direct user correction, "trade will be triggered from spot and
+  exit will be triggered from spot."
+- **Strike is ATM, not 2% OTM** — `STRIKE_OTM_PCT`/`strike_otm_pct` default changed
+  `2.0 → 0.0` (`screener.py`, `book_manager.py`) — the raw strike is simply the spot
+  trigger price, which `resolve_contract` then rounds to the nearest real listed strike
+  step. Supersedes the 2026-08-24 2% OTM spec that shipped with the very first live day.
+- Validated against the real 51-row shortlist export (2026-08-31 to 2026-09-04, real
+  Upstox 1-min NSE_EQ history): 46 entered, 87.0% win, PF 29.40, **+3,116.36 pts** —
+  the confirmed baseline this spec is frozen to. Two candidate refinements were tested
+  and explicitly REJECTED on this sample, not adopted:
+  - **Trend-based Fib 1.272 extension exit** (in place of HA+StochRSI) — underperformed
+    across every timeframe/swing-width combo swept.
+  - **09:15-09:20 momentum-confirmation filter** on the immediate 09:25 VWAP-retest
+    entry (require spot to have broken the 09:15-09:20 candle's own high/low before
+    09:25, else withhold) — tested in both a "delay" variant (falls through to a later
+    retest, PF 24.38, +2,997.94) and a "skip-entirely" variant (rejected for the whole
+    day, PF 13.06, +1,256.34, forfeiting +1,860.02 pts of otherwise-winning setups) —
+    both net negative vs. the plain baseline. Neither adopted.
+- **Stock-MIS execution variant (buy/short the underlying stock itself at broker MIS
+  leverage instead of an option) was explored, backtested, and then explicitly DROPPED**
+  2026-09-06, direct user decision — not pursuing it. Never reached implementation
+  (no `strategies/oi_orb_screener_stock/` package or `execution_bridge/
+  oi_orb_stock_bridge.py` was ever built); the two placeholder `Topic.
+  OI_ORB_STOCK_ORDER_REQUEST`/`FILL` enum members added in anticipation of it were
+  removed the same day. Don't resurrect without an explicit new ask.
+- **First live deployment (paper_route) scheduled 2026-09-07**, alongside `sell_straddle`
+  and `cag_straddle` — see each strategy's own section for its own readiness state.
+
 ---
 
 ### CAG Long Straddle Strategy (`strategies/cag_straddle/`)

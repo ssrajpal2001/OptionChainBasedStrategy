@@ -57,45 +57,11 @@ SMOOTH = 3
 OVERSOLD, OVERBOUGHT = 20.0, 80.0
 
 
-def compute_rsi_series(closes: List[float], period: int) -> List[Optional[float]]:
-    """Expanding-window Wilder-style RSI -- None until `period` real
-    gain/loss samples exist."""
-    out: List[Optional[float]] = [None] * len(closes)
-    gains, losses = [], []
-    for i in range(1, len(closes)):
-        chg = closes[i] - closes[i - 1]
-        gains.append(max(chg, 0.0))
-        losses.append(max(-chg, 0.0))
-        if i < period:
-            continue
-        avg_gain = sum(gains[-period:]) / period
-        avg_loss = sum(losses[-period:]) / period
-        if avg_loss == 0:
-            out[i] = 100.0
-        else:
-            rs = avg_gain / avg_loss
-            out[i] = 100.0 - 100.0 / (1.0 + rs)
-    return out
-
-
-def compute_stoch_rsi(closes: List[float], rsi_period: int, stoch_period: int, smooth: int):
-    """Returns (k_series, d_series), both list[Optional[float]] aligned to
-    `closes`. None wherever warm-up hasn't completed yet."""
-    rsi = compute_rsi_series(closes, rsi_period)
-    k = [None] * len(closes)
-    for i in range(len(closes)):
-        window = [r for r in rsi[max(0, i - stoch_period + 1):i + 1] if r is not None]
-        if len(window) < stoch_period or rsi[i] is None:
-            continue
-        lo, hi = min(window), max(window)
-        k[i] = 100.0 if hi == lo else (rsi[i] - lo) / (hi - lo) * 100.0
-    d = [None] * len(closes)
-    for i in range(len(closes)):
-        window = [k[j] for j in range(max(0, i - smooth + 1), i + 1) if k[j] is not None]
-        if len(window) < smooth:
-            continue
-        d[i] = sum(window) / len(window)
-    return k, d
+# 2026-09-06: compute_rsi_series/compute_stoch_rsi moved to
+# strategies/core/candle_indicators.py (ported into the live oi_orb_screener
+# engine) -- imported here, not duplicated, so this backtest can never
+# drift from the live version.
+from strategies.core.candle_indicators import compute_rsi_series, compute_stoch_rsi  # noqa: E402,F401
 
 
 @dataclass

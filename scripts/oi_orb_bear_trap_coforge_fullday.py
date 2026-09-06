@@ -32,8 +32,7 @@ sys.path.insert(0, ".")
 from data_layer.historical_candles import fetch_upstox_intraday_1m
 from strategies.core.support_resistance import SupportResistanceCalculator
 from scripts.oi_orb_bear_trap_coforge_backtest import to_bars, to_n_min_bars, COFORGE_STOCK_KEY
-from strategies.liquidity_trap.detector import find_all_setups
-from strategies.d1_trap_option.bear_only_book import _collapse_nearby_zones
+from strategies.core.trap_zone_utils import find_all_setups, _collapse_nearby_zones
 
 TOKEN = sys.argv[1] if len(sys.argv) > 1 else ""
 QTY = 475

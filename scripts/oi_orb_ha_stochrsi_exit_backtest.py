@@ -55,6 +55,7 @@ from scripts.oi_orb_entry_mode_backtest import (
 )
 from scripts.oi_orb_30_3_1_target_backtest import to_heikin_ashi
 from scripts.oi_orb_stoch_rsi_backtest import compute_stoch_rsi
+from strategies.core.candle_indicators import ha_stoch_shape_exit_signal
 from scripts.oi_orb_atr_chandelier_backtest import fetch_all
 from strategies.oi_orb_screener import screener
 
@@ -98,15 +99,7 @@ def ha_stoch_exit(entry_ts, entry_price, side, bars_1m, ha_15m, k, d, inclusive=
     for i, hb in enumerate(ha_15m):
         if hb.ts < entry_ts:
             continue
-        if k[i] is None or d[i] is None:
-            continue
-        if side == "CALL":
-            cross = (d[i] >= k[i]) if inclusive else (d[i] > k[i])
-            cond = (hb.high == hb.open) and cross
-        else:
-            cross = (k[i] >= d[i]) if inclusive else (k[i] > d[i])
-            cond = (hb.low == hb.open) and cross
-        if cond:
+        if ha_stoch_shape_exit_signal(hb, k[i], d[i], side, inclusive=inclusive):
             candidates = [b for b in post_entry if b.ts >= hb.ts]
             if candidates:
                 exit_bar = candidates[0]

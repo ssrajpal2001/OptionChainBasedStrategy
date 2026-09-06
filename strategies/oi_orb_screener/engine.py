@@ -371,6 +371,14 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._immediate_tsl_calc: Dict[str, "object"] = {}
         self._immediate_tsl_acc: Dict[str, "object"] = {}
         self._immediate_tsl_fed_bars: Dict[str, int] = {}
+        # 2026-09-06, direct user spec: the confirmed HA-shape + StochRSI(9,9)
+        # exit backtested this week (scripts/oi_orb_ha_stochrsi_exit_backtest.py)
+        # ported into live -- see _ha_stoch_check_exit's own docstring. Applies
+        # to EVERY open position regardless of sl_mechanic (unlike the trap/
+        # immediate_15m TSLs above, which only apply to their own entry style) --
+        # this is meant as the universal, always-on exit, same as the backtest.
+        self._ha_stoch_1m_acc: Dict[str, "object"] = {}
+        self._ha_stoch_last_checked_bar_ts: Dict[str, datetime] = {}
 
         # ── contract/feed/position state, keyed by stock symbol ────────
         self._pending_contracts: Dict[str, "stock_resolve.ResolvedContract"] = {}
@@ -409,7 +417,16 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         # Stock spot tick feed -- kept for LIVE UI VISIBILITY ONLY now (the
         # SL/target check itself no longer uses it); see _ensure_spot_feed's
         # own docstring.
-        self._live_spot_ltp: Dict[str, float] = {}   # symbol -> most recent live spot tick (UI only)
+        self._live_spot_ltp: Dict[str, float] = {}   # symbol -> most recent live spot tick
+        # 2026-09-06, direct user spec: real upstox2 ticks are now the PRIMARY
+        # price source for entry/exit decisions (not just the dashboard's
+        # spot_ltp display field, as this dict originally was) -- the 20s
+        # NSE-poll dataframe (`live`) is kept as an automatic fallback for any
+        # symbol whose tick feed has gone stale/quiet, same tick-primary/
+        # poll-fallback philosophy this codebase's own dual-feeder active-
+        # passive design already uses. See _live_price().
+        self._live_spot_ltp_ts: Dict[str, datetime] = {}   # symbol -> monotonic-safe wall-clock of last tick
+        self._TICK_STALE_SEC = 10.0
         self._spot_tick_subscribed: Dict[str, bool] = {}
         # Two-session scan state (2026-08-27, direct user spec).
         self._afternoon_scan_last_ts: float = 0.0    # throttle: don't re-scan every poll cycle
@@ -987,6 +1004,17 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                              self._client_id, self._binding_id, len(self._shortlist_symbols),
                              ", ".join(f"{s}({self._shortlist_pchange.get(s, 0):+.2f}%)"
                                        for s in self._shortlist_symbols))
+            # 2026-09-06, direct user spec: subscribe every shortlisted stock to
+            # the dedicated upstox2 WebSocket the MOMENT it's shortlisted, not
+            # only once a position opens on it -- real ticks are now consumed
+            # for entry/exit DECISIONS too (see _live_price(), _spot_tick_loop's
+            # new self._live_tick_ltp/_live_tick_ts recording), not just the
+            # dashboard's spot_ltp display field as before. Tick-primary,
+            # NSE-poll-fallback: this subscribe call was already idempotent
+            # and safe to call early (_ensure_spot_feed no-ops if already
+            # subscribed), so widening WHEN it's called is the only change.
+            for sym in self._shortlist_symbols:
+                self._ensure_spot_feed(sym)
 
             await asyncio.to_thread(store.record_scan, self._client_id, self._binding_id, nifty_pchange, "ok")
             sl_indexed = shortlist.set_index("symbol")
@@ -1075,9 +1103,9 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
 
             _heartbeat_parts: list = []
             for sym in self._shortlist_symbols:
-                if sym not in live.index:
+                ltp = self._live_price(sym, live)
+                if ltp is None:
                     continue
-                ltp = float(live.loc[sym, "lastPrice"])
                 self._bars.on_quote(sym, ltp, now)
 
                 # 2026-08-27, direct user spec: per-stock live price vs its own ORB
@@ -1164,14 +1192,24 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             # because new entries aren't being evaluated right now.
             # 2026-09-02: "immediate_15m"-tagged positions get their own
             # parallel 15-min S1/R1 TSL instead.
+            # 2026-09-06: the confirmed HA-shape + StochRSI(9,9) exit runs for
+            # EVERY open position, unconditional on sl_mechanic (unlike the
+            # trap/immediate_15m TSLs above, which only apply to their own
+            # entry style) -- checked first, since it's the universal exit
+            # this week's backtest series confirmed; either check can claim
+            # self._eod_closing first, whichever fires wins, same "first
+            # fired wins" discipline this engine already uses everywhere else.
             for sym, pos in list(self._positions.items()):
-                if sym not in live.index:
+                ltp = self._live_price(sym, live)
+                if ltp is None:
                     continue
+                side = screener.side_from_pchange(self._shortlist_pchange.get(sym, 0.0))
+                await self._ha_stoch_check_exit(sym, side, ltp, now)
+                if sym in self._eod_closing:
+                    continue   # already claimed by the HA+StochRSI check above this cycle
                 mech = pos.get("sl_mechanic")
                 if mech not in ("trap", "immediate_15m"):
                     continue
-                side = screener.side_from_pchange(self._shortlist_pchange.get(sym, 0.0))
-                ltp = float(live.loc[sym, "lastPrice"])
                 if mech == "trap":
                     await self._trap_update_tsl_and_check_exit(sym, side, ltp, now)
                 else:
@@ -1183,20 +1221,28 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             if self._regime is not None and entry_window_open:
                 regime_filter_on = cfg.get("REGIME_FILTER_ENABLED", True)
                 for sym in self._shortlist_symbols:
-                    if sym not in live.index or sym in self._positions or sym in self._pending_contracts:
+                    if sym in self._positions or sym in self._pending_contracts:
                         continue
                     side = screener.side_from_pchange(self._shortlist_pchange.get(sym, 0.0))
                     if (sym, side) in self._already_fired or (sym, side) in self._rejected:
                         continue
                     if not screener.side_allowed_by_regime(side, self._regime, regime_filter_on):
                         continue
-                    ltp = float(live.loc[sym, "lastPrice"])
+                    ltp = self._live_price(sym, live)
+                    if ltp is None:
+                        continue
                     if immediate_entry_on:
                         fire = self._immediate_check_entry(sym, side, now)
                         reason = "immediate_orb_entry"
                     else:
-                        fire = self._trap_check_entry(sym, side, ltp, now)
-                        reason = "trap_retest"
+                        # 2026-09-06, direct user spec: VWAP-retest is the
+                        # active entry mechanic again, matching this week's
+                        # entire validated backtest series exactly (see
+                        # _vwap_check_entry's own docstring for why).
+                        # _trap_check_entry (bear/bull-trap zone entry) is
+                        # left in place, unused, not deleted.
+                        fire = self._vwap_check_entry(sym, side, ltp)
+                        reason = "vwap_retest"
                     if not fire:
                         continue
                     self._already_fired.add((sym, side))
@@ -1290,7 +1336,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         until after this point."""
         fcfg = self._filters_cfg
         opt_type = "CE" if sig.side == "CALL" else "PE"
-        otm_frac = self._screener_cfg.get("STRIKE_OTM_PCT", 2.0) / 100.0
+        otm_frac = self._screener_cfg.get("STRIKE_OTM_PCT", 0.0) / 100.0
         entry_strike = sig.trigger_price * (1 + otm_frac if opt_type == "CE" else 1 - otm_frac)
 
         snap = None
@@ -1368,10 +1414,11 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 orb_high=sig.orb_high, orb_low=sig.orb_low)
             return
 
-        # 2026-08-24, direct user spec: strike is 2% OTM (above spot for a
-        # CALL, below spot for a PUT), not ATM -- resolve_contract rounds
-        # whatever raw price it's given to the nearest valid strike step.
-        otm_frac = self._screener_cfg.get("STRIKE_OTM_PCT", 2.0) / 100.0
+        # 2026-09-06, direct user correction (supersedes the 2026-08-24 2% OTM
+        # spec): strike is ATM -- otm_frac defaults to 0.0, so raw_strike is
+        # just the spot trigger price; resolve_contract rounds it to the
+        # nearest valid listed strike step.
+        otm_frac = self._screener_cfg.get("STRIKE_OTM_PCT", 0.0) / 100.0
         raw_strike = sig.trigger_price * (1 + otm_frac if opt_type == "CE" else 1 - otm_frac)
 
         contract = await stock_resolve.resolve_contract_async(sig.symbol, raw_strike, opt_type)
@@ -1423,6 +1470,33 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                          self._client_id, self._binding_id, sig.symbol, opt_type, contract.strike,
                          contract.expiry, qty, entry_price, event_id)
         await self._bus.publish(Topic.OI_ORB_ORDER_REQUEST, order_ev)
+
+    def _live_price(self, symbol: str, live_df, log_source: bool = False) -> Optional[float]:
+        """2026-09-06, direct user spec: tick-primary, NSE-poll-fallback price
+        lookup. Prefers a real upstox2 tick (self._live_spot_ltp) if one has
+        arrived within self._TICK_STALE_SEC seconds; otherwise falls back to
+        the 20s-polled NSE dataframe (`live_df.loc[symbol, "lastPrice"]`,
+        exactly what every call site used unconditionally before this pass)
+        so a symbol whose tick feed hasn't started yet (or has gone quiet)
+        never goes blind. Returns None only if NEITHER source has this
+        symbol at all (mirrors the old behavior of skipping symbols not in
+        `live_df.index`)."""
+        ts = self._live_spot_ltp_ts.get(symbol)
+        if ts is not None and (datetime.now(IST) - ts).total_seconds() <= self._TICK_STALE_SEC:
+            ltp = self._live_spot_ltp.get(symbol)
+            if ltp is not None and ltp > 0:
+                if log_source:
+                    self._clog.debug("OiOrb[%s/%s]: %s price from live tick (upstox2) ltp=%.2f",
+                                      self._client_id, self._binding_id, symbol, ltp)
+                return ltp
+        if live_df is not None and symbol in live_df.index:
+            ltp = float(live_df.loc[symbol, "lastPrice"])
+            if log_source:
+                self._clog.debug("OiOrb[%s/%s]: %s price from NSE-poll fallback ltp=%.2f "
+                                  "(tick stale or not yet arrived)",
+                                  self._client_id, self._binding_id, symbol, ltp)
+            return ltp
+        return None
 
     async def _await_first_ltp(self, stock_symbol: str, timeout: float) -> float:
         deadline = _time.monotonic() + timeout
@@ -1721,15 +1795,52 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 if not isinstance(ev, IndexTick):
                     continue
                 symbol = ev.symbol
-                if symbol not in self._positions:
+                # 2026-09-06: record for ANY subscribed symbol (shortlisted,
+                # not just already-open positions) -- this is now the
+                # tick-primary price source for entry evaluation too, not
+                # just the UI's spot_ltp field for already-open positions.
+                if symbol not in self._shortlist_symbols and symbol not in self._positions:
                     continue
                 ltp = float(ev.ltp or 0.0)
                 if ltp <= 0:
                     continue
                 self._live_spot_ltp[symbol] = ltp
+                self._live_spot_ltp_ts[symbol] = datetime.now(IST)
             except Exception:
                 self._clog.exception("OiOrb[%s/%s]: spot tick processing error (recovered).",
                                       self._client_id, self._binding_id)
+
+    def _vwap_check_entry(self, sym: str, side: str, ltp: float) -> bool:
+        """2026-09-06, direct user spec: switch the live entry mechanic BACK
+        to VWAP-retest (screener.check_vwap_retest_entry) -- the exact
+        mechanic this whole week's real-data backtest series (VWAP-retest
+        entry + 15-min HA-shape/StochRSI(9,9) exit, the Fib-extension
+        comparison, the option-vs-stock-MIS comparison) actually used.
+        _trap_check_entry (bear/bull-trap zone entry, live since 2026-08-31)
+        was found to be the engine's REAL active entry mechanic while
+        porting this week's exit work -- a mismatch nothing this week's
+        backtests ever covered, since they all assumed VWAP-retest timing.
+        Direct user decision: make live match validated backtest exactly,
+        rather than trust the exit mechanic works equally well paired with
+        a different, never-backtested-together entry. _trap_check_entry/
+        _immediate_check_entry are left in place, unused, not deleted --
+        available again if a future decision reopens that door.
+
+        self._vwap (screener.VwapState) is already fed every poll cycle
+        (see the volume-confirmation block above, which feeds the SAME
+        poll-to-poll volume delta into both the volume filter and VWAP) --
+        this method only adds the actual entry DECISION, which nothing
+        called before this pass despite the state already existing.
+
+        Returns True the instant a genuine retest-entry fires (caller emits
+        the Signal exactly as it already does for _trap_check_entry)."""
+        vwap = self._vwap.current(sym)
+        if vwap is None:
+            return False
+        armed = self._vwap_armed.get(sym, False)
+        new_armed, fire = screener.check_vwap_retest_entry(side, ltp, vwap, armed, 0.15)
+        self._vwap_armed[sym] = new_armed
+        return fire
 
     def _trap_check_entry(self, sym: str, side: str, ltp: float, ts: datetime) -> bool:
         """Bear-trap (side="CALL")/bull-trap (side="PUT") zone detection ->
@@ -1927,6 +2038,91 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             "immediate_hybrid_sl_triggered",
             detail=f"underlying_ltp={ltp:.2f} sl_level={sl_level:.2f}")
         await self._emit_close(sym, pos, "immediate_hybrid_sl")
+
+    async def _ha_stoch_check_exit(self, sym: str, side: str, ltp: float, ts: datetime) -> None:
+        """2026-09-06, direct user spec: the confirmed exit mechanic from
+        this week's real-data backtest series (scripts/oi_orb_ha_stochrsi_
+        exit_backtest.py) -- entry and this exit are BOTH evaluated on the
+        underlying's own SPOT price only, never on the option's own premium
+        chart (direct user correction: "all entry and exit condition are on
+        spot not on options. option is only activated when entry is
+        triggered and it exit when exit is triggered in spot chart not in
+        option chart"). This applies to EVERY open position regardless of
+        which entry mechanic opened it (unlike the trap/immediate_15m TSLs,
+        which only run for their own tagged positions) -- matches the
+        backtest's own universal design.
+
+        Mechanic: a fresh 1-min Heikin-Ashi series (Bar dataclass from
+        strategies.core.trap_zone_utils, via strategies.core.candle_
+        indicators.to_heikin_ashi -- HA MUST be computed on the 1-min series
+        first, never on an already-aggregated 15-min bar, a different and
+        wrong result) is resampled to 15-min bars. On the most recently
+        FULLY CLOSED 15-min bar (never the still-forming one -- checked via
+        its own end boundary against wall-clock `ts`, since to_n_min_bars'
+        bucketing has no concept of "is this bucket done yet" on its own):
+        CALL exits the instant that bar is "bearish-type" (HA_high==HA_open,
+        no upper wick at all) AND 15-min StochRSI(9,9,3) has %D>=%K
+        (inclusive cross); PUT mirrored (HA_low==HA_open AND %K>=%D). No SL
+        beyond this -- EOD square-off remains the fallback if it never
+        fires, exactly as backtested.
+
+        `self._ha_stoch_last_checked_bar_ts[sym]` skips a bar this position
+        has already been evaluated against once, so a losing condition
+        isn't repeatedly logged/re-evaluated every poll cycle for the same
+        already-passed bar (harmless either way since self._eod_closing
+        would no-op a duplicate close, but avoids redundant recompute/log
+        spam)."""
+        pos = self._positions.get(sym)
+        if pos is None or sym in self._eod_closing:
+            return
+
+        from strategies.core.trap_zone_utils import BarAccumulator as _TrapAcc
+        from strategies.core.candle_indicators import (
+            to_heikin_ashi, to_n_min_bars, compute_stoch_rsi, ha_stoch_shape_exit_signal,
+        )
+
+        acc = self._ha_stoch_1m_acc.setdefault(sym, _TrapAcc(timeframe_min=1))
+        acc.on_tick(ts, ltp)
+        closed_1m = acc.bars   # CLOSED 1-min bars only -- excludes the still-forming bucket
+        if len(closed_1m) < 15:
+            return   # not even one real 15-min bar's worth of closed 1-min data yet
+
+        ha_1m = to_heikin_ashi(closed_1m)
+        ha_15m = to_n_min_bars(ha_1m, 15)
+        if not ha_15m:
+            return
+
+        # Only ever evaluate a 15-min bucket once its own 15-minute window has
+        # genuinely elapsed in wall-clock time -- to_n_min_bars has no notion
+        # of "complete", so the LAST bucket in its output can still be a
+        # partially-formed bar (e.g. only 2 of 15 minutes closed so far).
+        last_bar = ha_15m[-1]
+        if ts < last_bar.ts + timedelta(minutes=15):
+            ha_15m = ha_15m[:-1]
+        if not ha_15m:
+            return
+        latest = ha_15m[-1]
+        if self._ha_stoch_last_checked_bar_ts.get(sym) == latest.ts:
+            return   # already evaluated this exact closed bar for this position
+        self._ha_stoch_last_checked_bar_ts[sym] = latest.ts
+
+        closes = [b.close for b in ha_15m]
+        k, d = compute_stoch_rsi(closes, 9, 9, 3)
+        if not ha_stoch_shape_exit_signal(latest, k[-1], d[-1], side, inclusive=True):
+            return
+
+        self._eod_closing.add(sym)
+        self._clog.info(
+            "OiOrb[%s/%s]: %s HA+STOCHRSI EXIT (spot chart) -- underlying_ltp=%.2f "
+            "ha15m_close=%.2f k=%.2f d=%.2f side=%s -- closing.",
+            self._client_id, self._binding_id, sym, ltp, latest.close,
+            k[-1] if k[-1] is not None else -1.0, d[-1] if d[-1] is not None else -1.0, side,
+        )
+        await asyncio.to_thread(
+            store.log_signal_event, self._client_id, self._binding_id, sym,
+            "ha_stochrsi_exit_triggered",
+            detail=f"underlying_ltp={ltp:.2f} ha15m_close={latest.close:.2f} k={k[-1]} d={d[-1]}")
+        await self._emit_close(sym, pos, "ha_stoch_exit")
 
     async def _trap_update_tsl_and_check_exit(self, sym: str, side: str, ltp: float, ts: datetime) -> None:
         """Parallel 3-min S1(long)/R1(short) trailing stop for a trap-
@@ -2179,7 +2375,9 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 # is used instead of the 3-min trap ladder. pending["reason"]
                 # carries which entry path actually fired (set by whichever
                 # signal-fire site created this fill).
-                "sl_mechanic": "immediate_15m" if pending.get("reason") == "immediate_orb_entry" else "trap",
+                "sl_mechanic": ("immediate_15m" if pending.get("reason") == "immediate_orb_entry"
+                                else "vwap" if pending.get("reason") == "vwap_retest"
+                                else "trap"),
             }
             # 2026-08-27, direct user spec: option-premium SL/target tracking starts
             # FRESH the moment the trade starts, not before -- pop any stale state

@@ -34,8 +34,7 @@ sys.path.insert(0, ".")
 
 from data_layer.historical_candles import fetch_upstox_range_1m
 from strategies.core.support_resistance import SupportResistanceCalculator
-from strategies.d1_trap_option.bear_only_book import _collapse_nearby_zones
-from strategies.liquidity_trap.detector import find_all_setups
+from strategies.core.trap_zone_utils import _collapse_nearby_zones, find_all_setups
 
 TOKEN = sys.argv[1] if len(sys.argv) > 1 else ""
 STOCK_KEY = "NSE_EQ|INE205A01025"   # VEDL

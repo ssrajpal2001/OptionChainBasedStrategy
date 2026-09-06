@@ -50,7 +50,7 @@ from typing import List, Optional
 sys.path.insert(0, ".")
 
 from strategies.core.support_resistance import SupportResistanceCalculator
-from strategies.liquidity_trap.detector import Bar
+from strategies.core.trap_zone_utils import Bar
 from scripts.oi_orb_entry_mode_backtest import (
     ROWS, ORB_START, ORB_END, ENTRY_WINDOW_END, _key_range, to_n_min_bars, compute_orb,
 )
@@ -63,24 +63,10 @@ TRAP_TF_MIN = 3
 LTF_MIN = 1
 
 
-def to_heikin_ashi(bars_1m):
-    """Classic Heikin-Ashi transform, computed on the FINEST available
-    series (1-min) and resampled up from there -- converting an
-    already-aggregated N-min bar would give a different (wrong) result
-    than aggregating a continuous 1-min HA series. HA_close = avg OHLC;
-    HA_open = avg(prev HA_open, prev HA_close), seeded from the real
-    open/close on the very first bar; HA_high/low widen to include the
-    real bar's own high/low."""
-    out = []
-    prev_open = prev_close = None
-    for b in bars_1m:
-        ha_close = (b.open + b.high + b.low + b.close) / 4.0
-        ha_open = (b.open + b.close) / 2.0 if prev_open is None else (prev_open + prev_close) / 2.0
-        ha_high = max(b.high, ha_open, ha_close)
-        ha_low = min(b.low, ha_open, ha_close)
-        out.append(Bar(ts=b.ts, open=ha_open, high=ha_high, low=ha_low, close=ha_close))
-        prev_open, prev_close = ha_open, ha_close
-    return out
+# 2026-09-06: to_heikin_ashi moved to strategies/core/candle_indicators.py
+# (ported into the live oi_orb_screener engine) -- imported here, not
+# duplicated, so this backtest can never drift from the live version.
+from strategies.core.candle_indicators import to_heikin_ashi  # noqa: E402,F401
 
 
 @dataclass

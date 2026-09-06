@@ -53,7 +53,7 @@ from scripts.oi_orb_entry_mode_backtest import (
     to_bars, volume_by_ts,
 )
 from strategies.core.support_resistance import SupportResistanceCalculator
-from strategies.liquidity_trap.detector import Bar
+from strategies.core.trap_zone_utils import Bar
 from functools import partial
 
 TOKEN = os.environ.get("UPSTOX_TOKEN", "")
