@@ -7,14 +7,27 @@ from data_layer.base_feeder import EventBus
 from execution_bridge.straddle_bridge import StraddleOrderEvent
 
 
-def _ss(client_id="", binding_id=""):
+def _ss(client_id="", binding_id="", strategy_name="sell_straddle"):
     return SellStraddleStrategy(EventBus(), GlobalConfig(), underlying="NIFTY",
-                                client_id=client_id, binding_id=binding_id)
+                                client_id=client_id, binding_id=binding_id,
+                                strategy_name=strategy_name)
 
 
 def test_persist_key_per_binding():
     assert _ss()._persist_key == "NIFTY_sell_straddle"            # property
     assert _ss("C1", "Z1")._persist_key == "C1_Z1_NIFTY_sell_straddle"
+
+
+def test_persist_key_distinguishes_calc_vwap_on_the_same_binding():
+    """2026-09-07 regression: sell_straddle and sell_straddle_calc_vwap deployed on
+    the exact same (client,binding,underlying) must never share a session/position
+    persistence key -- otherwise one book's restore would silently clobber the
+    other's state."""
+    plain = _ss("C1", "Z1", "sell_straddle")
+    calc = _ss("C1", "Z1", "sell_straddle_calc_vwap")
+    assert plain._persist_key == "C1_Z1_NIFTY_sell_straddle"
+    assert calc._persist_key == "C1_Z1_NIFTY_sell_straddle_calc_vwap"
+    assert plain._persist_key != calc._persist_key
 
 
 def test_emit_order_stamps_identity():
@@ -23,6 +36,17 @@ def test_emit_order_stamps_identity():
                             pe_strike=0, ce_ltp=1, pe_ltp=1)
     asyncio.run(s._emit_order(ev))
     assert ev.client_id == "C1" and ev.binding_id == "Z1"
+
+
+def test_emit_order_stamps_strategy_name_for_trade_history_attribution():
+    """2026-09-07: the bridge's trade_history.record() call reads ev.strategy_name
+    (was a hardcoded 'sell_straddle' literal) so a calc_vwap book's trades are
+    attributed correctly, not merged into the plain book's history rows."""
+    s = _ss("C1", "Z1", "sell_straddle_calc_vwap")
+    ev = StraddleOrderEvent(action="EXIT", underlying="NIFTY", atm=0, ce_strike=0,
+                            pe_strike=0, ce_ltp=1, pe_ltp=1)
+    asyncio.run(s._emit_order(ev))
+    assert ev.strategy_name == "sell_straddle_calc_vwap"
 
 
 class _DB:

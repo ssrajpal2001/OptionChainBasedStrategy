@@ -60,8 +60,14 @@ class StrategyBookManager:
     def books(self) -> List[Any]:
         return list(self._books.values())
 
-    def find(self, client_id: str, binding_id: str, underlying: str) -> Optional[Any]:
-        return self._books.get((client_id, binding_id, str(underlying).upper()))
+    def find(self, client_id: str, binding_id: str, underlying: str, *key_extra) -> Optional[Any]:
+        """Look up a book by its identity key. Most managers use the plain 3-tuple
+        (client_id, binding_id, underlying); StraddleBookManager widens its own key
+        to a 4-tuple (..., strategy_name) so two strategy_names (e.g. sell_straddle /
+        sell_straddle_calc_vwap) can run independent books on the SAME binding+
+        underlying -- callers that know their strategy_name pass it as key_extra,
+        callers that don't (every other manager) simply omit it, unchanged."""
+        return self._books.get((client_id, binding_id, str(underlying).upper()) + tuple(key_extra))
 
     async def run(self) -> None:
         self._running = True

@@ -707,6 +707,33 @@ def _fetch_upstox_candles_sync(access_token: str, instrument_key: str,
     return result
 
 
+# 2026-09-07: known sell_straddle-family strategy_names, longest first so a suffix
+# match on "sell_straddle_calc_vwap" is tried before the shorter "sell_straddle"
+# (which would otherwise wrongly match as a suffix of the longer name too).
+_SS_STRATEGY_NAMES = ("sell_straddle_calc_vwap", "sell_straddle")
+
+
+def _split_ss_deploy_id(deploy_id: str) -> tuple:
+    """Parse a sell_straddle-family deploy_id of the form
+    ``{client}_{binding}_{strategy}_{underlying}`` into (binding_id, strategy_name,
+    underlying). binding_id itself may contain underscores (e.g. "Delta_srabjeet"),
+    so strategy_name -- one of a small known set -- is located by matching it as a
+    suffix of the joined middle segments, rather than assuming a fixed split index.
+    Falls back to the legacy single-token-binding/"sell_straddle" assumption if no
+    known strategy_name matches (keeps existing non-strategy-tagged deploy_ids
+    working exactly as before this function existed)."""
+    parts = deploy_id.split("_")
+    underlying = parts[-1] if parts else ""
+    mid = "_".join(parts[1:-1])
+    for sname in _SS_STRATEGY_NAMES:
+        if mid == sname:
+            return "", sname, underlying
+        suffix = "_" + sname
+        if mid.endswith(suffix):
+            return mid[: -len(suffix)], sname, underlying
+    return (parts[1] if len(parts) > 1 else ""), "sell_straddle", underlying
+
+
 class DashboardServer:
     """
     FastAPI-based async admin/client dashboard with JWT RBAC.
@@ -2437,8 +2464,8 @@ class DashboardServer:
             parts = deploy_id.split("_")
             if len(parts) < 3 or parts[0] != cid:
                 raise HTTPException(403, "deploy_id does not belong to the authenticated client.")
-            bid, underlying = parts[1], parts[-1]
-            return _srv._find_ss_book(cid, bid, underlying)
+            bid, sname, underlying = _split_ss_deploy_id(deploy_id)
+            return _srv._find_ss_book(cid, bid, underlying, sname)
 
         @app.get("/api/client/strategy/{deploy_id}/sell_straddle/pending_manual_entry", tags=["Client"])
         async def api_client_pending_manual_entry(
@@ -2617,7 +2644,7 @@ class DashboardServer:
                 underlying = dep.get("underlying") or dep.get("assigned_instrument") or ""
                 bid = dep.get("binding_id", "")
                 if sname in ("sell_straddle", "sell_straddle_calc_vwap"):
-                    strat = _srv._find_ss_book(cid, bid, underlying)
+                    strat = _srv._find_ss_book(cid, bid, underlying, sname)
                     pos = getattr(strat, "_position", None) if strat else None
                     return pos is not None and getattr(pos, "status", "") == "open"
                 return False
@@ -2734,7 +2761,7 @@ class DashboardServer:
                 pos = None     # active position for extracting top-level entry time
                 try:
                     if sname in ("sell_straddle", "sell_straddle_calc_vwap"):
-                        strat = _srv._find_ss_book(cid, bid, underlying)
+                        strat = _srv._find_ss_book(cid, bid, underlying, sname)
                         pos = getattr(strat, "_position", None) if strat else None
                         # Booked = sum of TODAY's closed-trade P&L from the History ledger (the
                         # source of truth shown in the History tab; survives restarts). Falls back
@@ -2747,7 +2774,7 @@ class DashboardServer:
                             booked = round(sum(
                                 float(r.get("pnl", 0) or 0) for r in _recs
                                 if str(r.get("ts", ""))[:10] == _today
-                                and r.get("strategy") == "sell_straddle"
+                                and r.get("strategy") == sname
                                 and str(r.get("instrument", "")).upper() == str(underlying).upper()
                                 and str(r.get("binding_id", "")) == bid
                             ), 2)
@@ -3264,6 +3291,13 @@ class DashboardServer:
                 if v is not None and v <= 0:
                     return {"ok": False, "error": "Entry price must be > 0."}
 
+            # NOTE (2026-09-07): this URL carries no strategy_name, so if BOTH
+            # sell_straddle and sell_straddle_calc_vwap are running on this exact
+            # (binding, underlying) -- the deliberate A/B comparison case -- this
+            # only ever reaches the plain sell_straddle book (the default). Editing
+            # a calc_vwap position's entry price isn't reachable from this endpoint
+            # yet; not a blocker for the comparison itself (only affects this rare
+            # manual-correction path), but flagged here rather than silently wrong.
             book = _srv._find_ss_book(cid, binding_id, underlying.upper())
             if book is None:
                 return {"ok": False, "error": f"No running position found for {binding_id}/{underlying}."}
@@ -5952,8 +5986,17 @@ pm2 save
             return self._straddle_manager.books
         return self._sell_straddles_static
 
-    def _find_ss_book(self, client_id: str, binding_id: str, underlying: str):
+    def _find_ss_book(self, client_id: str, binding_id: str, underlying: str,
+                       strategy_name: str = "sell_straddle"):
         """Locate the per-binding book for this deployment; fall back to per-underlying match.
+
+        2026-09-07: strategy_name is now part of the manager's book-identity key
+        (see StraddleBookManager._wanted()'s own docstring) -- sell_straddle and
+        sell_straddle_calc_vwap can both run on the SAME (client,binding,underlying)
+        as a deliberate VWAP-source A/B comparison. Every caller that knows which
+        of the two it means MUST pass strategy_name explicitly (from the deployment
+        row's own strategy_name field) -- the default here only preserves legacy
+        single-book callers, it does NOT disambiguate between two real books.
 
         2026-08-06: temporarily logged at WARNING (not DEBUG) on every miss/fallback
         path -- prior investigation (2026-07-03) into "UI shows no position despite a
@@ -5965,26 +6008,28 @@ pm2 save
         "MISS" there is completely expected, not a bug). Reverted to DEBUG per this
         docstring's own original intent."""
         if self._straddle_manager is not None:
-            b = self._straddle_manager.find(client_id, binding_id, underlying)
+            b = self._straddle_manager.find(client_id, binding_id, underlying, strategy_name)
             if b is not None:
                 return b
-            logger.debug("_find_ss_book MISS: cid=%s bid=%s und=%s books=%s",
-                        client_id, binding_id, underlying,
+            logger.debug("_find_ss_book MISS: cid=%s bid=%s und=%s sname=%s books=%s",
+                        client_id, binding_id, underlying, strategy_name,
                         list(self._straddle_manager._books.keys()))
         else:
             logger.debug("_find_ss_book: straddle_manager is None (sell_straddle not enabled?)")
         u = str(underlying).upper()
         for s in self._sell_straddles:
-            if getattr(s, "_underlying", None) == u and (
+            if (getattr(s, "_underlying", None) == u
+                    and getattr(s, "_strategy_name", "sell_straddle") == strategy_name and (
                 not getattr(s, "_client_id", "") or
                 (s._client_id == client_id and s._binding_id == binding_id)
-            ):
-                logger.debug("_find_ss_book: fallback scan matched cid=%s bid=%s und=%s "
+            )):
+                logger.debug("_find_ss_book: fallback scan matched cid=%s bid=%s und=%s sname=%s "
                                "(manager.find missed but per-underlying scan recovered it)",
-                               client_id, binding_id, underlying)
+                               client_id, binding_id, underlying, strategy_name)
                 return s
-        logger.debug("_find_ss_book: TOTAL MISS cid=%s bid=%s und=%s -- no book found via "
-                       "manager or fallback scan, UI will show no position", client_id, binding_id, underlying)
+        logger.debug("_find_ss_book: TOTAL MISS cid=%s bid=%s und=%s sname=%s -- no book found via "
+                       "manager or fallback scan, UI will show no position",
+                       client_id, binding_id, underlying, strategy_name)
         return None
 
     def _find_trap_book(self, client_id: str, binding_id: str, underlying: str):
@@ -6086,7 +6131,7 @@ pm2 save
                 continue
 
             if sname in ("sell_straddle", "sell_straddle_calc_vwap"):
-                strat = self._find_ss_book(cid, bid, underlying)
+                strat = self._find_ss_book(cid, bid, underlying, sname)
                 pos = getattr(strat, "_position", None) if strat else None
                 if pos is None or getattr(pos, "status", "") != "open":
                     continue
@@ -6186,7 +6231,7 @@ pm2 save
                     sname = d.get("strategy_name", "")
                     u = (d.get("underlying") or d.get("assigned_instrument") or "").upper()
                     if sname in ("sell_straddle", "sell_straddle_calc_vwap"):
-                        s = self._find_ss_book(c.client_id, d.get("binding_id", ""), u)
+                        s = self._find_ss_book(c.client_id, d.get("binding_id", ""), u, sname)
                         p = getattr(s, "_position", None) if s else None
                         if p and getattr(p, "status", "open") == "open":
                             running += float(getattr(p, "unrealized_pnl", 0.0) or 0.0) * _lot(u)

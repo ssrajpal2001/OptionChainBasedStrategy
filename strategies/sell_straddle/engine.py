@@ -36,9 +36,17 @@ _BUF = 600
 _MARKET_OPEN = dtime(9, 15)
 
 
-def _make_strategy_logger(underlying: str, client_id: str = "", binding_id: str = "") -> logging.Logger:
+def _make_strategy_logger(underlying: str, client_id: str = "", binding_id: str = "",
+                           strategy_name: str = "sell_straddle") -> logging.Logger:
     from utils.logging_utils import make_strategy_logger
     tag = f"{underlying}" + (f"_{client_id}_{binding_id}" if client_id and binding_id else "")
+    # 2026-09-07: byte-identical filename for the default "sell_straddle" so no
+    # existing log file's naming changes; a non-default strategy_name (e.g.
+    # sell_straddle_calc_vwap, run side-by-side on the SAME client/binding/
+    # underlying for a VWAP-source A/B comparison) gets its own suffixed file
+    # instead of interleaving into the plain sell_straddle book's log.
+    if strategy_name and strategy_name != "sell_straddle":
+        tag = f"{tag}_{strategy_name}"
     date_str = datetime.now().strftime("%Y%m%d")
     return make_strategy_logger(f"ss_{tag}_{date_str}", propagate=False)
 
@@ -67,12 +75,21 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         binding_id: str = "",
         shadow_on_reject: bool = False,
         vwap_source_override: Optional[str] = None,
+        strategy_name: str = "sell_straddle",
     ) -> None:
         if cfg is None:
             from config.global_config import GlobalConfig
             cfg = GlobalConfig()
         super().__init__(bus, cfg, underlying, client_id, binding_id)
-        PositionUpdateMixin.__init__(self, bus, client_id, binding_id, "sell_straddle", underlying)
+        # 2026-09-07: distinguishes this book from a plain sell_straddle book running
+        # on the SAME (client,binding,underlying) -- e.g. "sell_straddle_calc_vwap",
+        # a deliberate side-by-side VWAP-source A/B comparison on one broker account
+        # (see StraddleBookManager._wanted()'s own docstring for the collision this
+        # fixes). Threaded into _persist_key/log tag/PositionUpdateMixin's broadcast
+        # label so the two books never share a session file, log file, or mislabel
+        # their live position_update events.
+        self._strategy_name = strategy_name or "sell_straddle"
+        PositionUpdateMixin.__init__(self, bus, client_id, binding_id, self._strategy_name, underlying)
         self._lot_multiplier = lot_multiplier
         self._client_db = None
         # 2026-08-12, direct request, opt-in per deployment (strategy_params
@@ -267,16 +284,24 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
             "ltp": 0.0, "close": 0.0,
         }
 
-        self._clog: logging.Logger = _make_strategy_logger(underlying, client_id, binding_id)
+        self._clog: logging.Logger = _make_strategy_logger(
+            underlying, client_id, binding_id, self._strategy_name)
         self._load_thresholds()
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     @property
     def _persist_key(self) -> str:
+        # 2026-09-07: suffix is the real strategy_name, not a hardcoded literal --
+        # byte-identical to before for the default "sell_straddle" (preserves every
+        # existing book's session-restore key untouched), but a book running under
+        # "sell_straddle_calc_vwap" on the SAME (client,binding,underlying) now gets
+        # its own distinct persistence key instead of silently sharing/clobbering
+        # the plain sell_straddle book's session file.
+        suffix = self._strategy_name
         if self._client_id and self._binding_id:
-            return f"{self._client_id}_{self._binding_id}_{self._underlying}_sell_straddle"
-        return f"{self._underlying}_sell_straddle"
+            return f"{self._client_id}_{self._binding_id}_{self._underlying}_{suffix}"
+        return f"{self._underlying}_{suffix}"
 
     def set_rebalancer(self, rebalancer) -> None:
         """Inject StrikeRebalancer so the engine can fetch option-chain snapshots and subscribe
@@ -290,6 +315,12 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
 
     async def _emit_order(self, ev) -> None:
         """Stamp this book's identity on every order so the bridge routes to ONLY this binding."""
+        # 2026-09-07: also stamp strategy_name so the bridge's trade_history.record()
+        # call can attribute the row to the real book (sell_straddle vs
+        # sell_straddle_calc_vwap) instead of a hardcoded "sell_straddle" literal --
+        # otherwise two books trading the SAME (client,binding,underlying) for an
+        # A/B VWAP-source comparison would produce indistinguishable history rows.
+        ev.strategy_name = self._strategy_name
         await self._order_emitter.emit(Topic.ORDER_REQUEST, ev)
 
     def _current_product_type(self) -> str:

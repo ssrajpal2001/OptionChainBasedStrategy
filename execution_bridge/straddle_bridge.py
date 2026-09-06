@@ -88,6 +88,12 @@ class StraddleOrderEvent:
     # legacy per-index engine → bridge keeps the old behaviour (route to all eligible brokers).
     client_id:      str  = ""
     binding_id:     str  = ""
+    # 2026-09-07: the book's own strategy_name ("sell_straddle" or
+    # "sell_straddle_calc_vwap") -- stamped by SellStraddleStrategy._emit_order so
+    # trade_history.record() can attribute a row to the real book that placed it,
+    # not a hardcoded "sell_straddle" literal. Two books can now share the same
+    # (client,binding,underlying) for a deliberate VWAP-source A/B comparison.
+    strategy_name:  str  = "sell_straddle"
     # Set by the STRATEGY (never by the bridge) after the fact, on the order_ev it already
     # returned to a caller — True when this EXIT's fill was never confirmed (bridge couldn't
     # route it, or the wait timed out). Callers (e.g. single-side roll code in rolling.py) must
@@ -295,7 +301,7 @@ class TradeLogger:
             _legs = [l for l in _all if l["side"] in _sides]
             if _legs:
                 _th.record(
-                    client_id, "sell_straddle", ev.underlying,
+                    client_id, getattr(ev, "strategy_name", None) or "sell_straddle", ev.underlying,
                     sum(l["entry"] for l in _legs), sum(l["exit"] for l in _legs),
                     ev.close_reason, sum(l["pnl"] for l in _legs),
                     binding_id=binding_id, legs=_legs,

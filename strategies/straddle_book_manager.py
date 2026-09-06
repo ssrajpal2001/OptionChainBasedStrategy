@@ -40,9 +40,19 @@ class StraddleBookManager(StrategyBookManager):
                 book.set_delta_chain_manager(delta_chain)
 
     def _wanted(self) -> Dict[tuple, dict]:
-        """Map of (client,binding,underlying) → {"lots", "shadow_on_reject"} for every
-        sell_straddle deployment that is RUNNING (is_running=1). Single JOIN query —
-        O(1) regardless of client count (replaces N+1 per-client loop).
+        """Map of (client,binding,underlying,strategy_name) → {"lots", "shadow_on_reject"}
+        for every sell_straddle/sell_straddle_calc_vwap deployment that is RUNNING
+        (is_running=1). Single JOIN query — O(1) regardless of client count (replaces
+        N+1 per-client loop).
+
+        2026-09-07, real incident fix: the key used to be (client,binding,underlying)
+        only, with strategy_name dropped entirely. Two deployments sharing the exact
+        same (client,binding,underlying) -- sell_straddle AND sell_straddle_calc_vwap
+        both on (ssrajpal2001, UPSTOX, NIFTY), the user's own intended side-by-side
+        A/B comparison of VWAP source on the SAME broker account -- collided on one
+        dict key, so only whichever row SQLite happened to return last actually
+        spawned a book; the other was silently dropped with no trace in any log.
+        strategy_name is now part of the key so both run as fully independent books.
         """
         wanted: Dict[tuple, dict] = {}
         rows = self._db.get_running_straddle_deployments_sync()
@@ -50,6 +60,7 @@ class StraddleBookManager(StrategyBookManager):
             cid = d.get("client_id", "")
             bid = d.get("binding_id", "")
             und = str(d.get("underlying", "") or d.get("assigned_instrument", "")).upper()
+            sname = d.get("strategy_name") or "sell_straddle"
             if not cid or not bid:
                 continue
             if self._indices and und not in self._indices:
@@ -84,11 +95,12 @@ class StraddleBookManager(StrategyBookManager):
             # HARD-forces calculative regardless of strategy_params, since picking
             # this name from the dropdown IS the selection -- no ambiguity to leave
             # room for.
-            if d.get("strategy_name") == "sell_straddle_calc_vwap":
+            if sname == "sell_straddle_calc_vwap":
                 vwap_source_override = "calculative"
-            wanted[(cid, bid, und)] = {
+            wanted[(cid, bid, und, sname)] = {
                 "lots": lots, "shadow_on_reject": shadow,
                 "vwap_source_override": vwap_source_override,
+                "strategy_name": sname,
             }
         return wanted
 
@@ -98,12 +110,13 @@ class StraddleBookManager(StrategyBookManager):
         cls = SellStraddleStrategy
         if cls is None:
             from strategies.sell_straddle import SellStraddleStrategy as cls
-        cid, bid, und = key
+        cid, bid, und, sname = key
         book = cls(
             self._bus, self._cfg, underlying=und,
             lot_multiplier=value["lots"], client_id=cid, binding_id=bid,
             shadow_on_reject=value.get("shadow_on_reject", False),
             vwap_source_override=value.get("vwap_source_override"),
+            strategy_name=sname,
         )
         book.set_client_db(self._db)
         if self._rebalancer is not None and hasattr(book, "set_rebalancer"):
@@ -119,14 +132,14 @@ class StraddleBookManager(StrategyBookManager):
                 or getattr(book, "_vwap_source_override", None) != value.get("vwap_source_override"))
 
     def _log_spawned(self, key, value):
-        logger.info("StraddleBookManager: spawned book %s/%s/%s (lots=%d shadow_on_reject=%s)",
+        logger.info("StraddleBookManager: spawned book %s/%s/%s/%s (lots=%d shadow_on_reject=%s)",
                      *key, value["lots"], value.get("shadow_on_reject", False))
 
     def _log_stopped(self, key):
-        logger.info("StraddleBookManager: stopped book %s/%s/%s", *key)
+        logger.info("StraddleBookManager: stopped book %s/%s/%s/%s", *key)
 
     def _log_respawned(self, key, value):
-        logger.info("StraddleBookManager: re-spawned %s/%s/%s lots→%d shadow_on_reject=%s",
+        logger.info("StraddleBookManager: re-spawned %s/%s/%s/%s lots→%d shadow_on_reject=%s",
                      *key, value["lots"], value.get("shadow_on_reject", False))
 
     def _log_reconcile(self, wanted, current):
