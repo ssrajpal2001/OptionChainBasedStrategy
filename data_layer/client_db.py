@@ -685,9 +685,16 @@ class ClientDB:
             return []
 
     async def delete_deployment(self, deploy_id: str, client_id: str) -> None:
+        # 2026-09-07, real incident fix: also force is_running=0 -- a deleted
+        # deployment (is_active=0) whose is_running was still 1 kept being
+        # picked up by get_running_straddle_deployments_sync() (which only
+        # checked d.is_active before now, a separate bug fixed the same day)
+        # and spawned/traded a real book forever, invisible in the dashboard's
+        # deployment list. Belt-and-suspenders: deleting a deployment should
+        # never leave it in a state any is_running=1 query could still match.
         await asyncio.to_thread(
             self._exec,
-            "UPDATE strategy_deployments SET is_active=0 WHERE deploy_id=? AND client_id=?",
+            "UPDATE strategy_deployments SET is_active=0, is_running=0 WHERE deploy_id=? AND client_id=?",
             (deploy_id, client_id),
         )
 
@@ -1120,7 +1127,19 @@ class ClientDB:
         _wanted()'s own docstring for why this exists as a distinct strategy_name
         rather than a per-deployment strategy_params toggle: the latter had no
         UI control anywhere, so a client had no way to actually select it when
-        deploying a second binding for side-by-side comparison)."""
+        deploying a second binding for side-by-side comparison).
+
+        2026-09-07, real incident fix: this query never checked the deployment's
+        OWN is_active flag, only the client's (c.is_active). delete_deployment()
+        sets d.is_active=0 on a "✕ Delete" in the dashboard but does NOT also
+        force is_running=0 -- so a deleted deployment whose is_running happened to
+        still be 1 kept spawning and trading forever, completely invisible in the
+        UI's deployment list (get_deployments_sync correctly filters is_active=1).
+        Found live: ssrajpal2001_UPSTOX_sell_straddle_NIFTY (is_active=0,
+        is_running=1) kept a real book alive with no visible deployment card.
+        get_running_deployments_by_strategy_sync() below (the later, generalized
+        2026-07-19 version used by OI-ORB/CAG) already had d.is_active=1 -- this
+        older, straddle-specific query just never got the same fix applied."""
         try:
             con = sqlite3.connect(self._db_path)
             con.row_factory = sqlite3.Row
@@ -1131,6 +1150,7 @@ class ClientDB:
                 FROM clients c
                 JOIN strategy_deployments d ON c.client_id = d.client_id
                 WHERE c.is_active = 1
+                  AND d.is_active = 1
                   AND d.strategy_name IN ('sell_straddle', 'sell_straddle_calc_vwap')
                   AND d.is_running = 1
                 """
