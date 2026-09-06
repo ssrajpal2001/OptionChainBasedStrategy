@@ -1123,7 +1123,7 @@ document.addEventListener('alpine:init', () => {
 
     /* ── Manual entry-price confirmation (sell_straddle, 2026-08-23) ───── */
     async checkPendingManualEntries() {
-      const deps = (this.clientDeployments || []).filter(d => d.strategy_name === 'sell_straddle');
+      const deps = (this.clientDeployments || []).filter(d => d.strategy_name === 'sell_straddle' || d.strategy_name === 'sell_straddle_calc_vwap');
       for (const dep of deps) {
         try {
           const r = await this._fetch(`/api/client/strategy/${encodeURIComponent(dep.deploy_id)}/sell_straddle/pending_manual_entry`);
@@ -2238,7 +2238,7 @@ document.addEventListener('alpine:init', () => {
     async toggleStrategyRun(dep, b) {
       const want = !this.depRunning(dep);
       const did = dep.deploy_id || `${this.authClientId}_${dep.binding_id}_${dep.strategy_name}_${dep.underlying}`;
-      const _stratLabel = {sell_straddle:'Sell Straddle',d1_trap_option:'D1 Trap Option',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow',liquidity_sweep:'Liquidity Sweep',liquidity_trap:'Liquidity Trap',oi_orb_screener:'OI-ORB Screener',cag_straddle:'CAG Long Straddle'};
+      const _stratLabel = {sell_straddle:'Sell Straddle',sell_straddle_calc_vwap:'Sell Straddle (Calc VWAP)',d1_trap_option:'D1 Trap Option',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow',liquidity_sweep:'Liquidity Sweep',liquidity_trap:'Liquidity Trap',oi_orb_screener:'OI-ORB Screener',cag_straddle:'CAG Long Straddle'};
       const _undLabel = u => u==='ALL_FNO'?'All FnO Stocks':u==='WATCHLIST'?'Watchlist (top-5)':u;
       const label = (_stratLabel[dep.strategy_name]||dep.strategy_name)+' · '+_undLabel(dep.underlying);
       const ok = want
@@ -6984,7 +6984,7 @@ function amoTest() {
                         <span class="absolute top-0.5 w-2.5 h-2.5 bg-white rounded-full shadow transition-all"
                               :style="depRunning(dep)?'left:16px':'left:2px'"></span>
                       </span>
-                      <span x-text="({sell_straddle:'Sell Straddle',d1_trap_option:'D1 Trap',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow',liquidity_sweep:'Liquidity Sweep',liquidity_trap:'Liquidity Trap'}[dep.strategy_name]||dep.strategy_name)+' · '+(dep.underlying==='ALL_FNO'?'All FnO Stocks':dep.underlying)+' — '+(depRunning(dep)?'RUNNING':'stopped')"></span>
+                      <span x-text="({sell_straddle:'Sell Straddle',sell_straddle_calc_vwap:'Sell Straddle (Calc VWAP)',d1_trap_option:'D1 Trap',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow',liquidity_sweep:'Liquidity Sweep',liquidity_trap:'Liquidity Trap'}[dep.strategy_name]||dep.strategy_name)+' · '+(dep.underlying==='ALL_FNO'?'All FnO Stocks':dep.underlying)+' — '+(depRunning(dep)?'RUNNING':'stopped')"></span>
                     </button>
                   </template>
                   <span x-show="!(clientDeployments||[]).some(d=>d.binding_id===b.binding_id)"
@@ -7106,10 +7106,10 @@ function amoTest() {
                 <div class="flex items-center gap-3">
                   <span class="font-mono text-xs font-bold px-2 py-0.5 rounded"
                         style="background:rgba(var(--t-cyan-rgb),0.12);color:var(--t-cyan)"
-                        x-text="({sell_straddle:'SS',d1_trap_option:'D1',d1_trap_index:'TI',d1_trap_fno:'TF',d1_trap_bear_only:'BT',d1_trap_sr:'SR',fvg:'FVG',oi_flow:'OIF',liquidity_sweep:'LSW',liquidity_trap:'LTR',oi_orb_screener:'ORB'})[dep.strategy_name]||'??'"></span>
+                        x-text="({sell_straddle:'SS',sell_straddle_calc_vwap:'SSc',d1_trap_option:'D1',d1_trap_index:'TI',d1_trap_fno:'TF',d1_trap_bear_only:'BT',d1_trap_sr:'SR',fvg:'FVG',oi_flow:'OIF',liquidity_sweep:'LSW',liquidity_trap:'LTR',oi_orb_screener:'ORB'})[dep.strategy_name]||'??'"></span>
                   <div>
                     <div class="font-mono text-xs font-bold" style="color:var(--t-bright)"
-                         x-text="({sell_straddle:'Sell Straddle',d1_trap_option:'D1 Trap Option',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow',liquidity_sweep:'Liquidity Sweep',liquidity_trap:'Liquidity Trap'})[dep.strategy_name]||dep.strategy_name)+' · '+(dep.underlying==='ALL_FNO'?'All FnO Stocks':dep.underlying)"></div>
+                         x-text="({sell_straddle:'Sell Straddle',sell_straddle_calc_vwap:'Sell Straddle (Calc VWAP)',d1_trap_option:'D1 Trap Option',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow',liquidity_sweep:'Liquidity Sweep',liquidity_trap:'Liquidity Trap'})[dep.strategy_name]||dep.strategy_name)+' · '+(dep.underlying==='ALL_FNO'?'All FnO Stocks':dep.underlying)"></div>
                     <div class="font-mono text-xs" style="color:var(--t-muted)"
                          x-text="(dep.strategy_name==='d1_trap_fno')
                            ? 'Lots: '+dep.lot_multiplier+' · '+(dep.product_type||'NRML')
@@ -7239,6 +7239,7 @@ function amoTest() {
                           : JSON.stringify({htf:deployForm._htf||'D1',mtf:deployForm._mtf||'1H',itm:deployForm._itm||1});
                       ">
                 <option value="sell_straddle">Sell Straddle</option>
+                <option value="sell_straddle_calc_vwap">Sell Straddle (Calculative VWAP)</option>
                 <!-- 2026-09-06: D1 Trap (all variants)/FVG/OI-Flow/Liquidity Sweep/
                      Liquidity Trap deploy options removed -- fully stopped, direct
                      user decision. Backend also rejects these strategy_names now
@@ -7769,7 +7770,7 @@ function amoTest() {
                   <div class="flex items-center justify-between mb-3">
                     <div>
                       <div class="font-ui font-bold text-sm" style="color:var(--t-bright)"
-                           x-text="({sell_straddle:'Sell Straddle',d1_trap_option:'Trap Scanner',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow',liquidity_sweep:'Liquidity Sweep',liquidity_trap:'Liquidity Trap',oi_orb_screener:'OI-ORB Screener',cag_straddle:'CAG Long Straddle'}[dep.strategy_name]||dep.strategy_name)"></div>
+                           x-text="({sell_straddle:'Sell Straddle',sell_straddle_calc_vwap:'Sell Straddle (Calc VWAP)',d1_trap_option:'Trap Scanner',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow',liquidity_sweep:'Liquidity Sweep',liquidity_trap:'Liquidity Trap',oi_orb_screener:'OI-ORB Screener',cag_straddle:'CAG Long Straddle'}[dep.strategy_name]||dep.strategy_name)"></div>
                       <div class="flex items-center gap-2 mt-0.5">
                         <span class="font-mono text-xs" style="color:var(--t-cyan)" x-text="dep.underlying==='ALL_FNO'?'All 30 FnO Stocks':dep.underlying==='WATCHLIST'?'Watchlist (top-5)':dep.underlying"></span>
                         <span class="font-mono text-xs" style="color:var(--t-muted)"
@@ -8994,7 +8995,7 @@ function amoTest() {
                   </template>
 
                   <!-- Re-entry cooldown banner: entry paused after a full exit; data still flowing -->
-                  <template x-if="dep.strategy_name==='sell_straddle' && csPositions[b.binding_id] && csPositions[b.binding_id][dep.deploy_id] && csPositions[b.binding_id][dep.deploy_id].straddle && csPositions[b.binding_id][dep.deploy_id].straddle.cooldown">
+                  <template x-if="(dep.strategy_name==='sell_straddle'||dep.strategy_name==='sell_straddle_calc_vwap') && csPositions[b.binding_id] && csPositions[b.binding_id][dep.deploy_id] && csPositions[b.binding_id][dep.deploy_id].straddle && csPositions[b.binding_id][dep.deploy_id].straddle.cooldown">
                     <div class="mt-2 rounded px-3 py-2 font-mono text-xs"
                          style="background:rgba(var(--t-amber-rgb),0.08);border:1px solid rgba(var(--t-amber-rgb),0.3)"
                          x-data="{ get cd(){ return csPositions[b.binding_id][dep.deploy_id].straddle.cooldown } }">
@@ -9009,7 +9010,7 @@ function amoTest() {
                   </template>
 
                   <!-- ── Straddle summary: total sold, exit basis, LTP/Theta triplets ── -->
-                  <template x-if="dep.strategy_name==='sell_straddle' && csPositions[b.binding_id] && csPositions[b.binding_id][dep.deploy_id] && csPositions[b.binding_id][dep.deploy_id].straddle">
+                  <template x-if="(dep.strategy_name==='sell_straddle'||dep.strategy_name==='sell_straddle_calc_vwap') && csPositions[b.binding_id] && csPositions[b.binding_id][dep.deploy_id] && csPositions[b.binding_id][dep.deploy_id].straddle">
                     <div class="mt-3 pt-2 border-t font-mono text-xs space-y-1" style="border-color:var(--t-border)"
                          x-data="{ get ss(){ return ((csPositions[b.binding_id]||{})[dep.deploy_id]||{}).straddle || {} } }">
                       <div class="flex justify-between">
@@ -9222,7 +9223,7 @@ function amoTest() {
                   </template>
 
                   <!-- ── Manual entry-price confirmation (broker didn't confirm fill) — sell_straddle only ── -->
-                  <template x-if="dep.strategy_name==='sell_straddle' && pendingManualEntry[dep.deploy_id]">
+                  <template x-if="(dep.strategy_name==='sell_straddle'||dep.strategy_name==='sell_straddle_calc_vwap') && pendingManualEntry[dep.deploy_id]">
                     <div class="mt-3 pt-2 border-t" style="border-color:var(--t-amber);border-top-width:2px">
                       <div class="sec-label mb-1" style="color:var(--t-amber)">⚠ BROKER DID NOT CONFIRM FILL — ENTER PRICE MANUALLY</div>
                       <div class="font-mono text-xs mb-2" style="color:var(--t-muted)">
@@ -9259,7 +9260,7 @@ function amoTest() {
                   </template>
 
                   <!-- ── Tick-by-tick EXIT AUDIT (admin-gated per client) — sell_straddle only ── -->
-                  <template x-if="dep.strategy_name==='sell_straddle' && _auditFor(dep.underlying)">
+                  <template x-if="(dep.strategy_name==='sell_straddle'||dep.strategy_name==='sell_straddle_calc_vwap') && _auditFor(dep.underlying)">
                     <div class="mt-3 pt-2 border-t" style="border-color:var(--t-border)">
                       <div class="flex items-center justify-between cursor-pointer"
                            @click="auditOpen[dep.underlying] = !auditOpen[dep.underlying]">
@@ -9283,7 +9284,7 @@ function amoTest() {
                   </template>
 
                   <!-- ── 1-min combined-premium chart (VWAP/RSI/SLOPE) — sell_straddle only ── -->
-                  <template x-if="dep.strategy_name==='sell_straddle'">
+                  <template x-if="(dep.strategy_name==='sell_straddle'||dep.strategy_name==='sell_straddle_calc_vwap')">
                     <div class="mt-3 pt-2 border-t" style="border-color:var(--t-border)">
                       <div class="flex items-center justify-between mb-2">
                         <span class="sec-label" style="color:var(--t-cyan)">PREMIUM CHART · 1m (CE+PE)</span>

@@ -2284,7 +2284,7 @@ class DashboardServer:
             # Flipping is_running first lets StraddleBookManager's 5s reconcile tear the book down
             # before square_off_binding finds it → exchange legs left open, nothing in history.
             squared = 0
-            if not running and strat == "sell_straddle" and _srv._straddle_bridge is not None:
+            if not running and strat in ("sell_straddle", "sell_straddle_calc_vwap") and _srv._straddle_bridge is not None:
                 try:
                     squared = await _srv._straddle_bridge.square_off_binding(
                         cid, bid, _srv._sell_straddles, underlying=und)
@@ -2521,8 +2521,8 @@ class DashboardServer:
             body: _StrategySelectionsSchema, user: dict = Depends(_require_client),
         ):
             cid = user.get("client_id", "")
-            allowed_strategies = {"sell_straddle", "oi_orb_screener", "cag_straddle"}
-            allowed_instruments = {"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY", "CRUDEOIL", "GOLDM"}
+            allowed_strategies = {"sell_straddle", "sell_straddle_calc_vwap", "oi_orb_screener", "cag_straddle"}
+            allowed_instruments = {"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY"}
             import json as _json
             validated = []
             for item in (body.selections or []):
@@ -2548,7 +2548,7 @@ class DashboardServer:
                 overrides = getattr(profile, "strategy_risk_overrides", {}).get(f"{strategy}:{instrument}", {})
 
             admin_defaults: Dict[str, Any] = {}
-            if strategy == "sell_straddle":
+            if strategy in ("sell_straddle", "sell_straddle_calc_vwap"):
                 from strategies.sell_straddle.config import load_sell_straddle_config
                 from dataclasses import fields as _fields
                 from datetime import time as _dtime
@@ -2616,7 +2616,7 @@ class DashboardServer:
                 sname = dep.get("strategy_name", "")
                 underlying = dep.get("underlying") or dep.get("assigned_instrument") or ""
                 bid = dep.get("binding_id", "")
-                if sname == "sell_straddle":
+                if sname in ("sell_straddle", "sell_straddle_calc_vwap"):
                     strat = _srv._find_ss_book(cid, bid, underlying)
                     pos = getattr(strat, "_position", None) if strat else None
                     return pos is not None and getattr(pos, "status", "") == "open"
@@ -2733,7 +2733,7 @@ class DashboardServer:
                 booked = 0.0   # session realized P&L (₹) — straddle re-entries/rolls booked today
                 pos = None     # active position for extracting top-level entry time
                 try:
-                    if sname == "sell_straddle":
+                    if sname in ("sell_straddle", "sell_straddle_calc_vwap"):
                         strat = _srv._find_ss_book(cid, bid, underlying)
                         pos = getattr(strat, "_position", None) if strat else None
                         # Booked = sum of TODAY's closed-trade P&L from the History ledger (the
@@ -3783,7 +3783,7 @@ class DashboardServer:
                 return {"ok": False, "error": f"Invalid squareoff_time '{sq}'. Use HH:MM format."}
 
             allowed_strategies = {
-                "sell_straddle", "oi_orb_screener", "cag_straddle",
+                "sell_straddle", "sell_straddle_calc_vwap", "oi_orb_screener", "cag_straddle",
             }
             if body.strategy_name not in allowed_strategies:
                 return {"ok": False, "error": f"Unknown strategy '{body.strategy_name}'."}
@@ -3870,10 +3870,18 @@ class DashboardServer:
                 # this strategy. Mirror it into the mechanism that IS read, so this one
                 # field in the deploy form genuinely controls it end-to-end, instead of
                 # requiring a second edit in the separate Risk Overrides panel.
-                if body.strategy_name == "sell_straddle" and _srv._registry is not None:
+                if body.strategy_name in ("sell_straddle", "sell_straddle_calc_vwap") and _srv._registry is not None:
                     try:
                         profile = _srv._registry.get(cid)
                         if profile is not None:
+                            # NOTE: this key is scoped by (client, underlying) only, not
+                            # binding_id -- if sell_straddle and sell_straddle_calc_vwap
+                            # are BOTH deployed on the SAME underlying for this client,
+                            # their squareoff_time (and any other risk override under
+                            # this same key) is shared, last-write-wins. Only vwap_source
+                            # itself has a genuinely per-binding override (see
+                            # StraddleBookManager._wanted()) -- this pre-existing
+                            # limitation is unrelated to and not fixed by that mechanism.
                             key = f"sell_straddle:{body.underlying.upper()}"
                             existing = dict(profile.strategy_risk_overrides.get(key, {}))
                             existing["force_exit"] = sq
@@ -6077,7 +6085,7 @@ pm2 save
             if not sname or not underlying:
                 continue
 
-            if sname == "sell_straddle":
+            if sname in ("sell_straddle", "sell_straddle_calc_vwap"):
                 strat = self._find_ss_book(cid, bid, underlying)
                 pos = getattr(strat, "_position", None) if strat else None
                 if pos is None or getattr(pos, "status", "") != "open":
@@ -6177,7 +6185,7 @@ pm2 save
                 for d in deps:
                     sname = d.get("strategy_name", "")
                     u = (d.get("underlying") or d.get("assigned_instrument") or "").upper()
-                    if sname == "sell_straddle":
+                    if sname in ("sell_straddle", "sell_straddle_calc_vwap"):
                         s = self._find_ss_book(c.client_id, d.get("binding_id", ""), u)
                         p = getattr(s, "_position", None) if s else None
                         if p and getattr(p, "status", "open") == "open":

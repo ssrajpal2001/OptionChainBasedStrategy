@@ -1111,7 +1111,16 @@ class ClientDB:
     # ── Batch straddle deployment query ──────────────────────────────────────────
 
     def get_running_straddle_deployments_sync(self) -> list[dict]:
-        """Single JOIN: all is_running=1 sell_straddle deployments across active clients."""
+        """Single JOIN: all is_running=1 sell_straddle deployments across active clients.
+
+        2026-09-06, direct user spec: 'sell_straddle_calc_vwap' is included here
+        too -- a second strategy_name identical to sell_straddle in every way
+        except its VWAP source is hard-forced to the self-computed "calculative"
+        series instead of the broker's own live ATP (see StraddleBookManager.
+        _wanted()'s own docstring for why this exists as a distinct strategy_name
+        rather than a per-deployment strategy_params toggle: the latter had no
+        UI control anywhere, so a client had no way to actually select it when
+        deploying a second binding for side-by-side comparison)."""
         try:
             con = sqlite3.connect(self._db_path)
             con.row_factory = sqlite3.Row
@@ -1122,7 +1131,7 @@ class ClientDB:
                 FROM clients c
                 JOIN strategy_deployments d ON c.client_id = d.client_id
                 WHERE c.is_active = 1
-                  AND d.strategy_name = 'sell_straddle'
+                  AND d.strategy_name IN ('sell_straddle', 'sell_straddle_calc_vwap')
                   AND d.is_running = 1
                 """
             ).fetchall()

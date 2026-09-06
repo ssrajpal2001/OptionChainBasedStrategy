@@ -76,6 +76,16 @@ class StraddleBookManager(StrategyBookManager):
                     vwap_source_override = _vs
             except Exception:
                 pass
+            # 2026-09-06, direct user spec: 'sell_straddle_calc_vwap' is a distinct
+            # strategy_name (selectable in the deploy dropdown, unlike the
+            # strategy_params.vwap_source override above, which had no UI control
+            # anywhere -- a client had no actual way to pick it when deploying a
+            # second binding for side-by-side comparison). This strategy_name
+            # HARD-forces calculative regardless of strategy_params, since picking
+            # this name from the dropdown IS the selection -- no ambiguity to leave
+            # room for.
+            if d.get("strategy_name") == "sell_straddle_calc_vwap":
+                vwap_source_override = "calculative"
             wanted[(cid, bid, und)] = {
                 "lots": lots, "shadow_on_reject": shadow,
                 "vwap_source_override": vwap_source_override,
