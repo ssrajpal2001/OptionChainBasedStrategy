@@ -1328,8 +1328,17 @@ class AngelOneFeeder(BaseFeeder):
         def _on_error(wsapp, error) -> None:
             logger.warning("AngelOneFeeder: WS error: %s", error)
 
-        def _on_close(wsapp) -> None:
-            logger.info("AngelOneFeeder: WebSocket closed.")
+        def _on_close(*args, **kwargs) -> None:
+            # 2026-09-06 real incident: SmartWebSocketV2's underlying
+            # websocket-client invokes on_close with more positional args
+            # than the SDK's own documented single-arg signature suggests
+            # (confirmed live: "_on_close() takes 2 positional arguments but
+            # 4 were given") -- same defensive *args/**kwargs fix already
+            # used for UpstoxFeeder's own on_close a few lines up in this
+            # file, applied here for the same reason (SDK/library version
+            # drift in callback arity, not something worth pinning down
+            # further than "accept whatever arrives").
+            logger.info("AngelOneFeeder: WebSocket closed. args=%s", args)
             self._connected = False
 
         self._socket = SmartWebSocketV2(jwt_token, api_key, client_code, feed_token)
