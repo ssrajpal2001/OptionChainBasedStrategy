@@ -3291,14 +3291,21 @@ class DashboardServer:
                 if v is not None and v <= 0:
                     return {"ok": False, "error": "Entry price must be > 0."}
 
-            # NOTE (2026-09-07): this URL carries no strategy_name, so if BOTH
-            # sell_straddle and sell_straddle_calc_vwap are running on this exact
-            # (binding, underlying) -- the deliberate A/B comparison case -- this
-            # only ever reaches the plain sell_straddle book (the default). Editing
-            # a calc_vwap position's entry price isn't reachable from this endpoint
-            # yet; not a blocker for the comparison itself (only affects this rare
-            # manual-correction path), but flagged here rather than silently wrong.
-            book = _srv._find_ss_book(cid, binding_id, underlying.upper())
+            # 2026-09-07 real incident fix: this URL carries no strategy_name, so a
+            # calc_vwap-only binding (e.g. UPSTOX, running ONLY
+            # sell_straddle_calc_vwap after the plain sell_straddle deployment was
+            # removed) always got "No running position found" -- the endpoint only
+            # ever tried the "sell_straddle" default. Tries every known
+            # sell_straddle-family strategy_name and uses whichever one actually has
+            # a book for this (binding, underlying); if BOTH exist simultaneously
+            # (the deliberate A/B comparison case), this still only reaches
+            # whichever is checked first -- an acceptable limitation for this rare
+            # manual-correction path, not core trading logic.
+            book = None
+            for _sn in _SS_STRATEGY_NAMES:
+                book = _srv._find_ss_book(cid, binding_id, underlying.upper(), _sn)
+                if book is not None:
+                    break
             if book is None:
                 return {"ok": False, "error": f"No running position found for {binding_id}/{underlying}."}
             pos = getattr(book, "_position", None)
