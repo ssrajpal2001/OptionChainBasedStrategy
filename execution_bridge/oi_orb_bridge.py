@@ -294,7 +294,14 @@ class OiOrbExecutionBridge:
         # (margin-rejected but genuinely placed) orders. Same latent bug also
         # existed in straddle_bridge.py/straddle_hedge_bridge.py/
         # cag_straddle_bridge.py -- fixed in all four the same way.
-        _b = getattr(broker, "_b", None)
+        #
+        # 2026-09-07 CRITICAL FIX #2, real LIVE incident: the "_b" fix above
+        # broke ZerodhaBroker, which stores its binding as self._binding
+        # instead (opposite convention from Upstox/Fyers/Angel/Dhan/Delta) --
+        # a real SA5770/Zerodha LIVE SellStraddle position could not exit
+        # for minutes, retrying every ~6s against a broken canonical-string
+        # symbol. Check BOTH attribute names.
+        _b = getattr(broker, "_binding", None) or getattr(broker, "_b", None)
         provider = _b.provider if _b else getattr(broker, "provider", "mock")
         return REGISTRY.get_broker_symbol(ev.underlying, ev.expiry, int(ev.strike), ev.option_type, provider)
 

@@ -910,7 +910,18 @@ class StraddleExecutionBridge:
         # never self._binding -- see oi_orb_bridge.py's _resolve_symbol for
         # the full real-incident writeup (masked here only by luck, since
         # SellStraddle's underlyings are always in monitored_indices).
-        _b = getattr(broker, "_b", None)
+        # 2026-09-07 CRITICAL FIX #2, real live incident: ZerodhaBroker
+        # stores its binding as self._binding (NOT self._b like every other
+        # broker class) -- the earlier same-day fix that switched this
+        # lookup to "_b" (correct for Upstox/Fyers/Angel/Dhan/Delta) broke
+        # Zerodha's provider resolution right back to the "mock" fallback,
+        # reintroducing the exact same canonical-string-sent-as-symbol bug
+        # on a REAL LIVE SA5770 position that could not exit for minutes,
+        # retrying every ~6s ("The instrument...has either expired or does
+        # not exist" from Zerodha's real API). Check BOTH attribute names --
+        # this codebase's broker classes are not consistent about which one
+        # they use.
+        _b = getattr(broker, "_binding", None) or getattr(broker, "_b", None)
         provider = (_b.provider if _b else getattr(broker, "provider", "mock"))
         _today = _dt.now(_IST).date()
         expiry = getattr(ev, "expiry", None)
