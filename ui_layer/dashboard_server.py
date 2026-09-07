@@ -765,6 +765,7 @@ class DashboardServer:
         straddle_manager=None, # StraddleBookManager — per-binding books (live list + find)
         straddle_bridge=None, # StraddleExecutionBridge — for per-broker square-off on Trade/Terminal OFF
         oi_orb_manager=None,  # OiOrbScreenerBookManager — OI-Spurt + ORB screener books (F&O stocks)
+        oi_orb_top20_manager=None,  # OiOrbScreenerTop20BookManager — sibling top-20 variant, 2026-09-07
         cag_straddle_manager=None,  # CagStraddleBookManager — 15:00-15:35 R1/S1 breach books
     ) -> None:
         self._bus = bus
@@ -778,6 +779,7 @@ class DashboardServer:
         self._sell_straddles_static: list = sell_straddles or []
         self._straddle_bridge = straddle_bridge
         self._oi_orb_manager = oi_orb_manager
+        self._oi_orb_top20_manager = oi_orb_top20_manager
         self._cag_straddle_manager = cag_straddle_manager
         self._ws_bridge = WsBridge(bus, cfg=cfg)
         self._uvicorn_server = None
@@ -2548,7 +2550,8 @@ class DashboardServer:
             body: _StrategySelectionsSchema, user: dict = Depends(_require_client),
         ):
             cid = user.get("client_id", "")
-            allowed_strategies = {"sell_straddle", "sell_straddle_calc_vwap", "oi_orb_screener", "cag_straddle"}
+            allowed_strategies = {"sell_straddle", "sell_straddle_calc_vwap", "oi_orb_screener",
+                                   "oi_orb_screener_top20", "cag_straddle"}
             allowed_instruments = {"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "MIDCPNIFTY"}
             import json as _json
             validated = []
@@ -3824,7 +3827,8 @@ class DashboardServer:
                 return {"ok": False, "error": f"Invalid squareoff_time '{sq}'. Use HH:MM format."}
 
             allowed_strategies = {
-                "sell_straddle", "sell_straddle_calc_vwap", "oi_orb_screener", "cag_straddle",
+                "sell_straddle", "sell_straddle_calc_vwap", "oi_orb_screener",
+                "oi_orb_screener_top20", "cag_straddle",
             }
             if body.strategy_name not in allowed_strategies:
                 return {"ok": False, "error": f"Unknown strategy '{body.strategy_name}'."}
@@ -6065,10 +6069,16 @@ pm2 save
             today's shortlist, ORB regime/levels, and every open position
             (keyed by stock symbol) with its live LTP, straight from
             OiOrbScreenerStrategy.monitoring_state() (strategies/
-            oi_orb_screener/engine.py)."""
-            if _srv._oi_orb_manager is None:
-                return {"ok": True, "books": []}
-            books = getattr(_srv._oi_orb_manager, "books", [])
+            oi_orb_screener/engine.py).
+
+            2026-09-07: merges books from BOTH the standard oi_orb_screener
+            manager AND the sibling oi_orb_screener_top20 manager -- a single
+            binding can run both at once, so the frontend needs to see both
+            sets in one list. monitoring_state() now carries its own
+            "strategy_name" field so the UI can tell them apart when matching
+            on binding_id alone is ambiguous."""
+            books = list(getattr(_srv._oi_orb_manager, "books", []) or [])
+            books += list(getattr(_srv._oi_orb_top20_manager, "books", []) or [])
             result = []
             for b in books:
                 if not hasattr(b, "monitoring_state"):
@@ -6255,8 +6265,16 @@ pm2 save
                     # rupees (qty * price-diff, qty is the real share count) --
                     # no _lot() multiplier needed here, unlike SellStraddle's
                     # points-based unrealized_pnl.
-                    elif sname == "oi_orb_screener" and self._oi_orb_manager is not None:
-                        for b in (getattr(self._oi_orb_manager, "books", None) or []):
+                    elif sname in ("oi_orb_screener", "oi_orb_screener_top20"):
+                        # 2026-09-07: oi_orb_screener_top20 is a sibling deployment on
+                        # a possibly-different manager instance -- same running-P&L gap
+                        # this whole branch was added to fix (commit f3fc12d) would
+                        # otherwise recur for it specifically.
+                        _mgr = (self._oi_orb_manager if sname == "oi_orb_screener"
+                                else self._oi_orb_top20_manager)
+                        if _mgr is None:
+                            continue
+                        for b in (getattr(_mgr, "books", None) or []):
                             if (getattr(b, "_client_id", None) == c.client_id
                                     and getattr(b, "_binding_id", None) == d.get("binding_id", "")):
                                 try:

@@ -2821,6 +2821,11 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         return {
             "client_id": self._client_id,
             "binding_id": self._binding_id,
+            # 2026-09-07: a binding can now run both oi_orb_screener AND
+            # oi_orb_screener_top20 at once -- the dashboard needs this to
+            # tell the two books' panels apart (matching on binding_id alone
+            # is no longer unambiguous).
+            "strategy_name": self._strategy_name,
             "today": self._today.isoformat() if self._today else None,
             "shortlist": self._shortlist_symbols,
             "shortlist_pchange": self._shortlist_pchange,

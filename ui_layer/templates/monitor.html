@@ -2238,7 +2238,7 @@ document.addEventListener('alpine:init', () => {
     async toggleStrategyRun(dep, b) {
       const want = !this.depRunning(dep);
       const did = dep.deploy_id || `${this.authClientId}_${dep.binding_id}_${dep.strategy_name}_${dep.underlying}`;
-      const _stratLabel = {sell_straddle:'Sell Straddle',sell_straddle_calc_vwap:'Sell Straddle (Calc VWAP)',d1_trap_option:'D1 Trap Option',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow',liquidity_sweep:'Liquidity Sweep',liquidity_trap:'Liquidity Trap',oi_orb_screener:'OI-ORB Screener',cag_straddle:'CAG Long Straddle'};
+      const _stratLabel = {sell_straddle:'Sell Straddle',sell_straddle_calc_vwap:'Sell Straddle (Calc VWAP)',d1_trap_option:'D1 Trap Option',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow',liquidity_sweep:'Liquidity Sweep',liquidity_trap:'Liquidity Trap',oi_orb_screener:'OI-ORB Screener',oi_orb_screener_top20:'OI-ORB Screener (Top-20)',cag_straddle:'CAG Long Straddle'};
       const _undLabel = u => u==='ALL_FNO'?'All FnO Stocks':u==='WATCHLIST'?'Watchlist (top-5)':u;
       const label = (_stratLabel[dep.strategy_name]||dep.strategy_name)+' · '+_undLabel(dep.underlying);
       const ok = want
@@ -2813,7 +2813,7 @@ document.addEventListener('alpine:init', () => {
             // default (SELL-to-open), mislabeling every D1Trap/FVG entry backwards.
             // d1_trap_sr added 2026-08-12 -- same option-buyer mechanic, only the entry
             // trigger (S&R ping-pong vs T1/T2) differs from d1_trap_bear_only.
-            const _buyerOnlyStrats = ['d1_trap_bear_only', 'd1_trap_sr', 'd1_trap_option', 'd1_trap_index', 'd1_trap_fno', 'fvg', 'oi_flow', 'liquidity_sweep', 'liquidity_trap', 'oi_orb_screener', 'cag_straddle'];
+            const _buyerOnlyStrats = ['d1_trap_bear_only', 'd1_trap_sr', 'd1_trap_option', 'd1_trap_index', 'd1_trap_fno', 'fvg', 'oi_flow', 'liquidity_sweep', 'liquidity_trap', 'oi_orb_screener', 'oi_orb_screener_top20', 'cag_straddle'];
             const _openAction = (lg) => _buyerOnlyStrats.includes(strat) ? 'BUY' : 'SELL';
             const _closeAction = (lg) => _buyerOnlyStrats.includes(strat) ? 'SELL' : 'BUY';
             // OPEN rows. `_ts` = raw timestamp used for chronological sort.
@@ -7106,7 +7106,7 @@ function amoTest() {
                 <div class="flex items-center gap-3">
                   <span class="font-mono text-xs font-bold px-2 py-0.5 rounded"
                         style="background:rgba(var(--t-cyan-rgb),0.12);color:var(--t-cyan)"
-                        x-text="({sell_straddle:'SS',sell_straddle_calc_vwap:'SSc',d1_trap_option:'D1',d1_trap_index:'TI',d1_trap_fno:'TF',d1_trap_bear_only:'BT',d1_trap_sr:'SR',fvg:'FVG',oi_flow:'OIF',liquidity_sweep:'LSW',liquidity_trap:'LTR',oi_orb_screener:'ORB'})[dep.strategy_name]||'??'"></span>
+                        x-text="({sell_straddle:'SS',sell_straddle_calc_vwap:'SSc',d1_trap_option:'D1',d1_trap_index:'TI',d1_trap_fno:'TF',d1_trap_bear_only:'BT',d1_trap_sr:'SR',fvg:'FVG',oi_flow:'OIF',liquidity_sweep:'LSW',liquidity_trap:'LTR',oi_orb_screener:'ORB',oi_orb_screener_top20:'ORB20'})[dep.strategy_name]||'??'"></span>
                   <div>
                     <div class="font-mono text-xs font-bold" style="color:var(--t-bright)"
                          x-text="({sell_straddle:'Sell Straddle',sell_straddle_calc_vwap:'Sell Straddle (Calc VWAP)',d1_trap_option:'D1 Trap Option',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow',liquidity_sweep:'Liquidity Sweep',liquidity_trap:'Liquidity Trap'})[dep.strategy_name]||dep.strategy_name)+' · '+(dep.underlying==='ALL_FNO'?'All FnO Stocks':dep.underlying)"></div>
@@ -7193,7 +7193,7 @@ function amoTest() {
                           deployForm.product_type='MIS';
                           deployForm.underlying='SENSEX';
                           deployForm.squareoff_time='15:15';
-                        } else if(deployForm.strategy_name==='oi_orb_screener'){
+                        } else if(deployForm.strategy_name==='oi_orb_screener' || deployForm.strategy_name==='oi_orb_screener_top20'){
                           // No dedicated advanced-params UI yet -- '{}' (set
                           // below) lets OiOrbScreenerBookManager._parse_params()
                           // fill in its own validated defaults (oi_spurt_min_pct=7,
@@ -7203,6 +7203,11 @@ function amoTest() {
                           // 2026-09-06 FROZEN spec: VWAP-retest entry + 15-min
                           // HA-shape/StochRSI(9,9) exit, EOD square-off as the
                           // fallback (not the only exit) -- see CLAUDE.md.
+                          // 2026-09-07: oi_orb_screener_top20 is a sibling
+                          // strategy_name sharing this same engine/defaults --
+                          // its own shortlist (top-20 by OI-spurt, no threshold)
+                          // and entry (rolling VWAP-touch) differ, but deploy
+                          // form defaults are identical.
                           deployForm.product_type='MIS';
                           deployForm.underlying='SCREENER';
                           deployForm.squareoff_time='15:15';
@@ -7232,7 +7237,7 @@ function amoTest() {
                           ? '{}'
                           : deployForm.strategy_name==='liquidity_trap'
                           ? '{}'
-                          : deployForm.strategy_name==='oi_orb_screener'
+                          : (deployForm.strategy_name==='oi_orb_screener' || deployForm.strategy_name==='oi_orb_screener_top20')
                           ? '{}'
                           : deployForm.strategy_name==='cag_straddle'
                           ? '{}'
@@ -7245,6 +7250,7 @@ function amoTest() {
                      user decision. Backend also rejects these strategy_names now
                      (see allowed_strategies in ui_layer/dashboard_server.py). -->
                 <option value="oi_orb_screener">OI-ORB Screener (F&amp;O Stocks, VWAP-retest + HA/StochRSI exit)</option>
+                <option value="oi_orb_screener_top20">OI-ORB Screener Top-20 (No OI% threshold, VWAP-touch entry)</option>
                 <option value="cag_straddle">CAG Long Straddle (15:00-15:35 R1/S1 Breach)</option>
               </select>
             </div>
@@ -7258,15 +7264,16 @@ function amoTest() {
                   <option value="ALL_FNO">All 30 FnO Stocks</option>
                 </select>
               </template>
-              <!-- OI-ORB Screener: single sentinel underlying -- the screener itself
-                   picks real F&O stocks dynamically every day, not a per-index choice -->
-              <template x-if="deployForm.strategy_name === 'oi_orb_screener'">
+              <!-- OI-ORB Screener (both variants): single sentinel underlying -- the
+                   screener itself picks real F&O stocks dynamically every day, not a
+                   per-index choice -->
+              <template x-if="deployForm.strategy_name === 'oi_orb_screener' || deployForm.strategy_name === 'oi_orb_screener_top20'">
                 <select class="t-input" x-model="deployForm.underlying"
                         x-init="deployForm.underlying='SCREENER'" disabled>
                   <option value="SCREENER">Screener-Selected Stocks (dynamic, daily)</option>
                 </select>
               </template>
-              <template x-if="deployForm.strategy_name !== 'd1_trap_fno' && deployForm.strategy_name !== 'oi_orb_screener'">
+              <template x-if="deployForm.strategy_name !== 'd1_trap_fno' && deployForm.strategy_name !== 'oi_orb_screener' && deployForm.strategy_name !== 'oi_orb_screener_top20'">
                 <select x-model="deployForm.underlying" class="t-input"
                         @change="
                           if(deployForm.strategy_name==='d1_trap_bear_only'){
@@ -7770,7 +7777,7 @@ function amoTest() {
                   <div class="flex items-center justify-between mb-3">
                     <div>
                       <div class="font-ui font-bold text-sm" style="color:var(--t-bright)"
-                           x-text="({sell_straddle:'Sell Straddle',sell_straddle_calc_vwap:'Sell Straddle (Calc VWAP)',d1_trap_option:'Trap Scanner',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow',liquidity_sweep:'Liquidity Sweep',liquidity_trap:'Liquidity Trap',oi_orb_screener:'OI-ORB Screener',cag_straddle:'CAG Long Straddle'}[dep.strategy_name]||dep.strategy_name)"></div>
+                           x-text="({sell_straddle:'Sell Straddle',sell_straddle_calc_vwap:'Sell Straddle (Calc VWAP)',d1_trap_option:'Trap Scanner',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow',liquidity_sweep:'Liquidity Sweep',liquidity_trap:'Liquidity Trap',oi_orb_screener:'OI-ORB Screener',oi_orb_screener_top20:'OI-ORB Screener (Top-20)',cag_straddle:'CAG Long Straddle'}[dep.strategy_name]||dep.strategy_name)"></div>
                       <div class="flex items-center gap-2 mt-0.5">
                         <span class="font-mono text-xs" style="color:var(--t-cyan)" x-text="dep.underlying==='ALL_FNO'?'All 30 FnO Stocks':dep.underlying==='WATCHLIST'?'Watchlist (top-5)':dep.underlying"></span>
                         <span class="font-mono text-xs" style="color:var(--t-muted)"
@@ -8227,7 +8234,7 @@ function amoTest() {
                        2026-09-06 FROZEN spec: VWAP-retest entry + 15-min HA-shape/
                        StochRSI(9,9) exit, EOD square-off as the fallback -- see
                        CLAUDE.md's own OI-ORB Screener section. -->
-                  <template x-if="dep.strategy_name==='oi_orb_screener'">
+                  <template x-if="dep.strategy_name==='oi_orb_screener' || dep.strategy_name==='oi_orb_screener_top20'">
                     <div class="rounded p-3 mb-2 text-xs font-mono" style="background:rgba(var(--t-cyan-rgb),0.04);border:1px solid rgba(var(--t-cyan-rgb),0.18)"
                          x-data="{
                            _bk: null,
@@ -8237,7 +8244,12 @@ function amoTest() {
                                const r = await fetch('/api/oiorb/status', {headers:{'Authorization':'Bearer '+tok}});
                                const d = await r.json();
                                if (d.ok) {
-                                 this._bk = (d.books||[]).find(bk => bk.binding_id===b.binding_id) || null;
+                                 // 2026-09-07: a binding can now run BOTH oi_orb_screener AND
+                                 // oi_orb_screener_top20 at once -- must match on strategy_name
+                                 // too, not binding_id alone, or this always grabs whichever
+                                 // book happens to sort first.
+                                 this._bk = (d.books||[]).find(bk => bk.binding_id===b.binding_id
+                                             && (bk.strategy_name||'oi_orb_screener')===dep.strategy_name) || null;
                                }
                              } catch(e) {}
                            }

@@ -867,6 +867,7 @@ async def _run_live(
                 straddle_manager=straddle_manager,
                 straddle_bridge=straddle_bridge,
                 oi_orb_manager=managers.get("oi_orb_screener"),
+                oi_orb_top20_manager=managers.get("oi_orb_screener_top20"),
                 cag_straddle_manager=managers.get("cag_straddle"),
             )
         except ImportError as exc:
