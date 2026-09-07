@@ -72,7 +72,20 @@ logger = logging.getLogger(__name__)
 
 _EOD_TIME_DEFAULT = dtime(15, 15)
 _EOD_POLL_SEC = 10.0
-_ENTRY_LTP_WAIT_TIMEOUT_SEC = 5.0
+# 2026-09-07, real incident: was 5.0s. Real live data the same day showed
+# upstox2/Fyers reconnecting roughly every ~10 minutes (each reconnect cycle
+# itself taking ~10-20s to fully re-establish) -- two genuinely-fired signals
+# (SOLARINDS, MANAPPURAM, both correctly detected via the new historical
+# VWAP-retest check) were lost to entry_ltp_timeout purely because their
+# option-tick subscription landed within a few hundred ms of one of these
+# reconnects. 5s gives a feed reconnect essentially no room to recover
+# before the entry is abandoned. Raised to 20s -- comfortably covers a normal
+# reconnect cycle without meaningfully changing the entry price's freshness
+# (a real signal's price doesn't stale out in 20s the way it would in
+# minutes), and the strategy already treats a timeout as a hard skip (no
+# partial/guessed price), so a longer wait only ever helps a signal that was
+# genuinely about to get a real tick, never delays one that wasn't.
+_ENTRY_LTP_WAIT_TIMEOUT_SEC = 20.0
 # 2026-08-27, direct user spec (real observation: "log is not showing which
 # stock is for which side, rest of the log is blank"): before this, nothing
 # logged between "ORB frozen" and an actual fired/rejected signal -- with a
