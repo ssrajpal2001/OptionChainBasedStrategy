@@ -2125,6 +2125,7 @@ async def test_apply_historical_vwap_retest_fires_immediately_when_already_retes
     bus = _FakeBus()
     book = _make_book(bus)
     book._shortlist_pchange["MANAPPURAM"] = -3.49  # bearish -> PUT
+    book._regime = "bearish"  # PUT is tradeable on both bullish and bearish days
 
     monkeypatch.setattr(screener, "historical_vwap_retest_check", lambda symbols_sides, cfg: {
         "MANAPPURAM": {"armed": True, "fired": True, "fire_ts": "09:47",
@@ -2165,6 +2166,35 @@ async def test_apply_historical_vwap_retest_seeds_armed_state_without_firing(mon
     await book._apply_historical_vwap_retest(["SOLARINDS"], book._screener_cfg)
 
     assert book._vwap_armed["SOLARINDS"] is True
+    assert ("SOLARINDS", "CALL") not in book._already_fired
+    assert handled == []
+
+
+@pytest.mark.asyncio
+async def test_apply_historical_vwap_retest_respects_regime_gate(monkeypatch):
+    """2026-09-07 real incident: this path fired unconditionally, unlike the
+    live tick loop (which always gates on side_allowed_by_regime) -- a
+    SOLARINDS CALL fired here on a real BEARISH day, which should have
+    blocked it (bearish day: CALL ignored, PUT tradeable)."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._shortlist_pchange["SOLARINDS"] = 3.0  # bullish pchange -> CALL side
+    book._regime = "bearish"  # CALL is NOT tradeable on a bearish day
+
+    monkeypatch.setattr(screener, "historical_vwap_retest_check", lambda symbols_sides, cfg: {
+        "SOLARINDS": {"armed": True, "fired": True, "fire_ts": "09:17",
+                       "fire_price": 21530.00, "final_vwap": 21400.0, "bars_replayed": 20},
+    })
+
+    handled = []
+    async def _fake_handle_signal(sig):
+        handled.append(sig)
+    book._handle_signal = _fake_handle_signal
+    book._evaluate_additive_filters = lambda sig: True
+
+    await book._apply_historical_vwap_retest(["SOLARINDS"], book._screener_cfg)
+    await asyncio.sleep(0.05)
+
     assert ("SOLARINDS", "CALL") not in book._already_fired
     assert handled == []
 

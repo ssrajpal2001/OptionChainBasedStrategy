@@ -338,6 +338,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._regime: Optional[str] = None
         self._already_fired: set = set()
         self._entry_window_done_logged = False
+        self._morning_historical_retest_applied = False
         # (symbol, side) pairs no longer eligible to enter today -- as of
         # 2026-08-27 populated solely by the VWAP cancel-if-unreached rule
         # (see _run_today_pipeline's entry-window-close handling). The old
@@ -476,6 +477,11 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._already_fired = set()
         self._entry_window_done_logged = False
         self._rejected = set()
+        # 2026-09-07: guards the ONE morning call to _apply_historical_vwap_retest
+        # (right after the regime freeze block below) so it doesn't re-run on every
+        # poll cycle for the life of the day -- the afternoon rescan calls it again
+        # itself, per newly-added symbol, so this flag is morning-path-only.
+        self._morning_historical_retest_applied = False
         self._stock_chains = {}
         self._chain_subscribed = {}
         self._volume_cum_last = {}
@@ -1104,12 +1110,14 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             # backfilled the same way ORB/SMA already are, real 09:15-start basis instead of
             # starting cold from whatever time live polling first begins.
             await asyncio.to_thread(screener.backfill_vwap_from_yahoo, self._vwap, self._shortlist_symbols, cfg)
-            # 2026-09-07, direct user spec: this book may only start watching the
-            # shortlist well after market open (a restart, or simply because
-            # SCAN_START itself is 09:26) -- check whether today's real VWAP-retest
-            # already completed in the gap, and fire immediately if so, instead of
-            # starting every symbol's arm/retest state cold.
-            await self._apply_historical_vwap_retest(self._shortlist_symbols, cfg)
+            # 2026-09-07: the historical-retest check itself is deferred until AFTER
+            # the regime freeze block below (self._regime is still None here) -- see
+            # that block's own call to _apply_historical_vwap_retest. Firing before
+            # regime is known would either wrongly block on regime=None (side_allowed_
+            # by_regime treats None like neutral -> nothing tradeable) or, worse, skip
+            # the regime check entirely (the actual 2026-09-07 incident: SOLARINDS
+            # CALL fired historically while today's frozen regime was BEARISH, which
+            # should have blocked it -- see _apply_historical_vwap_retest's own gate).
 
         # 2026-08-27: MAX_MONITOR_MINUTES used to be this loop's own outer deadline, but a
         # position can now stay open (and needs live VWAP updates for its own SL) all the
@@ -1219,6 +1227,17 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 self._clog.info("OiOrb[%s/%s]: ORB frozen. NIFTY regime=%s (pChange %+.2f%%). Levels: %s",
                                  self._client_id, self._binding_id, self._regime.upper(), nifty_pchange_now,
                                  {s: v for s, v in self._orb_frozen.items()})
+                # 2026-09-07: deferred from right after the morning backfill (before
+                # this block) specifically so self._regime is real by the time this
+                # runs -- _apply_historical_vwap_retest's own regime gate needs it,
+                # and firing with self._regime still None would either wrongly block
+                # everything (None reads like neutral) or, the real incident this
+                # ordering fix closes, skip the regime check while it was still
+                # unset. Guarded to run once -- this freeze block itself only ever
+                # runs once too (the `if self._regime is None` guard above).
+                if not self._morning_historical_retest_applied:
+                    self._morning_historical_retest_applied = True
+                    await self._apply_historical_vwap_retest(self._shortlist_symbols, cfg)
 
             # Trap-mechanic TSL: runs for every currently-open "trap"-tagged
             # position regardless of the entry window/regime state above --
@@ -1383,6 +1402,21 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 continue
             if result["fired"]:
                 if (sym, side) in self._already_fired or (sym, side) in self._rejected:
+                    continue
+                # 2026-09-07 real incident fix: this path was firing unconditionally,
+                # unlike the live tick loop (which always gates on side_allowed_by_
+                # regime before entering) -- confirmed live, a SOLARINDS CALL fired
+                # here on a day whose frozen regime was BEARISH, which should have
+                # blocked it (bearish day: CALL ignored, PUT tradeable). A retest that
+                # genuinely completed in history is still a real fact worth knowing,
+                # so it's logged either way -- only the actual entry is gated.
+                regime_filter_on = cfg.get("REGIME_FILTER_ENABLED", True)
+                if not screener.side_allowed_by_regime(side, self._regime, regime_filter_on):
+                    self._clog.info(
+                        "OiOrb[%s/%s]: %s %s HISTORICAL VWAP-RETEST completed at %s (price=%.2f) "
+                        "but BLOCKED by regime=%s -- not entering.",
+                        self._client_id, self._binding_id, sym, side,
+                        result["fire_ts"], result["fire_price"], self._regime)
                     continue
                 self._clog.info(
                     "OiOrb[%s/%s]: %s %s HISTORICAL VWAP-RETEST already completed at %s "
