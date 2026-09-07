@@ -61,3 +61,35 @@ def test_tagged_other_client_not_touched():
     b, routed = _bridge()
     asyncio.run(b._handle(_ev(client_id="B", binding_id="B_b1")))
     assert routed == [("B", "B_b1")]
+
+
+class _DBCalcVwap:
+    """A_b1's only deployment is 'sell_straddle_calc_vwap', not 'sell_straddle'."""
+    def get_bindings_safe_sync(self, cid):
+        return [{"binding_id": f"{cid}_b1", "engine_active": True,
+                 "terminal_connected": True, "is_trade_enabled": True,
+                 "trading_mode": "paper"}]
+    def get_deployments_sync(self, cid):
+        return [{"binding_id": f"{cid}_b1", "strategy_name": "sell_straddle_calc_vwap",
+                 "underlying": "NIFTY", "is_running": 1}]
+
+
+def test_calc_vwap_event_routes_using_its_own_strategy_name():
+    """2026-09-07 real incident: this can_trade() gate was hardcoded to
+    "sell_straddle" regardless of the event's own strategy_name -- a
+    sell_straddle_calc_vwap order could never find its OWN running deployment
+    row under that literal, so it always `continue`d before ever reaching the
+    broker, surfacing downstream as a generic "no engine-active brokers found"
+    -> routing_failed=True abort. The event must carry its real
+    strategy_name (stamped by SellStraddleStrategy._emit_order) for this gate
+    to find the right deployment row."""
+    router = _Router()
+    router._client_db = _DBCalcVwap()
+    b = StraddleExecutionBridge(EventBus(), _Registry(["A"]), router)
+    routed = []
+    async def _fake_fill(ev, cid, bid, broker):
+        routed.append((cid, bid))
+    b._paper_fill = _fake_fill
+    ev = _ev(client_id="A", binding_id="A_b1", strategy_name="sell_straddle_calc_vwap")
+    asyncio.run(b._handle(ev))
+    assert routed == [("A", "A_b1")]

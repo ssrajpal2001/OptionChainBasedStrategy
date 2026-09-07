@@ -565,6 +565,12 @@ class ExitMixin:
             exit_price=price if action == "SELL" else 0.0,
             reason=reason, event_id=eid,
             product_type=self._current_product_type(),
+            # 2026-09-07 real incident fix: left at the dataclass default
+            # ("sell_straddle") this would fail straddle_hedge_bridge.py's own
+            # can_trade(ev.strategy, ...) ENTRY gate for a sell_straddle_calc_vwap
+            # book near EOD hedge-and-carry, the exact same class of bug found and
+            # fixed the same day in entries.py/straddle_bridge.py.
+            strategy=self._strategy_name,
         )
         waiter = asyncio.Event()
         self._hedge_fill_waiters[eid] = waiter

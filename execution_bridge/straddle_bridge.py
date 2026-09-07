@@ -524,7 +524,18 @@ class StraddleExecutionBridge:
                     # deployments at all, so the old code always blocked ENTRY in that case).
                     if db is None:
                         continue
-                    if not can_trade(client.client_id, binding_id, db, "sell_straddle", ev.underlying):
+                    # 2026-09-07 real incident fix: hardcoded "sell_straddle" here too --
+                    # a sell_straddle_calc_vwap order (ev.strategy_name, stamped by
+                    # SellStraddleStrategy._emit_order) could never find its OWN running
+                    # deployment row under this literal, so can_trade() always returned
+                    # False here, `continue`d before ever reaching resolve_broker_or_alert,
+                    # and `routed` stayed 0 -- surfacing downstream as the generic "no
+                    # engine-active brokers found" -> routing_failed=True abort, identical
+                    # symptom to (but a DIFFERENT bug from) entries.py's own
+                    # _any_active_terminal() hardcode fixed the same day.
+                    if not can_trade(client.client_id, binding_id, db,
+                                      getattr(ev, "strategy_name", None) or "sell_straddle",
+                                      ev.underlying):
                         continue
 
                 mode = live_b.get("trading_mode", "paper") or "paper"
@@ -596,10 +607,15 @@ class StraddleExecutionBridge:
                     # DB query. Only ever affects the OrderPlacementFailed fallback inside
                     # _live_fill (see its docstring) -- a genuinely-successful live order is
                     # completely unaffected by this flag.
+                    # 2026-09-07: matched on the literal "sell_straddle" -- a
+                    # sell_straddle_calc_vwap deployment's OWN shadow_on_reject
+                    # setting could never be found under that literal, silently
+                    # defaulting to False regardless of what was actually configured.
                     _shadow = False
+                    _own_strategy_name = getattr(ev, "strategy_name", None) or "sell_straddle"
                     for _d in deployments:
                         if (str(_d.get("binding_id", "")) == binding_id
-                                and str(_d.get("strategy_name", "")).lower() == "sell_straddle"
+                                and str(_d.get("strategy_name", "")).lower() == _own_strategy_name.lower()
                                 and str(_d.get("underlying", "") or _d.get("assigned_instrument", "")).upper()
                                     == ev.underlying.upper()):
                             try:

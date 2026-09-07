@@ -427,6 +427,15 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         # passive design already uses. See _live_price().
         self._live_spot_ltp_ts: Dict[str, datetime] = {}   # symbol -> monotonic-safe wall-clock of last tick
         self._TICK_STALE_SEC = 10.0
+        # 2026-09-07: last _live_price() result per symbol (tick-primary,
+        # NSE-poll-fallback already resolved) -- monitoring_state()'s
+        # shortlist_vwap needs a real LTP to show even when the upstox2 tick
+        # has gone stale/quiet, same as the WATCH heartbeat log already does
+        # via _live_price()'s own fallback; reading self._live_spot_ltp
+        # directly there would show "VWAP --" whenever ONLY the NSE-poll
+        # fallback has a price, which is misleading since the heartbeat log
+        # right above it clearly has one.
+        self._last_known_price: Dict[str, float] = {}
         self._spot_tick_subscribed: Dict[str, bool] = {}
         # Two-session scan state (2026-08-27, direct user spec).
         self._afternoon_scan_last_ts: float = 0.0    # throttle: don't re-scan every poll cycle
@@ -1106,6 +1115,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 ltp = self._live_price(sym, live)
                 if ltp is None:
                     continue
+                self._last_known_price[sym] = ltp
                 self._bars.on_quote(sym, ltp, now)
 
                 # 2026-08-27, direct user spec: per-stock live price vs its own ORB
@@ -2497,14 +2507,24 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             }
         # 2026-09-07, direct user spec: "when stocks are scanned the ui should
         # show how far is ltp from vwap as we have already subscribed to all
-        # the stocks after 9.25 when they got scanned" -- self._live_spot_ltp
-        # is populated for every shortlisted symbol (not just open positions,
-        # see the 2026-09-06 tick-loop change above), and self._vwap tracks a
-        # running VWAP per symbol from the same subscribed feed, so both are
-        # already available with no new subscription needed.
+        # the stocks after 9.25 when they got scanned" -- self._vwap tracks a
+        # running VWAP per symbol from the same subscribed feed, no new
+        # subscription needed.
+        #
+        # 2026-09-07 real incident fix: originally read self._live_spot_ltp
+        # directly, which is ONLY the raw upstox2 tick -- whenever that tick
+        # had gone stale/quiet (confirmed live: real WATCH heartbeat log
+        # lines showed a valid LTP the whole time, but this panel showed
+        # "VWAP --" for the same symbols at the same moment), this dict alone
+        # was empty/stale even though a real, currently-displayed price
+        # existed via _live_price()'s own NSE-poll fallback. self._last_known_price
+        # is the exact value the WATCH heartbeat itself already computed and
+        # trusts (tick-primary, poll-fallback already resolved), so reading
+        # it here instead keeps this panel consistent with what the log
+        # already shows, rather than re-deriving a stricter, tick-only value.
         shortlist_vwap = {}
         for sym in self._shortlist_symbols:
-            ltp = self._live_spot_ltp.get(sym)
+            ltp = self._last_known_price.get(sym)
             vwap = self._vwap.current(sym)
             dist = round(ltp - vwap, 2) if (ltp is not None and vwap) else None
             dist_pct = round((ltp - vwap) / vwap * 100.0, 2) if (ltp is not None and vwap) else None

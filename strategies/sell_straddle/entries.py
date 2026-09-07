@@ -160,7 +160,7 @@ class EntryMixin:
                 for _dep in db.get_deployments_sync(_cid):
                     _sn = str(_dep.get("strategy_name", "")).lower()
                     _ul = str(_dep.get("underlying", "") or _dep.get("assigned_instrument", "")).upper()
-                    if _sn == "sell_straddle" and _ul == self._underlying.upper():
+                    if _sn == self._strategy_name and _ul == self._underlying.upper():
                         _b = _binds.get(_dep.get("binding_id"))
                         if _b and _b.get("engine_active") and _b.get("terminal_connected"):
                             active = True
@@ -192,7 +192,7 @@ class EntryMixin:
                 for _dep in db.get_deployments_sync(_cid):
                     _sn = str(_dep.get("strategy_name", "")).lower()
                     _ul = str(_dep.get("underlying", "") or _dep.get("assigned_instrument", "")).upper()
-                    if _sn == "sell_straddle" and _ul == self._underlying.upper():
+                    if _sn == self._strategy_name and _ul == self._underlying.upper():
                         _b = _binds.get(_dep.get("binding_id"))
                         if _b and _b.get("show_granular_ticks"):
                             out.append((_cid, _b.get("binding_id")))
