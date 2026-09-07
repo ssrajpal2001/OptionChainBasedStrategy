@@ -6242,6 +6242,51 @@ pm2 save
                         p = getattr(s, "_position", None) if s else None
                         if p and getattr(p, "status", "open") == "open":
                             running += float(getattr(p, "unrealized_pnl", 0.0) or 0.0) * _lot(u)
+                    # 2026-09-07 fix, real user-found gap: oi_orb_screener's open
+                    # positions were never included in the header/global running
+                    # total at all (only sell_straddle had a branch here) --
+                    # confirmed via direct code inspection: closed/booked P&L was
+                    # already correct (trade_history is strategy-agnostic), only
+                    # a CURRENTLY OPEN OI-ORB position's unrealized P&L was
+                    # missing from the header while it was still running. This
+                    # book can hold several concurrent stock positions at once
+                    # (unlike SellStraddle's single position), so sum across all
+                    # of them. monitoring_state()'s own "pnl" is already in real
+                    # rupees (qty * price-diff, qty is the real share count) --
+                    # no _lot() multiplier needed here, unlike SellStraddle's
+                    # points-based unrealized_pnl.
+                    elif sname == "oi_orb_screener" and self._oi_orb_manager is not None:
+                        for b in (getattr(self._oi_orb_manager, "books", None) or []):
+                            if (getattr(b, "_client_id", None) == c.client_id
+                                    and getattr(b, "_binding_id", None) == d.get("binding_id", "")):
+                                try:
+                                    ms = b.monitoring_state()
+                                    for pos in (ms.get("positions") or {}).values():
+                                        running += float(pos.get("pnl") or 0.0)
+                                except Exception:
+                                    logger.debug("_compute_live_pnls: oi_orb_screener "
+                                                 "monitoring_state() failed for %s/%s",
+                                                 c.client_id, d.get("binding_id", ""))
+                                break
+                    # 2026-09-07 fix, same gap/same fix as oi_orb_screener above --
+                    # CAG Straddle only ever holds ONE position at a time
+                    # (monitoring_state()'s "position" is a single dict/None, not a
+                    # dict of many like OI-ORB's). unrealized_pnl is already real
+                    # rupees (qty_unit * price-diff), no _lot() multiplier needed.
+                    elif sname == "cag_straddle" and self._cag_straddle_manager is not None:
+                        for b in (getattr(self._cag_straddle_manager, "books", None) or []):
+                            if (getattr(b, "_client_id", None) == c.client_id
+                                    and getattr(b, "_binding_id", None) == d.get("binding_id", "")):
+                                try:
+                                    ms = b.monitoring_state()
+                                    pos = ms.get("position")
+                                    if pos:
+                                        running += float(pos.get("unrealized_pnl") or 0.0)
+                                except Exception:
+                                    logger.debug("_compute_live_pnls: cag_straddle "
+                                                 "monitoring_state() failed for %s/%s",
+                                                 c.client_id, d.get("binding_id", ""))
+                                break
                     # 2026-09-06: d1_trap_bear_only P&L branch removed along with
                     # D1 Trap -- fully stopped, direct user decision.
                 try:
