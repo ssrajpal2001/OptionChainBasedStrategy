@@ -411,8 +411,14 @@ class UpstoxFeeder(BaseFeeder):
         self._running = False
         self._connected = False
         if self._streamer:
+            # 2026-09-07 fix: see FyersFeeder.disconnect()'s own writeup --
+            # this is the identical shape (a synchronous SDK call that can
+            # block the whole event loop) for Upstox's own streamer, fixed
+            # pre-emptively as the same class of risk, even though the real
+            # incident caught Fyers specifically.
+            _streamer = self._streamer
             try:
-                self._streamer.disconnect()
+                await asyncio.to_thread(_streamer.disconnect)
             except Exception:
                 pass
             self._streamer = None
@@ -945,8 +951,24 @@ class FyersFeeder(BaseFeeder):
         self._running = False
         self._connected = False
         if self._socket:
+            # 2026-09-07 CRITICAL FIX, real incident: close_connection() is a
+            # SYNCHRONOUS call into the fyers-apiv3 SDK that internally does
+            # thread.join() waiting for its own background socket thread to
+            # exit -- confirmed via a live py-spy dump during a real "EC2
+            # hung, had to restart the instance" incident: the MainThread
+            # (which runs the ENTIRE asyncio event loop, including the
+            # dashboard's HTTP server) was stuck in exactly this call for the
+            # whole outage. This is called from DualFeeder._run_stream's own
+            # reconnect loop, ON the event loop -- if the Fyers SDK's
+            # background thread doesn't exit promptly (e.g. stuck on a
+            # socket read during a bad reconnect), this blocks forever and
+            # freezes the whole process, not just this one feeder. Wrapped in
+            # asyncio.to_thread() per this codebase's own blocking-I/O rule
+            # (CLAUDE.md "Development Notes") -- a genuinely stuck SDK thread
+            # now only stalls this one disconnect() call, never the process.
+            _sock = self._socket
             try:
-                self._socket.close_connection()
+                await asyncio.to_thread(_sock.close_connection)
             except Exception:
                 pass
             self._socket = None
@@ -1353,8 +1375,14 @@ class AngelOneFeeder(BaseFeeder):
         self._running = False
         self._connected = False
         if self._socket:
+            # 2026-09-07 fix: see FyersFeeder.disconnect()'s own writeup --
+            # this is the identical shape (a synchronous SDK call that can
+            # block the whole event loop) for AngelOne's own SmartWebSocketV2
+            # close, fixed pre-emptively as the same class of risk, even
+            # though the real incident caught Fyers specifically.
+            _sock = self._socket
             try:
-                self._socket.close_connection()
+                await asyncio.to_thread(_sock.close_connection)
             except Exception:
                 pass
             self._socket = None
