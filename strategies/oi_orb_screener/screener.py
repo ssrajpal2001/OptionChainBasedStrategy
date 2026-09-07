@@ -93,6 +93,20 @@ CONFIG = {
     "RANK_WINDOW_END": "09:30",
     "RANK_POLL_INTERVAL_SEC": 90.0,
     "RANK_TOP_N": 10,
+    # 2026-09-07, direct user spec: "instead of checking for only stocks
+    # whose spurt is above 7% we will get the top 20 stocks data and save
+    # in db ... so that after 1 to 2 week we have all the stocks with
+    # their oi spurt to analyse what is best threshold". Deliberately a
+    # SEPARATE, purely-observational poll loop from _rank_tracking_loop
+    # above (which also DROPS a pre-entry candidate from the shortlist if
+    # its rank falls -- a real trading-behavior effect) -- this one only
+    # ever logs, all day, never touches self._shortlist_symbols/_rejected.
+    # See engine.py's _oi_spurt_history_loop + store.record_oi_spurt_history.
+    "OI_SPURT_HISTORY_ENABLED": True,
+    "OI_SPURT_HISTORY_START": "09:15",
+    "OI_SPURT_HISTORY_END": "15:30",
+    "OI_SPURT_HISTORY_POLL_SEC": 60.0,
+    "OI_SPURT_HISTORY_TOP_N": 20,
     # 2026-09-07, direct user spec, REVERSES the 2026-08-27 spec below:
     # "understand stocks which got scanned at 9.25 will be considered for
     # complete day, no need to scan fresh stocks after 9.25am." Default
@@ -443,17 +457,17 @@ def bull_trap_zones(bars_3m: list) -> List[dict]:
     return out
 
 
-def poll_oi_rank(nse: "NSESession", cfg=CONFIG) -> pd.DataFrame:
+def poll_oi_rank(nse: "NSESession", cfg=CONFIG, top_n: Optional[int] = None) -> pd.DataFrame:
     """2026-08-30, direct user spec: a single poll of the OI-Spurt + price
     universe, RANKED by oi_spurt_pct descending -- deliberately does NOT
     apply build_shortlist's OI_SPURT_MIN_PCT/PRICE_MOVE_MIN_PCT threshold
     filters ("instead of OI percent we can use OI change rank"). Returns the
-    top RANK_TOP_N rows with an explicit `rank` column (1 = highest OI-spurt
-    %). Called repeatedly across the RANK_WINDOW_START-RANK_WINDOW_END
-    window (engine.py's own poll loop) to track which stocks are climbing
-    vs falling in OI momentum, independent of whether they'd currently pass
-    the fixed threshold build_shortlist uses to lock the real shortlist at
-    SCAN_START.
+    top-N rows with an explicit `rank` column (1 = highest OI-spurt %).
+
+    top_n: explicit override (2026-09-07, added for the full-day OI-spurt
+    history collector, which wants top 20 -- distinct from RANK_TOP_N's own
+    10, used by the narrow 09:16-09:30 rank-tracking window). Falls back to
+    cfg["RANK_TOP_N"] when not passed, unchanged behavior for that caller.
 
     Pure/synchronous, same shape as build_shortlist -- callers wrap with
     asyncio.to_thread() per this codebase's blocking-I/O rule."""
@@ -464,8 +478,9 @@ def poll_oi_rank(nse: "NSESession", cfg=CONFIG) -> pd.DataFrame:
         return pd.DataFrame(columns=["symbol", "rank", "oi_spurt_pct", "pChange"])
     merged = merged.sort_values("oi_spurt_pct", ascending=False).reset_index(drop=True)
     merged["rank"] = merged.index + 1
-    top_n = int(cfg.get("RANK_TOP_N", 10) or 10)
-    return merged.head(top_n)
+    if top_n is None:
+        top_n = int(cfg.get("RANK_TOP_N", 10) or 10)
+    return merged.head(int(top_n))
 
 
 class MinuteBars:

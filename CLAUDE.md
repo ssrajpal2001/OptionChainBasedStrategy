@@ -1450,6 +1450,46 @@ change; `self._vwap` is the same running `VwapState` `_vwap_check_entry` itself
 reads) — no new feed calls needed. Rendered in `monitor.html`'s shortlist row,
 green/red by direction.
 
+**Full-day OI-spurt history capture for threshold optimization, 2026-09-07, direct user
+spec** — "instead of checking for only stocks whose spurt is above 7% we will get the
+top 20 stocks data and save in db with its oi spurt so that after 1 to 2 week we have
+all the stocks with their oi spurt to analyse what is best threshold... save complete
+oi spurt from start of day till end of day." The current `OI_SPURT_MIN_PCT=7.0` hard
+threshold was picked without any historical OI-spurt distribution to validate it
+against (this screener's OI data cannot be backtested at all — same structural NSE
+API gap OI-Flow already hit) — this feature exists purely to accumulate that missing
+distribution going forward.
+
+Deliberately built as a **second, fully independent** poll loop
+(`OiOrbScreenerStrategy._oi_spurt_history_loop`/`_do_oi_spurt_history_poll`,
+`engine.py`), NOT a widening of the pre-existing `_rank_tracking_loop` (2026-08-30,
+09:16-09:30 window) — that loop's poll also **drops** a not-yet-entered candidate
+from the live shortlist if its rank falls out of top-N, a real trading-behavior side
+effect this data-collection pass must never inherit. The new loop only ever calls
+`store.record_oi_spurt_history` — it never reads or writes
+`self._shortlist_symbols`/`_rejected`/`_positions`, confirmed by a dedicated
+regression test (`test_do_oi_spurt_history_poll_records_top_n_and_never_touches_
+trading_state`).
+
+Runs `OI_SPURT_HISTORY_START`-`OI_SPURT_HISTORY_END` (default full session,
+09:15-15:30, config-overridable per-deployment like every other tunable),
+`OI_SPURT_HISTORY_POLL_SEC=60.0` (1-minute cadence, direct user choice — finer than
+the existing rank-tracking loop's 90s), `OI_SPURT_HISTORY_TOP_N=20` (vs. the other
+loop's own `RANK_TOP_N=10`) — `screener.poll_oi_rank()` gained an explicit `top_n`
+override param for this (falls back to `cfg["RANK_TOP_N"]` when omitted, so the
+existing 09:16-09:30 caller is byte-for-byte unchanged). Writes to a brand-new
+dedicated table `oi_spurt_history` (`store.py`) — deliberately NOT the existing
+`rank_snapshots` table, so 1-2 weeks of this full-day, threshold-agnostic dataset can
+be queried cleanly without filtering out the other window's differently-scoped rows.
+Toggle: `OI_SPURT_HISTORY_ENABLED` (default True).
+
+Query pattern for the eventual threshold analysis: `SELECT symbol, oi_spurt_pct,
+poll_ts FROM oi_spurt_history WHERE trade_date=... ORDER BY poll_ts` joined against
+`positions`/`signal_events` by symbol/date to see which OI-spurt levels actually
+preceded a real tradeable move vs. which were noise — same "log everything now,
+optimize later since backtesting is impossible" pattern already established for
+OI-Flow's `telemetry.py` and SellStraddle's shadow-VWAP log.
+
 ---
 
 ### CAG Long Straddle Strategy (`strategies/cag_straddle/`)

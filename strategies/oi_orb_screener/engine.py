@@ -458,6 +458,8 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._rank_last_poll_ts: float = 0.0
         self._rank_prev_top: set = set()
         self._rank_dropped: set = set()
+        # ── Full-day OI-spurt history capture (2026-09-07, direct user spec) ──
+        self._oi_spurt_hist_last_poll_ts: float = 0.0
 
     # ── lifecycle ────────────────────────────────────────────────────────
 
@@ -509,6 +511,9 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._rank_last_poll_ts = 0.0
         self._rank_prev_top: set = set()
         self._rank_dropped: set = set()
+        # 2026-09-07, direct user spec: independent full-day, threshold-agnostic
+        # OI-spurt history capture -- see _oi_spurt_history_loop's own docstring.
+        self._oi_spurt_hist_last_poll_ts = 0.0
         self._clog.info("OiOrb[%s/%s]: session reset for new trading day.",
                          self._client_id, self._binding_id)
 
@@ -536,6 +541,8 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             self._eod_loop(), name=f"oiorb_eod_{self._client_id}_{self._binding_id}"))
         self._tasks.append(asyncio.create_task(
             self._rank_tracking_loop(), name=f"oiorb_rank_{self._client_id}_{self._binding_id}"))
+        self._tasks.append(asyncio.create_task(
+            self._oi_spurt_history_loop(), name=f"oiorb_spurthist_{self._client_id}_{self._binding_id}"))
         self._clog.info("OiOrb[%s/%s]: started.", self._client_id, self._binding_id)
 
     # ── daily pipeline ───────────────────────────────────────────────────
@@ -951,6 +958,76 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                     "rank_dropped_out_of_top_n", side=side,
                     detail=f"fell out of top-{len(new_top)} OI-spurt rank")
         self._rank_prev_top = new_top
+
+    # ── full-day OI-spurt history capture (2026-09-07, direct user spec) ──
+
+    async def _oi_spurt_history_loop(self) -> None:
+        """"instead of checking for only stocks whose spurt is above 7% we
+        will get the top 20 stocks data and save in db with its oi spurt so
+        that after 1 to 2 week we have all the stocks with their oi spurt to
+        analyse what is best threshold... save complete oi spurt from start
+        of day till end of day."
+
+        Deliberately INDEPENDENT of _rank_tracking_loop above: that loop
+        only covers 09:16-09:30 and, as a side effect, DROPS a not-yet-
+        entered candidate from the live shortlist if its rank falls -- a
+        real trading-behavior effect this data-collection pass must never
+        touch. This loop runs OI_SPURT_HISTORY_START-END (default full
+        session, 09:15-15:30), never reads or writes
+        self._shortlist_symbols/_rejected/_positions, and only ever calls
+        store.record_oi_spurt_history -- pure logging, zero effect on any
+        trading decision.
+        """
+        while self._running:
+            now = datetime.now(IST)
+            cfg = self._screener_cfg
+            if not cfg.get("OI_SPURT_HISTORY_ENABLED", True):
+                await asyncio.sleep(60)
+                continue
+            win_start = cfg.get("OI_SPURT_HISTORY_START", "09:15")
+            win_end = cfg.get("OI_SPURT_HISTORY_END", "15:30")
+            now_key = now.strftime("%H:%M")
+            if not (win_start <= now_key < win_end) or cfg.get("IGNORE_TIME_WINDOWS"):
+                await asyncio.sleep(30)
+                continue
+            now_ts = now.timestamp()
+            interval = float(cfg.get("OI_SPURT_HISTORY_POLL_SEC", 60.0) or 60.0)
+            if now_ts - self._oi_spurt_hist_last_poll_ts < interval:
+                await asyncio.sleep(5)
+                continue
+            self._oi_spurt_hist_last_poll_ts = now_ts
+            try:
+                if self._nse is None:
+                    self._nse = await asyncio.to_thread(screener.NSESession)
+                await self._do_oi_spurt_history_poll(now, cfg)
+            except Exception:
+                self._clog.warning("OiOrb[%s/%s]: OI-spurt history poll failed (non-fatal, will "
+                                    "retry next interval).", self._client_id, self._binding_id,
+                                    exc_info=True)
+            await asyncio.sleep(5)
+
+    async def _do_oi_spurt_history_poll(self, now: datetime, cfg: dict) -> None:
+        """One purely-observational poll cycle -- split out for direct unit
+        testing, same shape as _do_rank_poll."""
+        top_n = int(cfg.get("OI_SPURT_HISTORY_TOP_N", 20) or 20)
+        ranked = await asyncio.to_thread(screener.poll_oi_rank, self._nse, cfg, top_n)
+        if ranked is None or ranked.empty:
+            return
+
+        poll_ts = now.isoformat(timespec="seconds")
+        rows = [
+            {"symbol": r["symbol"], "rank": int(r["rank"]),
+             "oi_spurt_pct": float(r["oi_spurt_pct"]), "price_change_pct": float(r["pChange"])}
+            for _, r in ranked.iterrows()
+        ]
+        await asyncio.to_thread(store.record_oi_spurt_history, self._client_id, self._binding_id,
+                                 poll_ts, rows)
+        self._clog.info(
+            "OiOrb[%s/%s]: OI-SPURT HISTORY POLL @%s top-%d: %s",
+            self._client_id, self._binding_id, now.strftime("%H:%M:%S"), len(rows),
+            ", ".join(f"{r['symbol']}(#{int(r['rank'])},{r['oi_spurt_pct']:.1f}%)"
+                      for _, r in ranked.iterrows()),
+        )
 
     async def _run_today_pipeline(self) -> None:
         cfg = self._screener_cfg

@@ -126,6 +126,26 @@ CREATE TABLE IF NOT EXISTS rank_snapshots (
     price_change_pct  REAL
 );
 
+-- 2026-09-07, direct user spec: full-trading-day, threshold-agnostic
+-- top-20 OI-spurt capture -- deliberately a SEPARATE table from
+-- rank_snapshots (which only covers the narrow 09:16-09:30 pre-market
+-- window and is coupled to a real trading-behavior side effect, dropping
+-- a pre-entry candidate whose rank falls). This table is purely
+-- observational, written by an independent poll loop, so 1-2 weeks of
+-- data can be queried cleanly to work out the best OI_SPURT_MIN_PCT
+-- threshold without needing to filter out the other window's rows.
+CREATE TABLE IF NOT EXISTS oi_spurt_history (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_id         TEXT NOT NULL,
+    binding_id        TEXT NOT NULL,
+    trade_date        TEXT NOT NULL,
+    poll_ts           TEXT NOT NULL,
+    symbol            TEXT NOT NULL,
+    rank              INTEGER NOT NULL,
+    oi_spurt_pct      REAL,
+    price_change_pct  REAL
+);
+
 CREATE INDEX IF NOT EXISTS idx_positions_open
     ON positions(client_id, binding_id, status, trade_date);
 CREATE INDEX IF NOT EXISTS idx_signal_events_day
@@ -134,6 +154,10 @@ CREATE INDEX IF NOT EXISTS idx_shortlist_day
     ON shortlist(client_id, binding_id, trade_date);
 CREATE INDEX IF NOT EXISTS idx_rank_snapshots_day
     ON rank_snapshots(client_id, binding_id, trade_date, poll_ts);
+CREATE INDEX IF NOT EXISTS idx_oi_spurt_history_day
+    ON oi_spurt_history(client_id, binding_id, trade_date, poll_ts);
+CREATE INDEX IF NOT EXISTS idx_oi_spurt_history_symbol
+    ON oi_spurt_history(symbol, trade_date);
 """
 
 _initialized = False
@@ -287,6 +311,39 @@ def record_rank_snapshot(client_id: str, binding_id: str, poll_ts: str, rows: Li
         con.commit()
     except Exception as exc:
         logger.error("oi_orb store.record_rank_snapshot failed: %s", exc)
+    finally:
+        con.close()
+
+
+# ── oi_spurt_history (2026-09-07, direct user spec): "get the top 20 stocks
+# data and save in db with its oi spurt so that after 1 to 2 week we have
+# all the stocks with their oi spurt to analyse what is best threshold" --
+# same non-upserted, one-row-per-symbol-per-poll shape as rank_snapshots,
+# but a dedicated table since this poll runs on its own full-day cadence,
+# independent of and never coupled to the 09:16-09:30 rank-tracking window
+# above (that one can drop a pre-entry candidate from the shortlist; this
+# one only ever logs). ──────────────────────────────────────────────────
+
+def record_oi_spurt_history(client_id: str, binding_id: str, poll_ts: str, rows: List[dict],
+                             trade_date: Optional[str] = None) -> None:
+    """rows: [{"symbol", "rank", "oi_spurt_pct", "price_change_pct"}, ...] --
+    the full top-N poll output, one row per symbol per poll."""
+    init_db()
+    td = trade_date or _today()
+    con = sqlite3.connect(_DB_PATH)
+    try:
+        for r in rows:
+            con.execute(
+                """INSERT INTO oi_spurt_history
+                       (client_id, binding_id, trade_date, poll_ts, symbol, rank,
+                        oi_spurt_pct, price_change_pct)
+                   VALUES (?,?,?,?,?,?,?,?)""",
+                (client_id, binding_id, td, poll_ts, r["symbol"], int(r["rank"]),
+                 r.get("oi_spurt_pct"), r.get("price_change_pct")),
+            )
+        con.commit()
+    except Exception as exc:
+        logger.error("oi_orb store.record_oi_spurt_history failed: %s", exc)
     finally:
         con.close()
 

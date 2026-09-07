@@ -322,6 +322,29 @@ def test_poll_oi_rank_truncates_to_top_n(monkeypatch):
     assert list(ranked["rank"]) == list(range(1, 11))
 
 
+def test_poll_oi_rank_explicit_top_n_overrides_cfg_rank_top_n(monkeypatch):
+    """2026-09-07, direct user spec: the full-day OI-spurt history collector
+    wants top 20, distinct from RANK_TOP_N's own 10 used by the narrow
+    09:16-09:30 rank-tracking window -- an explicit top_n arg must win."""
+    universe = pd.DataFrame([
+        {"symbol": f"S{i}", "lastPrice": 100.0, "pChange": 1.0, "open": 99.0,
+         "dayHigh": 101.0, "dayLow": 98.0, "previousClose": 99.0, "totalTradedVolume": 1000}
+        for i in range(25)
+    ])
+    oi_spurts = pd.DataFrame({
+        "symbol": [f"S{i}" for i in range(25)],
+        "oi_spurt_pct": [float(25 - i) for i in range(25)],
+    })
+    monkeypatch.setattr(screener, "fetch_fno_price_universe", lambda nse: universe)
+    monkeypatch.setattr(screener, "fetch_oi_spurts_nse", lambda nse: oi_spurts)
+
+    cfg = _cfg(RANK_TOP_N=10)
+    ranked = screener.poll_oi_rank(nse=None, cfg=cfg, top_n=20)
+    assert len(ranked) == 20
+    assert ranked.iloc[0]["symbol"] == "S0"
+    assert list(ranked["rank"]) == list(range(1, 21))
+
+
 def test_poll_oi_rank_empty_on_no_overlap(monkeypatch):
     universe = pd.DataFrame([
         {"symbol": "NOMATCH", "lastPrice": 100.0, "pChange": 1.0, "open": 99.0,

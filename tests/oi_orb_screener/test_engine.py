@@ -618,6 +618,68 @@ async def test_do_rank_poll_never_drops_an_already_entered_symbol(monkeypatch):
     assert "BBB" not in book._rank_dropped
 
 
+# ── Full-day OI-spurt history capture (2026-09-07, direct user spec):
+# a SEPARATE, purely-observational poll -- must never touch shortlist/
+# rejected/positions state, unlike _do_rank_poll above. ───────────────────
+
+@pytest.mark.asyncio
+async def test_do_oi_spurt_history_poll_records_top_n_and_never_touches_trading_state(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._nse = object()
+    book._shortlist_symbols = ["AAA", "BBB"]
+    book._shortlist_pchange = {"AAA": 3.0, "BBB": -2.5}
+
+    captured = {}
+
+    def _poll(nse, cfg, top_n):
+        captured["top_n"] = top_n
+        return _ranked_df([
+            {"symbol": "AAA", "rank": 1, "oi_spurt_pct": 20.0, "pChange": 3.0},
+            {"symbol": "ZZZ", "rank": 2, "oi_spurt_pct": 9.73, "pChange": -2.43},
+        ])
+    monkeypatch.setattr(screener, "poll_oi_rank", _poll)
+
+    recorded = {}
+
+    def _record(client_id, binding_id, poll_ts, rows):
+        recorded["client_id"] = client_id
+        recorded["binding_id"] = binding_id
+        recorded["rows"] = rows
+    monkeypatch.setattr(store, "record_oi_spurt_history", _record)
+
+    now = datetime(2026, 9, 7, 11, 8, 50, tzinfo=IST)
+    await book._do_oi_spurt_history_poll(now, book._screener_cfg)
+
+    assert captured["top_n"] == book._screener_cfg.get("OI_SPURT_HISTORY_TOP_N", 20)
+    assert recorded["rows"] == [
+        {"symbol": "AAA", "rank": 1, "oi_spurt_pct": 20.0, "price_change_pct": 3.0},
+        {"symbol": "ZZZ", "rank": 2, "oi_spurt_pct": 9.73, "price_change_pct": -2.43},
+    ]
+    # ZZZ was never shortlisted and never becomes a candidate -- this poll
+    # only logs, it must never mutate shortlist/rejected/positions.
+    assert book._shortlist_symbols == ["AAA", "BBB"]
+    assert book._rejected == set()
+    assert book._positions == {}
+
+
+@pytest.mark.asyncio
+async def test_do_oi_spurt_history_poll_empty_ranked_df_is_a_noop(monkeypatch):
+    """An empty ranked frame (e.g. NSE returned nothing) must not call
+    store.record_oi_spurt_history at all."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._nse = object()
+    monkeypatch.setattr(screener, "poll_oi_rank", lambda nse, cfg, top_n: _ranked_df([]))
+
+    def _record_should_not_be_called(*a, **kw):
+        raise AssertionError("record_oi_spurt_history must not be called for an empty poll")
+    monkeypatch.setattr(store, "record_oi_spurt_history", _record_should_not_be_called)
+
+    now = datetime(2026, 9, 7, 11, 8, 50, tzinfo=IST)
+    await book._do_oi_spurt_history_poll(now, book._screener_cfg)
+
+
 @pytest.mark.asyncio
 async def test_afternoon_scan_noop_outside_window(monkeypatch):
     bus = _FakeBus()
