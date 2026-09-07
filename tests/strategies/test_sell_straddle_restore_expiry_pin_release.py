@@ -120,3 +120,73 @@ def test_reset_session_clears_the_restore_pin_flag():
     ss.reset_session()
 
     assert ss._entry_expiry_pinned_from_restore is False
+
+
+# ── trades_today revert on post_restore_data_stale (2026-09-07, direct user
+# spec): "the close which happened today was not due to the condition met it
+# was due to the ltp was not coming so it will be considered that we will
+# start from beginning." A post_restore_data_stale close is a defensive
+# safety-close caused by a data/feed problem, never a genuine trading
+# decision -- unlike day_loss_sl/day_profit_target/day_low_reversal_exit/EOD/
+# ITM-pair-gate (real exits driven by the strategy's own rules) or the
+# single-side rolls (decay/ratio_exit/exit_rules/vwap_rise, which never touch
+# trades_today at all since they don't go through entry-selection). ─────────
+
+def test_post_restore_data_stale_close_reverts_trades_today_to_beginning():
+    """The exact real incident: a restored position force-closed by the
+    post-restore stale-feed guard must NOT consume the day's 'first trade'
+    slot -- the next entry evaluation must see trades_today==0 again."""
+    ss = SellStraddleStrategy(EventBus(), GlobalConfig(), underlying="NIFTY")
+    ss._trades_today = 1  # the restored position's own original entry incremented this
+    _open_position(ss, date.today())
+    _patch_confirming_emit(ss)
+
+    async def _noop_unsub():
+        pass
+    ss._unsubscribe_entry_expiry_tokens = _noop_unsub
+
+    asyncio.run(ss._close_position("post_restore_data_stale"))
+
+    assert ss._trades_today == 0
+    is_beginning = (ss._trades_today == 0)
+    assert is_beginning is True
+
+
+def test_post_restore_data_stale_close_never_goes_negative():
+    """Defensive floor -- trades_today must never go below zero even if this
+    close somehow fires when trades_today is already 0 (e.g. a future caller
+    or an edge-case double-fire)."""
+    ss = SellStraddleStrategy(EventBus(), GlobalConfig(), underlying="NIFTY")
+    ss._trades_today = 0
+    _open_position(ss, date.today())
+    _patch_confirming_emit(ss)
+
+    async def _noop_unsub():
+        pass
+    ss._unsubscribe_entry_expiry_tokens = _noop_unsub
+
+    asyncio.run(ss._close_position("post_restore_data_stale"))
+
+    assert ss._trades_today == 0
+
+
+def test_genuine_exit_reasons_do_not_revert_trades_today():
+    """Contrast case: a REAL trading-decision exit (day_loss_sl here, same
+    category as day_profit_target/day_low_reversal_exit/EOD/itm_pair_gate_
+    profit) must never revert trades_today -- that trade genuinely happened
+    and genuinely completed on its own merits, so RE-ENTRY logic is correct
+    for whatever comes next today."""
+    ss = SellStraddleStrategy(EventBus(), GlobalConfig(), underlying="NIFTY")
+    ss._trades_today = 1
+    _open_position(ss, date.today())
+    _patch_confirming_emit(ss)
+
+    async def _noop_unsub():
+        pass
+    ss._unsubscribe_entry_expiry_tokens = _noop_unsub
+
+    asyncio.run(ss._close_position("day_loss_sl"))
+
+    assert ss._trades_today == 1
+    is_beginning = (ss._trades_today == 0)
+    assert is_beginning is False

@@ -2139,6 +2139,27 @@ class ExitMixin:
                     self._underlying,
                     self._entry_expiry_date.isoformat() if self._entry_expiry_date else None,
                 )
+            # 2026-09-07, direct user spec: "the close which happened today was not
+            # due to the condition met it was due to the ltp was not coming so it
+            # will be considered that we will start from beginning." A
+            # post_restore_data_stale close is a defensive safety-close caused by
+            # a data/feed problem, never a genuine trading decision (unlike
+            # day_loss_sl/day_profit_target/day_low_reversal_exit/EOD/ITM-pair-gate
+            # -- real exits driven by the strategy's own rules; single-side rolls
+            # like decay/ratio_exit/exit_rules/vwap_rise never touch trades_today
+            # at all, since they don't go through entry-selection). Undo the
+            # trades_today increment this position's own original entry made, so
+            # is_beginning (entries.py: self._trades_today == 0) is true again on
+            # the next cycle -- the strategy has not genuinely completed its first
+            # real trade of the day, so it should still be treated as one.
+            if reason == "post_restore_data_stale" and self._trades_today > 0:
+                self._trades_today -= 1
+                logger.info(
+                    "SellStraddle[%s]: post_restore_data_stale close was not a genuine "
+                    "trading decision -- trades_today reverted to %d so the next entry "
+                    "is evaluated as BEGINNING, not RE-ENTRY.",
+                    self._underlying, self._trades_today,
+                )
             # Cooldown is for organic SL events; forced liquidation / deployment removal
             # should not penalise future entries (and kill-switch means no future entries).
             if reason not in ("itm_pair_gate_profit", "kill_switch", "deployment_stop", "system_shutdown"):
