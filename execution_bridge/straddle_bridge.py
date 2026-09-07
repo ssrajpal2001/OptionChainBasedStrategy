@@ -906,7 +906,11 @@ class StraddleExecutionBridge:
         # Resolve the execution broker's provider + active expiry, then the broker-specific
         # symbol via the registry (mirrors ic_bridge). SymbolTranslator has no
         # 'to_broker_symbol' — that call was crashing the whole bridge.
-        _b = getattr(broker, "_binding", None)
+        # 2026-09-07 fix: every broker class stores its binding as self._b,
+        # never self._binding -- see oi_orb_bridge.py's _resolve_symbol for
+        # the full real-incident writeup (masked here only by luck, since
+        # SellStraddle's underlyings are always in monitored_indices).
+        _b = getattr(broker, "_b", None)
         provider = (_b.provider if _b else getattr(broker, "provider", "mock"))
         _today = _dt.now(_IST).date()
         expiry = getattr(ev, "expiry", None)

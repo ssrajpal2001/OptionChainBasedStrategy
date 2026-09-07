@@ -272,7 +272,29 @@ class OiOrbExecutionBridge:
     def _resolve_symbol(self, ev: OiOrbOrderEvent, broker) -> str:
         if not ev.expiry or not ev.strike or not ev.option_type:
             return ""
-        _b = getattr(broker, "_binding", None)
+        # 2026-09-07 CRITICAL FIX, real incident: every broker class
+        # (UpstoxBroker, ZerodhaBroker, FyersBroker, AngelBroker, DhanBroker,
+        # DeltaBroker) stores its BrokerBinding as self._b, NEVER self._binding
+        # -- this always returned None, so `provider` always fell through to
+        # the "mock" default, and get_broker_symbol()'s if/elif chain has no
+        # "mock" branch -- it silently returned the bare InternalSymbol
+        # canonical string (e.g. "ICICIPRULI:29SEP26:485:PE") as if it were a
+        # real broker symbol. For SellStraddle/CAG (index-only underlyings)
+        # this was invisibly masked -- UpstoxBroker._instrument_map is
+        # pre-populated at auth time with exactly these canonical strings as
+        # KEYS for monitored_indices only (execution_router.py's own
+        # build_instrument_map() injection loop), so the wrong "mock" symbol
+        # still happened to translate correctly by luck. OI-ORB trades
+        # individual F&O STOCKS, never in monitored_indices -- the same bug
+        # had no lucky fallback there, so Upstox rejected every single order
+        # with "UDAPI100011: Invalid Instrument key" (confirmed via the real
+        # 2026-09-07 order logs for SOLARINDS/ICICIPRULI/LTM), and since that
+        # rejection happens before an order even exists, none of them showed
+        # up in the user's broker app at all -- unlike SellStraddle's real
+        # (margin-rejected but genuinely placed) orders. Same latent bug also
+        # existed in straddle_bridge.py/straddle_hedge_bridge.py/
+        # cag_straddle_bridge.py -- fixed in all four the same way.
+        _b = getattr(broker, "_b", None)
         provider = _b.provider if _b else getattr(broker, "provider", "mock")
         return REGISTRY.get_broker_symbol(ev.underlying, ev.expiry, int(ev.strike), ev.option_type, provider)
 

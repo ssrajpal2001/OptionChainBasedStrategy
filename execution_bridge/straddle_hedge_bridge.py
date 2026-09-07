@@ -248,7 +248,11 @@ class StraddleHedgeExecutionBridge:
     def _resolve_symbol(self, ev: StraddleHedgeOrderEvent, broker) -> str:
         if not ev.expiry or not ev.strike or not ev.option_type:
             return ""
-        _b = getattr(broker, "_binding", None)
+        # 2026-09-07 fix: every broker class stores its binding as self._b,
+        # never self._binding -- see oi_orb_bridge.py's _resolve_symbol for
+        # the full real-incident writeup (masked here only by luck, since
+        # this bridge's underlyings are always in monitored_indices).
+        _b = getattr(broker, "_b", None)
         provider = _b.provider if _b else getattr(broker, "provider", "mock")
         return REGISTRY.get_broker_symbol(ev.underlying, ev.expiry, int(ev.strike), ev.option_type, provider)
 
