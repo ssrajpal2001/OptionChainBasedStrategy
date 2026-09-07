@@ -2114,3 +2114,70 @@ async def test_on_fill_tags_vwap_when_reason_is_vwap_retest(monkeypatch):
     await book._on_fill(fill)
 
     assert book._positions["ITC"]["sl_mechanic"] == "vwap"
+
+
+@pytest.mark.asyncio
+async def test_apply_historical_vwap_retest_fires_immediately_when_already_retested(monkeypatch):
+    """2026-09-07 direct user spec: a stock added to the shortlist well after
+    market open must check real intraday history for a VWAP-retest that
+    already completed, and fire immediately if so -- not start its arm/
+    retest state cold and wait for a brand new cross-and-retest cycle."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._shortlist_pchange["MANAPPURAM"] = -3.49  # bearish -> PUT
+
+    monkeypatch.setattr(screener, "historical_vwap_retest_check", lambda symbols_sides, cfg: {
+        "MANAPPURAM": {"armed": True, "fired": True, "fire_ts": "09:47",
+                        "fire_price": 327.30, "final_vwap": 327.79, "bars_replayed": 30},
+    })
+
+    handled = []
+    async def _fake_handle_signal(sig):
+        handled.append(sig)
+    book._handle_signal = _fake_handle_signal
+    book._evaluate_additive_filters = lambda sig: True  # isolate the historical-retest logic itself
+
+    await book._apply_historical_vwap_retest(["MANAPPURAM"], book._screener_cfg)
+    await asyncio.sleep(0.05)   # let the create_task'd _handle_signal actually run
+
+    assert ("MANAPPURAM", "PUT") in book._already_fired
+    assert len(handled) == 1
+    assert handled[0].reason == "vwap_retest_historical"
+    assert handled[0].trigger_price == 327.30
+
+
+@pytest.mark.asyncio
+async def test_apply_historical_vwap_retest_seeds_armed_state_without_firing(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._shortlist_pchange["SOLARINDS"] = 2.19  # bullish -> CALL
+
+    monkeypatch.setattr(screener, "historical_vwap_retest_check", lambda symbols_sides, cfg: {
+        "SOLARINDS": {"armed": True, "fired": False, "fire_ts": None,
+                       "fire_price": None, "final_vwap": 21824.27, "bars_replayed": 12},
+    })
+
+    handled = []
+    async def _fake_handle_signal(sig):
+        handled.append(sig)
+    book._handle_signal = _fake_handle_signal
+
+    await book._apply_historical_vwap_retest(["SOLARINDS"], book._screener_cfg)
+
+    assert book._vwap_armed["SOLARINDS"] is True
+    assert ("SOLARINDS", "CALL") not in book._already_fired
+    assert handled == []
+
+
+@pytest.mark.asyncio
+async def test_apply_historical_vwap_retest_missing_result_degrades_safely(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._shortlist_pchange["GHOST"] = 1.0
+
+    monkeypatch.setattr(screener, "historical_vwap_retest_check", lambda symbols_sides, cfg: {})
+
+    await book._apply_historical_vwap_retest(["GHOST"], book._screener_cfg)
+
+    assert "GHOST" not in book._vwap_armed
+    assert ("GHOST", "CALL") not in book._already_fired

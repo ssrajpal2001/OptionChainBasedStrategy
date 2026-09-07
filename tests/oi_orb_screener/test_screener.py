@@ -749,6 +749,93 @@ def test_backfill_vwap_from_yahoo_seeds_typical_price_times_volume(monkeypatch):
     assert vwap.current("VBL") == pytest.approx(101.333, abs=0.01)
 
 
+def _bar(ts, high, low, close, volume):
+    return {"ts": ts, "high": high, "low": low, "close": close, "volume": volume}
+
+
+def test_replay_vwap_retest_from_bars_fires_on_a_genuine_historical_retest():
+    """CALL side: price runs above vwap (arms), then comes back down onto vwap
+    (fires) -- entirely within the replayed history, before any live tick."""
+    bars = [
+        _bar("09:15", 101, 99, 100, 1000),    # vwap≈100, close=100 -> not yet armed (needs > vwap)
+        _bar("09:16", 110, 105, 108, 1000),   # close > vwap -> arms
+        _bar("09:17", 109, 100, 101, 1000),   # close comes back down onto/through vwap -> fires
+    ]
+    result = screener.replay_vwap_retest_from_bars(bars, "CALL", "09:15")
+    assert result["fired"] is True
+    assert result["fire_ts"] == "09:17"
+    assert result["bars_replayed"] == 3
+
+
+def test_replay_vwap_retest_from_bars_armed_but_not_fired():
+    bars = [
+        _bar("09:15", 101, 99, 100, 1000),
+        _bar("09:16", 110, 105, 108, 1000),   # arms, never retests
+    ]
+    result = screener.replay_vwap_retest_from_bars(bars, "CALL", "09:15")
+    assert result["fired"] is False
+    assert result["armed"] is True
+
+
+def test_replay_vwap_retest_from_bars_put_side_mirrors_call():
+    bars = [
+        _bar("09:15", 101, 99, 100, 1000),
+        _bar("09:16", 95, 90, 92, 1000),      # close < vwap -> arms (PUT)
+        _bar("09:17", 99, 92, 98, 1000),      # close comes back up onto vwap -> fires
+    ]
+    result = screener.replay_vwap_retest_from_bars(bars, "PUT", "09:15")
+    assert result["fired"] is True
+
+
+def test_replay_vwap_retest_from_bars_ignores_bars_before_orb_start():
+    bars = [
+        _bar("09:10", 200, 190, 195, 1000),   # before orb_start -- must be ignored
+        _bar("09:15", 101, 99, 100, 1000),
+    ]
+    result = screener.replay_vwap_retest_from_bars(bars, "CALL", "09:15")
+    assert result["bars_replayed"] == 1
+
+
+def test_replay_vwap_retest_from_bars_no_data_stays_cold():
+    result = screener.replay_vwap_retest_from_bars([], "CALL", "09:15")
+    assert result == {"armed": False, "fired": False, "fire_ts": None,
+                       "fire_price": None, "final_vwap": None, "bars_replayed": 0}
+
+
+def test_historical_vwap_retest_check_bulk_wrapper(monkeypatch):
+    import pandas as _pd
+    import sys
+
+    class _FakeYF:
+        @staticmethod
+        def download(tickers, period, interval, progress, group_by):
+            idx = _pd.date_range("2026-09-07 09:15", periods=3, freq="1min", tz="Asia/Kolkata")
+            df = _pd.DataFrame({
+                "High": [101, 110, 109], "Low": [99, 105, 100],
+                "Close": [100, 108, 101], "Volume": [1000, 1000, 1000],
+            }, index=idx)
+            df.columns = _pd.MultiIndex.from_product([["MANAPPURAM.NS"], df.columns])
+            return df
+
+    monkeypatch.setitem(sys.modules, "yfinance", _FakeYF)
+    out = screener.historical_vwap_retest_check({"MANAPPURAM": "CALL"}, screener.CONFIG)
+    assert out["MANAPPURAM"]["fired"] is True
+
+
+def test_historical_vwap_retest_check_missing_symbol_degrades_safely(monkeypatch):
+    import pandas as _pd
+    import sys
+
+    class _FakeYF:
+        @staticmethod
+        def download(tickers, period, interval, progress, group_by):
+            return _pd.DataFrame()
+
+    monkeypatch.setitem(sys.modules, "yfinance", _FakeYF)
+    out = screener.historical_vwap_retest_check({"GHOST": "PUT"}, screener.CONFIG)
+    assert "GHOST" not in out
+
+
 def test_smabars_seed_close_never_overwrites_live_quote():
     from datetime import datetime as _dt
     bars = screener.SmaBars()

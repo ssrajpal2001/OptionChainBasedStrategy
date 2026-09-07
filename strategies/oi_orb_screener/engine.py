@@ -785,6 +785,11 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             try:
                 await asyncio.to_thread(screener.backfill_orb_from_yahoo, self._bars, [sym], cfg)
                 await asyncio.to_thread(screener.backfill_vwap_from_yahoo, self._vwap, [sym], cfg)
+                # 2026-09-07, direct user spec: same historical-retest check as the
+                # morning path -- an afternoon-added symbol has been trading since
+                # 09:15 too, so check whether its VWAP-retest already completed
+                # before the afternoon scan even noticed it.
+                await self._apply_historical_vwap_retest([sym], cfg)
             except Exception:
                 self._clog.exception("OiOrb[%s/%s]: afternoon-scan backfill failed for %s "
                                       "(non-fatal, VWAP will start cold from now).",
@@ -1086,6 +1091,12 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             # backfilled the same way ORB/SMA already are, real 09:15-start basis instead of
             # starting cold from whatever time live polling first begins.
             await asyncio.to_thread(screener.backfill_vwap_from_yahoo, self._vwap, self._shortlist_symbols, cfg)
+            # 2026-09-07, direct user spec: this book may only start watching the
+            # shortlist well after market open (a restart, or simply because
+            # SCAN_START itself is 09:26) -- check whether today's real VWAP-retest
+            # already completed in the gap, and fire immediately if so, instead of
+            # starting every symbol's arm/retest state cold.
+            await self._apply_historical_vwap_retest(self._shortlist_symbols, cfg)
 
         # 2026-08-27: MAX_MONITOR_MINUTES used to be this loop's own outer deadline, but a
         # position can now stay open (and needs live VWAP updates for its own SL) all the
@@ -1257,25 +1268,10 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                         continue
                     self._already_fired.add((sym, side))
                     orb_lvl = self._orb_frozen.get(sym, (0.0, 0.0))
-                    sig = screener.Signal(symbol=sym, side=side, reason=reason,
-                                          trigger_price=ltp, orb_high=orb_lvl[0], orb_low=orb_lvl[1],
-                                          ts=now.strftime("%H:%M:%S"))
-                    self._clog.info(
-                        "OiOrb[%s/%s]: SIGNAL %s BUY %s %s ltp=%.2f reason=%s",
-                        self._client_id, self._binding_id, sig.symbol, sig.side,
-                        "IMMEDIATE-ORB" if immediate_entry_on else "TRAP-RETEST",
-                        sig.trigger_price, sig.reason)
-                    await asyncio.to_thread(
-                        store.log_signal_event, self._client_id, self._binding_id, sig.symbol,
-                        "signal_fired", side=sig.side, detail=sig.reason,
-                        trigger_price=sig.trigger_price, orb_high=sig.orb_high, orb_low=sig.orb_low)
-                    if self._evaluate_additive_filters(sig):
-                        asyncio.create_task(self._handle_signal(sig))
-                    else:
-                        self._clog.info(
-                            "OiOrb[%s/%s]: %s %s signal BLOCKED by an enabled additive filter -- "
-                            "see the individual oiorb_filter_* logs for which one and why.",
-                            self._client_id, self._binding_id, sig.symbol, sig.side)
+                    await self._emit_vwap_signal(
+                        sym, side, ltp, reason, orb_lvl, now.strftime("%H:%M:%S"),
+                        label="IMMEDIATE-ORB" if immediate_entry_on else "TRAP-RETEST",
+                    )
             elif (not cfg.get("IGNORE_TIME_WINDOWS") and now_key >= cfg["ENTRY_WINDOW_END"]
                   and not self._entry_window_done_logged):
                 self._entry_window_done_logged = True
@@ -1309,6 +1305,90 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 break
 
             await asyncio.sleep(cfg["POLL_SECONDS"])
+
+    async def _emit_vwap_signal(self, sym: str, side: str, ltp: float, reason: str,
+                                 orb_lvl: tuple, ts_str: str, label: str) -> None:
+        """Factored out of the live tick loop (2026-09-07) so the historical-
+        replay path (_apply_historical_vwap_retest) can fire an identical
+        signal for a retest that already completed in real intraday history
+        before this book started watching the stock, not just a live tick."""
+        sig = screener.Signal(symbol=sym, side=side, reason=reason,
+                              trigger_price=ltp, orb_high=orb_lvl[0], orb_low=orb_lvl[1],
+                              ts=ts_str)
+        self._clog.info(
+            "OiOrb[%s/%s]: SIGNAL %s BUY %s %s ltp=%.2f reason=%s",
+            self._client_id, self._binding_id, sig.symbol, sig.side,
+            label, sig.trigger_price, sig.reason)
+        await asyncio.to_thread(
+            store.log_signal_event, self._client_id, self._binding_id, sig.symbol,
+            "signal_fired", side=sig.side, detail=sig.reason,
+            trigger_price=sig.trigger_price, orb_high=sig.orb_high, orb_low=sig.orb_low)
+        if self._evaluate_additive_filters(sig):
+            asyncio.create_task(self._handle_signal(sig))
+        else:
+            self._clog.info(
+                "OiOrb[%s/%s]: %s %s signal BLOCKED by an enabled additive filter -- "
+                "see the individual oiorb_filter_* logs for which one and why.",
+                self._client_id, self._binding_id, sig.symbol, sig.side)
+
+    async def _apply_historical_vwap_retest(self, symbols: list, cfg: dict) -> None:
+        """2026-09-07, direct user spec: "when we started the application and
+        stocks were already there in the scan list it should have called
+        intraday historical data and found if it satisfied the vwap touch
+        concept or not -- if yes, immediately trade should have started."
+
+        Called once for every symbol newly added to the shortlist (morning
+        scan AND the 12:00-15:00 afternoon rescan) -- replays real intraday
+        1-min history through the exact same check_vwap_retest_entry() state
+        machine the live tick loop uses (screener.historical_vwap_retest_check/
+        replay_vwap_retest_from_bars). A symbol whose retest already
+        genuinely completed earlier today fires immediately, right here,
+        instead of silently starting its arm/retest state cold and waiting
+        for a brand new cross-and-retest cycle that may not come again for
+        the rest of the day. A symbol that only got as far as arming (crossed
+        to the correct side but never retested) has that arm state carried
+        forward into self._vwap_armed, so the very next live tick continues
+        from where the real market already was, instead of restarting from
+        scratch. Best-effort: any missing/failed Yahoo data for a symbol
+        leaves it at the safe cold-start default (armed=False), identical to
+        today's pre-existing behavior for that symbol."""
+        if not symbols:
+            return
+        symbols_sides = {sym: screener.side_from_pchange(self._shortlist_pchange.get(sym, 0.0))
+                          for sym in symbols}
+        try:
+            results = await asyncio.to_thread(screener.historical_vwap_retest_check, symbols_sides, cfg)
+        except Exception:
+            self._clog.exception("OiOrb[%s/%s]: historical VWAP-retest check failed "
+                                  "(non-fatal, arm state stays cold for %s).",
+                                  self._client_id, self._binding_id, symbols)
+            return
+        now = datetime.now(IST)
+        for sym, side in symbols_sides.items():
+            result = results.get(sym)
+            if not result:
+                continue
+            if result["fired"]:
+                if (sym, side) in self._already_fired or (sym, side) in self._rejected:
+                    continue
+                self._clog.info(
+                    "OiOrb[%s/%s]: %s %s HISTORICAL VWAP-RETEST already completed at %s "
+                    "(price=%.2f) before this book started watching it -- firing immediately.",
+                    self._client_id, self._binding_id, sym, side,
+                    result["fire_ts"], result["fire_price"])
+                self._already_fired.add((sym, side))
+                orb_lvl = self._orb_frozen.get(sym, (0.0, 0.0))
+                await self._emit_vwap_signal(
+                    sym, side, result["fire_price"], "vwap_retest_historical", orb_lvl,
+                    now.strftime("%H:%M:%S"), label="HISTORICAL-RETEST",
+                )
+            else:
+                self._vwap_armed[sym] = result["armed"]
+                if result["armed"]:
+                    self._clog.info(
+                        "OiOrb[%s/%s]: %s %s armed from real intraday history (bars_replayed=%d) "
+                        "-- waiting for the retest touch on the next live tick.",
+                        self._client_id, self._binding_id, sym, side, result["bars_replayed"])
 
     async def _wait_until_actionable(self, cfg) -> bool:
         """Waits for SCAN_START (session 1's single point-in-time scan,
