@@ -202,9 +202,20 @@ class UpstoxBroker(BaseBroker):
             is_amo=self._is_amo,
         )
 
-        ret = await asyncio.to_thread(
-            self._order_api.place_order, body, api_version="2.0"
-        )
+        try:
+            ret = await asyncio.to_thread(
+                self._order_api.place_order, body, api_version="2.0"
+            )
+        except Exception as exc:
+            # upstox_client's ApiException.__str__() collapses to just "(400)"
+            # -- the real rejection reason (invalid instrument, bad product
+            # code, insufficient margin, etc.) lives in exc.body and is lost
+            # unless surfaced explicitly. Real incident 2026-09-07: OI-ORB
+            # Screener orders failed with only "(400)" logged, indistinguishable
+            # from a genuine no-funds rejection vs. a malformed request that
+            # never reached Upstox's order book at all.
+            body = getattr(exc, "body", None)
+            raise RuntimeError(f"Upstox place_order failed: {exc} body={body}") from exc
 
         if ret and ret.status == "success":
             return str(ret.data.order_id if ret.data else "")
