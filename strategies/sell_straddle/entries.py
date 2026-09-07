@@ -131,7 +131,16 @@ class EntryMixin:
 
     def _any_active_terminal(self) -> bool:
         """True if at least one client has a binding with terminal_connected AND engine_active,
-        deployed to sell_straddle for this underlying."""
+        deployed to this book's own strategy_name for this underlying.
+
+        2026-09-07 real incident fix: this hardcoded the literal "sell_straddle" instead
+        of self._strategy_name -- a sell_straddle_calc_vwap book's deployment row is
+        actually named "sell_straddle_calc_vwap" in strategy_deployments, so can_trade()
+        could never find a matching running deployment for it and permanently returned
+        False, silently blocking entry forever (term=False in every IDX_TICKS log line)
+        even though the binding's terminal/trade toggles were genuinely ON. Every other
+        strategy_name-aware spot (persist_key, log tag, PositionUpdateMixin, _emit_order's
+        event stamp) was already fixed the same night this book's own gate was missed."""
         from strategies.core import can_trade
         db = self._client_db
         if db is None:
@@ -140,7 +149,7 @@ class EntryMixin:
             if self._client_id and self._binding_id:
                 return can_trade(
                     self._client_id, self._binding_id, db,
-                    strategy_name="sell_straddle", underlying=self._underlying,
+                    strategy_name=self._strategy_name, underlying=self._underlying,
                 )
             active = False
             for _client in db.get_all_clients_sync():

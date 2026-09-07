@@ -30,3 +30,36 @@ def test_gate_allows_when_active():
     # bypass the 5s cache from any prior call
     ss._term_check_t = 0.0
     assert ss._any_active_terminal() is True
+
+
+class _FakeDBCalcVwap:
+    """Terminal/trade ON, but the only running deployment is
+    'sell_straddle_calc_vwap', not 'sell_straddle'."""
+    def get_all_clients_sync(self): return [{"client_id": "c_calcvwap"}]
+    def get_bindings_safe_sync(self, cid):
+        return [{
+            "binding_id": "b_calcvwap",
+            "engine_active": True,
+            "terminal_connected": True,
+            "is_trade_enabled": True,
+        }]
+    def get_deployments_sync(self, cid):
+        return [{"strategy_name": "sell_straddle_calc_vwap", "underlying": "NIFTY",
+                  "binding_id": "b_calcvwap", "is_running": 1}]
+
+
+def test_gate_uses_own_strategy_name_not_hardcoded_sell_straddle():
+    """2026-09-07 real incident: _any_active_terminal() hardcoded
+    strategy_name="sell_straddle" instead of self._strategy_name, so a
+    sell_straddle_calc_vwap book's own can_trade() check could never find its
+    OWN deployment row (named "sell_straddle_calc_vwap") and permanently
+    returned False -- terminal/trade toggles genuinely ON, entry blocked
+    forever anyway. Uses distinct client/binding ids from the other tests in
+    this file to avoid colliding with gate.py's own 5s module-level cache."""
+    ss = SellStraddleStrategy(
+        EventBus(), GlobalConfig(), underlying="NIFTY",
+        client_id="c_calcvwap", binding_id="b_calcvwap",
+        strategy_name="sell_straddle_calc_vwap",
+    )
+    ss.set_client_db(_FakeDBCalcVwap())
+    assert ss._any_active_terminal() is True
