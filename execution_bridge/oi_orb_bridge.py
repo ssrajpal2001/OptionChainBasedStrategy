@@ -324,7 +324,16 @@ class OiOrbExecutionBridge:
             qty=ev.quantity,
             order_type=OrderType.MARKET,
             product=ev.product_type or "MIS",
-            price=ev.entry_price,   # ignored for MARKET; MockBroker uses as fill
+            # 2026-09-07 CRITICAL FIX, real incident: Upstox's real API
+            # rejects a MARKET order that carries a non-zero price
+            # ("UDAPI1040: Price not required") -- the stale "MockBroker
+            # uses as fill" comment this replaces was wrong for this code
+            # path: _live_fill is ONLY ever called with a REAL broker
+            # (paper_route/live both need one) -- MockBroker is never
+            # reached here, paper mode bypasses this entirely via
+            # _paper_fill. straddle_bridge.py never sets price at all
+            # (defaults to 0.0) for exactly this reason -- match it.
+            price=0.0,
             tag=f"{_ORDER_TAG_PREFIX}{ev.underlying}_{ev.action}"[:20],
         )
 

@@ -282,7 +282,13 @@ class StraddleHedgeExecutionBridge:
             qty=ev.quantity,
             order_type=OrderType.MARKET,
             product=ev.product_type or "NRML",
-            price=ev.entry_price,   # ignored for MARKET; MockBroker uses as fill
+            # 2026-09-07 fix: Upstox's real API rejects a MARKET order
+            # carrying a non-zero price ("UDAPI1040: Price not required")
+            # -- see oi_orb_bridge.py's own writeup, same fix here
+            # pre-emptively (never yet triggered live, but this bridge is
+            # the identical shape). _live_fill only ever gets a real
+            # broker, never MockBroker.
+            price=0.0,
             tag=f"{_ORDER_TAG_PREFIX}{ev.underlying}_{ev.action}"[:20],
         )
 
