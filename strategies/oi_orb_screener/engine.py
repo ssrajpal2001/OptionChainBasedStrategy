@@ -1033,9 +1033,12 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             # signal while ORB levels are still empty/pending.
             self._shortlist_pchange = (shortlist.set_index("symbol")["pChange"].to_dict()
                                         if "pChange" in shortlist.columns else {})
+            _oi_spurt_map = (shortlist.set_index("symbol")["oi_spurt_pct"].to_dict()
+                             if "oi_spurt_pct" in shortlist.columns else {})
             self._clog.info("OiOrb[%s/%s]: shortlist ready (%d): %s",
                              self._client_id, self._binding_id, len(self._shortlist_symbols),
-                             ", ".join(f"{s}({self._shortlist_pchange.get(s, 0):+.2f}%)"
+                             ", ".join(f"{s}(px={self._shortlist_pchange.get(s, 0):+.2f}%,"
+                                       f"oi_spurt={_oi_spurt_map.get(s, 0):.2f}%)"
                                        for s in self._shortlist_symbols))
             # 2026-09-06, direct user spec: subscribe every shortlisted stock to
             # the dedicated upstox2 WebSocket the MOMENT it's shortlisted, not
