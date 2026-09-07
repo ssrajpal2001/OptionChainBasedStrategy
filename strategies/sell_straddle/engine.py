@@ -250,6 +250,21 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         # from scratch and just holds self._entry_expiry_date fixed for the rest
         # of the day -- see that method's own updated docstring.
         self._expiry_shifted_low_anchor_ltp: bool = False
+        # 2026-09-07 CRITICAL FIX, real incident: distinguishes WHY the sticky
+        # pin above was armed. The genuine "expiry-day shift" reason (comment
+        # above) is meant to persist for the whole day, across multiple
+        # entries/exits, by design. But _restore_position() (below) also sets
+        # the SAME flag purely so a restart doesn't forget an EXISTING open
+        # position's own expiry -- that reason should NOT outlive the
+        # position it was protecting. Real incident: after that restored
+        # position closed, the pin stayed stuck on its (stale, no-longer-
+        # relevant) expiry for the rest of the day; pool warm-seeding kept
+        # failing against that stale expiry ("no token/spot"), and since this
+        # book's main loop is tick-driven, a subscription that never
+        # resolves means the book silently never wakes up again -- no
+        # exception, just permanent silence until the next restart. See
+        # _close_position()'s own use of this flag for the actual fix.
+        self._entry_expiry_pinned_from_restore: bool = False
 
         # 2026-08-23, direct user spec: "entry price should come from the broker
         # which is connected to the client. If broker doesn't send the data we
@@ -652,6 +667,7 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
             return
         self._entry_expiry_date = self._position.expiry_date
         self._expiry_shifted_low_anchor_ltp = True
+        self._entry_expiry_pinned_from_restore = True
         logger.info(
             "SellStraddle[%s]: restored position's own expiry (%s) re-armed as "
             "the sticky entry expiry -- subscriptions/new entries stay pinned to "
@@ -1152,6 +1168,7 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         # a fresh trading day starts back on the normal current-week expiry,
         # never inheriting yesterday's shift.
         self._expiry_shifted_low_anchor_ltp = False
+        self._entry_expiry_pinned_from_restore = False
         # Recompute effective entry expiry for the new session/day.
         self._entry_expiry_date = self._effective_entry_expiry()
         try:

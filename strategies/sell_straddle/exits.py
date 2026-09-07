@@ -1927,6 +1927,13 @@ class ExitMixin:
         self._unpin_position_legs(pos)
         self._position = None
         await self._unsubscribe_entry_expiry_tokens()
+        # 2026-09-07 fix: same restore-only sticky-expiry-pin release as
+        # _close_position() -- see that method's own writeup for the real
+        # incident this fixes.
+        if self._entry_expiry_pinned_from_restore:
+            self._entry_expiry_pinned_from_restore = False
+            self._expiry_shifted_low_anchor_ltp = False
+            self._entry_expiry_date = self._effective_entry_expiry()
         self._apply_sl_cooldown()
         self._persist()
         logger.info(
@@ -2108,6 +2115,30 @@ class ExitMixin:
 
             self._persist()
             await self._unsubscribe_entry_expiry_tokens()
+            # 2026-09-07 CRITICAL FIX, real incident: release the sticky expiry
+            # pin if it was only ever armed to protect a RESTORED position's own
+            # expiry across a restart (see engine.py's _entry_expiry_pinned_from_
+            # restore for the full writeup) -- that reason ends the moment this
+            # very position closes. Without this, the pin stayed on the closed
+            # position's (possibly stale/illiquid) expiry for the rest of the
+            # day, pool warm-seeding kept failing against it, and since this
+            # book's main loop is tick-driven, a subscription that never
+            # resolves left it permanently silent -- no exception, just dead
+            # air until the next restart. Recompute fresh immediately so the
+            # NEXT entry scan uses the genuinely current expiry, not the stale
+            # one. Deliberately does NOT touch the flag for the legitimate
+            # same-day "expiry-day shift" reason (entries.py/exits.py's own
+            # sets of this flag never touch _entry_expiry_pinned_from_restore).
+            if self._entry_expiry_pinned_from_restore:
+                self._entry_expiry_pinned_from_restore = False
+                self._expiry_shifted_low_anchor_ltp = False
+                self._entry_expiry_date = self._effective_entry_expiry()
+                logger.info(
+                    "SellStraddle[%s]: released restore-only sticky expiry pin on close -- "
+                    "next entry scan will use the genuinely current expiry (%s).",
+                    self._underlying,
+                    self._entry_expiry_date.isoformat() if self._entry_expiry_date else None,
+                )
             # Cooldown is for organic SL events; forced liquidation / deployment removal
             # should not penalise future entries (and kill-switch means no future entries).
             if reason not in ("itm_pair_gate_profit", "kill_switch", "deployment_stop", "system_shutdown"):
