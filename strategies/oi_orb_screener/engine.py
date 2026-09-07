@@ -264,9 +264,23 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         # premium (its own VWAP, its own bars), not the underlying stock's
         # spot price -- see screener.compute_option_premium_sl_arm/_target.
         rr_multiple: float = 2.0,
+        # 2026-09-07, direct user spec: new sibling variant -- top-20-by-OI-spurt
+        # (no pct threshold) + a rolling-15x1min-candle directional VWAP-touch
+        # entry (strategies/oi_orb_screener/screener.py's VwapTouchTracker),
+        # rather than the standard variant's OI_SPURT_MIN_PCT-gated shortlist +
+        # arm/retest _vwap_check_entry. Everything else (ORB/VWAP backfill,
+        # chain subscription, HA+StochRSI exit, EOD square-off) is untouched and
+        # shared byte-for-byte between both variants -- only shortlist-building
+        # and entry-detection branch on this flag. Deliberately a constructor
+        # flag, not a second engine file, so a bug fix to shared machinery never
+        # has to be applied twice (same reasoning as SellStraddle's own
+        # sell_straddle_calc_vwap variant).
+        strategy_name: str = "oi_orb_screener",
     ) -> None:
         super().__init__(bus, cfg, _UNDERLYING_SENTINEL, client_id, binding_id)
-        self._strategy_name = "oi_orb_screener"
+        self._strategy_name = strategy_name
+        self._top20_mode = (strategy_name == "oi_orb_screener_top20")
+        self._vwap_touch_trackers: dict = {}
         self._lot_multiplier = max(1, lot_multiplier)
         self._product_type = product_type
         try:
@@ -1050,8 +1064,27 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         last_exc: Optional[Exception] = None
         for attempt in range(1, _BUILD_SHORTLIST_MAX_ATTEMPTS + 1):
             try:
-                shortlist, nifty_pchange = await asyncio.to_thread(
-                    screener.build_shortlist, self._nse, cfg)
+                if self._top20_mode:
+                    top20_all, shortlist, nifty_pchange = await asyncio.to_thread(
+                        screener.build_top20_shortlist, self._nse, cfg)
+                    if top20_all is not None and not top20_all.empty:
+                        await asyncio.to_thread(
+                            store.record_top20_daily_scan, self._client_id, self._binding_id,
+                            [
+                                {
+                                    "symbol": r["symbol"],
+                                    "rank": int(r["rank"]),
+                                    "oi_spurt_pct": float(r.get("oi_spurt_pct", 0.0) or 0.0),
+                                    "price_change_pct": float(r.get("pChange", 0.0) or 0.0),
+                                    "price_move_pass": bool(abs(float(r.get("pChange", 0.0) or 0.0))
+                                                             >= cfg.get("PRICE_MOVE_MIN_PCT", 2.0)),
+                                }
+                                for r in top20_all.to_dict("records")
+                            ],
+                        )
+                else:
+                    shortlist, nifty_pchange = await asyncio.to_thread(
+                        screener.build_shortlist, self._nse, cfg)
                 last_exc = None
                 break
             except Exception as exc:
@@ -1359,12 +1392,31 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                     side = screener.side_from_pchange(self._shortlist_pchange.get(sym, 0.0))
                     if (sym, side) in self._already_fired or (sym, side) in self._rejected:
                         continue
-                    if not screener.side_allowed_by_regime(side, self._regime, regime_filter_on):
+                    # 2026-09-07, direct user spec for oi_orb_screener_top20:
+                    # "no oi spurt threshold... 2% high or low from prev day...
+                    # if any stocks which passes this criteria is checked for
+                    # vwap touch" -- no NIFTY-regime gate in this variant's spec,
+                    # both CALL and PUT sides are always eligible once a genuine
+                    # directional VWAP touch fires.
+                    if not self._top20_mode and not screener.side_allowed_by_regime(
+                            side, self._regime, regime_filter_on):
                         continue
                     ltp = self._live_price(sym, live)
                     if ltp is None:
                         continue
-                    if immediate_entry_on:
+                    if self._top20_mode:
+                        vwap = self._vwap.current(sym)
+                        tracker = self._vwap_touch_trackers.get(sym)
+                        if vwap is None or tracker is None:
+                            continue
+                        touch_side = tracker.check_touch(ltp, vwap)
+                        fire = touch_side == side
+                        reason = "vwap_touch_top20"
+                        if fire:
+                            await asyncio.to_thread(
+                                store.update_top20_vwap_touch, self._client_id,
+                                self._binding_id, sym, side)
+                    elif immediate_entry_on:
                         fire = self._immediate_check_entry(sym, side, now)
                         reason = "immediate_orb_entry"
                     else:
@@ -1379,10 +1431,14 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                     if not fire:
                         continue
                     self._already_fired.add((sym, side))
+                    if self._top20_mode:
+                        await asyncio.to_thread(
+                            store.update_top20_traded, self._client_id, self._binding_id, sym)
                     orb_lvl = self._orb_frozen.get(sym, (0.0, 0.0))
                     await self._emit_vwap_signal(
                         sym, side, ltp, reason, orb_lvl, now.strftime("%H:%M:%S"),
-                        label="IMMEDIATE-ORB" if immediate_entry_on else "TRAP-RETEST",
+                        label=("TOP20-VWAP-TOUCH" if self._top20_mode
+                               else ("IMMEDIATE-ORB" if immediate_entry_on else "TRAP-RETEST")),
                     )
             elif (not cfg.get("IGNORE_TIME_WINDOWS") and now_key >= cfg["ENTRY_WINDOW_END"]
                   and not self._entry_window_done_logged):
@@ -2035,6 +2091,17 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                     continue
                 self._live_spot_ltp[symbol] = ltp
                 self._live_spot_ltp_ts[symbol] = datetime.now(IST)
+                # 2026-09-07, top20 variant only: real tick-by-tick feed into
+                # this symbol's rolling 15x1min VWAP-touch window (see
+                # screener.VwapTouchTracker) -- the standard variant's
+                # arm/retest _vwap_check_entry does not use this tracker at all.
+                if self._top20_mode and symbol in self._shortlist_symbols:
+                    tracker = self._vwap_touch_trackers.get(symbol)
+                    if tracker is None:
+                        tracker = screener.VwapTouchTracker(
+                            self._screener_cfg.get("VWAP_TOUCH_WINDOW_MIN", 15))
+                        self._vwap_touch_trackers[symbol] = tracker
+                    tracker.on_tick(datetime.now(IST), ltp)
             except Exception:
                 self._clog.exception("OiOrb[%s/%s]: spot tick processing error (recovered).",
                                       self._client_id, self._binding_id)

@@ -159,10 +159,15 @@ def _parse_params(raw: str) -> dict:
 
 
 class OiOrbScreenerBookManager(StrategyBookManager):
+    # 2026-09-07: overridden by OiOrbScreenerTop20BookManager so the same
+    # book class/reconcile logic serves both deployment rows
+    # ("oi_orb_screener" vs "oi_orb_screener_top20") -- only the DB query
+    # and the strategy_name threaded into the spawned book differ.
+    STRATEGY_NAME = _STRATEGY_NAME
 
     def _wanted(self) -> Dict[tuple, dict]:
         wanted: Dict[tuple, dict] = {}
-        rows = self._db.get_running_deployments_by_strategy_sync(_STRATEGY_NAME)
+        rows = self._db.get_running_deployments_by_strategy_sync(self.STRATEGY_NAME)
         for d in rows or []:
             cid = d.get("client_id", "")
             bid = d.get("binding_id", "")
@@ -250,11 +255,12 @@ class OiOrbScreenerBookManager(StrategyBookManager):
             vwap_sl_tf_minutes=value["vwap_sl_tf_minutes"],
             rr_multiple=value["rr_multiple"],
             immediate_entry_enabled=value["immediate_entry_enabled"],
+            strategy_name=self.STRATEGY_NAME,
         )
         logger.info(
-            "OiOrbScreenerBookManager: spawned %s/%s (lots=%d oi_spurt>=%.1f%% price_move>=%.1f%% "
+            "OiOrbScreenerBookManager[%s]: spawned %s/%s (lots=%d oi_spurt>=%.1f%% price_move>=%.1f%% "
             "top_n=%d regime_filter=%s ignore_time_windows=%s).",
-            client_id, binding_id, value["lots"], value["oi_spurt_min_pct"],
+            self.STRATEGY_NAME, client_id, binding_id, value["lots"], value["oi_spurt_min_pct"],
             value["price_move_min_pct"], value["top_n_per_side"], value["regime_filter_enabled"],
             value["ignore_time_windows"],
         )
@@ -319,3 +325,23 @@ class OiOrbScreenerBookManager(StrategyBookManager):
 
     def _log_stopped(self, key: tuple) -> None:
         logger.info("OiOrbScreenerBookManager: reconcile stopped %s", key)
+
+
+class OiOrbScreenerTop20BookManager(OiOrbScreenerBookManager):
+    """2026-09-07, direct user spec: sibling deployment/strategy_name to the
+    standard oi_orb_screener -- same shortlist->ORB/VWAP scaffolding, own
+    scan (top-20-by-OI-spurt, no pct threshold) + own entry mechanic
+    (rolling 15x1min VWAP-touch, see screener.VwapTouchTracker), reusing the
+    identical exit mechanic (HA+StochRSI, EOD square-off). See
+    OiOrbScreenerStrategy.__init__'s strategy_name param + engine.py's
+    self._top20_mode branches for the actual behavioral difference -- this
+    class only changes WHICH deployment rows get read and WHICH strategy_name
+    gets threaded into the spawned book; everything else (reconcile/respawn
+    logic, config parsing) is inherited unchanged.
+
+    A client/binding could in principle run BOTH variants -- since each is a
+    separate strategy_deployments row keyed by strategy_name, and this class's
+    own _wanted() only ever queries "oi_orb_screener_top20" rows, the two
+    managers can never accidentally spawn duplicate/colliding books for the
+    same deployment."""
+    STRATEGY_NAME = "oi_orb_screener_top20"

@@ -926,3 +926,108 @@ def test_backfill_sma_bars_from_yahoo_single_ticker_multiindex_columns(monkeypat
 
     closes = sma_bars.closes("VBL", before=_dt(2026, 8, 26, 9, 25), tf_min=5)
     assert closes == [440.0, 445.0, 446.5]   # spans the day boundary, single-ticker MultiIndex handled
+
+
+# ── build_top20_shortlist -- rank-only cutoff, no OI-spurt threshold ─────
+
+def test_build_top20_shortlist_ranks_by_oi_spurt_no_threshold(monkeypatch):
+    # 22 symbols so the top-20 cutoff genuinely excludes something; two of
+    # the top-20 fail the price-move filter and must show up in `top20`
+    # (unfiltered, for DB registration) but NOT in `tradeable`.
+    universe_rows = []
+    oi_rows = []
+    for i in range(22):
+        sym = f"SYM{i:02d}"
+        pchange = 3.0 if i not in (0, 1) else 1.0   # SYM00/SYM01 fail the 2% move filter
+        universe_rows.append({"symbol": sym, "lastPrice": 100.0 + i, "pChange": pchange,
+                               "open": 99.0, "dayHigh": 101.0, "dayLow": 98.0,
+                               "previousClose": 100.0, "totalTradedVolume": 1000})
+        oi_rows.append({"symbol": sym, "oi_spurt_pct": float(30 - i)})  # descending, SYM00 highest
+    universe = pd.DataFrame(universe_rows)
+    oi_spurts = pd.DataFrame(oi_rows)
+
+    monkeypatch.setattr(screener, "fetch_fno_price_universe", lambda nse: universe)
+    monkeypatch.setattr(screener, "fetch_nifty_pchange", lambda nse: 0.05)
+    monkeypatch.setattr(screener, "fetch_oi_spurts_nse", lambda nse: oi_spurts)
+
+    cfg = _cfg(TOP20_RANK_N=20, PRICE_MOVE_MIN_PCT=2.0)
+    top20, tradeable, nifty_pchange = screener.build_top20_shortlist(nse=None, cfg=cfg)
+
+    assert nifty_pchange == 0.05
+    assert len(top20) == 20
+    assert list(top20["symbol"]) == [f"SYM{i:02d}" for i in range(20)]   # highest OI-spurt first
+    assert list(top20["rank"]) == list(range(1, 21))
+    assert "SYM20" not in set(top20["symbol"])   # ranked #21, cut off
+    assert "SYM21" not in set(top20["symbol"])   # ranked #22, cut off
+
+    tradeable_syms = set(tradeable["symbol"])
+    assert "SYM00" not in tradeable_syms   # in top20 but fails |pChange|>=2%
+    assert "SYM01" not in tradeable_syms
+    assert "SYM02" in tradeable_syms       # in top20 and passes the move filter
+
+
+def test_build_top20_shortlist_empty_universe_returns_empty_frames(monkeypatch):
+    monkeypatch.setattr(screener, "fetch_fno_price_universe", lambda nse: pd.DataFrame(columns=["symbol"]))
+    monkeypatch.setattr(screener, "fetch_nifty_pchange", lambda nse: 0.0)
+    monkeypatch.setattr(screener, "fetch_oi_spurts_nse", lambda nse: pd.DataFrame(columns=["symbol", "oi_spurt_pct"]))
+
+    top20, tradeable, nifty_pchange = screener.build_top20_shortlist(nse=None, cfg=_cfg())
+    assert top20.empty
+    assert tradeable.empty
+
+
+# ── VwapTouchTracker -- rolling 15x1min directional touch detection ─────
+
+def test_vwap_touch_tracker_call_fires_on_low_touch_below_vwap_while_ltp_above():
+    from datetime import datetime as _dt, timedelta
+    tr = screener.VwapTouchTracker(window_min=15)
+    base = _dt(2026, 9, 7, 9, 30)
+    # A low candle that dips to/through VWAP (100.0), closes above it.
+    tr.on_tick(base, 100.0)             # opens the first 1-min bucket
+    tr.on_tick(base, 99.5)              # low touch AT/below vwap within this bucket
+    tr.on_tick(base + timedelta(seconds=30), 101.0)
+    # Roll into the next minute bucket -- flushes the completed bar (low=99.5) into the window.
+    tr.on_tick(base + timedelta(minutes=1), 102.0)
+    assert tr.check_touch(ltp=102.0, vwap=100.0) == "CALL"
+
+
+def test_vwap_touch_tracker_put_fires_on_high_touch_above_vwap_while_ltp_below():
+    from datetime import datetime as _dt, timedelta
+    tr = screener.VwapTouchTracker(window_min=15)
+    base = _dt(2026, 9, 7, 9, 30)
+    tr.on_tick(base, 100.0)
+    tr.on_tick(base, 100.6)             # high touch AT/above vwap within this bucket
+    tr.on_tick(base + timedelta(minutes=1), 98.0)
+    assert tr.check_touch(ltp=98.0, vwap=100.0) == "PUT"
+
+
+def test_vwap_touch_tracker_no_touch_yet_returns_none():
+    from datetime import datetime as _dt, timedelta
+    tr = screener.VwapTouchTracker(window_min=15)
+    base = _dt(2026, 9, 7, 9, 30)
+    tr.on_tick(base, 105.0)
+    tr.on_tick(base + timedelta(minutes=1), 106.0)
+    # LTP above VWAP but the rolling window never dipped down to touch it.
+    assert tr.check_touch(ltp=106.0, vwap=100.0) is None
+
+
+def test_vwap_touch_tracker_window_flushes_oldest_bar(monkeypatch):
+    from datetime import datetime as _dt, timedelta
+    tr = screener.VwapTouchTracker(window_min=3)
+    base = _dt(2026, 9, 7, 9, 30)
+    # Minute 0: dips to touch VWAP=100.
+    tr.on_tick(base, 100.0)
+    tr.on_tick(base, 99.0)
+    # Minutes 1..4: stays well above VWAP, never touching again -- by minute
+    # 4 the window (size 3) must have flushed minute 0's touching bar out.
+    for m in range(1, 5):
+        tr.on_tick(base + timedelta(minutes=m), 110.0)
+    assert tr.check_touch(ltp=110.0, vwap=100.0) is None
+
+
+def test_vwap_touch_tracker_no_touch_when_vwap_nonpositive():
+    from datetime import datetime as _dt
+    tr = screener.VwapTouchTracker(window_min=15)
+    base = _dt(2026, 9, 7, 9, 30)
+    tr.on_tick(base, 50.0)
+    assert tr.check_touch(ltp=50.0, vwap=0.0) is None

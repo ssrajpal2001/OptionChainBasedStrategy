@@ -18,7 +18,10 @@ First strategy in this codebase's live pipeline to trade individual F&O STOCKS
 BANKNIFTY underlying -- see strategies/oi_orb_screener/stock_resolve.py for how
 strike/lot/expiry are resolved for a stock not known in advance.
 """
-from strategies.oi_orb_screener.book_manager import OiOrbScreenerBookManager
+from strategies.oi_orb_screener.book_manager import (
+    OiOrbScreenerBookManager,
+    OiOrbScreenerTop20BookManager,
+)
 from strategies.oi_orb_screener.engine import OiOrbScreenerStrategy
 
-__all__ = ["OiOrbScreenerStrategy", "OiOrbScreenerBookManager"]
+__all__ = ["OiOrbScreenerStrategy", "OiOrbScreenerBookManager", "OiOrbScreenerTop20BookManager"]

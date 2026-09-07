@@ -1490,6 +1490,64 @@ preceded a real tradeable move vs. which were noise — same "log everything now
 optimize later since backtesting is impossible" pattern already established for
 OI-Flow's `telemetry.py` and SellStraddle's shadow-VWAP log.
 
+**Sibling strategy `oi_orb_screener_top20`, added 2026-09-07, direct user spec** —
+same `OiOrbScreenerStrategy` engine class, same ORB/VWAP-backfill/chain-subscription
+scaffolding, same exit mechanic (HA+StochRSI, EOD square-off), a DIFFERENT
+shortlist-building + entry-detection pair, selected via a `strategy_name` constructor
+param (`self._top20_mode = (strategy_name == "oi_orb_screener_top20")`) — deliberately
+a flag inside the one engine file, not a second engine, so any future fix to the
+shared machinery (ORB, VWAP, chain sub, exits) never has to be applied twice (same
+precedent as SellStraddle's own `sell_straddle_calc_vwap` variant).
+- **Shortlist**: `screener.build_top20_shortlist()` ranks the WHOLE F&O universe by
+  `oi_spurt_pct` descending and takes exactly the top `TOP20_RANK_N` (default 20) —
+  **no OI-spurt threshold at all**, unlike the standard variant's hard
+  `OI_SPURT_MIN_PCT=7.0` gate. Returns `(top20, tradeable, nifty_pchange)` — `top20`
+  is ALL 20 ranked stocks (registered into a new `oi_orb_top20_daily_scan` table via
+  `store.record_top20_daily_scan`, traded or not, for future backtest/threshold
+  optimization); `tradeable` is the subset also passing `|pChange| >= 2%` from
+  previous close, which alone feeds `self._shortlist_symbols` (so all downstream
+  ORB/VWAP/chain-subscription machinery, written against `self._shortlist_symbols`,
+  needs zero changes to serve this variant).
+- **Entry**: `screener.VwapTouchTracker` — a rolling FIFO window of `VWAP_TOUCH_
+  WINDOW_MIN` (default 15) completed 1-min high/low bars, fed real tick-by-tick data
+  from `_spot_tick_loop`'s existing `IndexTick` stream (not a coarser poll-cycle
+  approximation). `check_touch(ltp, vwap)` returns `"CALL"` the instant LTP is above
+  VWAP AND the window's own low (including the still-forming current bar) has
+  touched-or-crossed VWAP within the window; mirrored for `"PUT"` (LTP below VWAP,
+  window high touched-or-crossed VWAP) — direct user spec: "for long ltp should come
+  from above vwap and low should touch vwap... for short ltp should come from below
+  vwap and high should touch vwap." **No NIFTY-regime gate** in this variant (the
+  standard variant's `side_allowed_by_regime` check is explicitly skipped when
+  `_top20_mode` is True) — not part of the user's spec for this variant. A fired
+  touch calls `store.update_top20_vwap_touch`; a confirmed entry calls
+  `store.update_top20_traded`.
+- **Strike/expiry/exit**: unchanged from the standard variant — ATM strike
+  (`STRIKE_OTM_PCT=0.0`), HA+StochRSI(9,9,3) 15-min exit, EOD square-off, hard
+  ₹2000/lot risk-cap backstop.
+- **DB**: `oi_orb_screener.db`'s new `oi_orb_top20_daily_scan` table — one row per
+  (client, binding, trade_date, symbol), all 20 ranked stocks whether traded or not,
+  with `rank`/`oi_spurt_pct`/`price_change_pct`/`price_move_pass`/`vwap_touch_pass`/
+  `touch_side`/`touch_ts`/`traded` — the full daily audit trail for later threshold
+  analysis, same "log everything now, backtest later" pattern as `oi_spurt_history`.
+- **Deployment**: separate `strategy_deployments` row, `strategy_name=
+  "oi_orb_screener_top20"`, `underlying="SCREENER"` (same sentinel). Registered in
+  `strategies/registry.py` as its own entry (`OiOrbScreenerTop20BookManager`, a thin
+  subclass of `OiOrbScreenerBookManager` overriding only `STRATEGY_NAME` and the
+  `strategy_name` threaded into the spawned book) — run via `--strategies
+  oi_orb_screener_top20` (add alongside `oi_orb_screener` in the same `--strategies`
+  flag if running both variants side-by-side; they are independent deployments, no
+  shared state, can run concurrently or standalone). No dashboard deploy-form entry
+  yet — seed the row directly, same as `oi_orb_screener`'s own first-ship precedent.
+- **Status (2026-09-07)**: built, unit-tested (`tests/oi_orb_screener/test_screener.py`
+  — `build_top20_shortlist` rank-cutoff/no-threshold/price-move-filter behavior,
+  `VwapTouchTracker` CALL/PUT touch detection + window-flush behavior;
+  `tests/oi_orb_screener/test_store.py` — `oi_orb_top20_daily_scan` write/upsert/
+  vwap-touch/traded roundtrips), full existing suite green (zero regression to the
+  standard `oi_orb_screener` variant or any other strategy). **Not yet deployed** —
+  scheduled for tomorrow, same graduation discipline as every other strategy addition
+  in this codebase (paper/paper_route first, watch real forward telemetry before any
+  scale-up).
+
 ---
 
 ### CAG Long Straddle Strategy (`strategies/cag_straddle/`)

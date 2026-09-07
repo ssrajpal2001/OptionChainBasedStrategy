@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import List, Optional
@@ -107,6 +107,18 @@ CONFIG = {
     "OI_SPURT_HISTORY_END": "15:30",
     "OI_SPURT_HISTORY_POLL_SEC": 60.0,
     "OI_SPURT_HISTORY_TOP_N": 20,
+    # 2026-09-07, direct user spec, new strategy "oi_orb_screener_top20":
+    # "start scanning for 1st 20 stocks where oi spurt is more in
+    # descending order from 9.15 onwards... select those stocks which are
+    # 2% high or low from prev day, no oi spurt threshold for condition
+    # matching... check for vwap touch within last 15 min." Rank-based
+    # top-N (no OI_SPURT_MIN_PCT gate at all -- see build_top20_shortlist,
+    # deliberately separate from build_shortlist's threshold-based
+    # selection), then the SAME PRICE_MOVE_MIN_PCT (2%) filter.
+    "TOP20_RANK_N": 20,
+    # Rolling window size for VwapTouchTracker's directional touch check
+    # (trailing N CLOSED 1-min candles, plus the live still-forming one).
+    "VWAP_TOUCH_WINDOW_MIN": 15,
     # 2026-09-07, direct user spec, REVERSES the 2026-08-27 spec below:
     # "understand stocks which got scanned at 9.25 will be considered for
     # complete day, no need to scan fresh stocks after 9.25am." Default
@@ -398,6 +410,111 @@ def build_shortlist(nse: "NSESession", cfg=CONFIG):
 
     shortlist = pd.concat([bullish, bearish], ignore_index=True)
     return shortlist, nifty_pchange
+
+
+def build_top20_shortlist(nse: "NSESession", cfg=CONFIG):
+    """2026-09-07, direct user spec, new strategy "oi_orb_screener_top20":
+    "start scanning for 1st 20 stocks where oi spurt is more in descending
+    order from 9.15 onwards... select those stocks which are 2% high or
+    low from prev day, no oi spurt threshold for condition matching."
+
+    Unlike build_shortlist() (which hard-gates on OI_SPURT_MIN_PCT before
+    ranking anything), this ranks the WHOLE F&O universe by oi_spurt_pct
+    descending and takes exactly the top TOP20_RANK_N (default 20)
+    regardless of their actual % -- a pure rank cutoff, same underlying
+    merge/sort poll_oi_rank() already does, but exposed here as its own
+    named entry point since this strategy's semantics ("top 20, no
+    threshold") are conceptually distinct from that function's own
+    "momentum tracking, not a real shortlist" purpose.
+
+    Returns (top20, tradeable, nifty_pchange):
+      top20     -- ALL 20 ranked stocks, unfiltered (for daily DB
+                   registration/backtesting -- store.record_top20_daily_scan
+                   logs every one of these, traded or not).
+      tradeable -- the subset of top20 that ALSO passes the price-move
+                   filter (|pChange| >= PRICE_MOVE_MIN_PCT) -- only these
+                   go on to the VWAP-touch check."""
+    universe = fetch_fno_price_universe(nse)
+    nifty_pchange = fetch_nifty_pchange(nse)
+    oi_spurts = fetch_oi_spurts_nse(nse)
+    merged = universe.merge(oi_spurts, on="symbol", how="inner")
+    if merged.empty:
+        return pd.DataFrame(), pd.DataFrame(), nifty_pchange
+    merged = merged.sort_values("oi_spurt_pct", ascending=False).reset_index(drop=True)
+    merged["rank"] = merged.index + 1
+    top_n = int(cfg.get("TOP20_RANK_N", 20) or 20)
+    top20 = merged.head(top_n).copy()
+    tradeable = top20[top20["pChange"].abs() >= cfg.get("PRICE_MOVE_MIN_PCT", 2.0)].copy()
+    return top20, tradeable, nifty_pchange
+
+
+class VwapTouchTracker:
+    """2026-09-07, direct user spec, new strategy "oi_orb_screener_top20":
+    "now if any stocks which passes this criteria is checked for vwap
+    touch within last 15 min." Followed by the directional clarification:
+    "for long ltp should come from above vwap and low should touch vwap,
+    for short ltp should come from below vwap and high should touch
+    vwap" -- the same CALL-arms-above/PUT-arms-below directionality
+    check_vwap_retest_entry() already uses, but expressed as a rolling
+    time-window touch check instead of an arm-then-retest state machine.
+
+    Maintains a FIFO rolling window of the trailing N (default 15) CLOSED
+    1-min candles -- each new candle both appends and flushes the oldest,
+    exactly matching the direct user spec ("every min we have new 16th
+    candle which is the 15th candle and 1st candle is flushed"). The
+    still-forming ("current") candle's own running high/low is tracked
+    separately and checked on every live tick, per the same spec ("also
+    tick by tick").
+
+    A "touch" is a genuine price-level cross into VWAP -- CALL: some
+    candle's LOW <= vwap (a dip down to it from above); PUT: some
+    candle's HIGH >= vwap (a rise up to it from below) -- checked across
+    both the closed-candle window AND the live current candle."""
+
+    def __init__(self, window_min: int = 15) -> None:
+        self._window_min = window_min
+        self._closed: deque = deque(maxlen=window_min)
+        self._cur_key: Optional[tuple] = None   # (hour, minute) of the still-forming candle
+        self._cur_high: float = float("-inf")
+        self._cur_low: float = float("inf")
+
+    def on_tick(self, ts: datetime, ltp: float) -> None:
+        key = (ts.hour, ts.minute)
+        if self._cur_key is None:
+            self._cur_key = key
+            self._cur_high = self._cur_low = ltp
+            return
+        if key != self._cur_key:
+            # The still-forming candle just closed -- push it into the
+            # rolling window (deque's own maxlen does the "flush oldest"
+            # part automatically) and start a fresh one.
+            self._closed.append((self._cur_high, self._cur_low))
+            self._cur_key = key
+            self._cur_high = self._cur_low = ltp
+        else:
+            self._cur_high = max(self._cur_high, ltp)
+            self._cur_low = min(self._cur_low, ltp)
+
+    def check_touch(self, ltp: float, vwap: float) -> Optional[str]:
+        """Returns "CALL" or "PUT" the instant this symbol's current side +
+        rolling-window touch condition is satisfied, else None. Directional
+        side is derived from ltp vs vwap right now (same convention
+        side_from_pchange/check_vwap_retest_entry already use elsewhere)."""
+        if vwap <= 0:
+            return None
+        if ltp > vwap:
+            lows = [lo for _, lo in self._closed]
+            if self._cur_key is not None:
+                lows.append(self._cur_low)
+            if any(lo <= vwap for lo in lows):
+                return "CALL"
+        elif ltp < vwap:
+            highs = [hi for hi, _ in self._closed]
+            if self._cur_key is not None:
+                highs.append(self._cur_high)
+            if any(hi >= vwap for hi in highs):
+                return "PUT"
+        return None
 
 
 def sharp_bear_zones(bars_3m: list) -> List[dict]:

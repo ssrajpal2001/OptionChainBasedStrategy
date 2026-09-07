@@ -10,6 +10,7 @@ from typing import Any, Dict, List
 
 from strategies.sell_straddle import StraddleBookManager
 from strategies.oi_orb_screener import OiOrbScreenerBookManager
+from strategies.oi_orb_screener.book_manager import OiOrbScreenerTop20BookManager
 from strategies.cag_straddle import CagStraddleBookManager
 
 
@@ -43,6 +44,16 @@ STRATEGY_REGISTRY: Dict[str, Dict[str, Any]] = {
     # STOCKS (chosen dynamically each day) rather than a fixed underlying.
     "oi_orb_screener": {
         "manager_class": OiOrbScreenerBookManager,
+        "per_binding": True,
+    },
+    # 2026-09-07, direct user spec: sibling strategy_name reusing the exact
+    # same OiOrbScreenerStrategy engine/exit mechanic -- top-20-by-OI-spurt
+    # (no pct threshold) shortlist + a rolling 15x1min-candle directional
+    # VWAP-touch entry, instead of the standard variant's OI_SPURT_MIN_PCT
+    # gate + arm/retest entry. See OiOrbScreenerTop20BookManager's own
+    # docstring and OiOrbScreenerStrategy.__init__'s strategy_name param.
+    "oi_orb_screener_top20": {
+        "manager_class": OiOrbScreenerTop20BookManager,
         "per_binding": True,
     },
     # 2026-08-27: 8th standalone strategy -- explicit exception to the prior

@@ -146,6 +146,32 @@ CREATE TABLE IF NOT EXISTS oi_spurt_history (
     price_change_pct  REAL
 );
 
+-- 2026-09-07, direct user spec, new strategy "oi_orb_screener_top20":
+-- "register all stocks in database for future backtest and optimisation"
+-- -- ALL 20 rank-scanned stocks logged once per day (not a repeated poll
+-- like oi_spurt_history above), whether or not each one went on to pass
+-- the price-move filter or fire a real VWAP-touch entry. One row per
+-- (client, binding, day, symbol) -- UNIQUE + ON CONFLICT UPDATE so the
+-- vwap_touch_pass/touch_ts/traded columns can be updated later the same
+-- day as those events actually happen, without duplicating the row.
+CREATE TABLE IF NOT EXISTS oi_orb_top20_daily_scan (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_id          TEXT NOT NULL,
+    binding_id         TEXT NOT NULL,
+    trade_date         TEXT NOT NULL,
+    symbol             TEXT NOT NULL,
+    rank               INTEGER NOT NULL,
+    oi_spurt_pct       REAL,
+    price_change_pct   REAL,
+    price_move_pass    INTEGER NOT NULL DEFAULT 0,
+    vwap_touch_pass    INTEGER NOT NULL DEFAULT 0,
+    touch_side         TEXT,
+    touch_ts           TEXT,
+    traded             INTEGER NOT NULL DEFAULT 0,
+    scanned_ts         TEXT NOT NULL,
+    UNIQUE(client_id, binding_id, trade_date, symbol)
+);
+
 CREATE INDEX IF NOT EXISTS idx_positions_open
     ON positions(client_id, binding_id, status, trade_date);
 CREATE INDEX IF NOT EXISTS idx_signal_events_day
@@ -158,6 +184,8 @@ CREATE INDEX IF NOT EXISTS idx_oi_spurt_history_day
     ON oi_spurt_history(client_id, binding_id, trade_date, poll_ts);
 CREATE INDEX IF NOT EXISTS idx_oi_spurt_history_symbol
     ON oi_spurt_history(symbol, trade_date);
+CREATE INDEX IF NOT EXISTS idx_top20_daily_scan_day
+    ON oi_orb_top20_daily_scan(client_id, binding_id, trade_date);
 """
 
 _initialized = False
@@ -344,6 +372,86 @@ def record_oi_spurt_history(client_id: str, binding_id: str, poll_ts: str, rows:
         con.commit()
     except Exception as exc:
         logger.error("oi_orb store.record_oi_spurt_history failed: %s", exc)
+    finally:
+        con.close()
+
+
+# ── oi_orb_top20_daily_scan (2026-09-07, direct user spec, new strategy
+# "oi_orb_screener_top20"): "register all stocks in database for future
+# backtest and optimisation" -- ALL 20 rank-scanned stocks once per day,
+# whether or not they went on to pass the price-move filter or fire a
+# real VWAP-touch entry. ──────────────────────────────────────────────
+
+def record_top20_daily_scan(client_id: str, binding_id: str, rows: List[dict],
+                             trade_date: Optional[str] = None) -> None:
+    """rows: [{"symbol", "rank", "oi_spurt_pct", "price_change_pct",
+    "price_move_pass"}, ...] -- the full top-20 scan, ALL stocks, called
+    once at scan time. ON CONFLICT UPDATE so a re-scan after a restart
+    corrects rather than duplicates each symbol's row for the day."""
+    init_db()
+    td = trade_date or _today()
+    now_ts = datetime.now(IST).isoformat(timespec="seconds")
+    con = sqlite3.connect(_DB_PATH)
+    try:
+        for r in rows:
+            con.execute(
+                """INSERT INTO oi_orb_top20_daily_scan
+                       (client_id, binding_id, trade_date, symbol, rank,
+                        oi_spurt_pct, price_change_pct, price_move_pass, scanned_ts)
+                   VALUES (?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(client_id, binding_id, trade_date, symbol) DO UPDATE SET
+                       rank=excluded.rank, oi_spurt_pct=excluded.oi_spurt_pct,
+                       price_change_pct=excluded.price_change_pct,
+                       price_move_pass=excluded.price_move_pass""",
+                (client_id, binding_id, td, r["symbol"], int(r["rank"]),
+                 r.get("oi_spurt_pct"), r.get("price_change_pct"),
+                 int(bool(r.get("price_move_pass"))), now_ts),
+            )
+        con.commit()
+    except Exception as exc:
+        logger.error("oi_orb store.record_top20_daily_scan failed: %s", exc)
+    finally:
+        con.close()
+
+
+def update_top20_vwap_touch(client_id: str, binding_id: str, symbol: str, touch_side: str,
+                             trade_date: Optional[str] = None) -> None:
+    """Marks a symbol's VWAP-touch condition as satisfied -- called the
+    moment VwapTouchTracker.check_touch() first fires for it. No-op
+    (safe) if the symbol was never scanned into today's row at all."""
+    init_db()
+    td = trade_date or _today()
+    now_ts = datetime.now(IST).isoformat(timespec="seconds")
+    con = sqlite3.connect(_DB_PATH)
+    try:
+        con.execute(
+            """UPDATE oi_orb_top20_daily_scan
+               SET vwap_touch_pass=1, touch_side=?, touch_ts=?
+               WHERE client_id=? AND binding_id=? AND trade_date=? AND symbol=?""",
+            (touch_side, now_ts, client_id, binding_id, td, symbol),
+        )
+        con.commit()
+    except Exception as exc:
+        logger.error("oi_orb store.update_top20_vwap_touch failed: %s", exc)
+    finally:
+        con.close()
+
+
+def update_top20_traded(client_id: str, binding_id: str, symbol: str,
+                         trade_date: Optional[str] = None) -> None:
+    """Marks a symbol as having actually fired a real entry today."""
+    init_db()
+    td = trade_date or _today()
+    con = sqlite3.connect(_DB_PATH)
+    try:
+        con.execute(
+            """UPDATE oi_orb_top20_daily_scan SET traded=1
+               WHERE client_id=? AND binding_id=? AND trade_date=? AND symbol=?""",
+            (client_id, binding_id, td, symbol),
+        )
+        con.commit()
+    except Exception as exc:
+        logger.error("oi_orb store.update_top20_traded failed: %s", exc)
     finally:
         con.close()
 
