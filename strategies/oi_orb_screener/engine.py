@@ -1945,8 +1945,20 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                     self._clog.debug("OiOrb[%s/%s]: LTP %s %s%d = %.2f",
                                       self._client_id, self._binding_id, tick.underlying,
                                       contract.option_type, contract.strike, tick.ltp)
-                await self._check_hard_risk_cap(tick.underlying, tick.ltp)
-                await self._update_option_sl_target_and_check(tick.underlying, tick.ltp, tick.timestamp)
+                # 2026-09-07, direct user spec: "only exit is HA+StockRSI as we
+                # have done backtest with that only -- remove other exit
+                # condition from oi scanner." Confirmed explicitly to also
+                # include the hard_risk_cap backstop, not just the SL/target
+                # ratchet -- HA+StochRSI + EOD square-off are now the ONLY
+                # things that can close a position. Both calls disabled here
+                # (not deleted -- their state/dashboard fields are still read
+                # elsewhere; a full cleanup of the now-dead
+                # _check_hard_risk_cap/_update_option_sl_target_and_check
+                # methods and their self._live_sl/_live_target/etc. state is
+                # a separate, lower-risk-window follow-up, not done live
+                # mid-trading-day).
+                # await self._check_hard_risk_cap(tick.underlying, tick.ltp)
+                # await self._update_option_sl_target_and_check(tick.underlying, tick.ltp, tick.timestamp)
 
     async def _check_hard_risk_cap(self, symbol: str, option_ltp: float) -> None:
         """2026-08-26, added alongside the structural SL -- a fresh entry (or a

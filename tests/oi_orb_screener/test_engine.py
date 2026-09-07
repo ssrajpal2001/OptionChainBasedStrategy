@@ -1444,12 +1444,19 @@ async def test_option_sl_bars_bucket_by_the_configured_tf_not_always_1min():
 
 
 @pytest.mark.asyncio
-async def test_option_tick_loop_feeds_atp_and_sl_target_check():
+async def test_option_tick_loop_feeds_atp_but_no_longer_arms_sl_target():
     """End-to-end via the real _option_tick_loop (not calling the SL/target
-    method directly) -- confirms OptionTick.atp is what feeds the option's
-    own VWAP reference, and that a real OPTION_TICK stream can arm the SL
-    (via the 2026-08-28 pooled multi-touch anchor) exactly like the
-    direct-call tests above."""
+    method directly) -- confirms OptionTick.atp still feeds the option's own
+    VWAP reference, but the SL/target ratchet is no longer armed by real
+    ticks. 2026-09-07, direct user spec: "only exit is HA+StockRSI as we
+    have done backtest with that only -- remove other exit condition from
+    oi scanner" (confirmed to include hard_risk_cap too, not just this
+    ratchet) -- _option_tick_loop no longer calls
+    _update_option_sl_target_and_check/_check_hard_risk_cap at all, so
+    self._live_sl/_live_target must stay empty regardless of how adverse the
+    tick sequence is. This test used to assert the OLD behavior (SL arming
+    at 89.5 via the pooled multi-touch anchor) -- inverted here to lock in
+    the removal instead."""
     bus = _FakeBus()
     book = _make_book(bus)
     book._vwap_sl_tf_minutes = 1
@@ -1478,7 +1485,45 @@ async def test_option_tick_loop_feeds_atp_and_sl_target_check():
             ))
             await asyncio.sleep(0.02)
         assert book._live_option_atp["MANAPPURAM"] == 100.0
-        assert book._live_sl["MANAPPURAM"] == 89.5
+        assert "MANAPPURAM" not in book._live_sl
+        assert "MANAPPURAM" not in book._live_target
+    finally:
+        book._running = False
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
+@pytest.mark.asyncio
+async def test_option_tick_loop_never_triggers_hard_risk_cap_even_on_severe_adverse_move():
+    """2026-09-07, direct user spec (same as the SL/target removal above):
+    hard_risk_cap must never fire either -- HA+StochRSI + EOD are the ONLY
+    things that can close a position now. Feeds a tick sequence with a loss
+    far exceeding the old Rs2000/lot cap and confirms no close is emitted."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    contract = _contract("MANAPPURAM", 365, "CE")
+    book._positions["MANAPPURAM"] = {
+        "contract": contract, "qty": 3000, "entry_price": 100.0, "paper_mode": True,
+        "opened_at": datetime(2026, 8, 26, 9, 15, 0),
+    }
+    book._subscribe(Topic.OPTION_TICK)
+    book._running = True
+    task = asyncio.create_task(book._option_tick_loop())
+    try:
+        # loss = (100 - 10) * 3000 = Rs270,000 -- far past any Rs2000/lot cap.
+        await bus.publish(Topic.OPTION_TICK, OptionTick(
+            symbol="MANAPPURAM365CE", underlying="MANAPPURAM", strike=365, option_type="CE",
+            expiry=date(2026, 8, 27), ltp=10.0, bid=10.0, ask=10.0, oi=0, change_oi=0,
+            volume=0, iv=0.0, delta=0.0, timestamp=datetime(2026, 8, 26, 9, 15, 10, tzinfo=IST),
+            atp=10.0,
+        ))
+        await asyncio.sleep(0.05)
+        assert "MANAPPURAM" in book._positions, \
+            "hard_risk_cap must not close the position -- only HA+StochRSI/EOD may"
+        assert "MANAPPURAM" not in book._eod_closing
     finally:
         book._running = False
         task.cancel()
