@@ -111,6 +111,11 @@ _TRAP_EXIT_HTF_INTRADAY_MIN = 15
 _TRAP_EXIT_LTF_MIN = 3
 _TRAP_EXIT_LOOKBACK_CALENDAR_DAYS = 15   # ~10 real trading days, same validated window
 
+# 2026-09-08, direct user spec: hard SL, validated via scripts/oi_orb_trap_
+# target_sl_backtest.py -- 30-min HA-candle close on the WRONG side of the
+# running session VWAP (CALL: close < vwap; PUT: close > vwap).
+_VWAP_SL_TF_MIN = 30
+
 
 def _make_strategy_logger(client_id: str, binding_id: str) -> logging.Logger:
     """Dedicated, rotating, per-(client,binding,day) log file -- same
@@ -440,6 +445,29 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._trap_exit_intraday_zones: Dict[str, list] = {}
         self._trap_exit_intraday_htf_fed: Dict[str, int] = {}
 
+        # 2026-09-08, direct user spec: hard STOP-LOSS layer (this strategy had
+        # target-style exits only -- trap zones, HA+StochRSI -- but never an
+        # actual downside stop; the disabled hard-risk-cap was the only thing
+        # that ever played this role, and it was turned off 2026-09-07). Wired
+        # in with the SAME restart-replay discipline as the trap-exit target
+        # mechanism above -- see _vwap_close_sl_check / _replay_vwap_close_sl.
+        # Validated this session (scripts/oi_orb_trap_target_sl_backtest.py,
+        # 4 SL families compared): 30-min HA-candle close vs session VWAP was
+        # the only candidate that improved BOTH win% and PF over the no-SL
+        # baseline while cutting the worst single-trade loss by ~75% -- every
+        # other candidate (structural swing, ATR, tight fixed-%, faster VWAP
+        # timeframes) either fired too often on noise (dragging win%/PF down
+        # WITH total points) or barely fired at all (no real risk cap).
+        self._sl_vwap_1m_acc: Dict[str, "object"] = {}
+        self._sl_vwap_last_checked_bar_ts: Dict[str, datetime] = {}
+        # 2026-09-08, direct user spec: "I want re-entry allowed after a SL
+        # stopped out, but just once in that specific script for that day" --
+        # (symbol, side) pairs that have already consumed their one-time
+        # SL-stop-out re-entry allowance today. Day-scoped (cleared in
+        # reset_session, never per-entry in _on_fill -- it must survive the
+        # re-entry itself to correctly block a SECOND allowance).
+        self._sl_reentry_used: Set[tuple] = set()
+
         # ── contract/feed/position state, keyed by stock symbol ────────
         self._pending_contracts: Dict[str, "stock_resolve.ResolvedContract"] = {}
         self._pending_fills: Dict[str, dict] = {}   # event_id -> context
@@ -525,6 +553,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._already_fired = set()
         self._entry_window_done_logged = False
         self._rejected = set()
+        self._sl_reentry_used = set()
         # 2026-09-07: guards the ONE morning call to _apply_historical_vwap_retest
         # (right after the regime freeze block below) so it doesn't re-run on every
         # poll cycle for the life of the day -- the afternoon rescan calls it again
@@ -1411,10 +1440,13 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             # parallel 15-min S1/R1 TSL instead.
             # 2026-09-08, direct user spec: the universal exit for EVERY open
             # position (unconditional on sl_mechanic, same as the HA+StochRSI
-            # check it replaces) is now the multi-day 75min HTF same-side trap
-            # + 3min S&R ladder, falling back to the already-validated
-            # intraday 15min/3min version of the same mechanic when no
-            # multi-day zone has locked+touched yet -- see
+            # check it replaces) is now: (1) a hard SL -- 30-min HA candle
+            # close on the wrong side of session VWAP, checked FIRST every
+            # cycle (a real stop takes priority over a target/reversal read)
+            # -- then (2) the multi-day 75min HTF same-side trap + 3min S&R
+            # ladder, falling back to (3) the already-validated intraday
+            # 15min/3min version of the same mechanic when no multi-day zone
+            # has locked+touched yet -- see _vwap_close_sl_check/
             # _trap_multiday_exit_check/_trap_intraday_exit_check's own
             # docstrings. _ha_stoch_check_exit is kept defined, not deleted,
             # per this codebase's own convention for superseded mechanics.
@@ -1423,12 +1455,15 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 if ltp is None:
                     continue
                 side = screener.side_from_pchange(self._shortlist_pchange.get(sym, 0.0))
+                await self._vwap_close_sl_check(sym, side, ltp, now)
+                if sym in self._eod_closing:
+                    continue
                 await self._trap_multiday_exit_check(sym, side, ltp, now)
                 if sym in self._eod_closing:
                     continue
                 await self._trap_intraday_exit_check(sym, side, ltp, now)
                 if sym in self._eod_closing:
-                    continue   # already claimed by the trap-exit checks above this cycle
+                    continue   # already claimed by the SL/trap-exit checks above this cycle
                 mech = pos.get("sl_mechanic")
                 if mech not in ("trap", "immediate_15m"):
                     continue
@@ -2485,6 +2520,123 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 return True
         return False
 
+    async def _fire_vwap_close_sl(self, sym: str, side: str, ltp: float, vwap: float) -> None:
+        """Closes the position on a confirmed VWAP-close SL breach, and
+        grants a ONE-TIME re-entry allowance for this (symbol, side) today
+        (direct user spec, 2026-09-08: "I want re-entry allowed after a SL
+        stopped out, but just once in that specific script for that day") --
+        clears self._already_fired for this (symbol, side) exactly once per
+        day via self._sl_reentry_used; a SECOND SL stop-out on the same
+        (symbol, side) the same day does NOT grant another re-entry (already
+        consumed). Target-hit and EOD exits are completely unaffected --
+        this allowance is specific to the SL close path only."""
+        pos = self._positions.get(sym)
+        if pos is None or sym in self._eod_closing:
+            return
+        self._eod_closing.add(sym)
+        self._clog.info(
+            "OiOrb[%s/%s]: %s VWAP-CLOSE SL HIT -- underlying_ltp=%.2f vwap=%.2f side=%s -- closing.",
+            self._client_id, self._binding_id, sym, ltp, vwap, side,
+        )
+        await asyncio.to_thread(
+            store.log_signal_event, self._client_id, self._binding_id, sym,
+            "vwap_close_sl_triggered", side=side, detail=f"underlying_ltp={ltp:.2f} vwap={vwap:.2f}")
+        key = (sym, side)
+        if key not in self._sl_reentry_used:
+            self._sl_reentry_used.add(key)
+            self._already_fired.discard(key)
+            self._clog.info(
+                "OiOrb[%s/%s]: %s %s one-time re-entry allowance granted for today (SL stop-out).",
+                self._client_id, self._binding_id, sym, side)
+        await self._emit_close(sym, pos, "vwap_close_sl")
+
+    async def _vwap_close_sl_check(self, sym: str, side: str, ltp: float, ts: datetime) -> None:
+        """Live per-tick SL check (2026-09-08, direct user spec): 30-min
+        Heikin-Ashi candle closes on the wrong side of the running session
+        VWAP -- CALL: close < vwap; PUT: close > vwap. Validated as the best
+        of 4 SL families tested (scripts/oi_orb_trap_target_sl_backtest.py)
+        against the same real 46-trade dataset -- the only candidate that
+        improved BOTH win% and PF over the no-SL baseline while cutting the
+        worst single-trade loss by ~75%. Checked ahead of both trap-exit
+        target tiers in the main exit loop (a real stop takes priority over
+        a target/reversal read). Uses self._vwap.current(sym) -- the SAME
+        running session VWAP the entry mechanic itself reads, already
+        backfilled from real history and refreshed on every restart via
+        _run_today_pipeline's own morning flow, so no separate VWAP seeding
+        is needed here beyond what already exists."""
+        pos = self._positions.get(sym)
+        if pos is None or sym in self._eod_closing:
+            return
+        from strategies.core.trap_zone_utils import BarAccumulator as _TrapAcc
+        from strategies.core.candle_indicators import to_heikin_ashi, to_n_min_bars_dateaware
+        acc = self._sl_vwap_1m_acc.setdefault(sym, _TrapAcc(timeframe_min=1))
+        acc.on_tick(ts, ltp)
+        if not acc.bars:
+            return
+        ha_1m = to_heikin_ashi(acc.bars)
+        ha_tf = to_n_min_bars_dateaware(ha_1m, _VWAP_SL_TF_MIN)
+        if not ha_tf:
+            return
+        last_bar = ha_tf[-1]
+        if ts < last_bar.ts + timedelta(minutes=_VWAP_SL_TF_MIN):
+            ha_tf = ha_tf[:-1]   # still-forming bucket -- never evaluate early
+        if not ha_tf:
+            return
+        latest = ha_tf[-1]
+        if self._sl_vwap_last_checked_bar_ts.get(sym) == latest.ts:
+            return
+        self._sl_vwap_last_checked_bar_ts[sym] = latest.ts
+        vwap = self._vwap.current(sym)
+        if vwap is None:
+            return
+        adverse = (latest.close < vwap) if side == "CALL" else (latest.close > vwap)
+        if not adverse:
+            return
+        await self._fire_vwap_close_sl(sym, side, ltp, vwap)
+
+    async def _replay_vwap_close_sl(self, sym: str, side: str, today_bars: list, entry_ts: datetime) -> bool:
+        """Restart-safety replay for the SL, same discipline as the trap-exit
+        target mechanism's own _replay_trap_state: walks TODAY's real 1-min
+        history (HA computed on the FULL day's bars first, never a sliced
+        post-entry-only series -- that misaligns the first 30-min bucket,
+        the exact bug found and fixed in an earlier backtest variant this
+        session) and fires a real close immediately if the SL condition was
+        ALREADY genuinely satisfied before this process started/restarted.
+        self._vwap.current(sym) is used as the VWAP reference throughout the
+        replay (not a bar-specific historical VWAP) -- deliberately the SAME
+        approximation the live check itself uses, so replay can never behave
+        differently from what live ticks would have done from this point
+        forward. Seeds self._sl_vwap_1m_acc with today's real bars either
+        way, so live ticks continue seamlessly regardless of whether a
+        breach was found. Returns True iff this call closed the position."""
+        if not today_bars:
+            return False
+        from strategies.core.trap_zone_utils import BarAccumulator as _TrapAcc
+        from strategies.core.candle_indicators import to_heikin_ashi, to_n_min_bars_dateaware
+        ha_1m = to_heikin_ashi(today_bars)
+        ha_tf = to_n_min_bars_dateaware(ha_1m, _VWAP_SL_TF_MIN)
+        for hb in ha_tf:
+            if hb.ts < entry_ts:
+                continue
+            vwap = self._vwap.current(sym)
+            if vwap is None:
+                continue
+            adverse = (hb.close < vwap) if side == "CALL" else (hb.close > vwap)
+            if adverse:
+                if sym not in self._positions or sym in self._eod_closing:
+                    return False
+                self._clog.critical(
+                    "OiOrb[%s/%s]: %s restart-recovery replay found an ALREADY-EARNED VWAP-close "
+                    "SL breach (HA %d-min close=%.2f vs vwap=%.2f, real history since entry=%s) "
+                    "-- closing now.", self._client_id, self._binding_id, sym, _VWAP_SL_TF_MIN,
+                    hb.close, vwap, entry_ts.isoformat())
+                await self._fire_vwap_close_sl(sym, side, hb.close, vwap)
+                return True
+        acc = _TrapAcc(timeframe_min=1)
+        acc.bars = list(today_bars)
+        self._sl_vwap_1m_acc[sym] = acc
+        return False
+
     async def _seed_trap_exit_state(self, sym: str, side: str, entry_ts: datetime) -> None:
         """2026-09-08, direct user spec: seeds BOTH exit tiers from real
         history and replays any zone-touch/ladder progress that already
@@ -2555,6 +2707,11 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             today_bars = [b for b in bars if b.ts.date() == today]
             zones_fn = screener.bull_trap_zones if side == "CALL" else screener.sharp_bear_zones
             from strategies.core.candle_indicators import to_n_min_bars_dateaware
+
+            # ---- Hard SL first (checked ahead of both target tiers -- a real
+            # stop takes priority over a target/reversal read) ----
+            if await self._replay_vwap_close_sl(sym, side, today_bars, entry_ts):
+                return   # position already closed via an already-earned SL breach
 
             # ---- Multi-day tier ----
             htf_multiday = to_n_min_bars_dateaware(bars, _TRAP_EXIT_HTF_MULTIDAY_MIN)
@@ -3121,6 +3278,10 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             self._trap_exit_intraday_1m_acc.pop(symbol, None)
             self._trap_exit_intraday_zones.pop(symbol, None)
             self._trap_exit_intraday_htf_fed.pop(symbol, None)
+            # SL accumulator state resets per-entry too (NOT self._sl_reentry_used --
+            # that must survive a re-entry to correctly block a second allowance).
+            self._sl_vwap_1m_acc.pop(symbol, None)
+            self._sl_vwap_last_checked_bar_ts.pop(symbol, None)
             asyncio.create_task(self._seed_trap_exit_state(symbol, side_for_zones, datetime.now(IST)))
             self._clog.info("OiOrb[%s/%s]: ENTRY CONFIRMED %s %s%d qty=%d @ %.2f (paper_mode=%s) "
                              "-- option-premium SL/target tracking starts now.",
