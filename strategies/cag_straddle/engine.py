@@ -142,7 +142,25 @@ class CagStraddleStrategy(AbstractStrategyBook):
         self._selected_strikes: Dict[str, Optional[int]] = {"CE": None, "PE": None}
         self._trackers: Dict[str, SideTracker] = {}
         self._bar_accs: Dict[str, BarAccumulator] = {}
-        self._live_premium: Dict[tuple, float] = {}   # (strike, side) -> ltp, ALL observed ticks
+        self._live_premium: Dict[tuple, float] = {}   # (strike, side) -> ltp, same-expiry ticks only
+        # 2026-09-08 CRITICAL FIX, real incident: this book used to accept
+        # ANY OptionTick matching (strike, side) regardless of expiry --
+        # harmless on a normal day (only one expiry's contracts tick near
+        # ATM), but today SellStraddle independently subscribed NEXT WEEK's
+        # expiry window (its own 0DTE-avoidance feature) while today (a
+        # Tuesday) was itself NIFTY's current-week 0DTE expiry -- both
+        # expiries' ticks for the same strike numbers flowed on the shared
+        # bus simultaneously. CAG entered CE23800 at 83.15 (next-week
+        # premium) but its SL check kept ingesting ANY CE23800 tick,
+        # including today's near-worthless 0DTE one (7.75) -- an 91% "drop"
+        # in 111ms, triggering hard_risk_cap on a contract it never
+        # actually held. Fixed: this book now resolves and pins its OWN
+        # expiry once per day (self._day_expiry, set the moment self._today
+        # is known) and filters every OptionTick against it -- never trusts
+        # the ambient shared-feed expiry mix, per direct user spec ("when
+        # ever we require expiry date for any strategy it should get its
+        # own expiry value").
+        self._day_expiry: Optional[date] = None
 
         self._position: Optional[dict] = None
         self._event_counter = 0
@@ -160,6 +178,7 @@ class CagStraddleStrategy(AbstractStrategyBook):
         self._trackers = {}
         self._bar_accs = {}
         self._live_premium = {}
+        self._day_expiry = None
         self._recent_remarks.clear()
 
     def start(self) -> None:
@@ -206,6 +225,7 @@ class CagStraddleStrategy(AbstractStrategyBook):
                 if self._today != today:
                     self.reset_session()
                     self._today = today
+                    self._day_expiry = self._resolve_expiry()
                 self._spot = ev.ltp
                 if not self._entry_window_started and not self._day_done \
                         and ev.timestamp.time() >= self._entry_start:
@@ -257,6 +277,14 @@ class CagStraddleStrategy(AbstractStrategyBook):
                 break
             try:
                 if not isinstance(ev, OptionTick) or ev.underlying != self._underlying or not ev.ltp:
+                    continue
+                # 2026-09-08 fix (see self._day_expiry's own comment in __init__):
+                # never trust a strike/side match alone -- multiple expiries can
+                # tick the same strike numbers simultaneously on the shared feed.
+                # Ticks arriving before self._day_expiry is resolved (very first
+                # moments of the day) are held back rather than risking a wrong
+                # expiry's price seeding self._live_premium.
+                if self._day_expiry is None or ev.expiry != self._day_expiry:
                     continue
                 strike = int(ev.strike)
                 side = str(ev.option_type).upper()
@@ -312,7 +340,7 @@ class CagStraddleStrategy(AbstractStrategyBook):
         qty_unit = self._lot_size * self._lot_multiplier
         self._event_counter += 1
         eid = f"{self._underlying}_{side}{int(strike)}_ENTRY_{self._event_counter}"
-        expiry = self._resolve_expiry()
+        expiry = self._day_expiry or self._resolve_expiry()
         self._position = dict(
             side=side, strike=strike, entry_price=entry_price, entry_ts=entry_ts,
             qty_unit=qty_unit, expiry=expiry, _entry_event_id=eid,

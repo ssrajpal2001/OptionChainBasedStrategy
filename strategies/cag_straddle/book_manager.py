@@ -35,7 +35,8 @@ def _parse_params(raw: str) -> dict:
         params = {}
     for k, v in _DEFAULT_PARAMS.items():
         params.setdefault(k, v)
-    params.setdefault("entry_start", "15:00")
+    # 2026-09-08, direct user spec: moved from 15:00 to 15:15.
+    params.setdefault("entry_start", "15:15")
     params.setdefault("force_exit_time", "15:35")
     return params
 
