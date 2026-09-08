@@ -148,12 +148,27 @@ _FILTER_BOOL_KEYS = ("oi_wall_check_enabled", "distance_to_wall_enabled", "pcr_g
                       "volume_confirmation_enabled", "oi_roc_enabled")
 
 
-def _parse_params(raw: str) -> dict:
+# 2026-09-08, direct user spec: the top-20 variant has no ORB-breakout
+# dependency at all (its entry is a rolling VWAP-touch, not an ORB freeze),
+# so there's no structural reason to wait for the standard variant's
+# SCAN_START=09:26 (which exists specifically to let the 09:15-09:25 ORB
+# range complete first). User confirmed the whole top20 pipeline -- scan,
+# top-20 rank, 2% price-move filter, DB save, VWAP-touch check, entry,
+# exit -- should start at 09:15. ORB_START/ORB_END stay 09:15/09:25
+# (still computed+stored for the dashboard/backtest data even though top20
+# entries don't gate on them), only SCAN_START/ENTRY_WINDOW_START move
+# earlier for this variant specifically.
+_TOP20_DEFAULT_PARAMS = dict(_DEFAULT_PARAMS)
+_TOP20_DEFAULT_PARAMS["scan_start"] = "09:15"
+_TOP20_DEFAULT_PARAMS["entry_window_start"] = "09:15"
+
+
+def _parse_params(raw: str, defaults: dict = _DEFAULT_PARAMS) -> dict:
     try:
         params = json.loads(raw or "{}")
     except Exception:
         params = {}
-    for k, v in _DEFAULT_PARAMS.items():
+    for k, v in defaults.items():
         params.setdefault(k, v)
     return params
 
@@ -164,6 +179,9 @@ class OiOrbScreenerBookManager(StrategyBookManager):
     # ("oi_orb_screener" vs "oi_orb_screener_top20") -- only the DB query
     # and the strategy_name threaded into the spawned book differ.
     STRATEGY_NAME = _STRATEGY_NAME
+    # 2026-09-08: per-variant defaults (see _TOP20_DEFAULT_PARAMS above) --
+    # overridden by OiOrbScreenerTop20BookManager.
+    DEFAULT_PARAMS = _DEFAULT_PARAMS
 
     def _wanted(self) -> Dict[tuple, dict]:
         wanted: Dict[tuple, dict] = {}
@@ -177,30 +195,31 @@ class OiOrbScreenerBookManager(StrategyBookManager):
                 lots = max(1, int(round(float(d.get("lot_multiplier", 1) or 1))))
             except Exception:
                 lots = 1
-            params = _parse_params(d.get("strategy_params", "{}"))
+            _defaults = self.DEFAULT_PARAMS
+            params = _parse_params(d.get("strategy_params", "{}"), _defaults)
             cfg = {
                 "lots": lots,
                 "product_type": d.get("product_type") or "MIS",
                 "squareoff_time": d.get("squareoff_time") or "15:15",
             }
             for k in _FLOAT_KEYS:
-                cfg[k] = float(params.get(k, _DEFAULT_PARAMS[k]))
+                cfg[k] = float(params.get(k, _defaults[k]))
             for k in _INT_KEYS:
-                cfg[k] = int(params.get(k, _DEFAULT_PARAMS[k]))
+                cfg[k] = int(params.get(k, _defaults[k]))
             for k in _STR_KEYS:
-                cfg[k] = str(params.get(k, _DEFAULT_PARAMS[k]))
+                cfg[k] = str(params.get(k, _defaults[k]))
             cfg["regime_filter_enabled"] = bool(params.get("regime_filter_enabled",
-                                                             _DEFAULT_PARAMS["regime_filter_enabled"]))
+                                                             _defaults["regime_filter_enabled"]))
             cfg["ignore_time_windows"] = bool(params.get("ignore_time_windows",
-                                                           _DEFAULT_PARAMS["ignore_time_windows"]))
+                                                           _defaults["ignore_time_windows"]))
             cfg["vwap_cancel_if_unreached"] = bool(params.get("vwap_cancel_if_unreached",
-                                                                _DEFAULT_PARAMS["vwap_cancel_if_unreached"]))
+                                                                _defaults["vwap_cancel_if_unreached"]))
             cfg["two_session_scan_enabled"] = bool(params.get("two_session_scan_enabled",
-                                                                _DEFAULT_PARAMS["two_session_scan_enabled"]))
+                                                                _defaults["two_session_scan_enabled"]))
             cfg["immediate_entry_enabled"] = bool(params.get("immediate_entry_enabled",
-                                                                _DEFAULT_PARAMS["immediate_entry_enabled"]))
+                                                                _defaults["immediate_entry_enabled"]))
             for k in _FILTER_BOOL_KEYS:
-                cfg[k] = bool(params.get(k, _DEFAULT_PARAMS[k]))
+                cfg[k] = bool(params.get(k, _defaults[k]))
             # Key on the sentinel underlying so this fits the base class's
             # generic (client_id, binding_id, underlying) Key shape without
             # a real per-stock underlying -- the screener itself decides
@@ -343,5 +362,12 @@ class OiOrbScreenerTop20BookManager(OiOrbScreenerBookManager):
     separate strategy_deployments row keyed by strategy_name, and this class's
     own _wanted() only ever queries "oi_orb_screener_top20" rows, the two
     managers can never accidentally spawn duplicate/colliding books for the
-    same deployment."""
+    same deployment.
+
+    2026-09-08, direct user spec: the whole pipeline (scan, top-20 rank, 2%
+    price-move filter, DB save, VWAP-touch check, entry, exit) starts at
+    09:15, not the standard variant's 09:26 -- see _TOP20_DEFAULT_PARAMS'
+    own comment for why the standard variant's SCAN_START delay doesn't
+    apply here (no ORB-breakout dependency)."""
     STRATEGY_NAME = "oi_orb_screener_top20"
+    DEFAULT_PARAMS = _TOP20_DEFAULT_PARAMS
