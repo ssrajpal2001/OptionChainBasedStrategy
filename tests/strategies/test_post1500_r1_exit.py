@@ -91,6 +91,35 @@ def _spy_close_position(s):
     return calls
 
 
+async def _establish_r1(s, side: str, base, leg_attr: str):
+    """Drives real 1-min bars through the actual SupportResistanceCalculator
+    state machine (strategies/core/support_resistance.py) up through a
+    genuinely ESTABLISHED R1 in a stable (non-R1_TRACKING) phase --
+    INITIAL_TREND_ESTABLISHMENT -> "BREAKOUT HIGH" -> R1_TRACKING(R1=30,
+    not established) -> a lower-high/lower-low candle confirms R1 established
+    @30, phase -> S2_TRACKING. Required after the 2026-09-08 fix (breach must
+    only action off a genuinely established, non-tracking R1) -- a handful of
+    monotonically-rising ticks (the old test shape) never actually reaches
+    "established" in the real state machine, so it could never have proven a
+    genuine breach even before this fix; it only "worked" by accident against
+    the old, ungated bug. Returns the timestamp of the next call the caller
+    should use to feed a breaching tick (minute3, still-forming)."""
+    from datetime import timedelta
+    leg = getattr(s._position, leg_attr)
+    steps = [
+        (0, 0, 25.0), (0, 30, 15.0),    # candle_A minute0: h=25 l=15 (init only)
+        (1, 0, 30.0), (1, 30, 20.0),    # candle_B minute1: h=30 l=20 -> BREAKOUT HIGH, R1_TRACKING (R1=30 unestablished)
+        (2, 0, 28.0), (2, 30, 18.0),    # candle_C minute2: h=28 l=18 (accumulates, not yet closed)
+    ]
+    for minute, sec, ltp in steps:
+        now = base + timedelta(minutes=minute, seconds=sec)
+        leg.ltp = ltp
+        await s._check_post1500_r1_exit(s._position, now)
+    # minute3's first call closes candle_C (28,18) -- since 28<prev_high(30) and
+    # 18<prev_low(20), this is exactly the "R1 established, S2_TRACKING" branch.
+    return base + timedelta(minutes=3)
+
+
 def test_defaults_on_via_runtime_config(monkeypatch):
     """2026-08-31, direct user spec: both post1500_exit_enabled and
     shadow_vwap_enabled now default ON globally (index_section() deep-merges
@@ -244,6 +273,58 @@ def test_day_low_reversal_never_fires_on_a_surviving_single_leg():
     assert s._position.ce_leg_closed is False, "surviving CE leg must still be open"
 
 
+def test_breach_never_fires_while_r1_still_mid_tracking():
+    """2026-09-08 CRITICAL FIX, direct user spec: a breach must only be
+    actioned once R1 is a genuinely ESTABLISHED, stable level -- never while
+    the phase is still R1_TRACKING (R1 itself mid-formation, not yet
+    confirmed). Before this fix, the code read whatever value R1 currently
+    held with no established/phase check at all, so a live tick above a
+    still-forming, unconfirmed R1 could incorrectly close a leg."""
+    s = _strategy()
+    s._post1500_exit_enabled = True
+    s._session_min_straddle_frozen = 1000.0   # arms immediately
+    close_leg_calls = _spy_close_leg(s)
+    s._position = _position(20.0, 20.0)
+
+    import strategies.sell_straddle.exits as exits_mod
+    from strategies.core.support_resistance import SupportResistanceCalculator
+    from datetime import datetime, timedelta
+    s._post1500_calc = {"CE": SupportResistanceCalculator(), "PE": SupportResistanceCalculator()}
+    s._post1500_bar_acc = {}
+
+    async def _run():
+        base = datetime.now(exits_mod.IST).replace(hour=15, minute=20, second=0, microsecond=0)
+        # Only the first two candles -- init (25,15), then BREAKOUT HIGH
+        # (30,20) which sets R1=30 with is_established=False, phase=
+        # R1_TRACKING. R1 is NEVER confirmed here (no third, lower-high/
+        # lower-low candle) -- it stays mid-tracking for the rest of this
+        # test, exactly the buggy scenario.
+        steps = [
+            (0, 0, 25.0), (0, 30, 15.0),
+            (1, 0, 30.0), (1, 30, 20.0),
+        ]
+        for minute, sec, ltp in steps:
+            now = base + timedelta(minutes=minute, seconds=sec)
+            s._position.ce_leg.ltp = ltp
+            await s._check_post1500_r1_exit(s._position, now)
+        # A live tick well above the still-unestablished R1=30 -- must NOT breach.
+        breach_ts = base + timedelta(minutes=2)
+        s._position.ce_leg.ltp = 200.0
+        await s._check_post1500_r1_exit(s._position, breach_ts)
+        # Confirm the state machine really is still mid-tracking, not established.
+        sr = s._post1500_calc["CE"].get_calculated_sr_state("NIFTY_CE_P1500")
+        assert sr["current_phase"] == "R1_TRACKING"
+        assert sr["sr_levels"]["R1"]["is_established"] is False
+
+    asyncio.run(_run())
+
+    assert close_leg_calls == [], (
+        f"a breach must never fire while R1 is still mid-tracking/unestablished, "
+        f"got: {close_leg_calls}"
+    )
+    assert s._position.ce_leg_closed is False
+
+
 def test_eod_close_of_surviving_leg_uses_close_leg_not_close_position():
     """The critical safety guard: once one leg is closed via this mechanic,
     EOD square-off must route through _close_leg for the survivor only --
@@ -296,14 +377,14 @@ def test_both_legs_closing_independently_finalizes_the_position():
     s._post1500_calc = {"CE": SupportResistanceCalculator(), "PE": SupportResistanceCalculator()}
     s._post1500_bar_acc = {}
 
-    from datetime import datetime, timedelta
-    base = datetime.now(exits_mod.IST).replace(hour=15, minute=10, second=0, microsecond=0)
-    for i in range(6):
-        now = base + timedelta(minutes=i)
-        s._position.pe_leg.ltp = 20.0 + i * 2
-        asyncio.run(s._check_post1500_r1_exit(s._position, now))
-        if s._position is None:
-            break
+    from datetime import datetime
+
+    async def _run():
+        base = datetime.now(exits_mod.IST).replace(hour=15, minute=10, second=0, microsecond=0)
+        breach_ts = await _establish_r1(s, "PE", base, "pe_leg")
+        s._position.pe_leg.ltp = 35.0   # breaches the now-established R1(=30)
+        await s._check_post1500_r1_exit(s._position, breach_ts)
+    asyncio.run(_run())
 
     assert s._stop_for_day is True or s._position is None or s._position.pe_leg_closed
 
@@ -540,18 +621,16 @@ def test_concurrent_r1_breach_checks_close_the_leg_only_once():
     s._position = _position(20.0, 20.0)
 
     import strategies.sell_straddle.exits as exits_mod
-    from datetime import datetime, timedelta
-    base = datetime.now(exits_mod.IST).replace(hour=15, minute=1, second=0, microsecond=0)
+    from datetime import datetime
 
-    # Feed real rising bars to establish a genuine CE R1, same as the
-    # existing per-leg breach test, but stop one bar short of the breach so
-    # the position is armed with a live R1 and the NEXT tick is what
-    # actually breaches it -- that breaching tick is what gets raced below.
-    for i in range(4):
-        now = base + timedelta(minutes=i)
-        s._position.ce_leg.ltp = 20.0 + i
-        s._position.pe_leg.ltp = 20.0
-        asyncio.run(s._check_post1500_r1_exit(s._position, now))
+    # Feed real bars through the actual S&R state machine to establish a
+    # genuine CE R1 (see _establish_r1's own docstring), stopping right
+    # before the breaching tick -- that breaching tick is what gets raced
+    # below, at breach_now.
+    async def _setup():
+        base = datetime.now(exits_mod.IST).replace(hour=15, minute=1, second=0, microsecond=0)
+        return base, await _establish_r1(s, "CE", base, "ce_leg")
+    base, breach_now = asyncio.run(_setup())
     assert s._post1500_armed is True
 
     # A slow, controllable fake _close_leg: both concurrent callers must
@@ -568,7 +647,6 @@ def test_concurrent_r1_breach_checks_close_the_leg_only_once():
         return _FakeOrderEvent(close_aborted=False)
     s._close_leg = _slow_close_leg
 
-    breach_now = base + timedelta(minutes=4)
     s._position.ce_leg.ltp = 200.0   # unambiguous breach of whatever R1 formed
     s._position.pe_leg.ltp = 20.0
 

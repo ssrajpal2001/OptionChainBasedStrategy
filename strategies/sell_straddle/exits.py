@@ -1207,10 +1207,27 @@ class ExitMixin:
             if self._post1500_closing.get(side):
                 continue
             leg = pos.ce_leg if side == "CE" else pos.pe_leg
-            sr = self._post1500_calc[side].get_calculated_sr_state(
-                f"{self._underlying}_{side}_P1500").get("sr_levels", {})
+            _sr_state = self._post1500_calc[side].get_calculated_sr_state(
+                f"{self._underlying}_{side}_P1500")
+            sr = _sr_state.get("sr_levels", {})
             r1 = sr.get("R1")
             if r1 is None:
+                continue
+            # 2026-09-08 CRITICAL FIX, direct user spec: a breach must only be
+            # actioned once R1 is a genuinely ESTABLISHED, stable level -- not
+            # while the phase is still R1_TRACKING (R1 itself is mid-formation/
+            # being tested as a hurdle, not yet confirmed). The old code read
+            # whatever R1 currently held with no established/phase check at
+            # all, so it could fire on an R1 that had never actually been
+            # confirmed. Once established+not-tracking, every tick is still
+            # checked live (this naturally catches a genuine "R2 breaches R1"
+            # breach in real time, well before the 1-min candle that would
+            # eventually confirm it even closes -- see this function's other
+            # bar-close block above, which is what would flip the phase to
+            # R1_TRACKING on the NEXT candle close using a NEW r1['high'];
+            # by then a real breach has already fired here, tick-by-tick,
+            # against the still-valid established value).
+            if not r1.get("is_established") or _sr_state.get("current_phase") == "R1_TRACKING":
                 continue
             ltp = float(leg.ltp or 0.0)
             if ltp <= 0 or ltp <= float(r1["high"]):
