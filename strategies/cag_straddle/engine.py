@@ -237,6 +237,19 @@ class CagStraddleStrategy(AbstractStrategyBook):
         self._entry_window_started = True
         atm = round(self._spot / self._strike_step) * self._strike_step
         for side in _SIDES:
+            if self._position is not None and self._position.get("side") == side:
+                # 2026-09-08 CRITICAL FIX, restart-safety audit: never re-pick a
+                # side that already has an open position restored from the DB --
+                # _restore_position() already pinned self._selected_strikes[side]
+                # to the position's REAL strike. Re-picking here (the original
+                # bug) would very likely land on a DIFFERENT strike than the one
+                # actually held (price has moved since real entry, that's the
+                # whole reason a position exists), silently orphaning every
+                # future OPTION_TICK for the real held strike from ever reaching
+                # _on_bar_close -- disabling BOTH the S1 structural SL and the
+                # hard-risk-cap check for the rest of the window, with no error,
+                # no log, nothing but a wrong number in self._selected_strikes.
+                continue
             candidates = {}
             for k in range(-self._strike_search_steps, self._strike_search_steps + 1):
                 strike = int(atm + k * self._strike_step)
@@ -539,6 +552,105 @@ class CagStraddleStrategy(AbstractStrategyBook):
         self._position = d
         logger.info("CagStraddle[%s]: restored open position from store (%s %d).",
                     self._underlying, d.get("side"), d.get("strike", 0))
+        side = d.get("side")
+        strike = d.get("strike")
+        # 2026-09-08 CRITICAL FIX, restart-safety audit (direct user spec, same
+        # replay discipline just built for OI-ORB Screener): pin this side to
+        # the position's REAL strike immediately, before _start_entry_window()
+        # ever gets a chance to re-pick it fresh (see that method's own updated
+        # guard). Without this, a restart mid-window would very likely end up
+        # tracking a DIFFERENT strike than the one actually held -- silently
+        # disabling this position's own S1 SL and hard-risk-cap for the rest of
+        # the day, with the position itself never lost (still visible/closeable
+        # at EOD), just running fully unprotected until then.
+        if side and strike:
+            self._selected_strikes[side] = int(strike)
+            self._trackers[side] = SideTracker()
+            self._bar_accs[side] = BarAccumulator()
+            asyncio.create_task(self._seed_restored_position_from_history(side, int(strike)))
+
+    async def _seed_restored_position_from_history(self, side: str, strike: int) -> None:
+        """2026-09-08, direct user spec: rebuilds the S&R tracker's real state
+        (continuous R1/S1/phase tracking from the entry-window's own 15:00
+        start, same as the live path never resets it mid-window) from real
+        1-min premium history, and replays the SL-fill check for every bar
+        since the position's actual entry -- so a genuinely-already-earned SL
+        breach that happened while this process was down still closes the
+        position now, immediately, instead of leaving it open on a stale S1
+        that never gets checked again until a fresh live cross. Uses
+        fetch_upstox_intraday_1m (TODAY's still-forming session) -- the
+        historical/range endpoint would miss today's data entirely, same
+        gotcha already found and fixed in OI-ORB Screener's own restart path.
+        Best-effort throughout: any failure just leaves the tracker to build
+        fresh from whatever live ticks arrive from here on -- the existing,
+        already-honest limitation this strategy has always had -- never
+        blocks startup, never leaves the position untracked (position
+        qty/entry_price/expiry already restored and persisted independently
+        of this)."""
+        pos = self._position
+        if pos is None or pos.get("side") != side:
+            return
+        entry_ts = pos.get("entry_ts")
+        if entry_ts is None:
+            return
+        try:
+            from data_layer.instrument_registry import REGISTRY
+            from data_layer.client_db import ClientDB
+            from data_layer.historical_candles import fetch_upstox_intraday_1m
+            expiry = pos.get("expiry") or self._day_expiry or self._resolve_expiry()
+            if expiry is None:
+                self._clog.warning("%s: restart-recovery history seed skipped -- no expiry resolvable.", side)
+                return
+            upstox_key = REGISTRY.get_upstox_key(self._underlying, expiry, strike, side)
+            if not upstox_key:
+                self._clog.warning("%s: restart-recovery history seed skipped -- no upstox key resolved "
+                                    "for %s%d.", side, side, strike)
+                return
+            creds = await asyncio.to_thread(ClientDB().get_feeder_creds_sync, "upstox")
+            token = (creds or {}).get("access_token", "")
+            if not token:
+                self._clog.warning("%s: restart-recovery history seed skipped -- no Upstox access token.", side)
+                return
+            rows = await fetch_upstox_intraday_1m(upstox_key, token)
+            if not rows:
+                self._clog.info("%s: restart-recovery history seed returned no bars.", side)
+                return
+            bars = sorted(
+                (Bar(ts=datetime.fromisoformat(r["ts"]), open=float(r["open"]), high=float(r["high"]),
+                     low=float(r["low"]), close=float(r["close"])) for r in rows),
+                key=lambda b: b.ts,
+            )
+            tracker = self._trackers.get(side)
+            acc = self._bar_accs.get(side)
+            if tracker is None or acc is None:
+                return
+            window_start = datetime.combine(entry_ts.date(), self._entry_start, tzinfo=IST)
+            replayed = 0
+            for b in bars:
+                if b.ts < window_start:
+                    continue
+                acc.bars.append(b)
+                info = tracker.on_bar(b)
+                replayed += 1
+                if b.ts < entry_ts:
+                    continue   # tracker state builds continuously, but no position existed yet to SL-check
+                if self._position is None or self._position.get("side") != side:
+                    return   # position already closed by something else mid-replay
+                sl_fill = tracker.check_sl_fill(b, info["s1_before"])
+                if sl_fill is not None:
+                    self._clog.critical(
+                        "%s: restart-recovery replay found an ALREADY-EARNED SL breach @%.2f "
+                        "(real history since entry_ts=%s) -- closing now.",
+                        side, sl_fill, entry_ts.isoformat())
+                    self._exit(reason=f"sl_s1_breach@{sl_fill:.2f}", exit_price=sl_fill)
+                    return
+            self._clog.info(
+                "%s: restart-recovery replayed %d real bars since window start -- S&R tracker "
+                "reconstructed (phase=%s, S1=%s), no breach found; live ticks continue from here.",
+                side, replayed, tracker.last_phase, tracker.last_s1)
+        except Exception:
+            self._clog.exception("%s: restart-recovery history seed failed (non-fatal, tracker "
+                                  "stays cold from now).", side)
 
     # ── monitoring / UI ──────────────────────────────────────────────────────
 
