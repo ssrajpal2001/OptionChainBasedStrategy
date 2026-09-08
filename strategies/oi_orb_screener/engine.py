@@ -361,6 +361,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._already_fired: set = set()
         self._entry_window_done_logged = False
         self._morning_historical_retest_applied = False
+        self._restart_db_reconcile_applied = False
         # (symbol, side) pairs no longer eligible to enter today -- as of
         # 2026-08-27 populated solely by the VWAP cancel-if-unreached rule
         # (see _run_today_pipeline's entry-window-close handling). The old
@@ -529,6 +530,10 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         # poll cycle for the life of the day -- the afternoon rescan calls it again
         # itself, per newly-added symbol, so this flag is morning-path-only.
         self._morning_historical_retest_applied = False
+        # 2026-09-08, direct user spec: guards the ONE restart-recovery
+        # reconciliation against the DB's continuous per-minute scan log --
+        # see _reconcile_shortlist_from_db's own docstring.
+        self._restart_db_reconcile_applied = False
         self._stock_chains = {}
         self._chain_subscribed = {}
         self._volume_cum_last = {}
@@ -1391,6 +1396,9 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 # ordering fix closes, skip the regime check while it was still
                 # unset. Guarded to run once -- this freeze block itself only ever
                 # runs once too (the `if self._regime is None` guard above).
+                if not self._restart_db_reconcile_applied:
+                    self._restart_db_reconcile_applied = True
+                    await self._reconcile_shortlist_from_db(cfg)
                 if not self._morning_historical_retest_applied:
                     self._morning_historical_retest_applied = True
                     await self._apply_historical_vwap_retest(self._shortlist_symbols, cfg)
@@ -1546,6 +1554,77 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 "OiOrb[%s/%s]: %s %s signal BLOCKED by an enabled additive filter -- "
                 "see the individual oiorb_filter_* logs for which one and why.",
                 self._client_id, self._binding_id, sig.symbol, sig.side)
+
+    async def _reconcile_shortlist_from_db(self, cfg: dict) -> None:
+        """2026-09-08, direct user spec: on a mid-day restart, don't trust
+        this restarted process's own single fresh scan to reproduce the same
+        top-N a prior process instance already found and was tracking --
+        OI-spurt/price-move values drift minute to minute, so a restart's own
+        scan can genuinely differ (the real 2026-09-08 incident that dropped
+        GVT&D/HAL/NATIONALUM/HINDZINC from the shortlist entirely). The DB's
+        own continuous per-minute scan log (oi_spurt_history, written by
+        _oi_spurt_history_loop, on by default all session) is the
+        authoritative record of what should currently be tracked -- reads
+        its MOST RECENT poll and onboards any symbol that passes this book's
+        own tradeable filter and isn't already on this process's own
+        shortlist, using the SAME onboarding steps _maybe_run_afternoon_scan
+        already uses for a newly-discovered symbol (ORB/VWAP backfill from
+        Yahoo, orb_frozen, and -- critically -- the historical VWAP-retest
+        replay, so a retest that already genuinely happened before this
+        process restarted still fires immediately). Best-effort, runs once
+        per process life (same guard shape as _morning_historical_retest_
+        applied): no rows in the DB yet (first-ever start of the day) is a
+        normal no-op, not a failure."""
+        rows = await asyncio.to_thread(
+            store.load_latest_scan_symbols, self._client_id, self._binding_id,
+            datetime.now(IST).date().isoformat())
+        if not rows:
+            return
+        min_pct = cfg.get("PRICE_MOVE_MIN_PCT", 2.0) if self._top20_mode else cfg.get("OI_SPURT_MIN_PCT", 7.0)
+        new_syms = []
+        for r in rows:
+            sym = r.get("symbol")
+            if not sym or sym in self._shortlist_symbols:
+                continue
+            metric = r.get("price_change_pct") if self._top20_mode else r.get("oi_spurt_pct")
+            if metric is None or abs(metric) < min_pct:
+                continue
+            pchange = r.get("price_change_pct") or 0.0
+            self._shortlist_symbols.append(sym)
+            self._shortlist_pchange[sym] = pchange
+            new_syms.append(sym)
+            self._clog.info(
+                "OiOrb[%s/%s]: %s reconstructed from DB scan history (restart recovery) -- "
+                "pChange=%+.2f%% oi_spurt=%s.",
+                self._client_id, self._binding_id, sym, pchange, r.get("oi_spurt_pct"))
+            try:
+                await asyncio.to_thread(screener.backfill_orb_from_yahoo, self._bars, [sym], cfg)
+                await asyncio.to_thread(screener.backfill_vwap_from_yahoo, self._vwap, [sym], cfg)
+            except Exception:
+                self._clog.exception(
+                    "OiOrb[%s/%s]: %s restart-recovery ORB/VWAP backfill failed (non-fatal, "
+                    "VWAP starts cold from now).", self._client_id, self._binding_id, sym)
+            h, l = self._bars.orb(sym, cfg["ORB_START"], cfg["ORB_END"])
+            if h is not None:
+                self._orb_frozen[sym] = (h, l)
+                await asyncio.to_thread(store.update_orb_levels, self._client_id, self._binding_id, sym, h, l)
+            self._ensure_spot_feed(sym)
+        if not new_syms:
+            return
+        await asyncio.to_thread(
+            store.record_shortlist, self._client_id, self._binding_id,
+            [{"symbol": s, "price_change_pct": self._shortlist_pchange.get(s), "oi_spurt_pct": None,
+              "score": None, "side_bias": "bullish" if self._shortlist_pchange.get(s, 0) > 0 else "bearish"}
+             for s in new_syms])
+        self._clog.info(
+            "OiOrb[%s/%s]: restart recovery reconstructed %d stock(s) from DB scan history: %s",
+            self._client_id, self._binding_id, len(new_syms), ", ".join(new_syms))
+        # Historical VWAP-retest replay for the reconstructed symbols only --
+        # session-1 symbols already got this from the morning call right
+        # after this method returns; re-running it for symbols already
+        # checked would be harmless (idempotent, gated on _already_fired/
+        # _rejected) but wasteful.
+        await self._apply_historical_vwap_retest(new_syms, cfg)
 
     async def _apply_historical_vwap_retest(self, symbols: list, cfg: dict) -> None:
         """2026-09-07, direct user spec: "when we started the application and

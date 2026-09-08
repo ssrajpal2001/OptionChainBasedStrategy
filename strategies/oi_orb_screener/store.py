@@ -376,6 +376,41 @@ def record_oi_spurt_history(client_id: str, binding_id: str, poll_ts: str, rows:
         con.close()
 
 
+def load_latest_scan_symbols(client_id: str, binding_id: str, trade_date: Optional[str] = None) -> List[dict]:
+    """2026-09-08, direct user spec: on a mid-day restart, reconstruct
+    'what should currently be tracked' from the continuous per-minute
+    oi_spurt_history log rather than trusting a fresh live re-scan to
+    reproduce the same top-N -- OI-spurt/price-move values drift minute to
+    minute, so a restart's own scan can genuinely differ from what was
+    already being watched before the restart (the real 2026-09-08 incident
+    that dropped GVT&D/HAL/NATIONALUM/HINDZINC). Returns the rows from the
+    MOST RECENT poll_ts recorded today -- [] if oi_spurt_history has no
+    rows yet today (first-ever start of the day, nothing to reconstruct)."""
+    init_db()
+    td = trade_date or _today()
+    con = sqlite3.connect(_DB_PATH)
+    con.row_factory = sqlite3.Row
+    try:
+        latest_ts = con.execute(
+            "SELECT MAX(poll_ts) FROM oi_spurt_history WHERE client_id=? AND binding_id=? AND trade_date=?",
+            (client_id, binding_id, td),
+        ).fetchone()[0]
+        if not latest_ts:
+            return []
+        rows = con.execute(
+            """SELECT symbol, rank, oi_spurt_pct, price_change_pct FROM oi_spurt_history
+               WHERE client_id=? AND binding_id=? AND trade_date=? AND poll_ts=?
+               ORDER BY rank""",
+            (client_id, binding_id, td, latest_ts),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    except Exception as exc:
+        logger.error("oi_orb store.load_latest_scan_symbols failed: %s", exc)
+        return []
+    finally:
+        con.close()
+
+
 # ── oi_orb_top20_daily_scan (2026-09-07, direct user spec, new strategy
 # "oi_orb_screener_top20"): "register all stocks in database for future
 # backtest and optimisation" -- ALL 20 rank-scanned stocks once per day,
