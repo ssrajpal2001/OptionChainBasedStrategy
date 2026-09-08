@@ -103,6 +103,14 @@ _UNDERLYING_SENTINEL = "SCREENER"
 _BUILD_SHORTLIST_MAX_ATTEMPTS = 3
 _BUILD_SHORTLIST_RETRY_SEC = 180.0
 
+# 2026-09-08, direct user spec: live exit mechanic, replaces HA+StochRSI --
+# see the module docstring note at self._trap_exit_* in __init__ for the
+# full three-tier design (multi-day HTF trap -> intraday HTF trap -> EOD).
+_TRAP_EXIT_HTF_MULTIDAY_MIN = 75
+_TRAP_EXIT_HTF_INTRADAY_MIN = 15
+_TRAP_EXIT_LTF_MIN = 3
+_TRAP_EXIT_LOOKBACK_CALENDAR_DAYS = 15   # ~10 real trading days, same validated window
+
 
 def _make_strategy_logger(client_id: str, binding_id: str) -> logging.Logger:
     """Dedicated, rotating, per-(client,binding,day) log file -- same
@@ -408,6 +416,29 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._ha_stoch_1m_acc: Dict[str, "object"] = {}
         self._ha_stoch_last_checked_bar_ts: Dict[str, datetime] = {}
 
+        # 2026-09-08, direct user spec: replaces the HA+StochRSI exit above as
+        # the LIVE exit mechanic (kept defined, not deleted, per this codebase's
+        # own convention of leaving superseded mechanics in place unused) --
+        # multi-day 75min HTF same-side trap zone + 3min S&R ladder, validated
+        # this session (scripts/oi_orb_same_side_trap_multiday_htf_sweep.py) as
+        # the config the user chose to run live, falling back to the
+        # already-validated intraday 15min/3min version of the same mechanic
+        # (scripts/oi_orb_trap_target_full_htf_ltf_sweep.py) when no multi-day
+        # zone ever locks+touches, and EOD square-off as the final fallback --
+        # same three-tier fallback shape the backtest itself used. See
+        # _seed_multiday_trap_exit_zones / _trap_multiday_exit_check /
+        # _trap_intraday_exit_check for the full mechanic.
+        self._trap_exit_multiday_zones: Dict[str, list] = {}
+        self._trap_exit_multiday_fetch_done: Dict[str, bool] = {}
+        self._trap_exit_touched: Dict[str, bool] = {}
+        self._trap_exit_source: Dict[str, str] = {}
+        self._trap_exit_calc: Dict[str, "object"] = {}
+        self._trap_exit_ltf_acc: Dict[str, "object"] = {}
+        self._trap_exit_ltf_fed: Dict[str, int] = {}
+        self._trap_exit_intraday_1m_acc: Dict[str, "object"] = {}
+        self._trap_exit_intraday_zones: Dict[str, list] = {}
+        self._trap_exit_intraday_htf_fed: Dict[str, int] = {}
+
         # ── contract/feed/position state, keyed by stock symbol ────────
         self._pending_contracts: Dict[str, "stock_resolve.ResolvedContract"] = {}
         self._pending_fills: Dict[str, dict] = {}   # event_id -> context
@@ -629,6 +660,13 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             # moment the process happened to restart (see the method's own docstring
             # for the mechanic; best-effort, never blocks the restore on failure).
             await self._seed_option_bars_from_history(r["symbol"], contract, self._positions[r["symbol"]]["opened_at"])
+            # 2026-09-08: the multi-day trap-exit tier applies to EVERY open
+            # position regardless of sl_mechanic (same universal-exit shape
+            # as the HA+StochRSI check it replaced) -- a restored position
+            # needs its own zone seed too, not just a fresh _on_fill entry.
+            # Background task, best-effort, matches _on_fill's own pattern.
+            side_for_zones = screener.side_from_pchange(self._shortlist_pchange.get(r["symbol"], 0.0))
+            asyncio.create_task(self._seed_multiday_trap_exit_zones(r["symbol"], side_for_zones))
 
         already_fired = await asyncio.to_thread(store.load_already_fired, self._client_id, self._binding_id, td)
         rejected = await asyncio.to_thread(store.load_rejected, self._client_id, self._binding_id, td)
@@ -1358,21 +1396,26 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             # because new entries aren't being evaluated right now.
             # 2026-09-02: "immediate_15m"-tagged positions get their own
             # parallel 15-min S1/R1 TSL instead.
-            # 2026-09-06: the confirmed HA-shape + StochRSI(9,9) exit runs for
-            # EVERY open position, unconditional on sl_mechanic (unlike the
-            # trap/immediate_15m TSLs above, which only apply to their own
-            # entry style) -- checked first, since it's the universal exit
-            # this week's backtest series confirmed; either check can claim
-            # self._eod_closing first, whichever fires wins, same "first
-            # fired wins" discipline this engine already uses everywhere else.
+            # 2026-09-08, direct user spec: the universal exit for EVERY open
+            # position (unconditional on sl_mechanic, same as the HA+StochRSI
+            # check it replaces) is now the multi-day 75min HTF same-side trap
+            # + 3min S&R ladder, falling back to the already-validated
+            # intraday 15min/3min version of the same mechanic when no
+            # multi-day zone has locked+touched yet -- see
+            # _trap_multiday_exit_check/_trap_intraday_exit_check's own
+            # docstrings. _ha_stoch_check_exit is kept defined, not deleted,
+            # per this codebase's own convention for superseded mechanics.
             for sym, pos in list(self._positions.items()):
                 ltp = self._live_price(sym, live)
                 if ltp is None:
                     continue
                 side = screener.side_from_pchange(self._shortlist_pchange.get(sym, 0.0))
-                await self._ha_stoch_check_exit(sym, side, ltp, now)
+                await self._trap_multiday_exit_check(sym, side, ltp, now)
                 if sym in self._eod_closing:
-                    continue   # already claimed by the HA+StochRSI check above this cycle
+                    continue
+                await self._trap_intraday_exit_check(sym, side, ltp, now)
+                if sym in self._eod_closing:
+                    continue   # already claimed by the trap-exit checks above this cycle
                 mech = pos.get("sl_mechanic")
                 if mech not in ("trap", "immediate_15m"):
                     continue
@@ -2335,6 +2378,208 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             detail=f"underlying_ltp={ltp:.2f} sl_level={sl_level:.2f}")
         await self._emit_close(sym, pos, "immediate_hybrid_sl")
 
+    async def _seed_multiday_trap_exit_zones(self, sym: str, side: str) -> None:
+        """2026-09-08, direct user spec: on a fresh entry, fetch >=15 calendar
+        days of the UNDERLYING's own real 1-min spot history (real trading
+        days, not just today) and build 75-min HTF bars from it (date-aware
+        bucketing -- to_n_min_bars is NOT safe across multiple days, see its
+        own docstring), then detect same-side trap zones on those genuinely
+        multi-day-formed bars. This is the exact mechanic validated in
+        scripts/oi_orb_same_side_trap_multiday_htf_sweep.py (best combo:
+        HTF=75min/LTF=3min), fired once per position, best-effort: any
+        failure (no token, no data, network error, no instrument key) just
+        means self._trap_exit_multiday_zones[sym] stays empty, so
+        _trap_multiday_exit_check never fires for this position and it falls
+        straight to the already-validated intraday tier -- never blocks
+        entry, never leaves a position unprotected (the intraday tier is
+        checked every tick regardless of whether this seed succeeded)."""
+        self._trap_exit_multiday_fetch_done[sym] = True
+        try:
+            eq_key = stock_resolve.resolve_eq_instrument_key(sym)
+            if not eq_key:
+                self._clog.warning(
+                    "OiOrb[%s/%s]: %s multi-day trap-exit zone seed skipped -- no NSE_EQ "
+                    "instrument key resolved; will rely on intraday trap tier only.",
+                    self._client_id, self._binding_id, sym)
+                return
+            from data_layer.client_db import ClientDB
+            creds = await asyncio.to_thread(ClientDB().get_feeder_creds_sync, "upstox")
+            token = (creds or {}).get("access_token", "")
+            if not token:
+                self._clog.warning(
+                    "OiOrb[%s/%s]: %s multi-day trap-exit zone seed skipped -- no Upstox "
+                    "access token; will rely on intraday trap tier only.",
+                    self._client_id, self._binding_id, sym)
+                return
+            from data_layer.historical_candles import fetch_upstox_range_1m
+            from strategies.core.trap_zone_utils import Bar as _Bar
+            today = datetime.now(IST).date()
+            start = today - timedelta(days=_TRAP_EXIT_LOOKBACK_CALENDAR_DAYS)
+            rows = await fetch_upstox_range_1m(eq_key, token, start, today)
+            if not rows:
+                self._clog.info(
+                    "OiOrb[%s/%s]: %s multi-day trap-exit zone seed returned no bars -- "
+                    "will rely on intraday trap tier only.", self._client_id, self._binding_id, sym)
+                return
+            bars = [_Bar(ts=datetime.fromisoformat(r["ts"]), open=float(r["open"]), high=float(r["high"]),
+                          low=float(r["low"]), close=float(r["close"])) for r in rows]
+            bars.sort(key=lambda b: b.ts)
+            from strategies.core.candle_indicators import to_n_min_bars_dateaware
+            htf_bars = to_n_min_bars_dateaware(bars, _TRAP_EXIT_HTF_MULTIDAY_MIN)
+            if len(htf_bars) < 3:
+                self._clog.info(
+                    "OiOrb[%s/%s]: %s multi-day trap-exit HTF bars too thin (%d) -- "
+                    "will rely on intraday trap tier only.",
+                    self._client_id, self._binding_id, sym, len(htf_bars))
+                return
+            zones_fn = screener.bull_trap_zones if side == "CALL" else screener.sharp_bear_zones
+            zones = zones_fn(htf_bars)
+            self._trap_exit_multiday_zones[sym] = zones
+            self._clog.info(
+                "OiOrb[%s/%s]: %s multi-day trap-exit zones seeded: %d zone(s) from %d real "
+                "75-min bars across %d calendar days.",
+                self._client_id, self._binding_id, sym, len(zones), len(htf_bars),
+                _TRAP_EXIT_LOOKBACK_CALENDAR_DAYS)
+        except Exception:
+            self._clog.exception(
+                "OiOrb[%s/%s]: %s multi-day trap-exit zone seed failed -- will rely on "
+                "intraday trap tier only.", self._client_id, self._binding_id, sym)
+
+    @staticmethod
+    def _latest_locked_zone(zones: list, now: datetime) -> Optional[dict]:
+        """Direct user correction (2026-09-08): only ever check the MOST
+        RECENTLY locked zone as of `now`, not every zone confirmed anywhere
+        across the whole lookback -- a stale zone from days ago shouldn't win
+        a touch race against a fresher, more relevant one."""
+        locked = [z for z in zones if z.get("lock_ts") is not None and z["lock_ts"] <= now]
+        if not locked:
+            return None
+        return max(locked, key=lambda z: z["lock_ts"])
+
+    async def _trap_ladder_check(self, sym: str, side: str, ltp: float, ts: datetime, zone: dict,
+                                  exit_reason: str) -> bool:
+        """Shared 3-min S1(CALL)/R1(PUT) ladder, started fresh from the
+        instant `zone` is first touched -- same SupportResistanceCalculator
+        mechanic already validated live for the (currently unused)
+        _trap_check_entry/_trap_update_tsl_and_check_exit pair, reused here
+        for the exit side. Returns True if this call closed the position."""
+        from strategies.core.trap_zone_utils import BarAccumulator as _TrapAcc
+        from strategies.core.support_resistance import SupportResistanceCalculator
+
+        if not self._trap_exit_touched.get(sym):
+            touched = zone["zone_lo"] <= ltp <= zone["zone_hi"]
+            if not touched:
+                return False
+            self._trap_exit_touched[sym] = True
+            self._trap_exit_calc[sym] = SupportResistanceCalculator()
+            self._trap_exit_ltf_acc[sym] = _TrapAcc(timeframe_min=_TRAP_EXIT_LTF_MIN)
+            self._trap_exit_ltf_fed[sym] = 0
+            self._clog.info(
+                "OiOrb[%s/%s]: %s TRAP-EXIT zone touched [%.2f,%.2f] @ ltp=%.2f (source=%s) -- "
+                "%d-min S&R ladder starting fresh.",
+                self._client_id, self._binding_id, sym, zone["zone_lo"], zone["zone_hi"], ltp,
+                self._trap_exit_source.get(sym, "?"), _TRAP_EXIT_LTF_MIN,
+            )
+
+        acc = self._trap_exit_ltf_acc[sym]
+        acc.on_tick(ts, ltp)
+        calc = self._trap_exit_calc[sym]
+        fed = self._trap_exit_ltf_fed.get(sym, 0)
+        for b in acc.bars[fed:]:
+            calc.process_straddle_candle(sym, {"timestamp": b.ts, "high": b.high, "low": b.low,
+                                                 "duration": _TRAP_EXIT_LTF_MIN})
+        self._trap_exit_ltf_fed[sym] = len(acc.bars)
+
+        sr = calc.get_calculated_sr_state(sym).get("sr_levels", {})
+        level = sr.get("S1") if side == "CALL" else sr.get("R1")
+        if level is None or not level.get("is_established"):
+            return False   # cold/unconfirmed ladder -- hard risk cap still protects independently
+
+        lvl = level["low"] if side == "CALL" else level["high"]
+        self._live_sl[sym] = lvl
+        breach = (ltp <= lvl) if side == "CALL" else (ltp >= lvl)
+        if not breach:
+            return False
+
+        pos = self._positions.get(sym)
+        if pos is None:
+            return False
+        self._eod_closing.add(sym)
+        self._clog.info(
+            "OiOrb[%s/%s]: %s %s HIT -- underlying_ltp=%.2f level=%.2f side=%s -- closing.",
+            self._client_id, self._binding_id, sym, exit_reason, ltp, lvl, side,
+        )
+        await asyncio.to_thread(
+            store.log_signal_event, self._client_id, self._binding_id, sym,
+            f"{exit_reason}_triggered", detail=f"underlying_ltp={ltp:.2f} level={lvl:.2f}")
+        await self._emit_close(sym, pos, exit_reason)
+        return True
+
+    async def _trap_multiday_exit_check(self, sym: str, side: str, ltp: float, ts: datetime) -> None:
+        """Primary exit tier (2026-09-08, direct user spec, replaces
+        HA+StochRSI as the live exit): multi-day 75min HTF same-side trap
+        zone + 3min S&R ladder. Only ever acts once self._trap_exit_multiday_
+        zones[sym] has real zones (seeded once by _seed_multiday_trap_exit_
+        zones right after entry) -- if that seed never produced zones (no
+        token, no data, thin history), this tier is permanently a no-op for
+        this position and _trap_intraday_exit_check (called right after,
+        every cycle) provides the real protection instead."""
+        pos = self._positions.get(sym)
+        if pos is None or sym in self._eod_closing:
+            return
+        if self._trap_exit_source.get(sym) == "intraday":
+            return   # already escalated to the intraday tier -- never mix ladders mid-flight
+        zones = self._trap_exit_multiday_zones.get(sym)
+        if not zones:
+            return
+        zone = self._latest_locked_zone(zones, ts)
+        if zone is None:
+            return
+        self._trap_exit_source[sym] = "multiday"
+        await self._trap_ladder_check(sym, side, ltp, ts, zone, "trap_multiday_exit")
+
+    async def _trap_intraday_exit_check(self, sym: str, side: str, ltp: float, ts: datetime) -> None:
+        """Secondary/fallback exit tier -- the already-validated intraday
+        15min HTF same-side trap + 3min S&R ladder (scripts/oi_orb_trap_
+        target_full_htf_ltf_sweep.py), built live from THIS SESSION's own
+        ticks (single-day only, matching the backtest exactly). Only runs
+        once _trap_multiday_exit_check has had a chance to fire first and
+        hasn't (either no multi-day zones seeded, or none touched yet) --
+        the moment the multiday tier's ladder actually starts (self.
+        _trap_exit_source[sym] == 'multiday'), this tier steps aside
+        permanently for that position so the two ladders never race each
+        other mid-flight."""
+        pos = self._positions.get(sym)
+        if pos is None or sym in self._eod_closing:
+            return
+        if self._trap_exit_source.get(sym) == "multiday":
+            return
+        from strategies.core.trap_zone_utils import BarAccumulator as _TrapAcc
+        acc = self._trap_exit_intraday_1m_acc.setdefault(sym, _TrapAcc(timeframe_min=1))
+        acc.on_tick(ts, ltp)
+        fed = self._trap_exit_intraday_htf_fed.get(sym, 0)
+        if len(acc.bars) > fed:
+            from strategies.core.candle_indicators import to_n_min_bars_dateaware
+            htf_bars = to_n_min_bars_dateaware(acc.bars, _TRAP_EXIT_HTF_INTRADAY_MIN)
+            if len(htf_bars) >= 3:
+                zones_fn = screener.bull_trap_zones if side == "CALL" else screener.sharp_bear_zones
+                try:
+                    self._trap_exit_intraday_zones[sym] = zones_fn(htf_bars)
+                except Exception:
+                    self._clog.exception(
+                        "OiOrb[%s/%s]: %s intraday trap-exit zone detection error (recovered).",
+                        self._client_id, self._binding_id, sym)
+            self._trap_exit_intraday_htf_fed[sym] = len(acc.bars)
+
+        zones = self._trap_exit_intraday_zones.get(sym)
+        if not zones:
+            return
+        zone = self._latest_locked_zone(zones, ts)
+        if zone is None:
+            return
+        self._trap_exit_source[sym] = "intraday"
+        await self._trap_ladder_check(sym, side, ltp, ts, zone, "trap_intraday_exit")
+
     async def _ha_stoch_check_exit(self, sym: str, side: str, ltp: float, ts: datetime) -> None:
         """2026-09-06, direct user spec: the confirmed exit mechanic from
         this week's real-data backtest series (scripts/oi_orb_ha_stochrsi_
@@ -2687,6 +2932,28 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             self._live_option_atp.pop(symbol, None)
             self._option_adverse_lows[symbol] = []
             self._ensure_spot_feed(symbol)
+            # 2026-09-08, direct user spec: trap-exit state (multiday zones,
+            # touch/ladder progress, intraday zone accumulator) must not
+            # survive into a fresh entry on the same symbol -- a same-day
+            # re-entry after an earlier exit on this symbol would otherwise
+            # inherit a stale touched/escalated ladder from the previous
+            # trade. Fresh multi-day zone fetch kicked off in the background
+            # (asyncio.create_task, same fire-and-forget pattern already used
+            # elsewhere in this engine) so a slow/failed fetch never delays
+            # fill processing -- the intraday tier protects the position from
+            # tick one regardless of when/whether the multiday seed lands.
+            side_for_zones = screener.side_from_pchange(self._shortlist_pchange.get(symbol, 0.0))
+            self._trap_exit_multiday_zones.pop(symbol, None)
+            self._trap_exit_multiday_fetch_done.pop(symbol, None)
+            self._trap_exit_touched.pop(symbol, None)
+            self._trap_exit_source.pop(symbol, None)
+            self._trap_exit_calc.pop(symbol, None)
+            self._trap_exit_ltf_acc.pop(symbol, None)
+            self._trap_exit_ltf_fed.pop(symbol, None)
+            self._trap_exit_intraday_1m_acc.pop(symbol, None)
+            self._trap_exit_intraday_zones.pop(symbol, None)
+            self._trap_exit_intraday_htf_fed.pop(symbol, None)
+            asyncio.create_task(self._seed_multiday_trap_exit_zones(symbol, side_for_zones))
             self._clog.info("OiOrb[%s/%s]: ENTRY CONFIRMED %s %s%d qty=%d @ %.2f (paper_mode=%s) "
                              "-- option-premium SL/target tracking starts now.",
                              self._client_id, self._binding_id, symbol, contract.option_type,

@@ -29,6 +29,47 @@ from typing import Dict, List, Optional
 from strategies.core.trap_zone_utils import Bar
 
 
+def to_n_min_bars_dateaware(bars_1m: List[Bar], n: int) -> List[Bar]:
+    """Date-aware sibling of to_n_min_bars, for multi-day bar series --
+    to_n_min_bars buckets purely by (hour, floored-minute), which silently
+    MERGES same-hour bars from different calendar days into one bucket for
+    any series spanning more than a single session (confirmed real bug hit
+    2026-09-08 while building the OI-ORB same-side trap's multi-day HTF
+    zone detection, which genuinely needs several real trading days of
+    history for coarse timeframes like Daily/4H to form real zones on).
+    Buckets by (calendar date, minutes-since-midnight // n) instead, so
+    every bucket stays within one real trading day."""
+    buckets: Dict[tuple, list] = {}
+    for b in bars_1m:
+        mins = b.ts.hour * 60 + b.ts.minute
+        key = (b.ts.date(), mins // n)
+        buckets.setdefault(key, []).append(b)
+    out: List[Bar] = []
+    for key in sorted(buckets.keys()):
+        g = sorted(buckets[key], key=lambda x: x.ts)
+        out.append(Bar(ts=g[0].ts, open=g[0].open, high=max(x.high for x in g),
+                        low=min(x.low for x in g), close=g[-1].close))
+    return out
+
+
+def to_daily_bars(bars_1m: List[Bar]) -> List[Bar]:
+    """One real bar per real calendar/trading day -- for a genuine 'Daily'
+    HTF option, distinct from to_n_min_bars_dateaware(bars, 24*60) which
+    would still slice by minutes-since-midnight and not represent a true
+    daily OHLC."""
+    from typing import Dict as _Dict
+    from datetime import date as _date
+    by_day: _Dict[_date, list] = {}
+    for b in bars_1m:
+        by_day.setdefault(b.ts.date(), []).append(b)
+    out: List[Bar] = []
+    for day in sorted(by_day):
+        g = sorted(by_day[day], key=lambda x: x.ts)
+        out.append(Bar(ts=g[0].ts, open=g[0].open, high=max(x.high for x in g),
+                        low=min(x.low for x in g), close=g[-1].close))
+    return out
+
+
 def to_n_min_bars(bars_1m: List[Bar], n: int) -> List[Bar]:
     """Non-date-aware (hour, floored-minute) bucketing -- correct for a
     single intraday session (every strategy this codebase resamples this
