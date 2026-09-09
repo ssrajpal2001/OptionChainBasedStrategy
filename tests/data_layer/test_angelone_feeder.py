@@ -43,12 +43,12 @@ def test_resolve_option_token_finds_and_caches_symboltoken(feeder, monkeypatch):
 
     feeder._smartapi = type("FakeSmartApi", (), {"searchScrip": staticmethod(fake_search_scrip)})()
 
-    token = feeder._resolve_option_token("NIFTY", 24000.0, "CE", date(2026, 9, 25))
+    token = asyncio.run(feeder._resolve_option_token("NIFTY", 24000.0, "CE", date(2026, 9, 25)))
     assert token == "58809"
     assert feeder._token_meta["58809"] == ("NIFTY", 24000.0, "CE", date(2026, 9, 25))
 
     # Second call for the SAME contract must hit the cache, not searchScrip again.
-    token2 = feeder._resolve_option_token("NIFTY", 24000.0, "CE", date(2026, 9, 25))
+    token2 = asyncio.run(feeder._resolve_option_token("NIFTY", 24000.0, "CE", date(2026, 9, 25)))
     assert token2 == "58809"
     assert calls["n"] == 1
 
@@ -61,7 +61,7 @@ def test_resolve_option_token_uses_bfo_for_sensex(feeder, monkeypatch):
         return {"status": True, "data": [{"tradingsymbol": tradingsymbol, "symboltoken": "1"}]}
 
     feeder._smartapi = type("FakeSmartApi", (), {"searchScrip": staticmethod(fake_search_scrip)})()
-    feeder._resolve_option_token("SENSEX", 81000.0, "PE", date(2026, 9, 30))
+    asyncio.run(feeder._resolve_option_token("SENSEX", 81000.0, "PE", date(2026, 9, 30)))
     assert seen_exchange["exchange"] == "BFO"
 
 
@@ -69,7 +69,7 @@ def test_resolve_option_token_returns_none_when_not_found(feeder):
     feeder._smartapi = type("FakeSmartApi", (), {
         "searchScrip": staticmethod(lambda exchange, ts: {"status": True, "data": []})
     })()
-    token = feeder._resolve_option_token("NIFTY", 24000.0, "CE", date(2026, 9, 25))
+    token = asyncio.run(feeder._resolve_option_token("NIFTY", 24000.0, "CE", date(2026, 9, 25)))
     assert token is None
     assert feeder._token_meta == {}
 
@@ -77,7 +77,7 @@ def test_resolve_option_token_returns_none_when_not_found(feeder):
 def test_resolve_option_token_none_smartapi_returns_none(bus):
     f = AngelOneFeeder(bus)
     assert f._smartapi is None
-    assert f._resolve_option_token("NIFTY", 24000.0, "CE", date(2026, 9, 25)) is None
+    assert asyncio.run(f._resolve_option_token("NIFTY", 24000.0, "CE", date(2026, 9, 25))) is None
 
 
 # ── _resolve_any_token (cross-format acceptance) ───────────────────────────
@@ -91,7 +91,7 @@ def test_resolve_any_token_accepts_upstox_key(feeder, monkeypatch):
         "searchScrip": staticmethod(lambda exchange, ts: {"status": True, "data": [
             {"tradingsymbol": ts, "symboltoken": "999"}]})
     })()
-    resolved = feeder._resolve_any_token("NSE_FO|12345")
+    resolved = asyncio.run(feeder._resolve_any_token("NSE_FO|12345"))
     assert resolved == ("999", 2)  # exchange_type 2 = nse_fo
 
 
@@ -103,7 +103,7 @@ def test_resolve_any_token_accepts_fyers_symbol(feeder, monkeypatch):
         "searchScrip": staticmethod(lambda exchange, ts: {"status": True, "data": [
             {"tradingsymbol": ts, "symboltoken": "777"}]})
     })()
-    resolved = feeder._resolve_any_token(fyers_sym)
+    resolved = asyncio.run(feeder._resolve_any_token(fyers_sym))
     assert resolved == ("777", 2)
 
 
@@ -115,12 +115,12 @@ def test_resolve_any_token_sensex_gets_bfo_exchange_type(feeder):
         "searchScrip": staticmethod(lambda exchange, ts: {"status": True, "data": [
             {"tradingsymbol": ts, "symboltoken": "42"}]})
     })()
-    resolved = feeder._resolve_any_token(fyers_sym)
+    resolved = asyncio.run(feeder._resolve_any_token(fyers_sym))
     assert resolved == ("42", 4)  # exchange_type 4 = bse_fo
 
 
 def test_resolve_any_token_unrecognized_format_returns_none(feeder):
-    assert feeder._resolve_any_token("totally-unrecognized-garbage") is None
+    assert asyncio.run(feeder._resolve_any_token("totally-unrecognized-garbage")) is None
 
 
 # ── subscribe_tokens / unsubscribe_tokens (state-tracking regression) ──────

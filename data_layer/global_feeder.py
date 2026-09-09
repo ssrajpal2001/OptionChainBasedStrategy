@@ -1275,6 +1275,9 @@ class AngelOneFeeder(BaseFeeder):
         self._token_meta: Dict[str, Tuple[str, float, str, date]] = {}
         self._subscribed: Dict[int, set] = {}   # exchangeType -> set of tokens
         self._scrip_cache: Dict[str, str] = {}  # (exchange, tradingsymbol) -> token, flattened key
+        # 2026-09-09 real incident fix -- see _resolve_option_token's own comment.
+        self._last_scrip_search_ts: float = 0.0
+        self._SCRIP_SEARCH_MIN_GAP_SEC: float = 0.35
         try:
             import SmartApi  # noqa: F401
             self._sdk_available = True
@@ -1401,7 +1404,7 @@ class AngelOneFeeder(BaseFeeder):
             self._connected = False
             self._running = False
 
-    def _resolve_option_token(self, underlying: str, strike: float, opt_type: str, expiry: date) -> Optional[str]:
+    async def _resolve_option_token(self, underlying: str, strike: float, opt_type: str, expiry: date) -> Optional[str]:
         """Pure lookup -- resolve the numeric AngelOne symboltoken for an
         option contract via the scrip master search, caching the result.
         Mirrors execution_bridge/broker_angel.py's own _lookup_symbol,
@@ -1425,7 +1428,26 @@ class AngelOneFeeder(BaseFeeder):
         if not self._smartapi:
             return None
         try:
-            res = self._smartapi.searchScrip(exchange, tradingsymbol)
+            # 2026-09-09 real incident fix: searchScrip() is a blocking synchronous
+            # SDK call (unlike this feeder's own generateSession/getfeedToken,
+            # already correctly wrapped) -- calling it directly here froze the
+            # whole event loop for each request. Confirmed live: subscribing to a
+            # batch of ATM+/-N strikes at startup fired ~13 of these back-to-back
+            # in well under half a second, which (a) tripped AngelOne's own rate
+            # limit ("Access denied because of exceeding access rate" on nearly
+            # every one) and (b) very likely starved the WebSocket's own
+            # heartbeat handling long enough to cause the observed rapid
+            # disconnect/reconnect cycling right after -- a reconnect re-triggers
+            # the same burst for any still-unresolved strikes, repeating the cycle.
+            # Fixed with (1) asyncio.to_thread so the event loop is never blocked,
+            # and (2) a minimum spacing between real network calls (cache hits
+            # skip this entirely, so an already-resolved strike costs nothing).
+            import time as _time
+            wait = self._last_scrip_search_ts + self._SCRIP_SEARCH_MIN_GAP_SEC - _time.monotonic()
+            if wait > 0:
+                await asyncio.sleep(wait)
+            self._last_scrip_search_ts = _time.monotonic()
+            res = await asyncio.to_thread(self._smartapi.searchScrip, exchange, tradingsymbol)
             token = ""
             if res and res.get("status") and res.get("data"):
                 for it in res["data"]:
@@ -1440,7 +1462,7 @@ class AngelOneFeeder(BaseFeeder):
             logger.warning("AngelOneFeeder: scrip search failed for %s: %s", tradingsymbol, exc)
             return None
 
-    def _resolve_any_token(self, token: str) -> Optional[Tuple[str, int]]:
+    async def _resolve_any_token(self, token: str) -> Optional[Tuple[str, int]]:
         """Accept an Upstox key / Fyers symbol / internal canonical token
         (whatever format strike_rebalancer.py's cross-feeder broadcast sends)
         and resolve it to (real_angelone_token, exchange_type) via the scrip
@@ -1468,7 +1490,7 @@ class AngelOneFeeder(BaseFeeder):
         if not meta:
             return None
         und, strike, ot, exp = meta
-        real_token = self._resolve_option_token(und, strike, ot, exp)
+        real_token = await self._resolve_option_token(und, strike, ot, exp)
         if not real_token:
             return None
         exchange_type = 4 if und.upper() == "SENSEX" else 2
@@ -1477,7 +1499,7 @@ class AngelOneFeeder(BaseFeeder):
     async def subscribe_tokens(self, tokens: List[str]) -> None:
         new_by_exchange: Dict[int, List[str]] = {}
         for t in tokens:
-            resolved = self._resolve_any_token(t)
+            resolved = await self._resolve_any_token(t)
             if not resolved:
                 logger.debug("AngelOneFeeder: could not resolve token %s", t)
                 continue
@@ -1500,7 +1522,7 @@ class AngelOneFeeder(BaseFeeder):
     async def unsubscribe_tokens(self, tokens: List[str]) -> None:
         by_exchange: Dict[int, List[str]] = {}
         for t in tokens:
-            resolved = self._resolve_any_token(t)
+            resolved = await self._resolve_any_token(t)
             if not resolved:
                 continue
             real_token, exchange_type = resolved
