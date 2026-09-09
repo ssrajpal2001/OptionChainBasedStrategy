@@ -385,15 +385,22 @@ class GlobalConfig:
     candle_timeframes: List[int] = field(default_factory=lambda: [1, 2, 5, 15, 75])
 
     # Primary feeder broker (admin-selected)
-    primary_feeder_provider: Literal["upstox", "upstox2", "fyers", "dhan", "angelone", "mock", "shared"] = "upstox"
+    # 2026-09-09, direct user decision: promoted angelone -> primary, upstox ->
+    # secondary. Two independent pieces of evidence this same session pointed at
+    # Upstox specifically: (1) the user's own direct observation that Upstox gives
+    # wrong/stale LTP during SellStraddle; (2) an independent real-data replay of
+    # SellStraddle's post-15:00 R1 exit logic showed UPSTOX's live R1 phase
+    # transitions lagging ~11 bars behind what the real market data justified,
+    # while SA5770's (a different broker) matched almost exactly -- see CLAUDE.md's
+    # SellStraddle section for the full investigation. AngelOneFeeder's own
+    # blocking/unthrottled scrip-search bug (real rate-limit + WS disconnect-cycle
+    # incident, same session) was found and fixed in data_layer/global_feeder.py
+    # BEFORE this promotion, but has not yet had a full clean live session to
+    # confirm the fix holds -- watch the first live day closely.
+    primary_feeder_provider: Literal["upstox", "upstox2", "fyers", "dhan", "angelone", "mock", "shared"] = "angelone"
 
     # Secondary / backup feeder. Used in dual-feed mode when its token is also valid.
-    # Set to "angelone" for Upstox+AngelOne (2026-09-06: the live default -- Fyers'
-    # own headless login is confirmed non-viable, Cloudflare Turnstile-blocked; see
-    # broker_auth/headless_totp_auth_fyers.py's own docstring for the full evidence
-    # trail), "fyers" for the old Upstox+Fyers pairing, or "upstox2" for two
-    # independent Upstox accounts.
-    secondary_feeder_provider: Literal["angelone", "fyers", "upstox2", "upstox", "none"] = "angelone"
+    secondary_feeder_provider: Literal["angelone", "fyers", "upstox2", "upstox", "none"] = "upstox"
 
     # How many seconds the primary feed can be silent before the secondary is promoted.
     feeder_failover_stale_sec: float = 3.0
