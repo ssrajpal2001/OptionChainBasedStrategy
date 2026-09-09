@@ -1278,6 +1278,10 @@ class AngelOneFeeder(BaseFeeder):
         # 2026-09-09 real incident fix -- see _resolve_option_token's own comment.
         self._last_scrip_search_ts: float = 0.0
         self._SCRIP_SEARCH_MIN_GAP_SEC: float = 0.35
+        # 2026-09-09, direct user spec ("we require future subscription for
+        # angel one that is must"): futures_atm_underlyings support, previously
+        # Upstox/Fyers only -- see _resolve_futures_token.
+        self._futures_token_to_underlying: Dict[str, str] = {}
         try:
             import SmartApi  # noqa: F401
             self._sdk_available = True
@@ -1371,6 +1375,24 @@ class AngelOneFeeder(BaseFeeder):
         self._socket.on_data = _on_data
         self._socket.on_error = _on_error
         self._socket.on_close = _on_close
+
+        # 2026-09-09 CRITICAL FIX, real gap found while adding futures support:
+        # _index_subscribe_all() (index spot ticks, and now futures) was NEVER
+        # actually called from this live connect path -- only from an isolated
+        # admin-panel test harness (ui_layer/dashboard_server.py). Confirmed
+        # live: today's real log shows option-leg ticks flowing fine (via the
+        # separate subscribe_tokens() path the strike-rebalancer uses), but
+        # zero "AngelOneFeeder: INDEX ..." lines anywhere, unlike Upstox/Fyers
+        # which both logged real spot ticks. Populating self._subscribed here,
+        # BEFORE the socket actually opens, means _on_open's own existing
+        # "re-assert all known subscriptions" logic picks these up on the very
+        # first connect too, not just reconnects.
+        try:
+            await self._index_subscribe_all()
+        except Exception:
+            logger.exception("AngelOneFeeder: index/futures subscribe-all failed at connect time "
+                              "(non-fatal, option-leg ticks still flow via subscribe_tokens).")
+
         logger.info("AngelOneFeeder: authenticated, socket created — will connect in _ws_loop.")
         return True
 
@@ -1427,40 +1449,81 @@ class AngelOneFeeder(BaseFeeder):
             return token or None
         if not self._smartapi:
             return None
+        token = await self._throttled_search_scrip(exchange, tradingsymbol)
+        self._scrip_cache[cache_key] = token or ""
+        if token:
+            self._token_meta[token] = (underlying, strike, opt_type, expiry)
+        return token or None
+
+    async def _throttled_search_scrip(self, exchange: str, tradingsymbol: str) -> Optional[str]:
+        """The actual searchScrip() call, factored out of _resolve_option_token
+        so _resolve_futures_token can share it -- same throttle/blocking fix
+        (2026-09-09 real incident): searchScrip() is a blocking synchronous SDK
+        call (unlike this feeder's own generateSession/getfeedToken, already
+        correctly wrapped) -- calling it directly froze the whole event loop
+        per request. Confirmed live: subscribing to a batch of ATM+/-N strikes
+        at startup fired ~13 of these back-to-back in well under half a second,
+        which (a) tripped AngelOne's own rate limit ("Access denied because of
+        exceeding access rate" on nearly every one) and (b) very likely starved
+        the WebSocket's own heartbeat handling long enough to cause the
+        observed rapid disconnect/reconnect cycling right after. Fixed with
+        (1) asyncio.to_thread so the event loop is never blocked, and (2) a
+        minimum spacing between real network calls (callers cache results, so
+        an already-resolved contract costs nothing)."""
         try:
-            # 2026-09-09 real incident fix: searchScrip() is a blocking synchronous
-            # SDK call (unlike this feeder's own generateSession/getfeedToken,
-            # already correctly wrapped) -- calling it directly here froze the
-            # whole event loop for each request. Confirmed live: subscribing to a
-            # batch of ATM+/-N strikes at startup fired ~13 of these back-to-back
-            # in well under half a second, which (a) tripped AngelOne's own rate
-            # limit ("Access denied because of exceeding access rate" on nearly
-            # every one) and (b) very likely starved the WebSocket's own
-            # heartbeat handling long enough to cause the observed rapid
-            # disconnect/reconnect cycling right after -- a reconnect re-triggers
-            # the same burst for any still-unresolved strikes, repeating the cycle.
-            # Fixed with (1) asyncio.to_thread so the event loop is never blocked,
-            # and (2) a minimum spacing between real network calls (cache hits
-            # skip this entirely, so an already-resolved strike costs nothing).
             import time as _time
             wait = self._last_scrip_search_ts + self._SCRIP_SEARCH_MIN_GAP_SEC - _time.monotonic()
             if wait > 0:
                 await asyncio.sleep(wait)
             self._last_scrip_search_ts = _time.monotonic()
             res = await asyncio.to_thread(self._smartapi.searchScrip, exchange, tradingsymbol)
-            token = ""
             if res and res.get("status") and res.get("data"):
                 for it in res["data"]:
                     if it.get("tradingsymbol") == tradingsymbol:
-                        token = str(it.get("symboltoken", ""))
-                        break
-            self._scrip_cache[cache_key] = token
-            if token:
-                self._token_meta[token] = (underlying, strike, opt_type, expiry)
-            return token or None
+                        return str(it.get("symboltoken", "")) or None
+            return None
         except Exception as exc:
             logger.warning("AngelOneFeeder: scrip search failed for %s: %s", tradingsymbol, exc)
             return None
+
+    async def _resolve_futures_token(self, underlying: str) -> Optional[str]:
+        """2026-09-09, direct user spec ("we require future subscription for
+        angel one that is must"): resolves the near-month futures token for a
+        futures_atm_underlyings entry, mirroring UpstoxFeeder/FyersFeeder's own
+        existing futures support (previously AngelOne had none at all -- see
+        CLAUDE.md's SellStraddle AngelOne-readiness note).
+
+        Futures contracts roll over monthly -- direct user follow-up: "future
+        key change every month... when u start check the contract and get the
+        latest future key and update, that need to be done daily, so if new
+        future key is found app doesn't stop." Handled by ALWAYS calling
+        REGISTRY.load_futures_only_sync() first (cheap -- no-ops once already
+        cached for a still-valid contract, but genuinely re-resolves the very
+        instant the cached contract's own expiry has passed -- see
+        InstrumentRegistry.load_sync's own "process that stays up past
+        contract expiry" incident note) rather than caching the resolved
+        AngelOne token forever. Called fresh at every connect/reconnect
+        (_index_subscribe_all), matching Upstox's own "self-corrects on the
+        next rebuild ... on reconnect" precedent exactly -- never a stale
+        token surviving into a new contract month."""
+        from data_layer.instrument_registry import REGISTRY
+        await asyncio.to_thread(REGISTRY.load_futures_only_sync, underlying)
+        expiry = REGISTRY.get_futures_expiry(underlying)
+        if expiry is None:
+            logger.warning("AngelOneFeeder: no futures expiry resolved yet for %s -- "
+                            "will retry on next reconnect.", underlying)
+            return None
+        from data_layer.symbol_translator import SymbolTranslator
+        tradingsymbol = SymbolTranslator.to_angelone_futures(underlying, expiry)
+        exchange = "BFO" if underlying.upper() == "SENSEX" else "NFO"
+        cache_key = f"FUT:{exchange}:{tradingsymbol}"
+        if cache_key in self._scrip_cache:
+            return self._scrip_cache[cache_key] or None
+        if not self._smartapi:
+            return None
+        token = await self._throttled_search_scrip(exchange, tradingsymbol)
+        self._scrip_cache[cache_key] = token or ""
+        return token or None
 
     async def _resolve_any_token(self, token: str) -> Optional[Tuple[str, int]]:
         """Accept an Upstox key / Fyers symbol / internal canonical token
@@ -1537,7 +1600,11 @@ class AngelOneFeeder(BaseFeeder):
                 logger.debug("AngelOneFeeder: unsubscribe_tokens error: %s", exc)
 
     async def _index_subscribe_all(self) -> None:
-        """Subscribe to every monitored index's fixed AngelOne token at connect time."""
+        """Subscribe to every monitored index's fixed AngelOne token, PLUS
+        (2026-09-09, direct user spec) the near-month futures contract for
+        every futures_atm_underlyings entry -- resolved fresh on every call
+        (see _resolve_futures_token's own docstring for the monthly-rollover
+        handling), matching Upstox/Fyers's own existing futures support."""
         indices = (
             self._cfg.monitored_indices
             if self._cfg and hasattr(self._cfg, "monitored_indices")
@@ -1550,12 +1617,36 @@ class AngelOneFeeder(BaseFeeder):
                 et, tok = pair
                 self._subscribed.setdefault(et, set()).add(tok)
                 by_exchange.setdefault(et, []).append(tok)
-        if by_exchange and self._socket:
+
+        _futures_underlyings = {u.upper() for u in (getattr(self._cfg, "futures_atm_underlyings", None) or [])}
+        for u in _futures_underlyings:
+            try:
+                fut_token = await self._resolve_futures_token(u)
+            except Exception:
+                logger.exception("AngelOneFeeder: futures token resolution failed for %s.", u)
+                continue
+            if not fut_token:
+                logger.warning("AngelOneFeeder: futures_atm underlying %s has no resolved "
+                                "futures token yet -- spot only this cycle.", u)
+                continue
+            fut_et = 4 if u == "SENSEX" else 2
+            self._futures_token_to_underlying[fut_token] = u
+            self._subscribed.setdefault(fut_et, set()).add(fut_token)
+            by_exchange.setdefault(fut_et, []).append(fut_token)
+
+        # Called from connect() BEFORE the socket has actually opened (self._connected
+        # is still False at that point) -- this call's real job there is just to
+        # populate self._subscribed/self._futures_token_to_underlying ahead of time,
+        # so _on_open's own "re-assert all known subscriptions" logic picks them up
+        # the instant the real WS handshake completes. Matches subscribe_tokens()'s
+        # own self._connected gate exactly -- only fire a live .subscribe() call here
+        # if the socket is ALREADY open (e.g. called again later, not just at connect).
+        if by_exchange and self._socket and self._connected:
             token_list = [{"exchangeType": et, "tokens": toks} for et, toks in by_exchange.items()]
             try:
                 self._socket.subscribe("angelone_feed", 3, token_list)
             except Exception as exc:
-                logger.warning("AngelOneFeeder: index subscribe failed: %s", exc)
+                logger.warning("AngelOneFeeder: index/futures subscribe failed: %s", exc)
 
     async def _parse_frame(self, raw: Any) -> None:
         if not isinstance(raw, dict):
@@ -1572,9 +1663,15 @@ class AngelOneFeeder(BaseFeeder):
         ltp = float(ltp_paise) / 100.0
 
         idx_internal = _ANGELONE_TOKEN_TO_INTERNAL.get((exchange_type, token))
-        if idx_internal:
+        # 2026-09-09, direct user spec: futures_atm_underlyings support -- a
+        # futures token resolved by _resolve_futures_token, tagged source="futures"
+        # so SellStraddle tracks it separately from real spot (see IndexTick's
+        # own source field docstring; mirrors Upstox/Fyers's existing behavior).
+        fut_internal = None if idx_internal else self._futures_token_to_underlying.get(token)
+        internal_name = idx_internal or fut_internal
+        if internal_name:
             tick = IndexTick(
-                symbol=idx_internal,
+                symbol=internal_name,
                 ltp=ltp,
                 open=float(raw.get("open_price_of_the_day", ltp_paise)) / 100.0,
                 high=float(raw.get("high_price_of_the_day", ltp_paise)) / 100.0,
@@ -1582,6 +1679,7 @@ class AngelOneFeeder(BaseFeeder):
                 close=float(raw.get("closed_price", ltp_paise)) / 100.0,
                 volume=int(raw.get("volume_trade_for_the_day", 0) or 0),
                 timestamp=datetime.now(IST),
+                source="futures" if fut_internal else "spot",
             )
             await self._publish_index(tick)
             return

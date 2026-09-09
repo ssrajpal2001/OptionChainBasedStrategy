@@ -159,6 +159,17 @@ class SymbolTranslator:
         return f"{sym.underlying}{dd}{mon}{yy}{sym.strike_int}{sym.option_type}"
 
     @staticmethod
+    def to_angelone_futures(underlying: str, expiry: "date") -> str:
+        """2026-09-09, added for AngelOneFeeder's own futures subscription
+        (futures_atm_underlyings -- previously only Upstox/Fyers had this).
+        Same DD+MON+YY date convention as to_angelone's own option format,
+        NSE's real futures trading-symbol convention: e.g. NIFTY30SEP26FUT."""
+        dd = expiry.strftime("%d")
+        mon = _MONTH_3[expiry.month - 1]
+        yy = expiry.strftime("%y")
+        return f"{underlying.upper()}{dd}{mon}{yy}FUT"
+
+    @staticmethod
     def from_angelone(raw: str) -> Optional[InternalSymbol]:
         pattern = r"^([A-Z]+)(\d{2})([A-Z]{3})(\d{2})(\d+)(CE|PE)$"
         m = re.match(pattern, raw)

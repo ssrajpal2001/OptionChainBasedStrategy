@@ -229,3 +229,82 @@ def test_parse_frame_ignores_unknown_token(feeder, bus):
 
 def test_parse_frame_ignores_non_dict(feeder):
     asyncio.run(feeder._parse_frame("not a dict"))  # must not raise
+
+
+# ── Futures support (2026-09-09, "we require future subscription for angel
+#    one that is must") ─────────────────────────────────────────────────────
+
+def test_to_angelone_futures_format():
+    from data_layer.symbol_translator import SymbolTranslator
+    assert SymbolTranslator.to_angelone_futures("NIFTY", date(2026, 9, 30)) == "NIFTY30SEP26FUT"
+
+
+def test_resolve_futures_token_finds_and_caches(feeder, monkeypatch):
+    from data_layer.instrument_registry import REGISTRY
+    monkeypatch.setattr(REGISTRY, "load_futures_only_sync", lambda underlying, today=None: None)
+    monkeypatch.setattr(REGISTRY, "get_futures_expiry", lambda underlying: date(2026, 9, 30))
+    calls = {"n": 0}
+
+    def fake_search_scrip(exchange, tradingsymbol):
+        calls["n"] += 1
+        assert exchange == "NFO"
+        assert tradingsymbol == "NIFTY30SEP26FUT"
+        return {"status": True, "data": [{"tradingsymbol": tradingsymbol, "symboltoken": "54321"}]}
+
+    feeder._smartapi = type("FakeSmartApi", (), {"searchScrip": staticmethod(fake_search_scrip)})()
+    token = asyncio.run(feeder._resolve_futures_token("NIFTY"))
+    assert token == "54321"
+    # Second call must hit the cache, not searchScrip again.
+    token2 = asyncio.run(feeder._resolve_futures_token("NIFTY"))
+    assert token2 == "54321"
+    assert calls["n"] == 1
+
+
+def test_resolve_futures_token_none_when_expiry_unresolved(feeder, monkeypatch):
+    from data_layer.instrument_registry import REGISTRY
+    monkeypatch.setattr(REGISTRY, "load_futures_only_sync", lambda underlying, today=None: None)
+    monkeypatch.setattr(REGISTRY, "get_futures_expiry", lambda underlying: None)
+    assert asyncio.run(feeder._resolve_futures_token("NIFTY")) is None
+
+
+def test_resolve_futures_token_uses_bfo_for_sensex(feeder, monkeypatch):
+    from data_layer.instrument_registry import REGISTRY
+    monkeypatch.setattr(REGISTRY, "load_futures_only_sync", lambda underlying, today=None: None)
+    monkeypatch.setattr(REGISTRY, "get_futures_expiry", lambda underlying: date(2026, 9, 30))
+    seen_exchange = {}
+
+    def fake_search_scrip(exchange, tradingsymbol):
+        seen_exchange["exchange"] = exchange
+        return {"status": True, "data": [{"tradingsymbol": tradingsymbol, "symboltoken": "1"}]}
+
+    feeder._smartapi = type("FakeSmartApi", (), {"searchScrip": staticmethod(fake_search_scrip)})()
+    asyncio.run(feeder._resolve_futures_token("SENSEX"))
+    assert seen_exchange["exchange"] == "BFO"
+
+
+def test_parse_frame_tags_futures_tick_with_source_futures(feeder, bus):
+    feeder._futures_token_to_underlying["54321"] = "NIFTY"
+    q = bus.subscribe(Topic.INDEX_TICK)
+    asyncio.run(feeder._parse_frame({
+        "exchange_type": 2, "token": "54321",
+        "last_traded_price": 2455000,  # paise -> 24550.00
+        "volume_trade_for_the_day": 0,
+    }))
+    tick = q.get_nowait()
+    assert tick.symbol == "NIFTY"
+    assert tick.source == "futures"
+    assert tick.ltp == pytest.approx(24550.00)
+
+
+def test_index_subscribe_all_resolves_futures_for_configured_underlyings(feeder, monkeypatch):
+    from data_layer.instrument_registry import REGISTRY
+    monkeypatch.setattr(REGISTRY, "load_futures_only_sync", lambda underlying, today=None: None)
+    monkeypatch.setattr(REGISTRY, "get_futures_expiry", lambda underlying: date(2026, 9, 30))
+    feeder._cfg = type("Cfg", (), {"monitored_indices": ["NIFTY"], "futures_atm_underlyings": ["NIFTY"]})()
+    feeder._smartapi = type("FakeSmartApi", (), {
+        "searchScrip": staticmethod(lambda exchange, ts: {"status": True, "data": [
+            {"tradingsymbol": ts, "symboltoken": "54321"}]})
+    })()
+    asyncio.run(feeder._index_subscribe_all())
+    assert feeder._futures_token_to_underlying.get("54321") == "NIFTY"
+    assert "54321" in feeder._subscribed.get(2, set())

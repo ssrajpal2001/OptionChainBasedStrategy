@@ -356,6 +356,15 @@ class InstrumentRegistry:
     def get_futures_upstox(self, underlying: str) -> str:
         return self._futures_upstox.get(underlying.upper(), "")
 
+    def get_futures_expiry(self, underlying: str) -> Optional[date]:
+        """2026-09-09, added for AngelOneFeeder's own futures subscription
+        (previously only Upstox/Fyers had futures support -- see
+        AngelOneFeeder._resolve_futures_token) -- the near-month futures
+        expiry, already resolved as a side effect of the SAME master-JSON
+        parse that populates _futures_upstox/_futures_fyers, just never
+        exposed publicly before."""
+        return self._futures_expiry.get(underlying.upper())
+
     def load_futures_only_sync(self, underlying: str, today: date = None) -> None:
         """Resolve just the near-month futures instrument_key for an arbitrary
         NSE F&O underlying via the master JSON. load_sync's options-API path
