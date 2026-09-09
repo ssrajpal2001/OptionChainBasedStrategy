@@ -980,7 +980,7 @@ def test_build_top20_shortlist_empty_universe_returns_empty_frames(monkeypatch):
 
 def test_vwap_touch_tracker_call_fires_on_low_touch_below_vwap_while_ltp_above():
     from datetime import datetime as _dt, timedelta
-    tr = screener.VwapTouchTracker(window_min=15)
+    tr = screener.VwapTouchTracker(window_min=15, skip_candles=0)
     base = _dt(2026, 9, 7, 9, 30)
     # A low candle that dips to/through VWAP (100.0), closes above it.
     tr.on_tick(base, 100.0)             # opens the first 1-min bucket
@@ -993,7 +993,7 @@ def test_vwap_touch_tracker_call_fires_on_low_touch_below_vwap_while_ltp_above()
 
 def test_vwap_touch_tracker_put_fires_on_high_touch_above_vwap_while_ltp_below():
     from datetime import datetime as _dt, timedelta
-    tr = screener.VwapTouchTracker(window_min=15)
+    tr = screener.VwapTouchTracker(window_min=15, skip_candles=0)
     base = _dt(2026, 9, 7, 9, 30)
     tr.on_tick(base, 100.0)
     tr.on_tick(base, 100.6)             # high touch AT/above vwap within this bucket
@@ -1003,7 +1003,7 @@ def test_vwap_touch_tracker_put_fires_on_high_touch_above_vwap_while_ltp_below()
 
 def test_vwap_touch_tracker_no_touch_yet_returns_none():
     from datetime import datetime as _dt, timedelta
-    tr = screener.VwapTouchTracker(window_min=15)
+    tr = screener.VwapTouchTracker(window_min=15, skip_candles=0)
     base = _dt(2026, 9, 7, 9, 30)
     tr.on_tick(base, 105.0)
     tr.on_tick(base + timedelta(minutes=1), 106.0)
@@ -1027,7 +1027,7 @@ def test_vwap_touch_tracker_window_flushes_oldest_bar(monkeypatch):
 
 def test_vwap_touch_tracker_no_touch_when_vwap_nonpositive():
     from datetime import datetime as _dt
-    tr = screener.VwapTouchTracker(window_min=15)
+    tr = screener.VwapTouchTracker(window_min=15, skip_candles=0)
     base = _dt(2026, 9, 7, 9, 30)
     tr.on_tick(base, 50.0)
     assert tr.check_touch(ltp=50.0, vwap=0.0) is None

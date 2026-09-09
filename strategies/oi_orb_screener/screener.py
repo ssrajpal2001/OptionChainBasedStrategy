@@ -469,11 +469,32 @@ class VwapTouchTracker:
     A "touch" is a genuine price-level cross into VWAP -- CALL: some
     candle's LOW <= vwap (a dip down to it from above); PUT: some
     candle's HIGH >= vwap (a rise up to it from below) -- checked across
-    both the closed-candle window AND the live current candle."""
+    both the closed-candle window AND the live current candle.
 
-    def __init__(self, window_min: int = 15) -> None:
+    2026-09-09 fix, direct user follow-up after the COFORGE/BSE/MUTHOOTFIN
+    vwap_close_sl review: a tracker's own FIRST recorded candle is always
+    self-referential -- VWAP hasn't accumulated any independent history
+    yet, so that candle's own high is mathematically guaranteed to sit at
+    or above whatever VWAP its own data just produced (confirmed on real
+    data: candle #1 is a 100% self-weighted contribution to VWAP; candle #2
+    is still 26-40%; candle #3 drops to ~17-23%, the point a touch starts
+    reflecting genuinely independent prior trading). `skip_candles` (default
+    2) makes the tracker's own first N candles ineligible to satisfy a
+    touch -- they still occupy a window slot chronologically, just can
+    never fire one. Backtested against the real 51-row shortlist dataset
+    (scripts/oi_orb_top20_touch_entry_backtest.py): byte-identical entries/
+    exits/P&L to skip_candles=0 on every single trade -- entry checking
+    never starts before ORB_END (09:25), 10 minutes after a tracker starts
+    recording, so a real secondary touch has always already backed up the
+    artifact one by then. Free fix -- closes the gap for a day/stock where
+    that secondary touch happens not to occur, at zero cost to anything
+    already validated."""
+
+    def __init__(self, window_min: int = 15, skip_candles: int = 2) -> None:
         self._window_min = window_min
+        self._skip_candles = skip_candles
         self._closed: deque = deque(maxlen=window_min)
+        self._candle_count: int = 0   # total candles ever closed (monotonic, not maxlen-bounded)
         self._cur_key: Optional[tuple] = None   # (hour, minute) of the still-forming candle
         self._cur_high: float = float("-inf")
         self._cur_low: float = float("inf")
@@ -487,8 +508,14 @@ class VwapTouchTracker:
         if key != self._cur_key:
             # The still-forming candle just closed -- push it into the
             # rolling window (deque's own maxlen does the "flush oldest"
-            # part automatically) and start a fresh one.
-            self._closed.append((self._cur_high, self._cur_low))
+            # part automatically) and start a fresh one. A candle within
+            # the first `skip_candles` closes as a sentinel that can never
+            # satisfy either side's touch condition (see class docstring).
+            if self._candle_count >= self._skip_candles:
+                self._closed.append((self._cur_high, self._cur_low))
+            else:
+                self._closed.append((float("-inf"), float("inf")))
+            self._candle_count += 1
             self._cur_key = key
             self._cur_high = self._cur_low = ltp
         else:
@@ -502,15 +529,16 @@ class VwapTouchTracker:
         side_from_pchange/check_vwap_retest_entry already use elsewhere)."""
         if vwap <= 0:
             return None
+        cur_eligible = self._cur_key is not None and self._candle_count >= self._skip_candles
         if ltp > vwap:
             lows = [lo for _, lo in self._closed]
-            if self._cur_key is not None:
+            if cur_eligible:
                 lows.append(self._cur_low)
             if any(lo <= vwap for lo in lows):
                 return "CALL"
         elif ltp < vwap:
             highs = [hi for hi, _ in self._closed]
-            if self._cur_key is not None:
+            if cur_eligible:
                 highs.append(self._cur_high)
             if any(hi >= vwap for hi in highs):
                 return "PUT"
@@ -872,6 +900,86 @@ def backfill_vwap_from_yahoo(vwap: "VwapState", symbols, cfg=CONFIG) -> None:
         logger.warning("backfill_vwap_from_yahoo: failed entirely: %r", exc)
 
 
+def historical_rolling_retest_check(symbols_sides: dict, cfg=CONFIG, window_min: float = 15.0) -> dict:
+    """2026-09-09, top20-mode equivalent of historical_vwap_retest_check --
+    same bulk Yahoo-backed replay pattern (one yf.download() for every
+    symbol), but seeds and replays a REAL RollingVwapRetestTracker per
+    symbol instead of the standard variant's check_vwap_retest_entry/
+    replay_vwap_retest_from_bars. Direct user spec: "as soon as a stock
+    enters the top 20 scanner we start to check for entry trigger in that
+    stock" -- this is what makes that true even for a stock added to the
+    shortlist well after 09:15: it gets checked against everything that
+    already happened today, immediately, using the SAME bounded rolling-
+    15-candle arm-then-retest sequence the live tick loop uses from then on.
+
+    Returns {symbol: {"fired": bool, "fire_ts": str, "fire_price": float,
+    "tracker": RollingVwapRetestTracker, "vwap": Optional[float]}} -- a
+    symbol missing (or Yahoo-data-less) means "start cold from now,"
+    exactly the historical_vwap_retest_check's own safe-default contract.
+    The returned tracker is ALREADY seeded with the real intraday replay
+    (its arm state as of the last real bar) even when fired=False, so the
+    caller can just keep using it live from this point forward -- no
+    separate "apply the armed state" step needed."""
+    out: dict = {}
+    if not symbols_sides:
+        return out
+    try:
+        import yfinance as yf
+    except ImportError:
+        logger.warning("historical_rolling_retest_check: yfinance not installed -- "
+                        "no historical retest check possible, tracker starts cold.")
+        return out
+    symbols = list(symbols_sides.keys())
+    try:
+        tickers = [s + ".NS" for s in symbols]
+        df = yf.download(tickers, period="1d", interval="1m", progress=False, group_by="ticker")
+    except Exception as exc:
+        logger.warning("historical_rolling_retest_check: yfinance download failed entirely: %r", exc)
+        return out
+    orb_start = cfg.get("ORB_START", "09:15")
+    for sym, ticker in zip(symbols, tickers):
+        try:
+            sub = df[ticker]
+        except Exception as exc:
+            logger.warning("historical_rolling_retest_check: no data for %s (%s): %r", sym, ticker, exc)
+            continue
+        side = symbols_sides[sym]
+        tracker = RollingVwapRetestTracker(window_min=window_min)
+        vwap_state = VwapState()
+        fired = False
+        fire_ts = fire_price = None
+        last_vwap = None
+        for ts, row in sub.iterrows():
+            if any(pd.isna(row.get(c)) for c in ("High", "Low", "Close", "Volume")):
+                continue
+            ts_ist = ts.tz_convert(IST) if ts.tzinfo else ts.tz_localize(IST)
+            hhmm = ts_ist.strftime("%H:%M")
+            if hhmm < orb_start:
+                continue
+            high, low, close, vol = (float(row["High"]), float(row["Low"]),
+                                      float(row["Close"]), float(row["Volume"]))
+            typical = (high + low + close) / 3.0
+            if vol > 0:
+                vwap_state.update(sym, typical, vol)
+            vwap = vwap_state.current(sym)
+            if vwap is None:
+                continue
+            last_vwap = vwap
+            bar_ts = ts_ist.replace(second=0, microsecond=0)
+            if not fired and tracker.check(side, bar_ts, close, vwap):
+                fired = True
+                fire_ts, fire_price = hhmm, close
+        out[sym] = {"fired": fired, "fire_ts": fire_ts, "fire_price": fire_price,
+                     "tracker": tracker, "vwap": last_vwap}
+        if fired:
+            logger.info(
+                "historical_rolling_retest_check: %s %s ALREADY RETESTED (rolling15) at %s "
+                "(price=%.2f) in today's real history -- treat as immediate entry.",
+                sym, side, fire_ts, fire_price,
+            )
+    return out
+
+
 def replay_vwap_retest_from_bars(bars: list, side: str, orb_start: str,
                                   min_gap_pct: float = 0.15) -> dict:
     """2026-09-07, direct user spec: "when we started the application and
@@ -1053,6 +1161,64 @@ def check_vwap_retest_entry(side: str, ltp: float, vwap: float, armed: bool,
     else:  # PUT
         if not armed:
             return (ltp < vwap), False
+        return armed, (ltp >= vwap)
+
+
+class RollingVwapRetestTracker:
+    """2026-09-09, direct user correction: the arm-then-retest SEQUENCE
+    (check_vwap_retest_entry's own mechanic -- price must first move to
+    one side of VWAP, THEN genuinely cross back) is the correct entry rule
+    ("rule 1 is correct where it should go up and then come back to touch
+    the vwamp for long position"). What's wrong is how it's currently
+    applied for the top20 variant: a single one-shot replay of the WHOLE
+    day's history done once at shortlist time (confirmed live 2026-09-09,
+    entry_reason=vwap_retest_historical on COFORGE/BSE/MUTHOOTFIN), plus an
+    arm state that then persists live with NO expiry once the one-shot
+    check hands off to it.
+
+    Direct user spec: "allwill be checked in last 1 min 15 candles only
+    and keep on checkign with flushign teh 1st 1 min candles and addign
+    new 1 min candle" -- the SAME rolling-window bookkeeping
+    VwapTouchTracker already uses for its own (different) touch check,
+    applied here to the arm-then-retest sequence instead: an arm that
+    doesn't retest within `window_min` (default 15) minutes expires and
+    must re-arm, rather than staying armed indefinitely. check() should be
+    called continuously (every live tick, or once per real 1-min bar in a
+    backtest) from the moment a symbol is added to the shortlist -- not as
+    a single deferred historical-replay-then-handoff like the current
+    _apply_historical_vwap_retest does."""
+
+    def __init__(self, window_min: float = 15.0) -> None:
+        self._window_min = window_min
+        self._armed = False
+        self._armed_side: Optional[str] = None
+        self._armed_at: Optional[datetime] = None
+
+    def check(self, side: str, ts: datetime, ltp: float, vwap: float) -> bool:
+        """Returns True the instant a genuine (bounded) retest fires. Caller
+        is responsible for marking (symbol, side) as already-fired, same
+        contract as check_vwap_retest_entry."""
+        if vwap <= 0:
+            return False
+        if self._armed and self._armed_side == side and self._armed_at is not None:
+            elapsed_min = (ts - self._armed_at).total_seconds() / 60.0
+            if elapsed_min > self._window_min:
+                self._armed = False
+                self._armed_side = None
+                self._armed_at = None
+        if not self._armed or self._armed_side != side:
+            new_armed = (ltp > vwap) if side == "CALL" else (ltp < vwap)
+            if new_armed:
+                self._armed = True
+                self._armed_side = side
+                self._armed_at = ts
+            return False
+        fired = (ltp <= vwap) if side == "CALL" else (ltp >= vwap)
+        if fired:
+            self._armed = False
+            self._armed_side = None
+            self._armed_at = None
+        return fired
         return armed, (ltp >= vwap)
 
 

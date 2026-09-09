@@ -8289,20 +8289,32 @@ function amoTest() {
                                     <span style="color:var(--t-muted)">Entry / LTP · Qty</span>
                                     <span x-text="fmt(p.entry_price)+' / '+(p.live_ltp!=null?fmt(p.live_ltp):'—')+' · '+p.qty"></span>
                                   </div>
-                                  <!-- 2026-08-27, direct user spec: SL/target now track the OPTION'S
-                                       OWN live premium (its own VWAP/bars), not the stock's spot price
-                                       -- both values update on every real tick, not on a poll interval.
-                                       sl/target=null means the first adverse bar hasn't confirmed yet
-                                       (hard risk cap only until then). spot_ltp is a live UI reference
-                                       price only -- no longer trading-relevant. -->
+                                  <!-- 2026-09-06 spec, updated 2026-09-09: entry AND exit both trigger
+                                       off the underlying's SPOT ticks -- the option is priced by these
+                                       signals, never itself the SL/target reference. Spot LTP + its
+                                       running session VWAP (the live SL's own comparison point, 20min
+                                       HA close vs VWAP with a 0.2% min-gap buffer) are shown together
+                                       so it's clear WHY a close SL trigger. Target = 180min/3min
+                                       same-side trap zone; trap_source shows which tier (multiday vs
+                                       intraday fallback) actually claimed it once touched. -->
                                   <div class="flex justify-between">
-                                    <span style="color:var(--t-muted)">Spot LTP (ref)</span>
-                                    <span x-text="p.spot_ltp!=null?fmt(p.spot_ltp):'—'"></span>
+                                    <span style="color:var(--t-muted)">Spot LTP vs VWAP</span>
+                                    <span :style="p.vwap_gap_pct==null?'color:var(--t-dim)':(p.vwap_gap_pct>=0?'color:var(--t-green)':'color:var(--t-red)')"
+                                          x-text="p.spot_ltp==null?'—':(fmt(p.spot_ltp)+(p.vwap!=null?(' vs VWAP '+fmt(p.vwap)+' ('+(p.vwap_gap_pct>=0?'+':'')+p.vwap_gap_pct.toFixed(2)+'%)'):' (VWAP not warm)'))"></span>
                                   </div>
                                   <div class="flex justify-between">
                                     <span style="color:var(--t-muted)">Option SL / Target</span>
                                     <span x-text="(p.sl!=null?fmt(p.sl):'establishing…')+' / '+(p.target!=null?fmt(p.target):'—')"
                                           :style="p.sl!=null?'color:var(--t-amber)':'color:var(--t-dim)'"></span>
+                                  </div>
+                                  <div class="flex justify-between">
+                                    <span style="color:var(--t-muted)">Target zone</span>
+                                    <span x-text="p.trap_source ? (p.trap_source+(p.trap_zone_touched?' · touched':' · locked, watching'))  : 'no zone locked yet'"
+                                          :style="p.trap_zone_touched?'color:var(--t-cyan)':'color:var(--t-dim)'"></span>
+                                  </div>
+                                  <div class="flex justify-between" x-show="p.sl_reentry_used">
+                                    <span style="color:var(--t-muted)">Re-entry</span>
+                                    <span style="color:var(--t-amber)">already used today</span>
                                   </div>
                                   <div class="flex justify-between" x-show="p.pnl!=null">
                                     <span style="color:var(--t-muted)">P&amp;L</span>
@@ -8311,7 +8323,7 @@ function amoTest() {
                                   </div>
                                 </div>
                               </template>
-                              <div style="color:var(--t-dim);font-size:10px" class="text-right">Option-premium SL/target + hard ₹/lot risk cap + EOD square-off</div>
+                              <div style="color:var(--t-dim);font-size:10px" class="text-right">Spot-triggered 20min VWAP-close SL (0.2% buffer) + 180min/3min trap target + hard ₹/lot risk cap + EOD square-off</div>
                             </div>
                           </template>
 
@@ -8319,7 +8331,7 @@ function amoTest() {
                           <template x-if="(_bk.shortlist||[]).length===0">
                             <div class="text-center py-1" style="color:var(--t-dim)">No shortlist yet — scanning</div>
                           </template>
-                          <template x-for="row in (_bk.shortlist||[]).slice(0,8).map(s => ({sym: s, pc: (_bk.shortlist_pchange||{})[s], vw: (_bk.shortlist_vwap||{})[s]}))" :key="row.sym">
+                          <template x-for="row in (_bk.shortlist||[]).slice(0,8).map(s => ({sym: s, pc: (_bk.shortlist_pchange||{})[s], vw: (_bk.shortlist_vwap||{})[s], rt: (_bk.retest_trackers||{})[s]}))" :key="row.sym">
                             <div class="flex items-center justify-between mb-1">
                               <span class="px-1.5 py-0.5 rounded font-bold"
                                     :style="row.pc>0?'background:rgba(16,185,129,0.15);color:var(--t-green)':'background:rgba(239,68,68,0.15);color:var(--t-red)'"
@@ -8330,6 +8342,13 @@ function amoTest() {
                               <span :style="!row.vw||row.vw.vwap_dist==null?'color:var(--t-dim)':(row.vw.vwap_dist>=0?'color:var(--t-green)':'color:var(--t-red)')"
                                     :title="row.vw&&row.vw.vwap!=null?('LTP '+fmt(row.vw.ltp)+' vs VWAP '+fmt(row.vw.vwap)):'VWAP not warm yet'"
                                     x-text="!row.vw||row.vw.vwap_dist==null?'VWAP —':((row.vw.vwap_dist>=0?'+':'')+row.vw.vwap_dist.toFixed(2)+' ('+(row.vw.vwap_dist_pct>=0?'+':'')+row.vw.vwap_dist_pct.toFixed(2)+'%) vs VWAP')"></span>
+                              <!-- 2026-09-09: rolling arm-then-retest tracker state -- "armed" means
+                                   price crossed to this side of VWAP and is waiting for the retest
+                                   touch within the rolling 15-candle window before it expires. -->
+                              <span class="px-1 py-0.5 rounded" style="font-size:10px"
+                                    :style="row.rt&&row.rt.armed?'background:rgba(6,182,212,0.15);color:var(--t-cyan)':'color:var(--t-dim)'"
+                                    :title="row.rt&&row.rt.armed_at?('armed at '+row.rt.armed_at.slice(11,19)):''"
+                                    x-text="row.rt&&row.rt.armed?('ARMED '+row.rt.armed_side):'not armed'"></span>
                             </div>
                           </template>
                           <div x-show="(_bk.shortlist||[]).length>8" class="mt-1 text-right" style="color:var(--t-dim);font-size:10px"
