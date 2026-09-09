@@ -1670,6 +1670,7 @@ class AngelOneFeeder(BaseFeeder):
         fut_internal = None if idx_internal else self._futures_token_to_underlying.get(token)
         internal_name = idx_internal or fut_internal
         if internal_name:
+            src = "futures" if fut_internal else "spot"
             tick = IndexTick(
                 symbol=internal_name,
                 ltp=ltp,
@@ -1679,14 +1680,32 @@ class AngelOneFeeder(BaseFeeder):
                 close=float(raw.get("closed_price", ltp_paise)) / 100.0,
                 volume=int(raw.get("volume_trade_for_the_day", 0) or 0),
                 timestamp=datetime.now(IST),
-                source="futures" if fut_internal else "spot",
+                source=src,
             )
+            # 2026-09-09, direct user spec: "let primary be upstox and have a
+            # log which should replicate the same and save what angel is
+            # showing" -- since DualFeeder runs every configured feeder's own
+            # real WebSocket connection concurrently regardless of which one
+            # is flagged primary (only the DEDUP/downstream-use decision
+            # depends on that flag, not the connection itself), the genuinely
+            # useful piece of that ask is an always-on, log-only record of
+            # what AngelOne itself is seeing -- independent of whether its
+            # ticks are actually being used for real decisions right now.
+            # Same "log-only, never affects decisions" spirit as SellStraddle's
+            # own SHADOW_VWAP. Throttled per (symbol, source) so this stays
+            # readable rather than one line per tick.
+            _dk = f"_shadowlog_idx_{internal_name}_{src}"
+            if time.monotonic() - getattr(self, _dk, 0.0) > 30.0:
+                setattr(self, _dk, time.monotonic())
+                logger.info("AngelOneFeeder SHADOW (log-only): %s (%s) ltp=%.2f",
+                            internal_name, src, ltp)
             await self._publish_index(tick)
             return
 
         meta = self._token_meta.get(token)
         if meta:
             underlying, strike, opt_type, expiry = meta
+            atp = float(raw.get("average_traded_price", ltp_paise)) / 100.0
             opt_tick = OptionTick(
                 symbol=token,  # symbol field is informational only downstream; strategies key off underlying/strike/option_type/expiry
                 underlying=underlying,
@@ -1702,8 +1721,19 @@ class AngelOneFeeder(BaseFeeder):
                 iv=0.0,
                 delta=0.0,
                 timestamp=datetime.now(IST),
-                atp=float(raw.get("average_traded_price", ltp_paise)) / 100.0,
+                atp=atp,
             )
+            # Same always-on shadow record for option legs -- ltp AND atp,
+            # since atp (broker VWAP) is the specific field SellStraddle's
+            # whole VWAP design depends on and is the one most worth having a
+            # continuous real-world audit trail for. Throttled per (underlying,
+            # strike, side), 30s -- a real strike can tick many times/second
+            # under load, one line per tick would be unreadable.
+            _dk2 = f"_shadowlog_opt_{underlying}_{int(strike)}_{opt_type}"
+            if time.monotonic() - getattr(self, _dk2, 0.0) > 30.0:
+                setattr(self, _dk2, time.monotonic())
+                logger.info("AngelOneFeeder SHADOW (log-only): %s %d%s ltp=%.2f atp=%.2f",
+                            underlying, int(strike), opt_type, ltp, atp)
             await self._publish_option(opt_tick)
 
 
