@@ -92,6 +92,12 @@ async def main():
         except Exception as exc:
             print(f"  searchScrip FAILED for {fut_symbol}: {exc}")
 
+    # Same real rate limit AngelOneFeeder._resolve_option_token was fixed for
+    # this session -- this standalone script calls searchScrip() directly
+    # (no throttle infra to reuse for a one-shot check), so space the two
+    # real searchScrip calls out manually instead.
+    await asyncio.sleep(1.5)
+
     print("\n--- 3) An ATM-ish NIFTY option (nearest weekly expiry) ---")
     if not REGISTRY.is_loaded("NIFTY"):
         REGISTRY.load_sync("NIFTY")
