@@ -757,11 +757,26 @@ class UpstoxFeeder(BaseFeeder):
                     setattr(self, _dk, time.monotonic())
                     logger.info("UpstoxFeeder: INDEX %s (%s) key=%s ltp=%.2f",
                                 internal_name, _source, inst_key, ltp)
+                # 2026-09-10, real incident fix: volume was hardcoded to 0 here,
+                # meaning EVERY stock subscribed via _extra_spot_keys (i.e. every
+                # OI-ORB dedicated-feeder stock, index/futures too) reported zero
+                # volume on every tick. OI-ORB's tick-by-tick VWAP accumulation
+                # (_spot_tick_loop) only updates when the cumulative volume delta
+                # is > 0 -- with volume always 0, that delta was always 0, so
+                # VWAP silently FROZE at whatever the initial historical seed
+                # computed and never moved again for the rest of the session,
+                # no matter how many real ticks arrived. Confirmed live: OIL's
+                # VWAP stuck at 508.73 for 20+ minutes while spot genuinely fell
+                # from ~500 to ~499, so its VWAP-close SL could never re-evaluate
+                # a real, current gap. _extract_extras() already parses Upstox's
+                # real "vtt" (volume traded today) field for the option-tick path
+                # just below -- reused here for index/spot/futures ticks too.
+                extras = self._extract_extras(feed_data)
                 tick = IndexTick(
                     symbol=internal_name,
                     ltp=ltp,
                     open=ltp, high=ltp, low=ltp, close=ltp,
-                    volume=0,
+                    volume=int(extras.get("volume", 0) or 0),
                     timestamp=now,
                     source=_source,
                 )
