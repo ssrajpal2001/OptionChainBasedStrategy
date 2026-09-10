@@ -524,7 +524,16 @@ class ExitMixin:
         since both `now` and `expiry_date` are always real trading days by
         construction (a weekly Tue-expiry position held over a weekend still yields
         exactly `.days == 1` on the Monday before it, matching the user's own
-        Monday/Tuesday example)."""
+        Monday/Tuesday example).
+
+        2026-09-10, direct user spec: when same_day_expiry_enabled is on (testing
+        running the entry side through expiry day rather than shifting to next week),
+        the hedge-and-carry side's own pre-emptive T-1/T-0 roll-to-next-week no
+        longer makes sense either -- both flags now move together so a carried
+        position isn't rolled away from the same-week contract the entry side was
+        deliberately told to keep using."""
+        if getattr(self, "_same_day_expiry_enabled", False):
+            return False
         if not pos.expiry_date:
             return False
         return (pos.expiry_date - now.date()).days <= 1

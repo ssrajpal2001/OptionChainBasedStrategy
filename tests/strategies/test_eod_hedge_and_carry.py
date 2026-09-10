@@ -178,6 +178,26 @@ def test_is_t1_from_expiry_false_when_expiry_is_far_out():
     assert s._is_t1_from_expiry(s._position, now) is False
 
 
+def test_is_t1_from_expiry_false_when_same_day_expiry_enabled():
+    """2026-09-10, direct user spec: with same_day_expiry_enabled on (testing
+    same-week expiry through T-1/T-0), the hedge-and-carry T-1 roll must not
+    fire even though the position genuinely expires tomorrow -- both flags
+    move together."""
+    s = _make(expiry_offset_days=1)
+    s._same_day_expiry_enabled = True
+    now = datetime.datetime.now(IST)
+    assert s._is_t1_from_expiry(s._position, now) is False
+
+
+def test_is_t1_from_expiry_still_true_when_flag_off_and_expiry_tomorrow():
+    """Default (flag off) behavior is unchanged -- the gate only suppresses
+    the roll when same_day_expiry_enabled is explicitly on."""
+    s = _make(expiry_offset_days=1)
+    s._same_day_expiry_enabled = False
+    now = datetime.datetime.now(IST)
+    assert s._is_t1_from_expiry(s._position, now) is True
+
+
 # ── StraddlePosition hedge-field persistence round-trip ─────────────────────
 
 def test_straddle_position_hedge_fields_roundtrip():
