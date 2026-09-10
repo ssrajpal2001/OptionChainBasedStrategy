@@ -456,22 +456,45 @@ class UpstoxFeeder(BaseFeeder):
 
     def register_extra_spot_keys(self, mapping: Dict[str, str]) -> None:
         """Register NSE_EQ instrument keys → ticker names so stock ticks flow as INDEX_TICK.
-        Also subscribes the keys on the active WebSocket streamer so Upstox actually sends them."""
+        Also subscribes the keys on the active WebSocket streamer so Upstox actually sends them.
+
+        2026-09-10, real incident fix: this used to append every new key to
+        self._subscribed_keys UNCONDITIONALLY, before even checking whether
+        self._streamer existed or the subscribe call actually succeeded. A
+        key registered in the brief window right after a restart/reconnect
+        (before the streamer is fully up -- e.g. OI-ORB's _restore_from_db
+        calling _ensure_spot_feed for a just-restored open position, very
+        early in the daily_loop's first iteration) got PERMANENTLY marked
+        "subscribed" without ever actually being sent to Upstox -- and
+        since _reapply_extra_spot_keys() (the only retry path, fired on
+        every subsequent feeder reconnect) calls this SAME method, its own
+        dedup check (`k not in self._subscribed_keys`) would then always
+        skip it, forever. Real trade: TECHM's live spot ticks never arrived
+        for the rest of the session post-restart -- VWAP had a correct
+        value (from the historical REST seed), but self._live_spot_ltp
+        stayed None the whole time, and the UI's "Spot LTP vs VWAP" field
+        never populated. Fixed: only mark a key as subscribed once the
+        streamer genuinely exists AND the subscribe call succeeds --
+        anything else leaves it eligible for the next reconnect's retry."""
         self._extra_spot_keys.update(mapping)
         new_keys = [k for k in mapping if k not in self._subscribed_keys]
         if not new_keys:
             return
-        for k in new_keys:
-            self._subscribed_keys.append(k)
-        if self._streamer:
+        if not self._streamer:
+            logger.warning("UpstoxFeeder: equity spot subscribe deferred (streamer not ready yet) "
+                            "for %d key(s): %s -- will retry on next reconnect.", len(new_keys), new_keys)
+            return
+        try:
             try:
-                try:
-                    self._streamer.subscribe(new_keys, "full")
-                except TypeError:
-                    self._streamer.subscribe(new_keys)
-                logger.info("UpstoxFeeder: subscribed %d equity spot keys: %s", len(new_keys), new_keys)
-            except Exception as exc:
-                logger.warning("UpstoxFeeder: equity spot subscribe error: %s", exc)
+                self._streamer.subscribe(new_keys, "full")
+            except TypeError:
+                self._streamer.subscribe(new_keys)
+            for k in new_keys:
+                self._subscribed_keys.append(k)
+            logger.info("UpstoxFeeder: subscribed %d equity spot keys: %s", len(new_keys), new_keys)
+        except Exception as exc:
+            logger.warning("UpstoxFeeder: equity spot subscribe error (will retry on next "
+                            "reconnect): %s", exc)
 
     async def subscribe_tokens(self, tokens: List[str]) -> None:
         # In dual mode _strikes_to_tokens() (strike_rebalancer.py) deliberately sends BOTH
