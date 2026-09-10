@@ -843,6 +843,36 @@ class DashboardServer:
             dashboard and position panel all agree with the History tab."""
             _srv._compute_live_pnls()
 
+        # ── Error sanitization ──────────────────────────────────────────────────
+
+        def _safe_error(exc: Exception) -> str:
+            """2026-09-10, direct user concern ("won't SQL queries in the browser
+            create a hacking risk?"): client_db.py's own _exec() logs AND
+            RE-RAISES on a DB error, so a raw sqlite3 exception (whose message
+            can echo real table/column names, e.g. "UNIQUE constraint failed:
+            broker_bindings.client_id, broker_bindings.binding_id") can reach an
+            endpoint's generic `except Exception as exc: return {"error":
+            str(exc)}` / f"...{exc}" handler uncaught, and from there straight
+            into the HTTP response body -- visible to anyone with DevTools open,
+            same category of finding as the earlier broker-access-token leak.
+
+            Always logs the FULL real exception server-side (exc_info=True, so
+            the complete traceback is still available for debugging in the
+            logs) regardless of what's returned to the caller. Only SANITIZES
+            genuine DB-driver-level exceptions (sqlite3.Error and subclasses)
+            before they reach the browser -- every other exception type (broker
+            SDK errors, ValueError/KeyError the app code itself deliberately
+            raises with a human-readable message, "token required", "Invalid
+            credentials", etc.) passes through UNCHANGED, since blanket-
+            replacing every error message would break genuinely useful client-
+            facing feedback that live trading operators rely on to diagnose a
+            failed action."""
+            logger.error("dashboard request failed: %s", exc, exc_info=True)
+            import sqlite3 as _sqlite3
+            if isinstance(exc, _sqlite3.Error):
+                return "A server error occurred processing this request. Please try again or contact support."
+            return str(exc)
+
         # ── Auth helpers ──────────────────────────────────────────────────────
 
         _bearer = HTTPBearer(auto_error=False)
@@ -855,7 +885,7 @@ class DashboardServer:
             try:
                 return verify_token(creds.credentials)
             except ValueError as exc:
-                raise HTTPException(status_code=401, detail=str(exc))
+                raise HTTPException(status_code=401, detail=_safe_error(exc))
 
         async def _require_admin(user: dict = Depends(_current_user)) -> dict:
             if user.get("role") != "admin":
@@ -927,7 +957,7 @@ class DashboardServer:
                 return result
             except Exception as exc:
                 import traceback; traceback.print_exc()
-                return {"ok": False, "error": str(exc)}
+                return {"ok": False, "error": _safe_error(exc)}
 
         @app.post("/api/backtest/nifty3m", tags=["Admin"])
         async def run_backtest_nifty_3m(request: Request):
@@ -953,7 +983,7 @@ class DashboardServer:
                 return result
             except Exception as exc:
                 import traceback; traceback.print_exc()
-                return {"ok": False, "error": str(exc)}
+                return {"ok": False, "error": _safe_error(exc)}
 
         _BACKTEST_SENSEX_HTML = os.path.join(_TEMPLATE_DIR, "backtest_sensex.html")
 
@@ -992,7 +1022,7 @@ class DashboardServer:
                 return result
             except Exception as exc:
                 import traceback; traceback.print_exc()
-                return {"ok": False, "error": str(exc)}
+                return {"ok": False, "error": _safe_error(exc)}
 
         @app.post("/api/backtest/sensex3", tags=["Admin"])
         async def run_backtest_sensex3(request: Request):
@@ -1039,7 +1069,7 @@ class DashboardServer:
                 return result
             except Exception as exc:
                 import traceback; traceback.print_exc()
-                return {"ok": False, "error": str(exc)}
+                return {"ok": False, "error": _safe_error(exc)}
 
         @app.post("/api/diagnostic/trap_zones", tags=["Admin"])
         async def diagnostic_trap_zones(request: Request):
@@ -1066,7 +1096,7 @@ class DashboardServer:
                 return {"ok": True, **result}
             except Exception as exc:
                 import traceback; traceback.print_exc()
-                return {"ok": False, "error": str(exc)}
+                return {"ok": False, "error": _safe_error(exc)}
 
         # ── PUBLIC — Authentication ───────────────────────────────────────────
 
@@ -1604,7 +1634,7 @@ class DashboardServer:
                 return {"ok": False, "error": "AngelOne connect() timed out after 20s."}
             except Exception as exc:
                 logger.error("[Feeder/AngelOne test] error: %s", exc)
-                return {"ok": False, "error": f"AngelOne test failed: {exc}"}
+                return {"ok": False, "error": f"AngelOne test failed: {_safe_error(exc)}"}
             finally:
                 if run_task is not None:
                     run_task.cancel()
@@ -1644,7 +1674,7 @@ class DashboardServer:
                 await _start_feeder_stream(_srv._feeder, "angelone", "", "", _srv._client_db, _srv._cfg)
             except Exception as exc:
                 logger.error("[Feeder/Toggle] [angelone] stream start failed: %s", exc)
-                return {"ok": False, "error": f"AngelOne connect failed: {exc}"}
+                return {"ok": False, "error": f"AngelOne connect failed: {_safe_error(exc)}"}
             active = getattr(_srv._feeder, "active_provider", None) if _srv._feeder else None
             if active not in ("angelone", "dual"):
                 return {
@@ -1834,7 +1864,7 @@ class DashboardServer:
             except Exception as exc:
                 logger.error("Dashboard: feeder connect failed: %s", exc)
                 _srv._cfg.primary_feeder_provider = old_provider  # type: ignore[misc]
-                raise HTTPException(502, f"Feeder connect failed: {exc}")
+                raise HTTPException(502, f"Feeder connect failed: {_safe_error(exc)}")
 
         # ── CLIENT — own portfolio ────────────────────────────────────────────
 
@@ -1881,12 +1911,12 @@ class DashboardServer:
                     out["profile"] = {"name": p.get("name") or p.get("email") or p.get("user_name", ""),
                                       "email": p.get("email", ""), "id": p.get("id", "")}
             except Exception as exc:
-                out["profile_error"] = str(exc)
+                out["profile_error"] = _safe_error(exc)
             try:
                 if hasattr(broker, "get_funds"):
                     out["funds"] = await broker.get_funds()
             except Exception as exc:
-                out["funds_error"] = str(exc)
+                out["funds_error"] = _safe_error(exc)
             try:
                 if hasattr(broker, "get_leverage"):
                     # Leverage is per-product on Delta; report the current default if the broker
@@ -1910,7 +1940,7 @@ class DashboardServer:
                 ok = await broker.set_leverage(int(body.get("product_id")), float(body.get("leverage")))
                 return {"ok": bool(ok), "leverage": body.get("leverage")}
             except Exception as exc:
-                return {"ok": False, "error": str(exc)}
+                return {"ok": False, "error": _safe_error(exc)}
 
         # ── CLIENT — live broker provisioning ────────────────────────────────
 
@@ -1948,13 +1978,13 @@ class DashboardServer:
             try:
                 _srv._registry.add_broker_binding(cid, binding)
             except ValueError as exc:
-                raise HTTPException(409, str(exc))
+                raise HTTPException(409, _safe_error(exc))
 
             # 3. Create broker instance and authenticate
             try:
                 broker = create_broker(binding, cid)
             except ValueError as exc:
-                raise HTTPException(400, str(exc))
+                raise HTTPException(400, _safe_error(exc))
 
             ok = await broker.authenticate()
             if not ok:
@@ -2168,7 +2198,7 @@ class DashboardServer:
                 raise
             except Exception as exc:
                 logger.error("Dashboard: add_broker DB error for %s: %s", cid, exc)
-                raise HTTPException(500, f"Failed to save broker credentials: {exc}")
+                raise HTTPException(500, f"Failed to save broker credentials: {_safe_error(exc)}")
 
             logger.info("Dashboard: client %s added broker binding %s (%s).", cid, body.binding_id, body.provider)
             return {
@@ -3286,7 +3316,7 @@ class DashboardServer:
             try:
                 ok, auth_msg, token = await _he.authenticate_binding(b_row, cid, _srv._client_db)
             except Exception as exc:
-                return {"ok": False, "message": f"Auth error: {exc}", "token_ok": False, "trading_enabled": False}
+                return {"ok": False, "message": f"Auth error: {_safe_error(exc)}", "token_ok": False, "trading_enabled": False}
 
             if not ok:
                 # Auth failed — do NOT enable trading
@@ -3530,7 +3560,7 @@ class DashboardServer:
                             "this server's IP is whitelisted on the Delta API key."}
                 except Exception as exc:
                     logger.error("[Terminal] [%s/%s] Delta connect error: %s", cid, binding_id, exc)
-                    return {"ok": False, "error": f"Delta connect error: {exc}"}
+                    return {"ok": False, "error": f"Delta connect error: {_safe_error(exc)}"}
 
             # Angel One headless auth — MPIN + TOTP, no OAuth needed.
             if provider == "angelone" and b.get("password"):
@@ -3564,7 +3594,7 @@ class DashboardServer:
                     return {"ok": False, "error": "Angel One headless auth failed — check CLIENT ID, MPIN, and TOTP secret."}
                 except Exception as exc:
                     logger.error("[Terminal] [%s/%s] Angel One connect error: %s", cid, binding_id, exc)
-                    return {"ok": False, "error": f"Angel One connect error: {exc}"}
+                    return {"ok": False, "error": f"Angel One connect error: {_safe_error(exc)}"}
 
             # Headless TOTP auto-login (2026-09-06, direct user spec): if this
             # binding has a password + TOTP secret saved, attempt the SAME
@@ -4408,7 +4438,7 @@ pm2 save
                 return {"strategies": out, "ts": now_ist}
             except Exception as exc:
                 logger.warning("Dashboard: /api/admin/strategies failed: %s", exc)
-                return {"ok": False, "error": str(exc), "strategies": [], "ts": now_ist}
+                return {"ok": False, "error": _safe_error(exc), "strategies": [], "ts": now_ist}
 
         # ── ADMIN — runtime strategy configuration ───────────────────────
 
@@ -4790,7 +4820,7 @@ pm2 save
                     await broker.logout()
                 except Exception:
                     pass
-                err_str = str(exc)
+                err_str = _safe_error(exc)
                 # Annotate known broker-specific errors with actionable hints
                 hint = ""
                 if "UDAPI1162" in err_str:
@@ -4855,7 +4885,7 @@ pm2 save
                         "expiries":  [d.isoformat() for d in _R.all_expiries(idx)],
                     }
                 except Exception as exc:
-                    results[idx] = {"ok": False, "error": str(exc)}
+                    results[idx] = {"ok": False, "error": _safe_error(exc)}
 
             return {"ok": True, "results": results}
 
@@ -4898,7 +4928,7 @@ pm2 save
                 return {
                     "ts":               datetime.now(IST).isoformat(),
                     "risk_manager_active": False,
-                    "error":            str(exc),
+                    "error":            _safe_error(exc),
                 }
 
         @app.post("/api/admin/risk/kill_all", tags=["Admin"])
@@ -5077,12 +5107,12 @@ pm2 save
                     clean_error = _upstox_translate_error(msg)
                     return JSONResponse(status_code=502, content={"ok": False, "error": clean_error})
             except Exception as exc:
-                _srv._auth_alerts["feeder"] = f"Upstox auth error: {exc}"
+                _srv._auth_alerts["feeder"] = f"Upstox auth error: {_safe_error(exc)}"
                 logger.error("Dashboard: Upstox auth error: %s", exc)
                 await _srv._client_db.update_feeder_token(
                     "upstox", "", generated_at="", expiry_at="",
                 )
-                clean_error = _upstox_translate_error(str(exc))
+                clean_error = _upstox_translate_error(_safe_error(exc))
                 return JSONResponse(status_code=502, content={"ok": False, "error": clean_error})
             try:
                 await feeder.start_single("upstox", creds)
@@ -5090,7 +5120,7 @@ pm2 save
                 logger.error("Dashboard: upstox connect failed: %s", exc)
                 return JSONResponse(
                     status_code=502,
-                    content={"ok": False, "error": f"Upstox connect failed: {exc}"},
+                    content={"ok": False, "error": f"Upstox connect failed: {_safe_error(exc)}"},
                 )
             return {"ok": True, "message": "Upstox feed stream initialized.", "provider": "upstox", "token_fresh": True}
 
@@ -5162,14 +5192,14 @@ pm2 save
                         content={"ok": False, "error": f"Fyers auth failed: {msg}"},
                     )
             except Exception as exc:
-                _srv._auth_alerts["feeder"] = f"Fyers auth error: {exc}"
+                _srv._auth_alerts["feeder"] = f"Fyers auth error: {_safe_error(exc)}"
                 logger.error("Dashboard: Fyers auth error: %s", exc)
                 await _srv._client_db.update_feeder_token(
                     "fyers", "", generated_at="", expiry_at="",
                 )
                 return JSONResponse(
                     status_code=502,
-                    content={"ok": False, "error": f"Fyers auth error: {exc}"},
+                    content={"ok": False, "error": f"Fyers auth error: {_safe_error(exc)}"},
                 )
             try:
                 await feeder.start_single("fyers", creds)
@@ -5177,7 +5207,7 @@ pm2 save
                 logger.error("Dashboard: fyers connect failed: %s", exc)
                 return JSONResponse(
                     status_code=502,
-                    content={"ok": False, "error": f"Fyers connect failed: {exc}"},
+                    content={"ok": False, "error": f"Fyers connect failed: {_safe_error(exc)}"},
                 )
             return {"ok": True, "message": "Fyers feed stream initialized.", "provider": "fyers", "token_fresh": True}
 
@@ -5310,7 +5340,7 @@ pm2 save
 
             except Exception as exc:
                 logger.error("Dashboard: Fyers exchange-code error: %s", exc)
-                return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
+                return JSONResponse(status_code=500, content={"ok": False, "error": _safe_error(exc)})
 
         # ── ADMIN — dual active-active feeder ────────────────────────────────
 
@@ -5409,7 +5439,7 @@ pm2 save
                 await feeder.start_dual(upstox_creds, fyers_creds)
             except Exception as exc:
                 logger.error("Dashboard: start_dual failed: %s", exc)
-                raise HTTPException(502, f"Dual feeder connect failed: {exc}")
+                raise HTTPException(502, f"Dual feeder connect failed: {_safe_error(exc)}")
 
             active = [p for p, ok in [("upstox", ok_u), ("fyers", ok_f)] if ok]
             warn   = f" | WARNING: {'; '.join(failures)}" if failures else ""
@@ -5448,7 +5478,7 @@ pm2 save
                 )
             except Exception as exc:
                 logger.error("Dashboard: Upstox credential save failed: %s", exc, exc_info=exc)
-                return JSONResponse(status_code=500, content={"ok": False, "error": f"Database write failed: {exc}"})
+                return JSONResponse(status_code=500, content={"ok": False, "error": f"Database write failed: {_safe_error(exc)}"})
             logger.info("Dashboard: Upstox feeder credentials saved to DB.")
             return {"ok": True, "message": "Upstox credentials saved."}
 
@@ -5477,7 +5507,7 @@ pm2 save
                 )
             except Exception as exc:
                 logger.error("Dashboard: Fyers credential save failed: %s", exc, exc_info=exc)
-                return JSONResponse(status_code=500, content={"ok": False, "error": f"Database write failed: {exc}"})
+                return JSONResponse(status_code=500, content={"ok": False, "error": f"Database write failed: {_safe_error(exc)}"})
             logger.info("Dashboard: Fyers feeder credentials saved to DB.")
             return {"ok": True, "message": "Fyers credentials saved."}
 
@@ -5657,7 +5687,7 @@ pm2 save
             try:
                 risk.validate()
             except AssertionError as exc:
-                raise HTTPException(400, str(exc))
+                raise HTTPException(400, _safe_error(exc))
 
             profile = ClientProfile(
                 client_id=body.client_id,
@@ -5668,7 +5698,7 @@ pm2 save
             try:
                 _srv._registry.register(profile)
             except ValueError as exc:
-                raise HTTPException(409, str(exc))
+                raise HTTPException(409, _safe_error(exc))
 
             if body.binding_id:
                 binding = BrokerBinding(
@@ -5756,7 +5786,7 @@ pm2 save
                 return {"lines": lines, "ts": now_ist}
             except Exception as exc:
                 logger.warning("Dashboard: audit_log read failed: %s", exc)
-                return {"lines": [], "ts": now_ist, "error": str(exc)}
+                return {"lines": [], "ts": now_ist, "error": _safe_error(exc)}
 
         # ── ADMIN — audit log (CSV download) ─────────────────────────────────
 
@@ -5777,7 +5807,7 @@ pm2 save
             except HTTPException:
                 raise
             except Exception as exc:
-                raise HTTPException(500, f"Log file read failed: {exc}")
+                raise HTTPException(500, f"Log file read failed: {_safe_error(exc)}")
 
         # ── ANY AUTH — telemetry ──────────────────────────────────────────────
 
@@ -5819,7 +5849,7 @@ pm2 save
             try:
                 token_payload = verify_token(token)
             except ValueError as exc:
-                await websocket.close(code=1008, reason=str(exc))
+                await websocket.close(code=1008, reason=_safe_error(exc))
                 return
 
             await websocket.accept()
@@ -5871,7 +5901,7 @@ pm2 save
                     return {"ok": False, "error": "No Upstox token found — connect feeder first"}
                 return {"ok": True, "token": token}
             except Exception as exc:
-                return {"ok": False, "error": str(exc)}
+                return {"ok": False, "error": _safe_error(exc)}
 
         self._register_oi_orb_routes(app)
         self._register_cag_straddle_routes(app)
