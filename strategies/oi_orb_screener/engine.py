@@ -393,6 +393,24 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         # 2026-09-10, real incident fix: see store.load_historical_check_done's
         # own docstring / _restore_from_db's restore call for the full incident.
         self._historical_check_done: set = set()
+        # 2026-09-10, real incident fix (LTM double-evaluation): _daily_loop's
+        # restore sequence (reset_session -> _restore_from_db -> _run_today_
+        # pipeline) and _oi_spurt_history_loop are launched as separate,
+        # concurrent asyncio.create_task() calls at start() -- nothing
+        # synchronizes them, so _oi_spurt_history_loop's own poll cycle (which
+        # streams newly-qualifying symbols and calls _apply_historical_
+        # rolling_retest on them) can run its FIRST cycle before _restore_
+        # from_db has finished populating self._historical_check_done from
+        # the DB. Real incident: LTM's historical retest check ran twice
+        # (13:20:37 and again 13:28:57, both correctly "not fired") because
+        # the 13:28:49 restart's OI-spurt poll fired at 13:28:51 -- BEFORE
+        # "restored 8 already-fired..." logged at 13:28:54. Both evaluations
+        # happened to return the same correct answer here, but the race
+        # itself is real and could re-fire a stale reference on a future
+        # restart, same class of incident as the GVT&D/FORCEMOT bugs this
+        # session already fixed. See _restore_from_db's own end-of-function
+        # comment for where this gets set True.
+        self._restore_from_db_ready = False
         self._entry_window_done_logged = False
         self._morning_historical_retest_applied = False
         self._restart_db_reconcile_applied = False
@@ -588,6 +606,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._regime = None
         self._already_fired = set()
         self._historical_check_done = set()
+        self._restore_from_db_ready = False
         self._entry_window_done_logged = False
         self._rejected = set()
         self._sl_reentry_used = set()
@@ -681,6 +700,15 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                     self._clog.exception("OiOrb[%s/%s]: restore-from-DB failed (recovered, "
                                           "starting flat with no already-fired/rejected memory).",
                                           self._client_id, self._binding_id)
+                finally:
+                    # 2026-09-10 real incident fix (see self._restore_from_db_ready's
+                    # own comment in __init__): unblocks _oi_spurt_history_loop's
+                    # own poll cycle, which was racing ahead of this restore on a
+                    # fresh restart. Set unconditionally (success OR failure) so a
+                    # restore exception can never block the OI-spurt loop forever --
+                    # same best-effort-never-block discipline as every other restore
+                    # step in this file.
+                    self._restore_from_db_ready = True
                 try:
                     await self._run_today_pipeline()
                 except Exception:
@@ -1177,6 +1205,17 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         trading decision.
         """
         while self._running:
+            # 2026-09-10 real incident fix: this loop is started as a
+            # separate, concurrent task from _daily_loop's own restore
+            # sequence -- without this wait, this loop's poll cycle can run
+            # (and stream a symbol into _apply_historical_rolling_retest)
+            # BEFORE self._historical_check_done has been restored from the
+            # DB on a fresh restart, causing a duplicate historical-retest
+            # evaluation. See self._restore_from_db_ready's own comment in
+            # __init__ for the full incident (LTM double-evaluation).
+            if not self._restore_from_db_ready:
+                await asyncio.sleep(1)
+                continue
             now = datetime.now(IST)
             cfg = self._screener_cfg
             if not cfg.get("OI_SPURT_HISTORY_ENABLED", True):

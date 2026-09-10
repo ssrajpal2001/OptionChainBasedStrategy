@@ -3010,3 +3010,113 @@ async def test_apply_historical_rolling_retest_marks_symbol_checked_after_proces
     await book._apply_historical_rolling_retest(["GVT&D"], book._screener_cfg)
 
     assert ("GVT&D", "PUT") in book._historical_check_done
+
+
+# ── _oi_spurt_history_loop must wait for _restore_from_db to finish before
+# its first poll cycle (2026-09-10 real incident: LTM's historical retest
+# check ran TWICE on the same restart -- 13:20:37 and again 13:28:57 -- because
+# this loop and _daily_loop's own restore sequence are launched as separate,
+# concurrent asyncio.create_task() calls with nothing synchronizing them; the
+# OI-spurt poll fired at 13:28:51, before "restored 8 already-fired..." logged
+# at 13:28:54) ─────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_oi_spurt_history_loop_waits_for_restore_from_db_ready(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._running = True
+    book._restore_from_db_ready = False
+
+    poll_calls = {"n": 0}
+    async def _spy_poll(now, cfg):
+        poll_calls["n"] += 1
+        book._running = False
+    book._do_oi_spurt_history_poll = _spy_poll
+
+    sleeps = []
+    real_sleep = asyncio.sleep
+    async def _tracking_sleep(secs):
+        sleeps.append(secs)
+        if len(sleeps) > 20:
+            book._running = False   # safety valve -- never spin forever in a test
+        await real_sleep(0)
+    monkeypatch.setattr(asyncio, "sleep", _tracking_sleep)
+
+    await book._oi_spurt_history_loop()
+
+    assert poll_calls["n"] == 0, "must never poll while restore-from-db hasn't finished yet"
+    assert 1 in sleeps, "must be waiting via the 1s not-ready sleep"
+
+
+@pytest.mark.asyncio
+async def test_oi_spurt_history_loop_polls_once_restore_from_db_is_ready(monkeypatch):
+    """IGNORE_TIME_WINDOWS is deliberately NOT set here -- this loop's own
+    window check treats that flag as an ADDITIONAL always-skip condition
+    (`if not (win_start<=now_key<win_end) or cfg.get("IGNORE_TIME_WINDOWS")`),
+    unlike every other IGNORE_TIME_WINDOWS check in this file which bypasses
+    a restriction. A fixed mid-session wall clock is used instead so the
+    real window check passes normally."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._running = True
+    book._restore_from_db_ready = True   # already finished, e.g. later in the same session
+
+    import strategies.oi_orb_screener.engine as _engine_mod
+    _fixed_now = datetime(2026, 9, 10, 13, 0, 0, tzinfo=_engine_mod.IST)
+    class _FixedDT(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return _fixed_now
+    monkeypatch.setattr(_engine_mod, "datetime", _FixedDT)
+
+    poll_calls = {"n": 0}
+    async def _spy_poll(now, cfg):
+        poll_calls["n"] += 1
+        book._running = False
+    book._do_oi_spurt_history_poll = _spy_poll
+    monkeypatch.setattr(asyncio, "sleep", _async_return(None))
+
+    await book._oi_spurt_history_loop()
+
+    assert poll_calls["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_daily_loop_sets_restore_from_db_ready_after_successful_restore(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._running = True
+    book._today = None
+    assert book._restore_from_db_ready is False
+
+    book._restore_from_db = _async_return(None)
+    async def _stop_pipeline():
+        book._running = False
+    book._run_today_pipeline = _stop_pipeline
+    monkeypatch.setattr(asyncio, "sleep", _async_return(None))
+
+    await book._daily_loop()
+
+    assert book._restore_from_db_ready is True
+
+
+@pytest.mark.asyncio
+async def test_daily_loop_sets_restore_from_db_ready_even_if_restore_raises(monkeypatch):
+    """The readiness flag must be set even on failure -- a restore exception
+    must never leave _oi_spurt_history_loop blocked forever."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._running = True
+    book._today = None
+
+    async def _raise():
+        raise RuntimeError("simulated restore failure")
+    book._restore_from_db = _raise
+    async def _stop_pipeline():
+        book._running = False
+    book._run_today_pipeline = _stop_pipeline
+    monkeypatch.setattr(asyncio, "sleep", _async_return(None))
+
+    await book._daily_loop()
+
+    assert book._restore_from_db_ready is True
