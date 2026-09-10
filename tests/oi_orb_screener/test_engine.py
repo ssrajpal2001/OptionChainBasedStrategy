@@ -972,6 +972,133 @@ def _bar(hhmm: str, h: float, l: float, c: float, vol: float) -> dict:
     return {"ts": f"2026-08-24T{hhmm}:00", "high": h, "low": l, "close": c, "volume": vol}
 
 
+# ── _replay_vwap_close_sl restart-safety replay (2026-09-10 real incident:
+# FORCEMOT closed at 13:10:04 citing "close=17826.00 vs vwap=17862.01" while
+# real live spot was 18077-18078 the entire time, ~1.3% ABOVE the real
+# contemporaneous VWAP -- nowhere near a genuine breach) ────────────────────
+
+def _row(hhmm: str, h: float, l: float, c: float, vol: float) -> dict:
+    # Real Upstox candle timestamps carry a tz offset (e.g. "...+05:30") --
+    # matches that shape, unlike the naive _bar() helper above.
+    hh, mm = hhmm.split(":")
+    ts = datetime(2026, 8, 24, int(hh), int(mm), 0, tzinfo=IST).isoformat()
+    return {"ts": ts, "high": h, "low": l, "close": c, "volume": vol}
+
+
+def _rows_flat(start_hh: int, start_mm: int, n: int, price: float, vol: float) -> list:
+    out = []
+    t = start_hh * 60 + start_mm
+    for _ in range(n):
+        hh, mm = divmod(t, 60)
+        out.append(_row(f"{hh:02d}:{mm:02d}", price, price, price, vol))
+        t += 1
+    return out
+
+
+def _bars_from_rows(rows: list):
+    from strategies.core.trap_zone_utils import Bar as _Bar
+    return [_Bar(ts=datetime.fromisoformat(r["ts"]), open=r["close"], high=r["high"],
+                 low=r["low"], close=r["close"]) for r in rows]
+
+
+@pytest.mark.asyncio
+async def test_replay_vwap_close_sl_does_not_fire_on_a_stale_bucket_judged_against_todays_final_vwap(monkeypatch):
+    """2026-09-10 real incident fix: the replay used to compare EVERY
+    historical 20-min bucket's close against self._vwap.current(sym) --
+    today's single, final/current VWAP snapshot -- instead of the VWAP as
+    it genuinely stood when that bucket itself closed. VWAP only grows/
+    drifts as the day accumulates more volume, so a bucket from hours ago
+    judged against today's LATER (and here, much higher) VWAP produces a
+    false breach. Real incident: FORCEMOT was closed this way while live
+    spot sat comfortably ~1.3% ABOVE the real contemporaneous VWAP the
+    whole time.
+
+    Bucket A [09:15-09:35) price=100 vol=10/min -> vwap-as-of-then=100.
+    Bucket B [09:35-09:55) price=101 vol=10/min -> vwap-as-of-then=100.5
+      (close 101 > vwap 100.5 -- healthy, NOT adverse).
+    Bucket C [09:55-10:15) price=115 vol=1000/min (heavy volume) drags the
+      CUMULATIVE/current vwap up to ~114.7 by end of day.
+    book._vwap (the live "current" snapshot) is seeded to an even higher
+    120 to simulate exactly what the old buggy code would have compared
+    every earlier bucket against -- under the OLD code this would have
+    fired on bucket A itself ((120-100)/120=16.7% adverse). The FIX must
+    fire on NONE of these three buckets (all genuinely non-adverse at
+    their own contemporaneous vwap)."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    contract = _contract("FORCEMOT", 17500, "CE")
+    entry_ts = datetime(2026, 8, 24, 9, 0, 0, tzinfo=IST)
+    book._positions["FORCEMOT"] = {
+        "contract": contract, "qty": 25, "entry_price": 845.70, "paper_mode": True,
+        "opened_at": entry_ts, "sl_mechanic": "vwap",
+    }
+    book._vwap.replace("FORCEMOT", 120.0 * 1000.0, 1000.0)   # simulates a much higher "current" vwap
+
+    rows = _rows_flat(9, 15, 20, 100.0, 10.0) + _rows_flat(9, 35, 20, 101.0, 10.0) + _rows_flat(9, 55, 20, 115.0, 1000.0)
+    today_bars = _bars_from_rows(rows)
+
+    import strategies.oi_orb_screener.engine as _engine_mod
+    _fixed_now = datetime(2026, 8, 24, 10, 20, 0, tzinfo=_engine_mod.IST)
+    class _FixedDT(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return _fixed_now
+    monkeypatch.setattr(_engine_mod, "datetime", _FixedDT)
+
+    fired = []
+    async def _spy_fire(sym, side, ltp, vwap):
+        fired.append((sym, side, ltp, vwap))
+    book._fire_vwap_close_sl = _spy_fire
+
+    closed = await book._replay_vwap_close_sl("FORCEMOT", "CALL", today_bars, entry_ts, rows)
+
+    assert closed is False
+    assert fired == []
+
+
+@pytest.mark.asyncio
+async def test_replay_vwap_close_sl_still_fires_on_a_genuine_contemporaneous_breach(monkeypatch):
+    """Continuing the same series past the heavy-volume bucket C: bucket D
+    [10:15-10:35) drops hard to close=90 while the running vwap-as-of-then
+    is still ~114.5 (dominated by bucket C's own heavy volume) -- a
+    genuine, large contemporaneous breach that must still fire, proving
+    the fix doesn't just blanket-suppress every historical bucket."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    contract = _contract("FORCEMOT", 17500, "CE")
+    entry_ts = datetime(2026, 8, 24, 9, 0, 0, tzinfo=IST)
+    book._positions["FORCEMOT"] = {
+        "contract": contract, "qty": 25, "entry_price": 845.70, "paper_mode": True,
+        "opened_at": entry_ts, "sl_mechanic": "vwap",
+    }
+    book._vwap.replace("FORCEMOT", 120.0 * 1000.0, 1000.0)
+
+    rows = (_rows_flat(9, 15, 20, 100.0, 10.0) + _rows_flat(9, 35, 20, 101.0, 10.0)
+            + _rows_flat(9, 55, 20, 115.0, 1000.0) + _rows_flat(10, 15, 20, 90.0, 10.0))
+    today_bars = _bars_from_rows(rows)
+
+    import strategies.oi_orb_screener.engine as _engine_mod
+    _fixed_now = datetime(2026, 8, 24, 10, 40, 0, tzinfo=_engine_mod.IST)
+    class _FixedDT(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return _fixed_now
+    monkeypatch.setattr(_engine_mod, "datetime", _FixedDT)
+
+    fired = []
+    async def _spy_fire(sym, side, ltp, vwap):
+        fired.append((sym, side, ltp, vwap))
+    book._fire_vwap_close_sl = _spy_fire
+
+    closed = await book._replay_vwap_close_sl("FORCEMOT", "CALL", today_bars, entry_ts, rows)
+
+    assert closed is True
+    assert len(fired) == 1
+    sym, side, ltp, vwap = fired[0]
+    assert ltp == pytest.approx(90.0)                 # bucket D's own close, not an earlier bucket
+    assert vwap == pytest.approx(114.476, abs=0.01)    # vwap AS OF bucket D's own close, not 120
+
+
 @pytest.mark.asyncio
 async def test_seed_vwap_from_upstox_intraday_replaces_state_with_hlc3_weighted_real_bars(monkeypatch):
     """2026-09-10, real incident fix: TECHM entered the shortlist via the

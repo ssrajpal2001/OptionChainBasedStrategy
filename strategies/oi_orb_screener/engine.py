@@ -3022,17 +3022,14 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             return
         await self._fire_vwap_close_sl(sym, side, ltp, vwap)
 
-    async def _replay_vwap_close_sl(self, sym: str, side: str, today_bars: list, entry_ts: datetime) -> bool:
+    async def _replay_vwap_close_sl(self, sym: str, side: str, today_bars: list, entry_ts: datetime,
+                                     today_rows: Optional[list] = None) -> bool:
         """Restart-safety replay for the SL, same discipline as the trap-exit
         target mechanism's own _replay_trap_state: walks TODAY's real 1-min
         history (bucketed on the FULL day's bars first, never a sliced
         post-entry-only series -- that misaligns the first bucket) and fires
         a real close immediately if the SL condition was ALREADY genuinely
-        satisfied before this process started/restarted. self._vwap.current(sym)
-        is used as the VWAP reference throughout the replay (not a
-        bar-specific historical VWAP) -- deliberately the SAME approximation
-        the live check itself uses, so replay can never behave differently
-        from what live ticks would have done from this point forward. Seeds
+        satisfied before this process started/restarted. Seeds
         self._sl_vwap_1m_acc with today's real bars either way, so live
         ticks continue seamlessly regardless of whether a breach was found.
         Returns True iff this call closed the position.
@@ -3046,7 +3043,34 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         genuine closed candle. Combined with the old midnight-aligned
         bucketing this is exactly what fired the false ATHERENERG SL 19
         seconds after entry -- this replay runs immediately after every
-        entry (via _seed_trap_exit_state), not only on a real restart."""
+        entry (via _seed_trap_exit_state), not only on a real restart.
+
+        2026-09-10, SECOND real incident fix, same day: this used to compare
+        EVERY historical bucket's close against self._vwap.current(sym) --
+        today's single CURRENT/latest VWAP snapshot -- instead of the VWAP
+        as it genuinely stood at that bucket's own close time. VWAP is
+        cumulative and only grows more data as the day progresses, so
+        "VWAP right now" is a materially different (and always more-final)
+        number than "VWAP two hours ago." Real incident: FORCEMOT, entered
+        10:54:41 with VWAP~=17796.52 at the time, was closed at 13:10:04 by
+        this replay citing "close=17826.00 vs vwap=17862.01" -- but the live
+        spot price the ENTIRE time around that restart was 18077-18078,
+        comfortably ~1.3% ABOVE the real contemporaneous VWAP (17842-17866)
+        -- nowhere near a genuine breach. The replay had found some earlier
+        bucket that legitimately closed below the FINAL 17862.01 snapshot,
+        even though VWAP was materially lower (closer to its 10:54 entry-
+        time value) when that bucket itself actually closed, and used the
+        wrong (future, too-high) VWAP to judge it -- a false SL that closed
+        a real, healthy, and ultimately +Rs5,373.75 position for the wrong
+        reason. Fixed by reconstructing a genuine minute-by-minute running
+        VWAP from today_rows' real (HLC3, volume) pairs (same real-Upstox-
+        intraday data the caller already fetched for this seed pass, just
+        previously discarding the volume field when building the volume-
+        less Bar objects) -- each bucket is now judged against the VWAP AS
+        IT ACTUALLY STOOD at that bucket's own close, exactly matching what
+        the live tick-driven check would have computed at that moment.
+        Degrades safely to self._vwap.current(sym) (the old behavior) only
+        if today_rows has no usable volume data for a given bucket."""
         if not today_bars:
             return False
         from strategies.core.trap_zone_utils import BarAccumulator as _TrapAcc
@@ -3057,10 +3081,38 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             last_bar = ha_tf[-1]
             if now < last_bar.ts + timedelta(minutes=_VWAP_SL_TF_MIN):
                 ha_tf = ha_tf[:-1]   # still-forming bucket -- never evaluate early
+
+        # Real minute-by-minute running VWAP, so each bucket is judged
+        # against the VWAP as it genuinely stood at that bucket's own close.
+        vwap_at_minute: Dict[datetime, float] = {}
+        if today_rows:
+            cum_pv = cum_v = 0.0
+            for r in sorted(today_rows, key=lambda r: r["ts"]):
+                vol = float(r.get("volume", 0) or 0)
+                if vol <= 0:
+                    continue
+                typical = (float(r["high"]) + float(r["low"]) + float(r["close"])) / 3.0
+                cum_pv += typical * vol
+                cum_v += vol
+                if cum_v > 0:
+                    r_ts = datetime.fromisoformat(r["ts"]) if isinstance(r["ts"], str) else r["ts"]
+                    vwap_at_minute[r_ts.replace(second=0, microsecond=0)] = cum_pv / cum_v
+        sorted_minutes = sorted(vwap_at_minute.keys())
+
+        def _vwap_as_of(bucket_end: datetime) -> Optional[float]:
+            # bucket_end is the bucket's own EXCLUSIVE upper edge (e.g. bucket
+            # [09:35,09:55) -> bucket_end=09:55) -- strict '<' so the very
+            # first minute of the NEXT bucket never leaks into "vwap as of
+            # THIS bucket's own close."
+            eligible = [ts for ts in sorted_minutes if ts < bucket_end]
+            if eligible:
+                return vwap_at_minute[eligible[-1]]
+            return self._vwap.current(sym)   # safe degrade -- no historical series available
+
         for hb in ha_tf:
             if hb.ts < entry_ts:
                 continue
-            vwap = self._vwap.current(sym)
+            vwap = _vwap_as_of(hb.ts + timedelta(minutes=_VWAP_SL_TF_MIN))
             if vwap is None or vwap <= 0:
                 continue
             adverse = ((vwap - hb.close) / vwap >= _VWAP_SL_MIN_GAP_PCT) if side == "CALL" \
@@ -3070,9 +3122,9 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                     return False
                 self._clog.critical(
                     "OiOrb[%s/%s]: %s restart-recovery replay found an ALREADY-EARNED VWAP-close "
-                    "SL breach (HA %d-min close=%.2f vs vwap=%.2f, real history since entry=%s) "
-                    "-- closing now.", self._client_id, self._binding_id, sym, _VWAP_SL_TF_MIN,
-                    hb.close, vwap, entry_ts.isoformat())
+                    "SL breach (HA %d-min close=%.2f vs vwap-as-of-then=%.2f, real history since "
+                    "entry=%s) -- closing now.", self._client_id, self._binding_id, sym,
+                    _VWAP_SL_TF_MIN, hb.close, vwap, entry_ts.isoformat())
                 await self._fire_vwap_close_sl(sym, side, hb.close, vwap)
                 return True
         acc = _TrapAcc(timeframe_min=1)
@@ -3153,7 +3205,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
 
             # ---- Hard SL first (checked ahead of both target tiers -- a real
             # stop takes priority over a target/reversal read) ----
-            if await self._replay_vwap_close_sl(sym, side, today_bars, entry_ts):
+            if await self._replay_vwap_close_sl(sym, side, today_bars, entry_ts, today_rows):
                 return   # position already closed via an already-earned SL breach
 
             # ---- Multi-day tier ----
