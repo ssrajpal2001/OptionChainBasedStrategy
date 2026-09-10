@@ -8277,7 +8277,7 @@ function amoTest() {
                            // 2026-09-10 fix: single source of truth for an open position's live
                            // gap% -- called fresh on every Alpine re-render (never cached in a
                            // nested x-data, which silently went stale after the first render, see
-                           // the "Spot LTP vs VWAP" row below for the full incident note).
+                           // the Spot LTP vs VWAP row below for the full incident note).
                            _posGapPct(sym, p) {
                              if (p.vwap == null) return null;
                              const ltp = this._liveLtp[sym] ?? p.spot_ltp;
