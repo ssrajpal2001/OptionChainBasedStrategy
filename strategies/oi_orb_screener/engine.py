@@ -1180,6 +1180,10 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             self._shortlist_symbols.append(sym)
             self._shortlist_pchange[sym] = pchange
             self._ensure_spot_feed(sym)
+            # 2026-09-10, real incident fix (TECHM): this path never seeded VWAP
+            # from any historical source before -- see _seed_vwap_from_upstox_
+            # intraday's own docstring for the full incident.
+            await self._seed_vwap_from_upstox_intraday(sym)
             new_syms.append(sym)
         if not new_syms:
             return
@@ -2191,6 +2195,71 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         except Exception:
             self._clog.exception("OiOrb[%s/%s]: live spot feed subscribe failed for %s.",
                                   self._client_id, self._binding_id, stock_symbol)
+
+    async def _seed_vwap_from_upstox_intraday(self, sym: str) -> None:
+        """2026-09-10, real incident fix + direct user spec: when a stock
+        (re-)enters the shortlist, compute its running session VWAP from
+        REAL Upstox intraday 1-min bars (09:15->now), never starting cold
+        from whatever moment it happened to get noticed.
+
+        Real incident: TECHM entered the shortlist via the STREAMING path
+        (_stream_new_top20_symbols) at 09:39:28, mid-way through a real
+        ~24-minute rally (1498->1538+) that had already been running since
+        the open -- but that path never seeded VWAP from any historical
+        source at all (unlike the other two shortlist-add paths, which both
+        call backfill_vwap_from_yahoo), so TECHM's VWAP started completely
+        empty and only began accumulating from that moment's live polls
+        onward. Result: computed VWAP (1530.05) diverged sharply from the
+        real broker/TradingView session VWAP, because it never saw the
+        first 24 minutes of real trading at all.
+
+        Uses REAL Upstox intraday bars (not Yahoo, not broker ATP -- ATP
+        resets on every restart per direct user spec) with a genuine HLC3
+        (typical-price) weighting, matching the standard VWAP formula every
+        broker terminal / TradingView uses -- NOT the coarse poll-snapshot
+        approximation this file's live self._vwap.update() otherwise uses
+        (that one still runs afterward for the rest of the day; this seed
+        just gives it a real starting basis instead of zero).
+
+        REPLACE semantics (VwapState.replace, not .seed): a stock
+        re-entering the shortlist later in the day gets a fresh,
+        authoritative recompute from the full real history up to that
+        moment, rather than merging with whatever fragile poll-based state
+        it may have accumulated in between. Best-effort throughout -- any
+        failure just leaves VWAP on the live poll-based accumulation alone,
+        same behavior as before this fix existed."""
+        try:
+            eq_key = stock_resolve.resolve_eq_instrument_key(sym)
+            if not eq_key:
+                return
+            from data_layer.client_db import ClientDB
+            creds = await asyncio.to_thread(ClientDB().get_feeder_creds_sync, "upstox")
+            token = (creds or {}).get("access_token", "")
+            if not token:
+                return
+            from data_layer.historical_candles import fetch_upstox_intraday_1m
+            rows = await fetch_upstox_intraday_1m(eq_key, token)
+            if not rows:
+                return
+            num = 0.0
+            den = 0.0
+            for r in rows:
+                vol = float(r.get("volume", 0) or 0)
+                if vol <= 0:
+                    continue
+                hlc3 = (float(r["high"]) + float(r["low"]) + float(r["close"])) / 3.0
+                num += hlc3 * vol
+                den += vol
+            if den > 0:
+                self._vwap.replace(sym, num, den)
+                self._clog.info(
+                    "OiOrb[%s/%s]: %s VWAP seeded from %d real Upstox intraday bars "
+                    "(HLC3-weighted, 09:15->now) -- vwap=%.2f.",
+                    self._client_id, self._binding_id, sym, len(rows), num / den)
+        except Exception:
+            self._clog.exception(
+                "OiOrb[%s/%s]: %s VWAP intraday seed failed -- falls back to live "
+                "poll-based accumulation only.", self._client_id, self._binding_id, sym)
 
     async def _ensure_chain_subscription(self, stock_symbol: str, spot: float) -> None:
         """Widen the live feed subscription from 'just the one traded

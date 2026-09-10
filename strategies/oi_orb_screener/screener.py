@@ -835,6 +835,21 @@ class VwapState:
         self._num[symbol] += price_vol_sum
         self._den[symbol] += vol_sum
 
+    def replace(self, symbol: str, price_vol_sum: float, vol_sum: float) -> None:
+        """2026-09-10, direct user spec: REPLACES (not adds) whatever's
+        accumulated for this symbol so far -- used when a stock (re-)enters
+        the shortlist and its VWAP should be recomputed fresh from a genuine
+        full-session real-bar history, not merged with fragile prior partial
+        state (e.g. from live poll-based accumulation before a proper
+        historical seed ever ran). "when stock comes again... get the
+        intraday historical data and compute the updated version" -- this is
+        that update path. A vol_sum<=0 call is a no-op (keeps whatever state
+        already existed rather than wiping it on a failed/empty fetch)."""
+        if vol_sum <= 0:
+            return
+        self._num[symbol] = price_vol_sum
+        self._den[symbol] = vol_sum
+
     def update(self, symbol: str, price: float, volume_delta: float) -> None:
         if price <= 0 or volume_delta <= 0:
             return

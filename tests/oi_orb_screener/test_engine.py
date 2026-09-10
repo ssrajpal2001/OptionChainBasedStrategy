@@ -938,6 +938,36 @@ def _bar(hhmm: str, h: float, l: float, c: float, vol: float) -> dict:
 
 
 @pytest.mark.asyncio
+async def test_seed_vwap_from_upstox_intraday_replaces_state_with_hlc3_weighted_real_bars(monkeypatch):
+    """2026-09-10, real incident fix: TECHM entered the shortlist via the
+    streaming path mid-rally, with VWAP never seeded from any real history
+    -- this proves the new seed genuinely computes a real HLC3-weighted VWAP
+    from real bars and REPLACES (not merges with) whatever was there
+    before."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    monkeypatch.setattr(stock_resolve, "resolve_eq_instrument_key", lambda sym: "NSE_EQ|INE669C01036")
+    monkeypatch.setattr("data_layer.client_db.ClientDB.get_feeder_creds_sync",
+                         lambda self, provider: {"access_token": "tok"})
+    bars = [
+        _bar("09:15", 1500, 1497, 1499, 1000),   # hlc3=1498.67
+        _bar("09:20", 1520, 1500, 1518, 2000),   # hlc3=1512.67
+        _bar("09:39", 1540, 1530, 1538, 1500),   # hlc3=1536.00
+    ]
+    monkeypatch.setattr("data_layer.historical_candles.fetch_upstox_intraday_1m", _async_return(bars))
+
+    # Simulate stale poll-based state accumulated before the fix would have
+    # run (must be wiped, not merged with).
+    book._vwap.update("TECHM", 1000.0, 1.0)
+
+    await book._seed_vwap_from_upstox_intraday("TECHM")
+
+    expected_num = (1498.0 + 2.0/3) * 1000 + (1512.0 + 2.0/3) * 2000 + 1536.0 * 1500
+    expected_den = 1000 + 2000 + 1500
+    assert book._vwap.current("TECHM") == pytest.approx(expected_num / expected_den, abs=0.01)
+
+
+@pytest.mark.asyncio
 async def test_seed_option_bars_from_history_reconstructs_sl_from_real_bars(monkeypatch):
     """Baseline bars (09:55-09:59, flat @100) establish a running vwap ~100.
     Position entered at 10:00. The 10:00-10:04 bucket (vwap_sl_tf_minutes=5)
