@@ -8273,6 +8273,16 @@ function amoTest() {
                              const dist = ltp - vwapSnap.vwap;
                              return { ltp, vwap: vwapSnap.vwap, vwap_dist: dist,
                                       vwap_dist_pct: vwapSnap.vwap ? (dist / vwapSnap.vwap * 100) : null };
+                           },
+                           // 2026-09-10 fix: single source of truth for an open position's live
+                           // gap% -- called fresh on every Alpine re-render (never cached in a
+                           // nested x-data, which silently went stale after the first render, see
+                           // the "Spot LTP vs VWAP" row below for the full incident note).
+                           _posGapPct(sym, p) {
+                             if (p.vwap == null) return null;
+                             const ltp = this._liveLtp[sym] ?? p.spot_ltp;
+                             if (ltp == null) return null;
+                             return (ltp - p.vwap) / p.vwap * 100;
                            }
                          }"
                          x-init="_load(); setInterval(()=>_load(), 3000); window.addEventListener('spot-tick', e => _onSpotTick(e))">
@@ -8318,10 +8328,17 @@ function amoTest() {
                                        so it's clear WHY a close SL trigger. Target = 180min/3min
                                        same-side trap zone; trap_source shows which tier (multiday vs
                                        intraday fallback) actually claimed it once touched. -->
-                                  <div class="flex justify-between" x-data="{ live: _liveVwapDist(sym, p.vwap!=null?{vwap:p.vwap, vwap_dist:p.spot_ltp!=null?(p.spot_ltp-p.vwap):null, vwap_dist_pct:p.vwap_gap_pct}:null) }">
+                                  <!-- 2026-09-10 fix: the previous nested x-data="{live: _liveVwapDist(...)}"
+                                       computed `live` ONCE at row-init time (a plain Alpine data property,
+                                       not a reactive getter) -- it never recomputed on later ticks even
+                                       though _liveLtp[sym] itself kept updating underneath it, so the
+                                       displayed gap% (and the color) silently went stale after the first
+                                       render. _posGapPct(sym,p) is called fresh on every re-render instead,
+                                       so it genuinely re-evaluates on every _liveLtp mutation (real tick). -->
+                                  <div class="flex justify-between">
                                     <span style="color:var(--t-muted)">Spot LTP vs VWAP</span>
-                                    <span :style="(live?live.vwap_dist_pct:p.vwap_gap_pct)==null?'color:var(--t-dim)':((live?live.vwap_dist_pct:p.vwap_gap_pct)>=0?'color:var(--t-green)':'color:var(--t-red)')"
-                                          x-text="(_liveLtp[sym]??p.spot_ltp)==null?'—':(fmt(_liveLtp[sym]??p.spot_ltp)+(p.vwap!=null?(' vs VWAP '+fmt(p.vwap)+' ('+((live?live.vwap_dist_pct:p.vwap_gap_pct)>=0?'+':'')+(live?live.vwap_dist_pct:p.vwap_gap_pct).toFixed(2)+'%)'):' (VWAP not warm)'))"></span>
+                                    <span :style="_posGapPct(sym,p)==null?'color:var(--t-dim)':(_posGapPct(sym,p)>=0?'color:var(--t-green)':'color:var(--t-red)')"
+                                          x-text="(_liveLtp[sym]??p.spot_ltp)==null?'—':(fmt(_liveLtp[sym]??p.spot_ltp)+(p.vwap!=null?(' vs VWAP '+fmt(p.vwap)+' ('+(_posGapPct(sym,p)>=0?'+':'')+_posGapPct(sym,p).toFixed(2)+'%)'):' (VWAP not warm)'))"></span>
                                   </div>
                                   <div class="flex justify-between">
                                     <span style="color:var(--t-muted)">Option SL / Target</span>
