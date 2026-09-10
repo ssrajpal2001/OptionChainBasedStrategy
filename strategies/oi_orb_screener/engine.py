@@ -2705,15 +2705,32 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         await self._emit_close(sym, pos, "vwap_close_sl")
 
     async def _vwap_close_sl_check(self, sym: str, side: str, ltp: float, ts: datetime) -> None:
-        """Live per-tick SL check (2026-09-08, direct user spec): 30-min
-        Heikin-Ashi candle closes on the wrong side of the running session
-        VWAP -- CALL: close < vwap; PUT: close > vwap. Validated as the best
-        of 4 SL families tested (scripts/oi_orb_trap_target_sl_backtest.py)
-        against the same real 46-trade dataset -- the only candidate that
-        improved BOTH win% and PF over the no-SL baseline while cutting the
-        worst single-trade loss by ~75%. Checked ahead of both trap-exit
-        target tiers in the main exit loop (a real stop takes priority over
-        a target/reversal read). Uses self._vwap.current(sym) -- the SAME
+        """Live per-tick SL check (2026-09-08, direct user spec): 20-min
+        candle closes on the wrong side of the running session VWAP -- CALL:
+        close < vwap; PUT: close > vwap. Validated as the best of 4 SL
+        families tested (scripts/oi_orb_trap_target_sl_backtest.py) against
+        the same real 46-trade dataset -- the only candidate that improved
+        BOTH win% and PF over the no-SL baseline while cutting the worst
+        single-trade loss by ~75%. Checked ahead of both trap-exit target
+        tiers in the main exit loop (a real stop takes priority over a
+        target/reversal read).
+
+        2026-09-10, direct user spec/real incident fix: switched from
+        Heikin-Ashi to plain candles AND from midnight-aligned to
+        market-open-anchored buckets (to_n_min_bars_market_anchored) --
+        real trade ATHERENERG entered 09:25:11, SL-stopped 09:25:31 with
+        ZERO real price movement in between, because the old midnight-
+        aligned [09:00-09:20) bucket only ever held ~5 real minutes
+        (09:15-09:20) but was already "confirmed closed" the instant
+        wall-clock passed 09:20, comparing a stale 5-minute snapshot
+        against a materially newer VWAP. Market-anchored buckets
+        ([09:15-09:35), [09:35-09:55), ...) give the first bucket a genuine
+        full 20 minutes before it's ever evaluated. HA-vs-normal was
+        already found to make no meaningful difference for this SL in an
+        earlier backtest this session -- normal candles kept for simplicity
+        per direct user preference, not because HA was itself the bug (the
+        bucket-boundary truncation applies equally to either candle type).
+        Uses self._vwap.current(sym) -- the SAME
         running session VWAP the entry mechanic itself reads, already
         backfilled from real history and refreshed on every restart via
         _run_today_pipeline's own morning flow, so no separate VWAP seeding
@@ -2722,13 +2739,12 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         if pos is None or sym in self._eod_closing:
             return
         from strategies.core.trap_zone_utils import BarAccumulator as _TrapAcc
-        from strategies.core.candle_indicators import to_heikin_ashi, to_n_min_bars_dateaware
+        from strategies.core.candle_indicators import to_n_min_bars_market_anchored
         acc = self._sl_vwap_1m_acc.setdefault(sym, _TrapAcc(timeframe_min=1))
         acc.on_tick(ts, ltp)
         if not acc.bars:
             return
-        ha_1m = to_heikin_ashi(acc.bars)
-        ha_tf = to_n_min_bars_dateaware(ha_1m, _VWAP_SL_TF_MIN)
+        ha_tf = to_n_min_bars_market_anchored(acc.bars, _VWAP_SL_TF_MIN)
         if not ha_tf:
             return
         last_bar = ha_tf[-1]
@@ -2752,24 +2768,38 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
     async def _replay_vwap_close_sl(self, sym: str, side: str, today_bars: list, entry_ts: datetime) -> bool:
         """Restart-safety replay for the SL, same discipline as the trap-exit
         target mechanism's own _replay_trap_state: walks TODAY's real 1-min
-        history (HA computed on the FULL day's bars first, never a sliced
-        post-entry-only series -- that misaligns the first 30-min bucket,
-        the exact bug found and fixed in an earlier backtest variant this
-        session) and fires a real close immediately if the SL condition was
-        ALREADY genuinely satisfied before this process started/restarted.
-        self._vwap.current(sym) is used as the VWAP reference throughout the
-        replay (not a bar-specific historical VWAP) -- deliberately the SAME
-        approximation the live check itself uses, so replay can never behave
-        differently from what live ticks would have done from this point
-        forward. Seeds self._sl_vwap_1m_acc with today's real bars either
-        way, so live ticks continue seamlessly regardless of whether a
-        breach was found. Returns True iff this call closed the position."""
+        history (bucketed on the FULL day's bars first, never a sliced
+        post-entry-only series -- that misaligns the first bucket) and fires
+        a real close immediately if the SL condition was ALREADY genuinely
+        satisfied before this process started/restarted. self._vwap.current(sym)
+        is used as the VWAP reference throughout the replay (not a
+        bar-specific historical VWAP) -- deliberately the SAME approximation
+        the live check itself uses, so replay can never behave differently
+        from what live ticks would have done from this point forward. Seeds
+        self._sl_vwap_1m_acc with today's real bars either way, so live
+        ticks continue seamlessly regardless of whether a breach was found.
+        Returns True iff this call closed the position.
+
+        2026-09-10, real incident fix: switched to plain candles + market-
+        anchored buckets, same reasoning as _vwap_close_sl_check. Also
+        ADDED the still-forming-bucket guard this replay was previously
+        missing entirely -- unlike the live check, this loop had no
+        boundary check at all, so it could evaluate the CURRENTLY-forming
+        last bucket (whatever ticks had arrived so far) as if it were a
+        genuine closed candle. Combined with the old midnight-aligned
+        bucketing this is exactly what fired the false ATHERENERG SL 19
+        seconds after entry -- this replay runs immediately after every
+        entry (via _seed_trap_exit_state), not only on a real restart."""
         if not today_bars:
             return False
         from strategies.core.trap_zone_utils import BarAccumulator as _TrapAcc
-        from strategies.core.candle_indicators import to_heikin_ashi, to_n_min_bars_dateaware
-        ha_1m = to_heikin_ashi(today_bars)
-        ha_tf = to_n_min_bars_dateaware(ha_1m, _VWAP_SL_TF_MIN)
+        from strategies.core.candle_indicators import to_n_min_bars_market_anchored
+        ha_tf = to_n_min_bars_market_anchored(today_bars, _VWAP_SL_TF_MIN)
+        if ha_tf:
+            now = datetime.now(IST)
+            last_bar = ha_tf[-1]
+            if now < last_bar.ts + timedelta(minutes=_VWAP_SL_TF_MIN):
+                ha_tf = ha_tf[:-1]   # still-forming bucket -- never evaluate early
         for hb in ha_tf:
             if hb.ts < entry_ts:
                 continue

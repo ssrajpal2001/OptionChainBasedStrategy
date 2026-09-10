@@ -90,6 +90,39 @@ def to_n_min_bars(bars_1m: List[Bar], n: int) -> List[Bar]:
     return out
 
 
+def to_n_min_bars_market_anchored(bars_1m: List[Bar], n: int,
+                                   anchor_hour: int = 9, anchor_min: int = 15) -> List[Bar]:
+    """Like to_n_min_bars_dateaware, but buckets are anchored to market open
+    (default 09:15) instead of midnight -- e.g. n=20 gives [09:15-09:35),
+    [09:35-09:55), ... instead of clock-aligned [09:00-09:20), [09:20-09:40).
+
+    2026-09-10, real incident fix (OI-ORB Screener's VWAP-close SL): with
+    midnight-aligned buckets, the FIRST bucket of the day ([09:00-09:20) for
+    n=20) only ever contains ~5 real minutes of data (09:15-09:20, since
+    market opens well after the bucket's own midnight-aligned start) but is
+    still treated as "confirmed closed" the instant wall-clock time passes
+    09:20 -- a stale, artificially-early close gets compared against a
+    materially newer running VWAP, firing a false SL almost immediately
+    after any entry taken in the first ~20-25 minutes of the session (real
+    trade: ATHERENERG entered 09:25:11, SL-stopped 09:25:31, zero real price
+    movement in between -- the "closed" bucket was a 5-minute snapshot from
+    09:15-09:20, not a genuine 20-minute read). Anchoring to market open
+    means the first bucket is a genuine full n-minute window before it can
+    ever be evaluated."""
+    anchor_mins = anchor_hour * 60 + anchor_min
+    buckets: Dict[tuple, list] = {}
+    for b in bars_1m:
+        mins = b.ts.hour * 60 + b.ts.minute
+        key = (b.ts.date(), (mins - anchor_mins) // n)
+        buckets.setdefault(key, []).append(b)
+    out: List[Bar] = []
+    for key in sorted(buckets.keys()):
+        g = sorted(buckets[key], key=lambda x: x.ts)
+        out.append(Bar(ts=g[0].ts, open=g[0].open, high=max(x.high for x in g),
+                        low=min(x.low for x in g), close=g[-1].close))
+    return out
+
+
 def to_heikin_ashi(bars_1m: List[Bar]) -> List[Bar]:
     """Classic Heikin-Ashi transform, computed on the FINEST available
     series (1-min) and resampled up from there -- converting an
