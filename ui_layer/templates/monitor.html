@@ -8238,6 +8238,7 @@ function amoTest() {
                     <div class="rounded p-3 mb-2 text-xs font-mono" style="background:rgba(var(--t-cyan-rgb),0.04);border:1px solid rgba(var(--t-cyan-rgb),0.18)"
                          x-data="{
                            _bk: null,
+                           _liveLtp: {},
                            async _load() {
                              try {
                                const tok = localStorage.getItem('terminus_token') || (authToken||'');
@@ -8252,9 +8253,29 @@ function amoTest() {
                                              && (bk.strategy_name||'oi_orb_screener')===dep.strategy_name) || null;
                                }
                              } catch(e) {}
+                           },
+                           // 2026-09-10, direct user spec: 'ui not showing tick by tick vwap
+                           // value change and ltp change' -- the REST poll above only refreshes
+                           // every 15s. Ticks for every shortlisted/open-position stock are
+                           // already flowing over the same WS every other panel's spot-tick
+                           // listener uses (OI-ORB subscribes them via Topic.INDEX_TICK, same
+                           // as any index -- ws_bridge broadcasts type:'tick' regardless of
+                           // symbol). Live LTP updates instantly on every real tick; VWAP itself
+                           // still only refreshes on the 15s REST poll (it moves slowly, no need
+                           // for tick-level VWAP), so the displayed gap is LIVE-LTP vs
+                           // last-polled-VWAP, recomputed locally on every tick.
+                           _onSpotTick(e) {
+                             this._liveLtp[e.detail.sym] = e.detail.ltp;
+                           },
+                           _liveVwapDist(sym, vwapSnap) {
+                             const ltp = this._liveLtp[sym];
+                             if (ltp == null || !vwapSnap || vwapSnap.vwap == null) return vwapSnap;
+                             const dist = ltp - vwapSnap.vwap;
+                             return { ltp, vwap: vwapSnap.vwap, vwap_dist: dist,
+                                      vwap_dist_pct: vwapSnap.vwap ? (dist / vwapSnap.vwap * 100) : null };
                            }
                          }"
-                         x-init="_load(); setInterval(()=>_load(), 15000)">
+                         x-init="_load(); setInterval(()=>_load(), 15000); window.addEventListener('spot-tick', e => _onSpotTick(e))">
                       <template x-if="!_bk">
                         <div class="text-center" style="color:var(--t-dim)">Loading OI-ORB Screener state…</div>
                       </template>
@@ -8297,10 +8318,10 @@ function amoTest() {
                                        so it's clear WHY a close SL trigger. Target = 180min/3min
                                        same-side trap zone; trap_source shows which tier (multiday vs
                                        intraday fallback) actually claimed it once touched. -->
-                                  <div class="flex justify-between">
+                                  <div class="flex justify-between" x-data="{ live: _liveVwapDist(sym, p.vwap!=null?{vwap:p.vwap, vwap_dist:p.spot_ltp!=null?(p.spot_ltp-p.vwap):null, vwap_dist_pct:p.vwap_gap_pct}:null) }">
                                     <span style="color:var(--t-muted)">Spot LTP vs VWAP</span>
-                                    <span :style="p.vwap_gap_pct==null?'color:var(--t-dim)':(p.vwap_gap_pct>=0?'color:var(--t-green)':'color:var(--t-red)')"
-                                          x-text="p.spot_ltp==null?'—':(fmt(p.spot_ltp)+(p.vwap!=null?(' vs VWAP '+fmt(p.vwap)+' ('+(p.vwap_gap_pct>=0?'+':'')+p.vwap_gap_pct.toFixed(2)+'%)'):' (VWAP not warm)'))"></span>
+                                    <span :style="(live?live.vwap_dist_pct:p.vwap_gap_pct)==null?'color:var(--t-dim)':((live?live.vwap_dist_pct:p.vwap_gap_pct)>=0?'color:var(--t-green)':'color:var(--t-red)')"
+                                          x-text="(_liveLtp[sym]??p.spot_ltp)==null?'—':(fmt(_liveLtp[sym]??p.spot_ltp)+(p.vwap!=null?(' vs VWAP '+fmt(p.vwap)+' ('+((live?live.vwap_dist_pct:p.vwap_gap_pct)>=0?'+':'')+(live?live.vwap_dist_pct:p.vwap_gap_pct).toFixed(2)+'%)'):' (VWAP not warm)'))"></span>
                                   </div>
                                   <div class="flex justify-between">
                                     <span style="color:var(--t-muted)">Option SL / Target</span>
@@ -8331,7 +8352,7 @@ function amoTest() {
                           <template x-if="(_bk.shortlist||[]).length===0">
                             <div class="text-center py-1" style="color:var(--t-dim)">No shortlist yet — scanning</div>
                           </template>
-                          <template x-for="row in (_bk.shortlist||[]).slice(0,8).map(s => ({sym: s, pc: (_bk.shortlist_pchange||{})[s], vw: (_bk.shortlist_vwap||{})[s], rt: (_bk.retest_trackers||{})[s]}))" :key="row.sym">
+                          <template x-for="row in (_bk.shortlist||[]).slice(0,8).map(s => ({sym: s, pc: (_bk.shortlist_pchange||{})[s], vw: _liveVwapDist(s, (_bk.shortlist_vwap||{})[s]), rt: (_bk.retest_trackers||{})[s]}))" :key="row.sym">
                             <div class="flex items-center justify-between mb-1">
                               <span class="px-1.5 py-0.5 rounded font-bold"
                                     :style="row.pc>0?'background:rgba(16,185,129,0.15);color:var(--t-green)':'background:rgba(239,68,68,0.15);color:var(--t-red)'"

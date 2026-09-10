@@ -2021,6 +2021,24 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 orb_high=sig.orb_high, orb_low=sig.orb_low)
             return
 
+        # 2026-09-10, real incident fix: a re-entry (or any second position on
+        # the same symbol today) onto a DIFFERENT strike than the just-closed
+        # one used to read a STALE leftover LTP here -- _live_option_ltp is
+        # keyed only by stock symbol, and _option_tick_loop's own strike-match
+        # guard correctly stops the OLD contract's ticks from overwriting it
+        # going forward, but nothing ever cleared the value the old contract's
+        # LAST tick had already written. _await_first_ltp's poll loop just
+        # checks "> 0" -- it can't distinguish a genuinely fresh tick from
+        # that stale leftover, so it returned the old contract's last price
+        # immediately, before the new contract had ticked even once. Real
+        # trade: ATHERENERG re-entered CE1620, entry recorded at 54.50 --
+        # actually CE1640's (the closed leg's) last price; real CE1620 LTP
+        # was 64.95 per the broker terminal at that moment. Clearing here
+        # forces _await_first_ltp to genuinely wait for the new contract's
+        # own first real tick, same as a brand-new entry already does.
+        self._live_option_ltp.pop(sig.symbol, None)
+        self._live_option_atp.pop(sig.symbol, None)
+
         self._pending_contracts[sig.symbol] = contract
         self._ensure_option_feed(sig.symbol, contract)
 

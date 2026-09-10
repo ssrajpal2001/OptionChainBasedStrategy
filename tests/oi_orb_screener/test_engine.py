@@ -147,6 +147,59 @@ async def test_handle_signal_resolves_contract_subscribes_feed_and_emits_buy(mon
 
 
 @pytest.mark.asyncio
+async def test_handle_signal_on_different_strike_does_not_reuse_stale_ltp(monkeypatch):
+    """2026-09-10, real incident: a re-entry onto a DIFFERENT strike than the
+    just-closed contract used to read the OLD contract's leftover LTP as its
+    own entry price (_live_option_ltp is keyed by stock symbol only, and
+    nothing cleared it between positions -- _await_first_ltp's "> 0" check
+    can't tell a stale leftover from a genuine fresh tick). Real trade:
+    ATHERENERG closed CE1640 @ 54.50, re-entered CE1620, and the recorded
+    entry was 54.50 -- CE1640's price, not CE1620's real ~64.95."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    # Simulate the just-closed contract's leftover LTP still sitting in the dict.
+    book._live_option_ltp["ATHERENERG"] = 54.50
+    book._live_option_atp["ATHERENERG"] = 54.50
+
+    book._subscribe(Topic.OPTION_TICK)
+    opt_tick_task = asyncio.create_task(book._option_tick_loop())
+    try:
+        new_contract = _contract("ATHERENERG", 1620, "CE")
+        monkeypatch.setattr(stock_resolve, "resolve_lot_async", _async_return(375))
+        monkeypatch.setattr(stock_resolve, "resolve_contract_async", _async_return(new_contract))
+
+        sig = screener.Signal(symbol="ATHERENERG", side="CALL", reason="vwap_retest_historical_top20",
+                               trigger_price=1630.60, orb_high=1638.10, orb_low=1629.00, ts="09:33:00")
+
+        book._running = True
+        task = asyncio.create_task(book._handle_signal(sig))
+        await asyncio.sleep(0.05)   # let _ensure_option_feed's subscribe task run
+
+        # The stale value must be gone the instant the new contract is set up --
+        # BEFORE any genuine new tick has arrived.
+        assert book._live_option_ltp.get("ATHERENERG") is None
+
+        # Now the genuinely fresh tick for the NEW contract arrives.
+        await bus.publish(Topic.OPTION_TICK, OptionTick(
+            symbol="ATHERENERG1620CE", underlying="ATHERENERG", strike=1620, option_type="CE",
+            expiry=date(2026, 8, 27), ltp=64.95, bid=64.8, ask=65.1, oi=0, change_oi=0,
+            volume=0, iv=0.0, delta=0.0, timestamp=datetime(2026, 9, 10, 9, 33, 0),
+        ))
+        await asyncio.wait_for(task, timeout=2.0)
+
+        buy_events = [e for t, e in bus.published if t == Topic.OI_ORB_ORDER_REQUEST]
+        assert len(buy_events) == 1
+        assert buy_events[0].entry_price == 64.95   # NOT the stale 54.50 leftover
+    finally:
+        book._running = False
+        opt_tick_task.cancel()
+        try:
+            await opt_tick_task
+        except asyncio.CancelledError:
+            pass
+
+
+@pytest.mark.asyncio
 async def test_on_fill_confirms_entry_and_tracks_position():
     bus = _FakeBus()
     book = _make_book(bus)
