@@ -2622,3 +2622,87 @@ async def test_apply_historical_vwap_retest_missing_result_degrades_safely(monke
 
     assert "GHOST" not in book._vwap_armed
     assert ("GHOST", "CALL") not in book._already_fired
+
+
+@pytest.mark.asyncio
+async def test_apply_historical_vwap_retest_skips_symbol_already_checked_today(monkeypatch):
+    """2026-09-10 real incident fix: this deterministic replay must run AT
+    MOST ONCE per (symbol, side) per day -- a symbol already marked done in
+    self._historical_check_done (restored from store.load_historical_check_done
+    on a restart, or set earlier this same process lifetime) must never be
+    re-evaluated, since it always finds/re-reports the SAME stale reference
+    price (the GVT&D incident: "retested at 09:18, price=4638.90" re-logged
+    across 10+ restarts while real spot had moved to ~4540-4547)."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._shortlist_pchange["MANAPPURAM"] = -3.49  # bearish -> PUT
+    book._regime = "bearish"
+    book._historical_check_done.add(("MANAPPURAM", "PUT"))
+
+    calls = []
+    def _fake_check(symbols_sides, cfg):
+        calls.append(dict(symbols_sides))
+        return {"MANAPPURAM": {"armed": True, "fired": True, "fire_ts": "09:47",
+                                "fire_price": 327.30, "final_vwap": 327.79, "bars_replayed": 30}}
+    monkeypatch.setattr(screener, "historical_vwap_retest_check", _fake_check)
+
+    await book._apply_historical_vwap_retest(["MANAPPURAM"], book._screener_cfg)
+
+    assert calls == []  # the expensive replay must never even be called
+    assert ("MANAPPURAM", "PUT") not in book._already_fired
+
+
+@pytest.mark.asyncio
+async def test_apply_historical_vwap_retest_marks_symbol_checked_after_processing(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._shortlist_pchange["SOLARINDS"] = 2.19  # bullish -> CALL
+
+    monkeypatch.setattr(screener, "historical_vwap_retest_check", lambda symbols_sides, cfg: {
+        "SOLARINDS": {"armed": True, "fired": False, "fire_ts": None,
+                       "fire_price": None, "final_vwap": 21824.27, "bars_replayed": 12},
+    })
+
+    await book._apply_historical_vwap_retest(["SOLARINDS"], book._screener_cfg)
+
+    assert ("SOLARINDS", "CALL") in book._historical_check_done
+
+
+@pytest.mark.asyncio
+async def test_apply_historical_rolling_retest_skips_symbol_already_checked_today(monkeypatch):
+    """Same restart-safety gate as the standard-variant test above, applied
+    to the top20-mode rolling-retest counterpart."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._top20_mode = True
+    book._shortlist_pchange["GVT&D"] = -2.0  # bearish -> PUT
+    book._historical_check_done.add(("GVT&D", "PUT"))
+
+    calls = []
+    def _fake_check(symbols_sides, cfg, window_min):
+        calls.append(dict(symbols_sides))
+        return {}
+    monkeypatch.setattr(screener, "historical_rolling_retest_check", _fake_check)
+
+    await book._apply_historical_rolling_retest(["GVT&D"], book._screener_cfg)
+
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_apply_historical_rolling_retest_marks_symbol_checked_after_processing(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._top20_mode = True
+    book._shortlist_pchange["GVT&D"] = -2.0  # bearish -> PUT
+
+    class _FakeTracker:
+        pass
+
+    monkeypatch.setattr(screener, "historical_rolling_retest_check",
+                         lambda symbols_sides, cfg, window_min: {
+                             "GVT&D": {"tracker": _FakeTracker(), "fired": False}})
+
+    await book._apply_historical_rolling_retest(["GVT&D"], book._screener_cfg)
+
+    assert ("GVT&D", "PUT") in book._historical_check_done

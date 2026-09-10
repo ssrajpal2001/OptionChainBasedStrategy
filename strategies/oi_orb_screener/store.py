@@ -561,6 +561,54 @@ def load_already_fired(client_id: str, binding_id: str, trade_date: Optional[str
         con.close()
 
 
+def load_historical_check_done(client_id: str, binding_id: str, trade_date: Optional[str] = None) -> set:
+    """2026-09-10, real incident fix: the "replay ALL of today's real 1-min
+    history and fire immediately if a retest already completed" check
+    (screener.historical_rolling_retest_check/historical_vwap_retest_check)
+    is DETERMINISTIC given the same day's history -- it always finds and
+    reports the SAME first-ever retest moment, no matter how many times or
+    how much later it's called. self._morning_historical_retest_applied/
+    _restart_db_reconcile_applied only guard this ONCE PER PROCESS
+    LIFETIME, not once per DAY -- every restart resets them to False, so
+    the SAME historical replay re-runs and re-logs a "signal_fired" using
+    an increasingly stale reference price from hours earlier, even for a
+    symbol whose real live market conditions have moved on completely.
+
+    Real incident: GVT&D's historical check kept re-reporting "retested at
+    09:18, price=4638.90" across 10+ separate log lines through the whole
+    session (09:18 through 12:21), even though real spot by 11:11 (when a
+    genuine entry actually fired off this stale reference) was trading
+    around 4540-4547 -- a ~2% discrepancy that corrupted the trade's own
+    recorded entry rationale and made post-hoc analysis actively
+    misleading, not just noisy.
+
+    This is the restart-safe fix: reconstructs which (symbol, side) pairs
+    have ALREADY had this historical replay performed at all today
+    (regardless of outcome -- fired, aborted, or rejected; ANY row at all
+    in signal_events counts), so a restart never re-runs it a second time.
+    Any GENUINELY new opportunity for a symbol from that point forward
+    comes exclusively from the live tick loop's own continuously-running
+    real-time arm/retest tracker (self._rolling_retest_trackers /
+    self._vwap_armed), which is seeded by the one real historical replay
+    and has no staleness risk of its own -- it only ever reacts to
+    real-time ticks."""
+    init_db()
+    con = sqlite3.connect(_DB_PATH)
+    try:
+        td = trade_date or _today()
+        rows = con.execute(
+            """SELECT DISTINCT symbol, side FROM signal_events
+               WHERE client_id=? AND binding_id=? AND trade_date=?""",
+            (client_id, binding_id, td),
+        ).fetchall()
+        return {(r[0], r[1]) for r in rows}
+    except Exception as exc:
+        logger.error("oi_orb store.load_historical_check_done failed: %s", exc)
+        return set()
+    finally:
+        con.close()
+
+
 def load_rejected(client_id: str, binding_id: str, trade_date: Optional[str] = None) -> set:
     init_db()
     con = sqlite3.connect(_DB_PATH)

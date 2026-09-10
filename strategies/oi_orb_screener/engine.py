@@ -390,6 +390,9 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._orb_frozen: dict = {}
         self._regime: Optional[str] = None
         self._already_fired: set = set()
+        # 2026-09-10, real incident fix: see store.load_historical_check_done's
+        # own docstring / _restore_from_db's restore call for the full incident.
+        self._historical_check_done: set = set()
         self._entry_window_done_logged = False
         self._morning_historical_retest_applied = False
         self._restart_db_reconcile_applied = False
@@ -584,6 +587,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._orb_frozen = {}
         self._regime = None
         self._already_fired = set()
+        self._historical_check_done = set()
         self._entry_window_done_logged = False
         self._rejected = set()
         self._sl_reentry_used = set()
@@ -763,6 +767,20 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         if already_fired or rejected:
             self._clog.info("OiOrb[%s/%s]: restored %d already-fired + %d rejected signal(s) from DB.",
                              self._client_id, self._binding_id, len(already_fired), len(rejected))
+        # 2026-09-10, real incident fix: the historical-replay-and-fire-
+        # immediately check is deterministic given the same day's history --
+        # it always finds and reports the SAME first-ever retest moment, no
+        # matter how many times it's called. Without this restore, every
+        # restart re-ran it and re-logged a "signal_fired" using an
+        # increasingly stale reference price (real incident: GVT&D re-logged
+        # "retested at 09:18, price=4638.90" across 10+ restarts through
+        # 12:21, even though real spot by then was trading ~4540-4547 --
+        # corrupting the recorded entry rationale for the real trade this
+        # eventually produced). See store.load_historical_check_done's own
+        # docstring for the full incident.
+        historical_check_done = await asyncio.to_thread(
+            store.load_historical_check_done, self._client_id, self._binding_id, td)
+        self._historical_check_done |= historical_check_done
 
     async def _seed_option_bars_from_history(self, symbol: str, contract: "stock_resolve.ResolvedContract",
                                               entry_ts: datetime) -> None:
@@ -1827,8 +1845,18 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             return await self._apply_historical_rolling_retest(symbols, cfg)
         if not symbols:
             return
-        symbols_sides = {sym: screener.side_from_pchange(self._shortlist_pchange.get(sym, 0.0))
-                          for sym in symbols}
+        # 2026-09-10, same restart-safety fix as _apply_historical_rolling_retest
+        # (see that function's own comment + store.load_historical_check_done's
+        # docstring for the GVT&D incident this closes) -- never re-run this
+        # deterministic replay for a symbol already evaluated today.
+        symbols_sides = {
+            sym: screener.side_from_pchange(self._shortlist_pchange.get(sym, 0.0))
+            for sym in symbols
+            if (sym, screener.side_from_pchange(self._shortlist_pchange.get(sym, 0.0)))
+               not in self._historical_check_done
+        }
+        if not symbols_sides:
+            return
         try:
             results = await asyncio.to_thread(screener.historical_vwap_retest_check, symbols_sides, cfg)
         except Exception:
@@ -1841,6 +1869,11 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             result = results.get(sym)
             if not result:
                 continue
+            self._historical_check_done.add((sym, side))
+            await asyncio.to_thread(
+                store.log_signal_event, self._client_id, self._binding_id, sym,
+                "historical_check_evaluated", side=side,
+                detail=f"fired={result['fired']}")
             if result["fired"]:
                 if (sym, side) in self._already_fired or (sym, side) in self._rejected:
                     continue
@@ -1892,8 +1925,25 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         in this variant's spec")."""
         if not symbols:
             return
-        symbols_sides = {sym: screener.side_from_pchange(self._shortlist_pchange.get(sym, 0.0))
-                          for sym in symbols}
+        # 2026-09-10, real incident fix: this deterministic replay always
+        # finds/re-reports the SAME first-ever retest moment for a symbol
+        # no matter how many times it's called -- skip anything already
+        # evaluated (this process lifetime OR a prior restart, restored via
+        # self._historical_check_done). Any genuinely new retest for these
+        # symbols from here forward is caught by the live tick loop's own
+        # continuously-running tracker (seeded below either way), not by
+        # re-running this replay. See store.load_historical_check_done's
+        # own docstring for the full incident (GVT&D re-fired off a 09:18
+        # price=4638.90 reference across 10+ restarts through 12:21, while
+        # real spot by then was trading ~4540-4547).
+        symbols_sides = {
+            sym: screener.side_from_pchange(self._shortlist_pchange.get(sym, 0.0))
+            for sym in symbols
+            if (sym, screener.side_from_pchange(self._shortlist_pchange.get(sym, 0.0)))
+               not in self._historical_check_done
+        }
+        if not symbols_sides:
+            return
         try:
             results = await asyncio.to_thread(
                 screener.historical_rolling_retest_check, symbols_sides, cfg,
@@ -1911,6 +1961,14 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             # tracker is seeded with the real replay either way -- keep using it
             # live from here forward regardless of whether it already fired.
             self._rolling_retest_trackers[sym] = result["tracker"]
+            # This symbol's ONE-TIME historical replay is now complete --
+            # persist a marker so a future restart's load_historical_check_done
+            # never re-runs it, regardless of the outcome below.
+            self._historical_check_done.add((sym, side))
+            await asyncio.to_thread(
+                store.log_signal_event, self._client_id, self._binding_id, sym,
+                "historical_check_evaluated", side=side,
+                detail=f"fired={result['fired']}")
             if not result["fired"]:
                 continue
             if (sym, side) in self._already_fired or (sym, side) in self._rejected:
