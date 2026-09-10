@@ -927,7 +927,24 @@ async def _run_live(
             _oiorb_cfg.secondary_feeder_provider = "none"
             _oiorb_cfg.monitored_indices = []
             oiorb_feeder = GlobalFeeder(bus, _oiorb_cfg, _shared_client_db)
-            await oiorb_feeder.start()
+            # 2026-09-10, real incident fix: GlobalFeeder.start() (the plain
+            # .start() call this used to make) runs a general multi-provider
+            # bootstrap meant for the MAIN app feeder -- it builds its
+            # candidate set from {"upstox","fyers","angelone"} and explicitly
+            # EXCLUDES "upstox2" from that set even when upstox2 is what was
+            # configured as primary_feeder_provider here, only falling back
+            # to genuinely using upstox2 once NONE of the other three have
+            # usable credentials loadable from the shared client_db at that
+            # exact instant -- a real race against whatever else is reading/
+            # writing that same shared DB at the same busy boot moment.
+            # Confirmed live: 7 restarts today, only 1 successfully connected
+            # via upstox2 (~14%), the other 6 all hit the CRITICAL below.
+            # Fixed by calling start_single("upstox2", ...) directly -- the
+            # SAME method the admin panel's own per-provider toggle uses,
+            # unambiguous, no candidate-set race at all.
+            _oiorb_upstox2_creds = await asyncio.to_thread(
+                _shared_client_db.get_feeder_creds_sync, "upstox2")
+            await oiorb_feeder.start_single("upstox2", _oiorb_upstox2_creds or {})
             bus._oiorb_feeder = oiorb_feeder
             # 2026-08-28 real incident: a missing/invalid upstox2 token doesn't
             # raise here -- .start() completes "successfully" but the feeder
