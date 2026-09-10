@@ -782,6 +782,42 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             store.load_historical_check_done, self._client_id, self._binding_id, td)
         self._historical_check_done |= historical_check_done
 
+        # 2026-09-10 CRITICAL FIX, real incident: a restart happening AFTER
+        # cfg["ENTRY_WINDOW_END"] used to leave the WHOLE dashboard panel
+        # blank for the rest of the day (real report: "AFTER RESTART
+        # EVERYTHING IS GONE FROM OI SCANNER, NOTHING SHOWING IN UI").
+        # _run_today_pipeline's own _wait_until_actionable() bails out
+        # before its main polling loop even starts once the entry window
+        # has closed -- and that loop was the ONLY place regime/shortlist/
+        # ORB ever got reconstructed from the DB on a restart
+        # (_reconcile_shortlist_from_db, gated on reaching cfg["ORB_END"]
+        # inside that loop). A late restart therefore never ran it at all,
+        # regardless of how much real scan/shortlist/ORB data a PRIOR
+        # process instance had already written to the DB earlier that same
+        # day. Restoring regime + shortlist here instead -- unconditionally,
+        # every restart, regardless of time of day -- means the dashboard
+        # panel is never blank just because the process happened to
+        # restart late; only genuinely NEW entries still correctly stop
+        # once the entry window has closed. Guarded on
+        # _restart_db_reconcile_applied (same flag _run_today_pipeline's
+        # own loop already used) so a restart that's still WITHIN the
+        # actionable window doesn't redundantly reconcile twice.
+        cfg = self._screener_cfg
+        regime = await asyncio.to_thread(store.load_scan_regime, self._client_id, self._binding_id, td)
+        if regime and self._regime is None:
+            self._regime = regime
+            self._clog.info("OiOrb[%s/%s]: restored regime=%s from DB (restart recovery).",
+                             self._client_id, self._binding_id, regime)
+        if not self._restart_db_reconcile_applied:
+            self._restart_db_reconcile_applied = True
+            try:
+                await self._reconcile_shortlist_from_db(cfg)
+            except Exception:
+                self._clog.exception(
+                    "OiOrb[%s/%s]: restart-recovery shortlist reconciliation failed "
+                    "(non-fatal, dashboard panel may stay empty until the next scan).",
+                    self._client_id, self._binding_id)
+
     async def _seed_option_bars_from_history(self, symbol: str, contract: "stock_resolve.ResolvedContract",
                                               entry_ts: datetime) -> None:
         """2026-08-27, direct user spec: on a mid-day restart with a position

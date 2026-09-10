@@ -1141,6 +1141,41 @@ async def test_restore_from_db_restores_already_fired_and_rejected_sets(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_restore_from_db_restores_shortlist_and_regime_regardless_of_time_of_day(monkeypatch):
+    """2026-09-10 CRITICAL FIX, real incident: a restart happening AFTER
+    ENTRY_WINDOW_END used to leave the whole dashboard panel blank for the
+    rest of the day -- _run_today_pipeline's own actionable-window check
+    bails out before its main polling loop (the only place regime/
+    shortlist/ORB used to get reconstructed from the DB on a restart) is
+    ever reached. _restore_from_db must now restore them unconditionally,
+    regardless of what time it is when this restart happens."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._today = date(2026, 9, 10)
+    book._top20_mode = True
+
+    store.record_scan(_TEST_CLIENT_ID, _TEST_BINDING_ID, -0.8, "ok", trade_date="2026-09-10")
+    store.update_scan_regime(_TEST_CLIENT_ID, _TEST_BINDING_ID, "bearish", trade_date="2026-09-10")
+    store.record_oi_spurt_history(
+        _TEST_CLIENT_ID, _TEST_BINDING_ID, "12:45:00",
+        [{"symbol": "UNIONBANK", "rank": 1, "oi_spurt_pct": 12.0, "price_change_pct": -3.0}],
+        trade_date="2026-09-10",
+    )
+
+    async def _no_seed(sym):
+        return None
+    monkeypatch.setattr(book, "_seed_vwap_from_upstox_intraday", _no_seed)
+    monkeypatch.setattr(screener, "backfill_orb_from_yahoo", lambda bars, syms, cfg: None)
+    monkeypatch.setattr(book, "_ensure_spot_feed", lambda sym: None)
+
+    await book._restore_from_db()
+
+    assert book._regime == "bearish"
+    assert "UNIONBANK" in book._shortlist_symbols
+    assert book._restart_db_reconcile_applied is True
+
+
+@pytest.mark.asyncio
 async def test_restore_from_db_with_nothing_stored_is_a_safe_noop():
     bus = _FakeBus()
     book = _make_book(bus)

@@ -261,6 +261,30 @@ def update_scan_regime(client_id: str, binding_id: str, regime: str,
         con.close()
 
 
+def load_scan_regime(client_id: str, binding_id: str, trade_date: Optional[str] = None) -> Optional[str]:
+    """2026-09-10, real incident fix: a restart happening AFTER
+    ENTRY_WINDOW_END used to leave the whole OI-ORB dashboard panel blank
+    for the rest of the day -- _run_today_pipeline's own actionable-window
+    check (_wait_until_actionable) returns early before the main polling
+    loop (the ONLY place that restores regime/shortlist/ORB from the DB)
+    is ever reached. This lets _restore_from_db pull back the regime
+    that was already frozen earlier today by a prior process instance,
+    unconditionally, regardless of what time it is now."""
+    init_db()
+    con = sqlite3.connect(_DB_PATH)
+    try:
+        row = con.execute(
+            "SELECT regime FROM scans WHERE client_id=? AND binding_id=? AND trade_date=?",
+            (client_id, binding_id, trade_date or _today()),
+        ).fetchone()
+        return row[0] if row and row[0] else None
+    except Exception as exc:
+        logger.error("oi_orb store.load_scan_regime failed: %s", exc)
+        return None
+    finally:
+        con.close()
+
+
 # ── shortlist (per-symbol candidate, one row per client/binding/day/symbol) ─
 
 def record_shortlist(client_id: str, binding_id: str, rows: List[dict],
