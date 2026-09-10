@@ -2028,6 +2028,41 @@ class DashboardServer:
 
         # ── CLIENT — lifecycle status ─────────────────────────────────────────
 
+        def _redact_bindings_for_response(bindings: list) -> list:
+            """2026-09-10 CRITICAL FIX, real finding (direct user report): despite
+            its name, ClientDB.get_bindings_safe_sync() is NOT actually safe to
+            serialize straight into an HTTP response -- its SELECT includes the
+            real broker access_token, and that raw value was going out verbatim
+            in /api/client/status and /api/admin/clients/{id}/bindings, visible
+            to anyone who opened browser DevTools' Network tab. The DB-level
+            XOR/PBKDF2 obfuscation in client_db.py only protects the token AT
+            REST on disk -- it does nothing once the backend decrypts it and
+            hands it to the browser as plain JSON. A live Zerodha/Upstox token
+            grants full order-placement authority on that account; leaking it to
+            the browser is equivalent to leaking a password.
+
+            get_bindings_safe_sync() itself is intentionally left untouched --
+            ~15 internal call sites (execution bridges, strategies/core/gate.py,
+            run_system.py, order routing) genuinely need the real token
+            server-side to authenticate with the broker. This redaction is
+            applied ONLY at the handful of endpoints that actually serialize the
+            bindings list back out to an HTTP caller; every other call site in
+            this file only ever reads a field off the dict internally (e.g.
+            terminal_connected) and never returns the dict itself, so those are
+            unaffected and still get the real token.
+
+            Replaces (not deletes) access_token with a plain bool -- monitor.html
+            (b.access_token ? '● Token OK' : '○ No Token', two places) only ever
+            uses this field as a truthy/falsy presence check, never displays the
+            value itself, so the UI indicator keeps working correctly off the
+            boolean while the real secret never reaches the browser."""
+            out = []
+            for b in bindings:
+                b2 = dict(b)
+                b2["access_token"] = bool(b2.get("access_token"))
+                out.append(b2)
+            return out
+
         @app.get("/api/client/status", tags=["Client"])
         async def api_client_status(user: dict = Depends(_require_client)):
             cid = user.get("client_id", "")
@@ -2049,7 +2084,7 @@ class DashboardServer:
                     "capital":             float(reg_client.risk.capital),
                     "daily_pnl":           round(float(getattr(reg_client, "_daily_pnl", 0.0)), 2),
                     "tradeable":           reg_client.is_tradeable(),
-                    "bindings":            bindings,
+                    "bindings":            _redact_bindings_for_response(bindings),
                 }
             # Not in registry — check DB
             db_client = _srv._client_db.get_client_sync(cid)
@@ -2069,7 +2104,7 @@ class DashboardServer:
                 "capital":             float(db_client.get("capital", 500_000.0)),
                 "daily_pnl":           0.0,
                 "tradeable":           False,
-                "bindings":            bindings,
+                "bindings":            _redact_bindings_for_response(bindings),
             }
 
         # ── CLIENT — add broker binding (portal onboarding) ───────────────────
@@ -4898,11 +4933,14 @@ pm2 save
         async def api_admin_client_bindings(
             client_id: str, _: dict = Depends(_require_admin)
         ):
-            """Return all broker bindings for a client — reads DB directly, not registry."""
+            """Return all broker bindings for a client — reads DB directly, not registry.
+            2026-09-10: redacted (see _redact_bindings_for_response's own docstring) --
+            even an admin session's browser has no legitimate need for the raw broker
+            token, only for whether a binding is connected/enabled."""
             bindings = await asyncio.to_thread(
                 _srv._client_db.get_bindings_safe_sync, client_id
             )
-            return {"ok": True, "client_id": client_id, "bindings": bindings}
+            return {"ok": True, "client_id": client_id, "bindings": _redact_bindings_for_response(bindings)}
 
         @app.post("/api/admin/clients/{client_id}/approve", tags=["Admin"])
         async def api_approve_client(
