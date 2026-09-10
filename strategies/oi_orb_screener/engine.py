@@ -711,6 +711,16 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             }
             self._ensure_option_feed(r["symbol"], contract)
             self._ensure_spot_feed(r["symbol"])
+            # 2026-09-10, real incident fix: a restored OPEN position's VWAP
+            # was never seeded at all -- _reconcile_shortlist_from_db (the
+            # shortlist-side restart recovery) only re-seeds symbols it
+            # re-adds to self._shortlist_symbols, and this restore-positions
+            # path runs independently, possibly before that. Without this,
+            # the position's VWAP-close SL silently has no protection at all
+            # (the check bails out on vwap is None) until enough live ticks
+            # happen to accumulate one from zero. Same real-Upstox-intraday-
+            # bar seed used everywhere else.
+            await self._seed_vwap_from_upstox_intraday(r["symbol"])
             self._clog.info("OiOrb[%s/%s]: RESTORED open position %s %s%d qty=%d @ %.2f from DB.",
                              self._client_id, self._binding_id, r["symbol"],
                              contract.option_type, contract.strike, r["qty"], r["entry_price"])
@@ -2533,7 +2543,13 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 # value, mirroring the exact price*volume-delta formula the
                 # old poll-based method used, just driven by every real tick
                 # instead of a 20s snapshot.
-                if self._top20_mode and symbol in self._shortlist_symbols:
+                # 2026-09-10, real incident fix: also accumulate for a symbol
+                # with an OPEN POSITION even if it's momentarily not back in
+                # self._shortlist_symbols yet (e.g. right after a restart,
+                # before _reconcile_shortlist_from_db re-adds it) -- an open
+                # position's own VWAP-close SL needs live accumulation
+                # regardless of shortlist membership.
+                if self._top20_mode and (symbol in self._shortlist_symbols or symbol in self._positions):
                     cum_vol = float(ev.volume or 0)
                     last_cum = self._vwap_tick_volume_cum_last.get(symbol)
                     if last_cum is not None and cum_vol >= last_cum:

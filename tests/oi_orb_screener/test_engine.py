@@ -928,6 +928,41 @@ async def test_restore_from_db_reopens_position_and_resubscribes_feed(monkeypatc
     assert contract.upstox_key in bus._global_feeder.subscribed_tokens
 
 
+@pytest.mark.asyncio
+async def test_restore_from_db_seeds_vwap_for_reopened_position(monkeypatch):
+    """2026-09-10, real incident: 3 positions restored after a restart
+    (TECHM/LODHA/PNB) all showed blank 'Spot LTP vs VWAP' -- _restore_from_db
+    subscribed feeds and seeded option-premium SL/target history, but never
+    seeded VWAP at all, meaning the real spot-based VWAP-close SL had no
+    protection until enough live ticks happened to build one from zero."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._today = date(2026, 8, 24)
+
+    store.open_position(_TEST_CLIENT_ID, _TEST_BINDING_ID, "DIXON", "PE", 14500,
+                         "2026-08-25", 50, 118.80, "orb_low_breakdown", True, "EVT1",
+                         trade_date="2026-08-24")
+
+    contract = _contract("DIXON", 14500, "PE")
+    monkeypatch.setattr(stock_resolve, "resolve_contract_exact_async", _async_return(contract))
+    monkeypatch.setattr(stock_resolve, "resolve_eq_instrument_key", lambda sym: "NSE_EQ|INE879I01012")
+    monkeypatch.setattr("data_layer.client_db.ClientDB.get_feeder_creds_sync",
+                         lambda self, provider: {"access_token": "tok"})
+    monkeypatch.setattr("data_layer.historical_candles.fetch_upstox_intraday_1m", _async_return([
+        {"ts": "2026-08-24T09:15:00", "high": 14520, "low": 14480, "close": 14500, "volume": 1000},
+        {"ts": "2026-08-24T09:16:00", "high": 14540, "low": 14500, "close": 14530, "volume": 500},
+    ]))
+
+    await book._restore_from_db()
+
+    assert book._vwap.current("DIXON") is not None
+    # Volume-weighted HLC3 blend of both real bars.
+    hlc3_a = (14520 + 14480 + 14500) / 3.0
+    hlc3_b = (14540 + 14500 + 14530) / 3.0
+    expected = (hlc3_a * 1000 + hlc3_b * 500) / 1500
+    assert book._vwap.current("DIXON") == pytest.approx(expected, abs=0.01)
+
+
 # ── option history backfill on mid-day restart (2026-08-27, direct user spec:
 # "it should get historical intraday data for that option chart from time
 # entry happened and then evaluate the sl and target in tf which we have
