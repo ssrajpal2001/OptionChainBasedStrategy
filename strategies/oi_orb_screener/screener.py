@@ -961,9 +961,10 @@ def historical_rolling_retest_check(symbols_sides: dict, cfg=CONFIG, window_min:
         side = symbols_sides[sym]
         tracker = RollingVwapRetestTracker(window_min=window_min)
         vwap_state = VwapState()
-        fired = False
-        fire_ts = fire_price = None
         last_vwap = None
+        last_bar_ts = None
+        last_fire_bar_ts = None
+        last_fire_hhmm = last_fire_price = None
         for ts, row in sub.iterrows():
             if any(pd.isna(row.get(c)) for c in ("High", "Low", "Close", "Volume")):
                 continue
@@ -981,9 +982,32 @@ def historical_rolling_retest_check(symbols_sides: dict, cfg=CONFIG, window_min:
                 continue
             last_vwap = vwap
             bar_ts = ts_ist.replace(second=0, microsecond=0)
-            if not fired and tracker.check(side, bar_ts, close, vwap):
+            last_bar_ts = bar_ts
+            # 2026-09-09/10: keep replaying the WHOLE day (not "stop at the
+            # first fire") so the tracker naturally re-arms/re-fires exactly
+            # like it would live -- we only care about the MOST RECENT fire.
+            if tracker.check(side, bar_ts, close, vwap):
+                last_fire_bar_ts = bar_ts
+                last_fire_hhmm, last_fire_price = hhmm, close
+        # 2026-09-10, direct user correction: "any time in day if it
+        # touched vwap then trade should start" is WRONG -- a retest is
+        # only still actionable RIGHT NOW if it completed within the last
+        # `window_min` (15) real minutes of "now" (the most recent bar in
+        # this replay), same bounded window RollingVwapRetestTracker's own
+        # live arm-expiry already enforces. A fire from hours earlier in
+        # the day, with price since drifted well away from VWAP, must NOT
+        # trigger an immediate entry now. Real incident: UNIONBANK entered
+        # off a stale historical fire while live LTP (179.69) sat ~1.3%
+        # below the session VWAP (181.96) -- nowhere near a genuine current
+        # retest. The tracker is still handed back live either way, so a
+        # genuinely fresh retest from this point forward is still caught.
+        fired = False
+        fire_ts = fire_price = None
+        if last_fire_bar_ts is not None and last_bar_ts is not None:
+            elapsed_min = (last_bar_ts - last_fire_bar_ts).total_seconds() / 60.0
+            if elapsed_min <= window_min:
                 fired = True
-                fire_ts, fire_price = hhmm, close
+                fire_ts, fire_price = last_fire_hhmm, last_fire_price
         out[sym] = {"fired": fired, "fire_ts": fire_ts, "fire_price": fire_price,
                      "tracker": tracker, "vwap": last_vwap}
         if fired:

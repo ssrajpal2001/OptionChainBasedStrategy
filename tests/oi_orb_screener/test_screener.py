@@ -859,6 +859,71 @@ def test_historical_vwap_retest_check_missing_symbol_degrades_safely(monkeypatch
     assert "GHOST" not in out
 
 
+def test_historical_rolling_retest_check_ignores_a_stale_fire_from_hours_ago(monkeypatch):
+    """2026-09-10, real incident fix: a retest that completed hours earlier
+    in the day (fire at 09:47) must NOT be treated as fireable "now" (last
+    bar at 12:30, price having drifted far from VWAP since) -- only a fire
+    within the trailing `window_min` (15) minutes of the most recent bar is
+    still fresh enough to act on. Real incident: UNIONBANK entered off a
+    stale historical fire while live LTP sat ~1.3% below the session VWAP,
+    nowhere near a genuine current retest."""
+    import pandas as _pd
+    import sys
+
+    class _FakeYF:
+        @staticmethod
+        def download(tickers, period, interval, progress, group_by):
+            # 09:15 vwap≈100 (not armed yet); 09:16 close=108>vwap (arms);
+            # 09:17 close=101 comes back onto vwap (fires, stale by design);
+            # then a long, flat run through 12:30 with price staying WELL
+            # above vwap the whole time (never comes back down again) --
+            # so the last real fire in the whole day's history is the
+            # 09:17 one, hours before the final bar.
+            n_flat = 195  # 09:18 .. 12:32 (three-plus hours of 1-min bars)
+            idx = _pd.date_range("2026-09-10 09:15", periods=3 + n_flat, freq="1min", tz="Asia/Kolkata")
+            highs = [101, 110, 109] + [130] * n_flat
+            lows = [99, 105, 100] + [125] * n_flat
+            closes = [100, 108, 101] + [128] * n_flat
+            vols = [1000] * (3 + n_flat)
+            df = _pd.DataFrame({"High": highs, "Low": lows, "Close": closes, "Volume": vols}, index=idx)
+            df.columns = _pd.MultiIndex.from_product([["UNIONBANK.NS"], df.columns])
+            return df
+
+    import sys as _sys
+    monkeypatch.setitem(_sys.modules, "yfinance", _FakeYF)
+    out = screener.historical_rolling_retest_check({"UNIONBANK": "CALL"}, screener.CONFIG, window_min=15.0)
+    assert out["UNIONBANK"]["fired"] is False
+    assert out["UNIONBANK"]["fire_ts"] is None
+    # the live tracker is still handed back so a genuinely fresh retest is
+    # still caught going forward -- it should currently be un-armed since
+    # price has stayed above vwap this whole time (armed, not fired).
+    assert out["UNIONBANK"]["tracker"]._armed is True
+
+
+def test_historical_rolling_retest_check_fires_on_a_genuinely_recent_retest(monkeypatch):
+    """A fire in the LAST 15 minutes of the replayed day must still fire
+    immediately -- this is the genuine "started watching mid-day, retest
+    already happened just now" case the whole mechanism exists for."""
+    import pandas as _pd
+
+    class _FakeYF:
+        @staticmethod
+        def download(tickers, period, interval, progress, group_by):
+            idx = _pd.date_range("2026-09-10 09:15", periods=3, freq="1min", tz="Asia/Kolkata")
+            df = _pd.DataFrame({
+                "High": [101, 110, 109], "Low": [99, 105, 100],
+                "Close": [100, 108, 101], "Volume": [1000, 1000, 1000],
+            }, index=idx)
+            df.columns = _pd.MultiIndex.from_product([["MANAPPURAM.NS"], df.columns])
+            return df
+
+    import sys
+    monkeypatch.setitem(sys.modules, "yfinance", _FakeYF)
+    out = screener.historical_rolling_retest_check({"MANAPPURAM": "CALL"}, screener.CONFIG, window_min=15.0)
+    assert out["MANAPPURAM"]["fired"] is True
+    assert out["MANAPPURAM"]["fire_ts"] == "09:17"
+
+
 def test_smabars_seed_close_never_overwrites_live_quote():
     from datetime import datetime as _dt
     bars = screener.SmaBars()
