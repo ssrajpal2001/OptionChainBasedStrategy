@@ -137,6 +137,10 @@ _TRAP_EXIT_LOOKBACK_CALENDAR_DAYS = 15   # ~10 real trading days, same validated
 _VWAP_SL_TF_MIN = 20
 _VWAP_SL_MIN_GAP_PCT = 0.002
 
+# 2026-09-10, real incident fix: see _spot_feed_retry_loop's own docstring.
+_SPOT_FEED_RETRY_GRACE_SEC = 45.0
+_SPOT_FEED_RETRY_POLL_SEC = 20.0
+
 
 def _make_strategy_logger(client_id: str, binding_id: str) -> logging.Logger:
     """Dedicated, rotating, per-(client,binding,day) log file -- same
@@ -547,6 +551,11 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         # right above it clearly has one.
         self._last_known_price: Dict[str, float] = {}
         self._spot_tick_subscribed: Dict[str, bool] = {}
+        # 2026-09-10, real incident fix: when _ensure_spot_feed's own subscribe
+        # attempt was seen, so _spot_feed_retry_loop can detect "subscribed a
+        # while ago, still zero live ticks" and force a genuine retry -- see
+        # that loop's own docstring for the full incident.
+        self._spot_feed_subscribed_at: Dict[str, datetime] = {}
         # Two-session scan state (2026-08-27, direct user spec).
         self._afternoon_scan_last_ts: float = 0.0    # throttle: don't re-scan every poll cycle
 
@@ -650,6 +659,8 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             self._rank_tracking_loop(), name=f"oiorb_rank_{self._client_id}_{self._binding_id}"))
         self._tasks.append(asyncio.create_task(
             self._oi_spurt_history_loop(), name=f"oiorb_spurthist_{self._client_id}_{self._binding_id}"))
+        self._tasks.append(asyncio.create_task(
+            self._spot_feed_retry_loop(), name=f"oiorb_spotretry_{self._client_id}_{self._binding_id}"))
         self._clog.info("OiOrb[%s/%s]: started.", self._client_id, self._binding_id)
 
     # ── daily pipeline ───────────────────────────────────────────────────
@@ -2195,6 +2206,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 try:
                     oiorb_gf.register_extra_spot_keys({eq_key: stock_symbol})
                     self._spot_tick_subscribed[stock_symbol] = True
+                    self._spot_feed_subscribed_at[stock_symbol] = datetime.now(IST)
                     self._clog.info("OiOrb[%s/%s]: subscribed live spot feed for %s via dedicated "
                                      "upstox2 feeder (%s) (live UI reference price only).",
                                      self._client_id, self._binding_id, stock_symbol, eq_key)
@@ -2217,6 +2229,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         try:
             gf.subscribe_fno_equity(f"NSE:{stock_symbol}-EQ", stock_symbol)
             self._spot_tick_subscribed[stock_symbol] = True
+            self._spot_feed_subscribed_at[stock_symbol] = datetime.now(IST)
             self._clog.info("OiOrb[%s/%s]: subscribed live spot feed for %s (live UI reference price only).",
                              self._client_id, self._binding_id, stock_symbol)
         except Exception:
@@ -3684,6 +3697,54 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                     self._eod_closing.add(symbol)
                     await self._emit_close(symbol, pos, "eod_squareoff")
             await asyncio.sleep(_EOD_POLL_SEC)
+
+    async def _spot_feed_retry_loop(self) -> None:
+        """2026-09-10, real incident fix: _ensure_spot_feed's own
+        self._spot_tick_subscribed[symbol] guard is set to True the instant
+        it CALLS the feeder's register_extra_spot_keys(), not once a real
+        tick has actually arrived -- so if that call happens to race ahead
+        of the dedicated upstox2 feeder's WebSocket being fully connected
+        yet (a genuine timing race at boot: this book's daily_loop and the
+        feeder's own connection sequence start concurrently, with no
+        ordering guarantee between them), the underlying subscribe can
+        silently defer (see UpstoxFeeder.register_extra_spot_keys' own
+        2026-09-10 fix) while this engine-level flag permanently believes
+        it already succeeded -- meaning _ensure_spot_feed would NEVER be
+        asked to retry for that symbol again, no matter how many feeder
+        reconnects happen afterward.
+
+        Real incident: TECHM/LODHA/OIL/ATHERENERG/FORCEMOT/DIXON/GVT&D all
+        showed spot_ltp=null in the live API for the entire session after a
+        restart, confirmed via direct /api/oiorb/status inspection -- even
+        for positions entered fresh AFTER the restart (DIXON, GVT&D), which
+        rules out this being restart-recovery-specific; it's a genuine race
+        that can happen on ANY _ensure_spot_feed call.
+
+        This loop periodically checks every symbol with a live open
+        position or shortlist membership: if it was marked subscribed more
+        than _SPOT_FEED_RETRY_GRACE_SEC ago but self._live_spot_ltp still
+        has nothing for it, clear the subscribed flag and call
+        _ensure_spot_feed again -- a genuine, safe retry (idempotent,
+        subscribing an already-subscribed key is a no-op on the feeder
+        side)."""
+        while self._running:
+            now = datetime.now(IST)
+            candidates = set(self._shortlist_symbols) | set(self._positions.keys())
+            for sym in candidates:
+                subscribed_at = self._spot_feed_subscribed_at.get(sym)
+                if subscribed_at is None:
+                    continue
+                if self._live_spot_ltp.get(sym) is not None:
+                    continue
+                if (now - subscribed_at).total_seconds() < _SPOT_FEED_RETRY_GRACE_SEC:
+                    continue
+                self._clog.warning(
+                    "OiOrb[%s/%s]: %s subscribed %.0fs ago but still zero live spot ticks -- "
+                    "retrying subscribe.", self._client_id, self._binding_id, sym,
+                    (now - subscribed_at).total_seconds())
+                self._spot_tick_subscribed.pop(sym, None)
+                self._ensure_spot_feed(sym)
+            await asyncio.sleep(_SPOT_FEED_RETRY_POLL_SEC)
 
     async def liquidate(self, reason: str = "kill_switch") -> None:
         """Immediate close of every open position, for the firm-wide kill

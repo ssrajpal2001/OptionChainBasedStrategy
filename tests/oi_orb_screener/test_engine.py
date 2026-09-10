@@ -1399,6 +1399,109 @@ def test_on_fill_buy_resets_option_sl_target_state_and_subscribes_spot_feed():
 
 
 @pytest.mark.asyncio
+async def test_spot_feed_retry_loop_resubscribes_when_no_ticks_after_grace_period(monkeypatch):
+    """2026-09-10, real incident: _ensure_spot_feed's own subscribed flag is
+    set the instant it CALLS the feeder, not once a real tick arrives -- if
+    that call raced ahead of the feeder's WebSocket being ready, the symbol
+    was marked done forever with zero live ticks ever arriving. This loop
+    must detect "subscribed a while ago, still nothing" and force a genuine
+    retry."""
+    import strategies.oi_orb_screener.engine as engine_mod
+    monkeypatch.setattr(engine_mod, "_SPOT_FEED_RETRY_GRACE_SEC", 0.01)
+    monkeypatch.setattr(engine_mod, "_SPOT_FEED_RETRY_POLL_SEC", 0.05)
+
+    bus = _FakeBus()
+    book = _make_book(bus)
+    contract = _contract("MANAPPURAM", 365, "CE")
+    book._positions["MANAPPURAM"] = {
+        "contract": contract, "qty": 100, "entry_price": 10.0, "paper_mode": True,
+        "opened_at": datetime(2026, 8, 26, 9, 15, 0),
+    }
+    book._spot_tick_subscribed["MANAPPURAM"] = True
+    book._spot_feed_subscribed_at["MANAPPURAM"] = datetime.now(IST) - timedelta(seconds=100)
+    # Deliberately no self._live_spot_ltp["MANAPPURAM"] -- simulates the
+    # real incident: subscribed, but zero live ticks ever arrived.
+
+    book._running = True
+    task = asyncio.create_task(book._spot_feed_retry_loop())
+    try:
+        await asyncio.sleep(0.2)
+        # Retried at least once (repeatedly, since the fixture never
+        # populates a real tick -- matches real behavior, it keeps trying
+        # until ticks actually start flowing): the stale flag was cleared
+        # and re-subscribed via the Fyers fallback route (no dedicated
+        # upstox2 feeder in this fixture).
+        assert len(bus._global_feeder.subscribed_equity) >= 1
+        assert all(c == ("NSE:MANAPPURAM-EQ", "MANAPPURAM") for c in bus._global_feeder.subscribed_equity)
+        assert book._spot_tick_subscribed.get("MANAPPURAM") is True
+    finally:
+        book._running = False
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
+@pytest.mark.asyncio
+async def test_spot_feed_retry_loop_does_not_retry_within_grace_period():
+    """A symbol subscribed only moments ago must NOT be retried yet -- the
+    grace period exists specifically so a genuinely-in-flight subscribe
+    isn't churned."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    contract = _contract("MANAPPURAM", 365, "CE")
+    book._positions["MANAPPURAM"] = {
+        "contract": contract, "qty": 100, "entry_price": 10.0, "paper_mode": True,
+        "opened_at": datetime(2026, 8, 26, 9, 15, 0),
+    }
+    book._spot_tick_subscribed["MANAPPURAM"] = True
+    book._spot_feed_subscribed_at["MANAPPURAM"] = datetime.now(IST)
+
+    book._running = True
+    task = asyncio.create_task(book._spot_feed_retry_loop())
+    try:
+        await asyncio.sleep(0.1)
+        assert bus._global_feeder.subscribed_equity == []
+    finally:
+        book._running = False
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
+@pytest.mark.asyncio
+async def test_spot_feed_retry_loop_does_not_retry_once_ticks_are_flowing():
+    """A symbol with a real live spot_ltp already must never be touched,
+    regardless of how long ago it was subscribed."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    contract = _contract("MANAPPURAM", 365, "CE")
+    book._positions["MANAPPURAM"] = {
+        "contract": contract, "qty": 100, "entry_price": 10.0, "paper_mode": True,
+        "opened_at": datetime(2026, 8, 26, 9, 15, 0),
+    }
+    book._spot_tick_subscribed["MANAPPURAM"] = True
+    book._spot_feed_subscribed_at["MANAPPURAM"] = datetime.now(IST) - timedelta(seconds=100)
+    book._live_spot_ltp["MANAPPURAM"] = 366.5
+
+    book._running = True
+    task = asyncio.create_task(book._spot_feed_retry_loop())
+    try:
+        await asyncio.sleep(0.1)
+        assert bus._global_feeder.subscribed_equity == []
+    finally:
+        book._running = False
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
+@pytest.mark.asyncio
 async def test_option_sl_does_not_arm_on_a_single_adverse_bar():
     """2026-08-28 real incident fix: a single adverse bar's own low is
     ordinary intraday noise, not a real defended level -- two real trades
