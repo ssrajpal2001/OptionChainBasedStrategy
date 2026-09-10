@@ -556,8 +556,8 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._rank_dropped: set = set()
         # ── Full-day OI-spurt history capture (2026-09-07, direct user spec) ──
         self._oi_spurt_hist_last_poll_ts: float = 0.0
-        # ── Periodic real-bar VWAP refresh (2026-09-10, direct user spec) ──
-        self._vwap_refresh_last_poll_ts: float = 0.0
+        # ── Tick-by-tick VWAP accumulation (2026-09-10, direct user spec) ──
+        self._vwap_tick_volume_cum_last: dict = {}
 
     # ── lifecycle ────────────────────────────────────────────────────────
 
@@ -618,9 +618,9 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         # 2026-09-07, direct user spec: independent full-day, threshold-agnostic
         # OI-spurt history capture -- see _oi_spurt_history_loop's own docstring.
         self._oi_spurt_hist_last_poll_ts = 0.0
-        # 2026-09-10, direct user spec: periodic real-Upstox-bar VWAP refresh --
-        # see _vwap_refresh_loop's own docstring.
-        self._vwap_refresh_last_poll_ts = 0.0
+        # 2026-09-10, direct user spec: tick-by-tick VWAP accumulation --
+        # see _spot_tick_loop's own VWAP-update block.
+        self._vwap_tick_volume_cum_last = {}
         self._clog.info("OiOrb[%s/%s]: session reset for new trading day.",
                          self._client_id, self._binding_id)
 
@@ -650,8 +650,6 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             self._rank_tracking_loop(), name=f"oiorb_rank_{self._client_id}_{self._binding_id}"))
         self._tasks.append(asyncio.create_task(
             self._oi_spurt_history_loop(), name=f"oiorb_spurthist_{self._client_id}_{self._binding_id}"))
-        self._tasks.append(asyncio.create_task(
-            self._vwap_refresh_loop(), name=f"oiorb_vwaprefresh_{self._client_id}_{self._binding_id}"))
         self._clog.info("OiOrb[%s/%s]: started.", self._client_id, self._binding_id)
 
     # ── daily pipeline ───────────────────────────────────────────────────
@@ -1127,64 +1125,6 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                                     exc_info=True)
             await asyncio.sleep(5)
 
-    async def _vwap_refresh_loop(self) -> None:
-        """2026-09-10, direct user spec: the initial VWAP seed
-        (_seed_vwap_from_upstox_intraday, called once when a stock streams
-        into the shortlist) fixes the "started with zero history" problem,
-        but the ONGOING updates for the rest of the day still ran off the
-        coarser 20-second poll-snapshot self._vwap.update() in the main
-        scan loop (LTP-at-poll-moment x volume-since-last-poll) -- accurate
-        enough for a slow stock, but it can still drift from a true VWAP
-        during a fast move, since it doesn't see the real price range
-        traded within each 20s window.
-
-        Direct user instruction: "do that in candle close of 1 min and
-        check what happened in prev candle" -- so instead of building a
-        live in-memory tick-to-1min-bar accumulator (which the user
-        immediately and correctly flagged: "if application gets restarted
-        then this value is not there to calculate" -- true, in-memory state
-        doesn't survive a restart), this loop periodically (default once
-        per real 1-min candle, VWAP_REFRESH_POLL_SEC) just RE-CALLS the
-        exact same real-Upstox-intraday-bar seed used at shortlist-entry,
-        for every currently shortlisted symbol. Since that seed always
-        re-fetches Upstox's own authoritative intraday REST history (never
-        relies on anything accumulated in this process's memory) and uses
-        REPLACE semantics, a restart is a non-event for this mechanism --
-        the very next cycle re-derives VWAP from the same real source a
-        fresh boot would use, zero data lost.
-
-        The 20s poll-snapshot update in the main scan loop is NOT removed
-        -- it keeps VWAP moving smoothly between refreshes (and is the only
-        thing keeping it updated at all if a refresh cycle fails, e.g. a
-        token issue), while this loop's periodic REPLACE corrects any
-        accumulated drift back to the real bar-based number roughly once a
-        minute. Best-effort per symbol -- one symbol's fetch failing never
-        blocks the others."""
-        while self._running:
-            now = datetime.now(IST)
-            cfg = self._screener_cfg
-            win_start = cfg.get("ENTRY_WINDOW_START", cfg.get("ORB_START", "09:15"))
-            win_end = cfg.get("SQUAREOFF_TIME", "15:37")
-            now_key = now.strftime("%H:%M")
-            if not (win_start <= now_key < win_end):
-                await asyncio.sleep(30)
-                continue
-            interval = float(cfg.get("VWAP_REFRESH_POLL_SEC", 60.0) or 60.0)
-            now_ts = now.timestamp()
-            if now_ts - self._vwap_refresh_last_poll_ts < interval:
-                await asyncio.sleep(5)
-                continue
-            self._vwap_refresh_last_poll_ts = now_ts
-            for sym in list(self._shortlist_symbols):
-                try:
-                    await self._seed_vwap_from_upstox_intraday(sym)
-                except Exception:
-                    self._clog.warning(
-                        "OiOrb[%s/%s]: %s periodic VWAP refresh failed (non-fatal -- falls back "
-                        "to poll-snapshot accumulation until the next cycle).",
-                        self._client_id, self._binding_id, sym, exc_info=True)
-            await asyncio.sleep(2)
-
     async def _do_oi_spurt_history_poll(self, now: datetime, cfg: dict) -> None:
         """One purely-observational poll cycle -- split out for direct unit
         testing, same shape as _do_rank_poll.
@@ -1521,9 +1461,14 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 # Volume-confirmation filter: totalTradedVolume is a CUMULATIVE session
                 # total (same gotcha OI-Flow's own BarAccumulator already handles for
                 # option volume) -- track the poll-to-poll DELTA, not the raw number,
-                # and keep a short rolling history for a trailing average. The SAME
-                # delta also feeds the running session VWAP (screener.VwapState) --
-                # both need exactly the same poll-to-poll volume delta.
+                # and keep a short rolling history for a trailing average.
+                # 2026-09-10, direct user spec: this NSE-poll delta used to also feed
+                # self._vwap.update() (a coarse ~20s-snapshot approximation) -- removed.
+                # VWAP is now driven by genuine tick-by-tick accumulation in
+                # _spot_tick_loop (real IndexTick.volume deltas, continuous, not a
+                # 20s snapshot) plus the one-time real-history seed on shortlist-entry/
+                # restart (_seed_vwap_from_upstox_intraday). This filter's own delta
+                # tracking is unrelated to VWAP and is untouched.
                 if "totalTradedVolume" in live.columns:
                     try:
                         cum_vol = float(live.loc[sym, "totalTradedVolume"])
@@ -1535,7 +1480,6 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                             hist.append(delta)
                             if len(hist) > 30:
                                 del hist[:-30]
-                            self._vwap.update(sym, ltp, delta)
                         self._volume_cum_last[sym] = cum_vol
                     except Exception:
                         pass
@@ -1791,7 +1735,15 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 self._client_id, self._binding_id, sym, pchange, r.get("oi_spurt_pct"))
             try:
                 await asyncio.to_thread(screener.backfill_orb_from_yahoo, self._bars, [sym], cfg)
-                await asyncio.to_thread(screener.backfill_vwap_from_yahoo, self._vwap, [sym], cfg)
+                # 2026-09-10, direct user spec: restart recovery re-seeds VWAP from
+                # real Upstox intraday history (not Yahoo) -- same real-bar,
+                # HLC3-weighted, REPLACE-semantics seed used when a symbol first
+                # streams into the shortlist. This is the exact restart-safety
+                # mechanism the user asked for: "if any time app restart we again
+                # get historic data and from there start computing tick by tick" --
+                # tick-by-tick accumulation resumes naturally in _spot_tick_loop the
+                # moment ticks start arriving again after this seed completes.
+                await self._seed_vwap_from_upstox_intraday(sym)
             except Exception:
                 self._clog.exception(
                     "OiOrb[%s/%s]: %s restart-recovery ORB/VWAP backfill failed (non-fatal, "
@@ -2559,6 +2511,36 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                     continue
                 self._live_spot_ltp[symbol] = ltp
                 self._live_spot_ltp_ts[symbol] = datetime.now(IST)
+                # 2026-09-10, direct user spec: TRUE tick-by-tick VWAP
+                # accumulation off the already-subscribed live feed, replacing
+                # the old 20-second poll-snapshot self._vwap.update() call in
+                # the scan loop (removed) -- direct user correction to an
+                # earlier draft of this fix that instead re-fetched Upstox's
+                # full intraday REST history once a minute per shortlisted
+                # symbol: "will this not create rate limit... instead of get
+                # the historical data for computing vwap and when it is added
+                # to websocket we start tick by tick calculation and if any
+                # time app restart we again get historic data and from there
+                # start computing tick by tick." That's exactly the design
+                # here: ONE real historical REST fetch when a symbol first
+                # streams into the shortlist (_seed_vwap_from_upstox_intraday,
+                # also re-run once per symbol on restart-recovery -- see
+                # _reconcile_shortlist_from_db), then continuous real-tick
+                # accumulation from here on, zero further REST calls. Uses
+                # ev.volume -- the SAME real cumulative-session-volume field
+                # every IndexTick already carries (confirmed present on the
+                # dataclass) -- diffed against the last tick's cumulative
+                # value, mirroring the exact price*volume-delta formula the
+                # old poll-based method used, just driven by every real tick
+                # instead of a 20s snapshot.
+                if self._top20_mode and symbol in self._shortlist_symbols:
+                    cum_vol = float(ev.volume or 0)
+                    last_cum = self._vwap_tick_volume_cum_last.get(symbol)
+                    if last_cum is not None and cum_vol >= last_cum:
+                        vol_delta = cum_vol - last_cum
+                        if vol_delta > 0:
+                            self._vwap.update(symbol, ltp, vol_delta)
+                    self._vwap_tick_volume_cum_last[symbol] = cum_vol
                 # 2026-09-07, top20 variant only: real tick-by-tick feed into
                 # this symbol's rolling 15x1min VWAP-touch window (see
                 # screener.VwapTouchTracker) -- the standard variant's

@@ -1284,6 +1284,55 @@ async def test_spot_tick_loop_reacts_to_index_tick_not_just_equity_tick():
             pass
 
 
+@pytest.mark.asyncio
+async def test_spot_tick_loop_accumulates_vwap_tick_by_tick_top20_mode():
+    """2026-09-10, direct user spec: real tick-by-tick VWAP accumulation off
+    IndexTick.volume deltas, replacing the old 20s poll-snapshot method --
+    proves consecutive ticks with real cumulative-volume deltas produce a
+    genuine volume-weighted VWAP, not just the latest LTP."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._top20_mode = True
+    book._shortlist_symbols = ["TECHM"]
+    book._subscribe(Topic.EQUITY_TICK)
+    book._subscribe(Topic.INDEX_TICK)
+    book._running = True
+    spot_task = asyncio.create_task(book._spot_tick_loop())
+    try:
+        # First tick establishes the cumulative-volume baseline -- no VWAP
+        # contribution yet (nothing to diff against).
+        await bus.publish(Topic.INDEX_TICK, IndexTick(
+            symbol="TECHM", ltp=1530.0, open=1530.0, high=1530.0, low=1530.0, close=1530.0,
+            volume=100000, timestamp=datetime(2026, 9, 10, 9, 40, 0, tzinfo=IST),
+        ))
+        await asyncio.sleep(0.05)
+        assert book._vwap.current("TECHM") is None
+
+        # Second tick: 1000 real shares traded at 1540.
+        await bus.publish(Topic.INDEX_TICK, IndexTick(
+            symbol="TECHM", ltp=1540.0, open=1530.0, high=1540.0, low=1530.0, close=1540.0,
+            volume=101000, timestamp=datetime(2026, 9, 10, 9, 40, 5, tzinfo=IST),
+        ))
+        await asyncio.sleep(0.05)
+        assert book._vwap.current("TECHM") == pytest.approx(1540.0)
+
+        # Third tick: 1000 more real shares at 1520 -- VWAP must be the real
+        # volume-weighted blend of both deltas, not just the latest LTP.
+        await bus.publish(Topic.INDEX_TICK, IndexTick(
+            symbol="TECHM", ltp=1520.0, open=1530.0, high=1540.0, low=1520.0, close=1520.0,
+            volume=102000, timestamp=datetime(2026, 9, 10, 9, 40, 10, tzinfo=IST),
+        ))
+        await asyncio.sleep(0.05)
+        assert book._vwap.current("TECHM") == pytest.approx(1530.0)
+    finally:
+        book._running = False
+        spot_task.cancel()
+        try:
+            await spot_task
+        except asyncio.CancelledError:
+            pass
+
+
 def test_on_fill_buy_resets_option_sl_target_state_and_subscribes_spot_feed():
     bus = _FakeBus()
     book = _make_book(bus)
