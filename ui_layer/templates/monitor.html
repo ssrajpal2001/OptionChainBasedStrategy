@@ -8275,7 +8275,7 @@ function amoTest() {
                                       vwap_dist_pct: vwapSnap.vwap ? (dist / vwapSnap.vwap * 100) : null };
                            }
                          }"
-                         x-init="_load(); setInterval(()=>_load(), 15000); window.addEventListener('spot-tick', e => _onSpotTick(e))">
+                         x-init="_load(); setInterval(()=>_load(), 3000); window.addEventListener('spot-tick', e => _onSpotTick(e))">
                       <template x-if="!_bk">
                         <div class="text-center" style="color:var(--t-dim)">Loading OI-ORB Screener state…</div>
                       </template>
