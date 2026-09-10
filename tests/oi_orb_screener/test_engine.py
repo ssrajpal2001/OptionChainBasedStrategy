@@ -1538,8 +1538,15 @@ async def test_option_sl_does_not_arm_on_a_single_adverse_bar():
 async def test_option_sl_arms_once_a_second_adverse_bar_clusters_near_the_first():
     """A second adverse bar whose own low sits within pool_sl_from_adverse_
     lows' tol_pct% of the first confirms a real anchor -- the SL arms to
-    that (most recent) clustered low, and a live tick breaching it closes
-    immediately, same tick, not waiting for the next bar close."""
+    that (most recent) clustered low (still computed and shown in the UI's
+    "Option SL/Target" field for reference).
+
+    2026-09-10, direct user spec: "the backtest also doesn't use the option
+    sl and target, it used only spot sl and target, then why are we
+    checking for option sl and target" -- this option-premium level no
+    longer closes the position on its own; the universal spot-based exit
+    (_vwap_close_sl_check et al, tested elsewhere) is the sole trigger now.
+    A live tick breaching this armed level must NOT close anything."""
     bus = _FakeBus()
     book = _make_book(bus)
     book._vwap_sl_tf_minutes = 1
@@ -1566,13 +1573,13 @@ async def test_option_sl_arms_once_a_second_adverse_bar_clusters_near_the_first(
     sell_events_before = [e for t, e in bus.published if t == Topic.OI_ORB_ORDER_REQUEST and e.action == "SELL"]
     assert sell_events_before == []
 
-    # A live tick (same forming bar, no new bar close needed) breaches SL immediately.
+    # A live tick breaches the armed option-premium SL -- must NOT close.
     await book._update_option_sl_target_and_check("MANAPPURAM", 90.4, datetime(2026, 8, 26, 9, 17, 20, tzinfo=IST))
 
     sell_events = [e for t, e in bus.published if t == Topic.OI_ORB_ORDER_REQUEST and e.action == "SELL"]
-    assert len(sell_events) == 1
-    assert sell_events[0].underlying == "MANAPPURAM"
-    assert "MANAPPURAM" in book._eod_closing
+    assert sell_events == []
+    assert "MANAPPURAM" not in book._eod_closing
+    assert "MANAPPURAM" in book._positions
 
 
 @pytest.mark.asyncio
@@ -1600,7 +1607,10 @@ async def test_option_sl_two_far_apart_adverse_lows_do_not_cluster():
 
 
 @pytest.mark.asyncio
-async def test_option_target_hit_closes_position():
+async def test_option_target_hit_does_not_close_position():
+    """2026-09-10, direct user spec (same as the SL test above): option-
+    premium target hit must NOT close a position -- only the universal
+    spot-based exit does. self._live_target is still tracked for display."""
     bus = _FakeBus()
     book = _make_book(bus)
     book._vwap_sl_tf_minutes = 1
@@ -1616,8 +1626,8 @@ async def test_option_target_hit_closes_position():
     await book._update_option_sl_target_and_check("MANAPPURAM", 121.0, datetime(2026, 8, 26, 9, 15, 10, tzinfo=IST))
 
     sell_events = [e for t, e in bus.published if t == Topic.OI_ORB_ORDER_REQUEST and e.action == "SELL"]
-    assert len(sell_events) == 1
-    assert sell_events[0].underlying == "MANAPPURAM"
+    assert sell_events == []
+    assert "MANAPPURAM" in book._positions
 
 
 @pytest.mark.asyncio

@@ -3514,24 +3514,19 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             b["l"] = min(b["l"], ltp)
             b["c"] = ltp
 
-        if pos is None or symbol in self._eod_closing:
-            return
-        sl = self._live_sl.get(symbol)
-        target = self._live_target.get(symbol)
-        hit = screener.check_option_premium_exit(sl, target, ltp)
-        if hit is not None:
-            self._eod_closing.add(symbol)
-            self._clog.info(
-                "OiOrb[%s/%s]: %s OPTION %s HIT -- option_ltp=%.2f sl=%s target=%s -- closing.",
-                self._client_id, self._binding_id, symbol, hit.upper(), ltp,
-                f"{sl:.2f}" if sl is not None else "n/a",
-                f"{target:.2f}" if target is not None else "n/a",
-            )
-            await asyncio.to_thread(
-                store.log_signal_event, self._client_id, self._binding_id, symbol,
-                f"option_{hit}_triggered",
-                detail=f"option_ltp={ltp:.2f} sl={sl} target={target}")
-            await self._emit_close(symbol, pos, f"option_{hit}")
+        # 2026-09-10, direct user spec: "backtest also doesn't use the option
+        # sl and target, it used only spot sl and target, then why are we
+        # checking for option sl and target" -- the universal spot-based exit
+        # (_vwap_close_sl_check/_trap_multiday_exit_check/_trap_intraday_
+        # exit_check, called unconditionally for every open position from the
+        # main poll loop regardless of sl_mechanic) is the ONLY thing that was
+        # ever actually validated against real backtests. This option-premium
+        # check used to ALSO be able to independently close a "vwap"-tagged
+        # (legacy/restored) position off its own option premium -- a second,
+        # never-backtested exit path racing the correct spot-based one.
+        # Removed the trigger; self._live_sl/self._live_target above are still
+        # computed and shown in the UI's "Option SL/Target" field for
+        # reference, but no longer close anything on their own.
 
     # ── fills ────────────────────────────────────────────────────────────
 
