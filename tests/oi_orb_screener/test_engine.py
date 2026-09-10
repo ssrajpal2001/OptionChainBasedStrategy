@@ -972,6 +972,148 @@ def _bar(hhmm: str, h: float, l: float, c: float, vol: float) -> dict:
     return {"ts": f"2026-08-24T{hhmm}:00", "high": h, "low": l, "close": c, "volume": vol}
 
 
+# ── side must come from the position's own contract, never re-derived from
+# the stock's current pChange sign (2026-09-10 real incident: TECHM, a
+# genuine CE/CALL position, got mislabeled side="PUT" once real price decline
+# flipped its pChange negative after entry, silently running the WRONG exit
+# mechanic -- wrong zone type, wrong S&R level, wrong breach direction -- for
+# the rest of the session) ───────────────────────────────────────────────────
+
+def test_side_from_option_type_maps_ce_pe_correctly():
+    bus = _FakeBus()
+    book = _make_book(bus)
+    assert book._side_from_option_type("CE") == "CALL"
+    assert book._side_from_option_type("PE") == "PUT"
+
+
+def test_monitoring_state_side_uses_contract_not_flipped_pchange():
+    """The exact field that showed side="PUT" for TECHM (a real CE position)
+    in the live dashboard API response."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    contract = _contract("TECHM", 1540, "CE")
+    book._positions["TECHM"] = {
+        "contract": contract, "qty": 600, "entry_price": 40.80, "paper_mode": True,
+        "opened_at": datetime.now(IST), "sl_mechanic": "trap",
+    }
+    # pChange has flipped negative since entry (real TECHM price declined all
+    # session) -- side_from_pchange would now wrongly say "PUT".
+    book._shortlist_pchange["TECHM"] = -1.2
+
+    state = book.monitoring_state()
+
+    assert state["positions"]["TECHM"]["side"] == "CALL"
+
+
+@pytest.mark.asyncio
+async def test_restore_from_db_seeds_trap_exit_state_with_contract_side_not_pchange(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._today = date(2026, 9, 10)
+
+    store.open_position(_TEST_CLIENT_ID, _TEST_BINDING_ID, "TECHM", "CE", 1540,
+                         "2026-09-29", 600, 40.80, "vwap_retest_historical_top20", True, "EVT1",
+                         trade_date="2026-09-10")
+    monkeypatch.setattr(stock_resolve, "resolve_contract_exact_async",
+                         _async_return(_contract("TECHM", 1540, "CE")))
+    # Same flip as the real incident -- pChange has gone negative since entry.
+    book._shortlist_pchange["TECHM"] = -1.2
+
+    captured = []
+    async def _spy_seed(sym, side, entry_ts):
+        captured.append((sym, side))
+    book._seed_trap_exit_state = _spy_seed
+
+    await book._restore_from_db()
+    await asyncio.sleep(0.05)   # let the create_task'd seed actually run
+
+    assert ("TECHM", "CALL") in captured
+
+
+@pytest.mark.asyncio
+async def test_on_fill_seeds_trap_exit_state_with_contract_side_not_pchange(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    contract = _contract("TECHM", 1540, "CE")
+    eid = "evt_techm"
+    book._pending_fills[eid] = {
+        "symbol": "TECHM", "contract": contract, "qty": 600,
+        "entry_price": 40.80, "reason": "vwap_retest_historical_top20",
+    }
+    # If pChange were read at this instant it would (in the real incident)
+    # still be positive at entry -- but assert the fix reads the CONTRACT,
+    # not pChange, regardless, by deliberately mismatching them here too.
+    book._shortlist_pchange["TECHM"] = -1.2
+
+    captured = []
+    async def _spy_seed(sym, side, entry_ts):
+        captured.append((sym, side))
+    book._seed_trap_exit_state = _spy_seed
+
+    fill = OiOrbFillEvent(
+        client_id=_TEST_CLIENT_ID, binding_id=_TEST_BINDING_ID, event_id=eid,
+        action="BUY", underlying="TECHM", option_type="CE", strike=1540,
+        qty=600, fill_price=40.80, paper_mode=True,
+    )
+    await book._on_fill(fill)
+    await asyncio.sleep(0.05)
+
+    assert ("TECHM", "CALL") in captured
+
+
+@pytest.mark.asyncio
+async def test_exit_check_loop_uses_contract_side_not_flipped_pchange(monkeypatch):
+    """2026-09-10 real incident, the PRIMARY site: _run_today_pipeline's main
+    polling loop re-derived `side` for every open position from screener.
+    side_from_pchange(self._shortlist_pchange[sym]) on EVERY cycle -- once a
+    stock's pChange flipped sign after entry (exactly what happened to
+    TECHM: entered CALL while pChange was positive, real price declined all
+    session until pChange went negative), every subsequent exit-check call
+    silently ran the WRONG side's mechanic. Proven here by driving the real
+    loop body and spying on _vwap_close_sl_check to capture the side it was
+    actually called with."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._screener_cfg["IGNORE_TIME_WINDOWS"] = True
+    book._running = True
+    book._shortlist_symbols = []
+
+    contract = _contract("TECHM", 1540, "CE")
+    book._positions["TECHM"] = {
+        "contract": contract, "qty": 600, "entry_price": 40.80, "paper_mode": True,
+        "opened_at": datetime.now(IST), "sl_mechanic": "trap",
+    }
+    book._shortlist_pchange["TECHM"] = -1.2   # flipped negative since entry, like the real incident
+
+    import strategies.oi_orb_screener.engine as _engine_mod
+    _fixed_now = datetime(2026, 9, 10, 13, 0, 0, tzinfo=_engine_mod.IST)
+    class _FixedDT(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return _fixed_now
+    monkeypatch.setattr(_engine_mod, "datetime", _FixedDT)
+
+    monkeypatch.setattr(screener, "NSESession", _FakeNSESession)
+    monkeypatch.setattr(asyncio, "sleep", _async_return(None))
+
+    import pandas as pd
+    monkeypatch.setattr(screener, "build_shortlist", lambda nse, cfg: (pd.DataFrame(), 0.0))
+    monkeypatch.setattr(screener, "fetch_fno_price_universe",
+                         lambda nse: pd.DataFrame(columns=["symbol", "lastPrice", "pChange"]))
+    book._maybe_run_afternoon_scan = _async_return(None)
+    book._live_price = lambda sym, live_df, log_source=False: 1517.50
+
+    captured = []
+    async def _spy_vwap_sl_check(sym, side, ltp, ts):
+        captured.append(side)
+        book._running = False   # stop the loop right after the first real call
+    book._vwap_close_sl_check = _spy_vwap_sl_check
+
+    await book._run_today_pipeline()
+
+    assert captured == ["CALL"]
+
+
 # ── _replay_vwap_close_sl restart-safety replay (2026-09-10 real incident:
 # FORCEMOT closed at 13:10:04 citing "close=17826.00 vs vwap=17862.01" while
 # real live spot was 18077-18078 the entire time, ~1.3% ABOVE the real

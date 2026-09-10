@@ -756,7 +756,11 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             # otherwise a zone-touch/ladder progress (or even an already-
             # earned breach) that happened before this restart would be
             # silently lost. Background task, best-effort.
-            side_for_zones = screener.side_from_pchange(self._shortlist_pchange.get(r["symbol"], 0.0))
+            # 2026-09-10 real incident fix: this position's own actual side
+            # (from the contract just resolved above), never re-derived from
+            # the stock's current/possibly-flipped pChange sign -- see
+            # _side_from_option_type's own docstring for the full incident.
+            side_for_zones = self._side_from_option_type(r["option_type"])
             asyncio.create_task(self._seed_trap_exit_state(
                 r["symbol"], side_for_zones, self._positions[r["symbol"]]["opened_at"]))
 
@@ -1617,7 +1621,15 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 ltp = self._live_price(sym, live)
                 if ltp is None:
                     continue
-                side = screener.side_from_pchange(self._shortlist_pchange.get(sym, 0.0))
+                # 2026-09-10 CRITICAL FIX, real incident (TECHM): this open
+                # position's own actual side, never re-derived from the
+                # stock's current/possibly-flipped pChange sign -- see
+                # _side_from_option_type's own docstring for the full
+                # incident (a CALL position got mislabeled "PUT" once real
+                # price decline flipped pChange negative after entry,
+                # silently running the wrong exit mechanic for the rest of
+                # the day).
+                side = self._side_from_option_type(pos["contract"].option_type)
                 await self._vwap_close_sl_check(sym, side, ltp, now)
                 if sym in self._eod_closing:
                     continue
@@ -3253,6 +3265,34 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 "ticks only from here.", self._client_id, self._binding_id, sym)
 
     @staticmethod
+    def _side_from_option_type(option_type: str) -> str:
+        """2026-09-10 CRITICAL FIX, real incident: an OPEN position's side
+        (CALL/PUT) must come from the option it actually holds
+        (contract.option_type -- CE/PE, fixed at entry, never changes), NOT
+        be re-derived from screener.side_from_pchange(self._shortlist_
+        pchange[sym]) -- the stock's CURRENT price-change-vs-previous-close
+        sign, which can and does flip during the day, completely
+        independent of which option was actually bought.
+
+        Real incident: TECHM was entered as a genuine CE1540 (CALL) at
+        09:39:59 while pChange was still positive. Real price then declined
+        steadily all session (confirmed via real Upstox intraday data,
+        1544.70 peak at 09:30 down to ~1515-1517 by early afternoon) until
+        pChange vs previous close flipped negative sometime after entry.
+        From that point on, every exit-check cycle re-derived side="PUT"
+        for this CALL position -- log evidence: "TECHM trap_intraday_exit
+        HIT -- underlying_ltp=1517.50 level=1517.50 side=PUT -- closing."
+        That single mislabeling cascaded through everything: the wrong
+        trap-zone type (sharp_bear_zones instead of bull_trap_zones), the
+        wrong S&R level (R1 instead of S1), and the wrong breach direction
+        (ltp>=level instead of ltp<=level) -- an entirely different
+        (PUT-side) exit mechanic ran against this CALL position for the
+        rest of the day. Independently confirmed: replaying the CORRECT
+        (CALL-side) zone logic against real market data for the same
+        session finds the target zone was NEVER genuinely touched at all."""
+        return "CALL" if option_type == "CE" else "PUT"
+
+    @staticmethod
     def _latest_locked_zone(zones: list, now: datetime) -> Optional[dict]:
         """Direct user correction (2026-09-08): only ever check the MOST
         RECENTLY locked zone as of `now`, not every zone confirmed anywhere
@@ -3757,7 +3797,10 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             # elsewhere in this engine) so a slow/failed fetch never delays
             # fill processing -- the intraday tier protects the position from
             # tick one regardless of when/whether the multiday seed lands.
-            side_for_zones = screener.side_from_pchange(self._shortlist_pchange.get(symbol, 0.0))
+            # 2026-09-10 real incident fix: use this fresh entry's own actual
+            # contract side, not the stock's current pChange sign -- see
+            # _side_from_option_type's own docstring for the full incident.
+            side_for_zones = self._side_from_option_type(contract.option_type)
             self._trap_exit_multiday_zones.pop(symbol, None)
             self._trap_exit_multiday_fetch_done.pop(symbol, None)
             self._trap_exit_touched.pop(symbol, None)
@@ -3913,7 +3956,12 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             pnl = round((ltp - entry) * p["qty"], 2) if ltp is not None and entry else None
             pnl_pct = round((ltp - entry) / entry * 100.0, 2) if ltp is not None and entry else None
             opened_at = p.get("opened_at")
-            side = screener.side_from_pchange(self._shortlist_pchange.get(sym, 0.0))
+            # 2026-09-10 real incident fix: this open position's own actual
+            # side for display, not the stock's current/possibly-flipped
+            # pChange sign -- see _side_from_option_type's own docstring.
+            # This exact field is what showed "side":"PUT" for TECHM (a real
+            # CE position) in the live dashboard API response.
+            side = self._side_from_option_type(p["contract"].option_type)
             vwap = self._vwap.current(sym)
             spot_ltp = self._live_spot_ltp.get(sym)
             vwap_gap_pct = (round((spot_ltp - vwap) / vwap * 100.0, 3)
