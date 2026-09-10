@@ -1286,6 +1286,30 @@ async def test_ensure_option_feed_prefers_dedicated_oiorb_feeder_when_available(
 
 
 @pytest.mark.asyncio
+async def test_emit_close_threads_entry_ts_from_position_opened_at():
+    """2026-09-10, real finding: entry_ts was only ever set on the BUY
+    event's own construction -- the SELL/close event never threaded the
+    original entry time forward, so every closed trade's dashboard History
+    row showed a blank entry TIME (confirmed live: entry_ts=null in every
+    stored oi_orb_screener_top20 history record)."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    contract = _contract("MANAPPURAM", 365, "CE")
+    opened_at = datetime(2026, 9, 10, 9, 25, 12, tzinfo=IST)
+    book._positions["MANAPPURAM"] = {
+        "contract": contract, "qty": 100, "entry_price": 10.0, "paper_mode": True,
+        "opened_at": opened_at,
+    }
+    book._live_option_ltp["MANAPPURAM"] = 12.5
+
+    await book._emit_close("MANAPPURAM", book._positions["MANAPPURAM"], "vwap_close_sl")
+
+    sell_events = [e for t, e in bus.published if t == Topic.OI_ORB_ORDER_REQUEST and e.action == "SELL"]
+    assert len(sell_events) == 1
+    assert sell_events[0].entry_ts == opened_at
+
+
+@pytest.mark.asyncio
 async def test_spot_tick_loop_reacts_to_index_tick_not_just_equity_tick():
     """The dedicated upstox2 feeder's register_extra_spot_keys() publishes
     stock spot ticks as INDEX_TICK (Upstox-native mechanic), not EQUITY_TICK

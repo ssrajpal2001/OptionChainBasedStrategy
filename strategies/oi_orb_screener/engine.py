@@ -3676,6 +3676,12 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             expiry=contract.expiry, quantity=pos["qty"], entry_price=pos["entry_price"],
             exit_price=exit_price, reason=reason, event_id=event_id,
             product_type=self._product_type, strategy=self._strategy_name,
+            # 2026-09-10, real finding: entry_ts was only ever set on the BUY
+            # event's own construction -- the SELL/close event never threaded
+            # the original entry time forward, so every closed trade's
+            # dashboard History row showed a blank entry TIME (oi_orb_bridge.py's
+            # _record_history reads ev.entry_ts, which defaulted to None here).
+            entry_ts=pos.get("opened_at"),
         )
         self._pending_closes[event_id] = reason
         self._clog.info("OiOrb[%s/%s]: closing %s qty=%d @ %.2f reason=%s",
