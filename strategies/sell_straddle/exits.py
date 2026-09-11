@@ -751,7 +751,8 @@ class ExitMixin:
             return sold_pnl_pts + pos.hedge_unrealized_pnl
         return sold_pnl_pts
 
-    async def _hedge_or_roll_if_eligible(self, pos: "StraddlePosition", now: datetime) -> bool:
+    async def _hedge_or_roll_if_eligible(self, pos: "StraddlePosition", now: datetime,
+                                          stop_for_day_on_hedge: bool = True) -> bool:
         """Shared hedge/roll eligibility + dispatch, factored out of
         _eod_close_or_hedge (2026-08-25) so the SAME decision can also run
         earlier via _maybe_prehedge (the pre-squareoff precheck) without
@@ -760,24 +761,35 @@ class ExitMixin:
         already-hedged/T-1-roll branch stays in _eod_close_or_hedge, since
         that one is specific to a position that's already carrying a hedge
         from a prior day. Returns True if a hedge or roll was started
-        (caller must not also close)."""
+        (caller must not also close).
+
+        2026-09-11, direct user spec: day_loss_sl now also reaches this same
+        method (see the day-level guardrail below) to activate a hedge
+        instead of closing on a mid-day loss, rather than only at EOD.
+        stop_for_day_on_hedge=False for that call site specifically --
+        direct user instruction: "stop for the day is false, it is only
+        true when day profit happened; in day loss we jump to add hedge so
+        day stop is false for that." No explicit block is needed anyway
+        since a beginning-entry can't fire while this position (now 4 legs)
+        is still open. The EOD-time callers keep the default True, unchanged."""
         if not (getattr(self, "_hedge_carry_enabled", False) and self._cumulative_hedge_pnl(pos) < 0):
             return False
         if self._is_t1_from_expiry(pos, now):
             logger.info(
-                "SellStraddle[%s]: HEDGE ROLL (T-1) — cumulative loss at EOD on the "
+                "SellStraddle[%s]: HEDGE ROLL (T-1) — cumulative loss on the "
                 "expiring week, rolling straight to next week instead of hedging a "
                 "contract that expires tomorrow.", self._underlying,
             )
             self._clog.info(
-                "HEDGE ROLL (T-1) — cumulative loss at EOD on the expiring week, rolling "
+                "HEDGE ROLL (T-1) — cumulative loss on the expiring week, rolling "
                 "straight to next week instead of hedging a contract that expires tomorrow."
             )
             await self._start_hedge_roll(pos, now, "t1_new_hedge_roll")
             return True
         hedged = await self._try_build_hedge(pos, now)
         if hedged:
-            self._stop_for_day = True
+            if stop_for_day_on_hedge:
+                self._stop_for_day = True
             return True
         # Hedge couldn't be built -- caller falls through to a normal close.
         return False
@@ -1040,15 +1052,26 @@ class ExitMixin:
         booked profit and the running loss happen to net to exactly ₹0 must
         NOT close the trade early -- only stop once ₹500 of real profit is
         actually sitting there.
+
+        2026-09-11, direct user spec: this ₹500 is PER LOT, not a flat total
+        -- threshold now scales by self._lot_multiplier (same pattern
+        _check_scalable_tsl's own base_profit/base_lock already use for a
+        per-lot rupee constant). _pnl_rs() already folds lot_size*
+        lot_multiplier into total_pnl_rs itself, so a multi-lot book's real
+        P&L was already being compared against a threshold that never grew
+        with lot count -- a 3-lot book used to trigger at the same flat ₹500
+        a 1-lot book would, undershooting the intended "₹500 of real profit
+        per lot traded."
         """
         total_pnl_pts = self._cumulative_hedge_pnl(pos, include_hedge=True)
         total_pnl_rs = self._pnl_rs(total_pnl_pts)
-        if total_pnl_rs < _HEDGE_CLOSE_PROFIT_RS:
+        _threshold_rs = _HEDGE_CLOSE_PROFIT_RS * self._lot_multiplier
+        if total_pnl_rs < _threshold_rs:
             return False
         logger.info(
-            "SellStraddle[%s]: HEDGE CUMULATIVE PROFIT — total=₹%.2f (%.2f pts) "
+            "SellStraddle[%s]: HEDGE CUMULATIVE PROFIT — total=₹%.2f (%.2f pts, threshold=₹%.2f) "
             "(booked=%.2f sold=%.2f hedge=%.2f pts) — closing all 4 legs, starting fresh.",
-            self._underlying, total_pnl_rs, total_pnl_pts, self._session_realized_pnl_pts,
+            self._underlying, total_pnl_rs, total_pnl_pts, _threshold_rs, self._session_realized_pnl_pts,
             pos.unrealized_pnl, pos.hedge_unrealized_pnl,
         )
         self._clog.info(
@@ -1575,9 +1598,35 @@ class ExitMixin:
                 )
                 if not self._defer_exit("day_loss_sl", now):
                     return
+                # 2026-09-11, direct user spec: a day-loss-SL breach now tries to
+                # ACTIVATE THE HEDGE (both sold legs stay open, protective legs
+                # added -- 4 legs running as a positional carry) instead of
+                # closing outright, reusing the exact same eligibility/T-1-roll/
+                # strike-selection machinery already built for EOD hedge-and-
+                # carry. stop_for_day stays False on success (direct user spec:
+                # reserved for day_profit_target only) -- a fresh beginning-entry
+                # can't fire anyway while this position is still open. Falls back
+                # to the original close-and-stop-for-day if hedging isn't
+                # eligible/enabled or genuinely can't be built (no valid
+                # protective strike, order failure) -- direct user confirmation.
+                hedged = await self._hedge_or_roll_if_eligible(pos, now, stop_for_day_on_hedge=False)
+                if hedged:
+                    logger.info(
+                        "SellStraddle[%s]: DAY LOSS SL — HEDGE ACTIVATED instead of closing "
+                        "(sold legs kept open, protective legs added / rolled to next week).",
+                        self._underlying,
+                    )
+                    self._clog.info(
+                        "DAY LOSS SL — HEDGE ACTIVATED instead of closing (positional carry, "
+                        "4 legs running)"
+                    )
+                    return
                 self._stop_for_day = True
                 await self._close_position_and_hedge("day_loss_sl")
-                logger.info("SellStraddle[%s]: STOPPED FOR DAY (loss SL hit).", self._underlying)
+                logger.info(
+                    "SellStraddle[%s]: STOPPED FOR DAY (loss SL hit, hedge not available/eligible).",
+                    self._underlying,
+                )
                 return
 
         # 2b. ITM PAIR GATE + 70% ROLL PROTECTION -- must run BEFORE the generic
