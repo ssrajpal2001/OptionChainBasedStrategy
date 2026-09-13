@@ -738,7 +738,17 @@ def test_day_loss_sl_does_not_fire_when_hedge_offsets_the_sold_leg_loss():
     asyncio.run(run())
 
 
-def test_day_loss_sl_fires_on_combined_pnl_and_closes_hedge_legs_too():
+def test_day_loss_sl_skipped_entirely_while_hedged():
+    """2026-09-13, direct user spec correction: day_loss_sl (and
+    day_profit_target) are now skipped ENTIRELY while a hedge is standing --
+    superseding the 2026-08-28 "combined P&L" behavior this test used to
+    verify. A hedged position is a positional carry with its own dedicated
+    full-close trigger (the cumulative-profit check); re-checking day_loss_sl
+    on top of that would either be a redundant no-op (hedge already active)
+    or, before this fix, risk re-attempting _hedge_or_roll_if_eligible on an
+    already-hedged position -- a case _try_build_hedge was never designed
+    for. Even a combined loss that would easily have breached the old
+    threshold must now leave the position untouched."""
     async def run():
         s = _make()   # sold legs net -50 pts
         s._force_exit = datetime.time(23, 59)
@@ -752,7 +762,7 @@ def test_day_loss_sl_fires_on_combined_pnl_and_closes_hedge_legs_too():
         s._initial_net_credit = 200.0
         s._day_exit_basis = "ltp"
         s._day_profit_target_pct = 0.0
-        s._day_loss_sl_pct = 5.0    # breach point = -10 pts -- combined -48 easily breaches
+        s._day_loss_sl_pct = 5.0    # breach point = -10 pts -- combined -48 would easily breach
         s._defer_exit = lambda reason, now: True
 
         pos = _hedged(s, ce_hedge_ltp=61.0, pe_hedge_ltp=56.0)   # hedge net +2 -- doesn't rescue
@@ -769,10 +779,145 @@ def test_day_loss_sl_fires_on_combined_pnl_and_closes_hedge_legs_too():
 
         await s._check_exits()
 
-        assert closed == ["day_loss_sl"]
-        assert ("SELL", "CE", 24500) in hedge_calls
-        assert ("SELL", "PE", 23500) in hedge_calls
-        assert pos.hedge_ce_leg is None and pos.hedge_pe_leg is None
+        assert closed == []
+        assert hedge_calls == []
+        assert pos.hedge_ce_leg is not None and pos.hedge_pe_leg is not None
+        assert s._position.status == "open"
+    asyncio.run(run())
+
+
+def test_day_profit_target_skipped_entirely_while_hedged():
+    """2026-09-13, direct user spec: day_profit_target is also skipped
+    entirely while hedged, same reasoning as day_loss_sl above -- there's no
+    "day profit" concept once carrying a positional hedge past a loss
+    event; the cumulative-profit check (section 1b) is the only full-close
+    trigger from here on."""
+    async def run():
+        s = _make()
+        s._force_exit = datetime.time(23, 59)
+        s._ltp_decay_enabled = False
+        s._tsl_enabled = False
+        s._vwap_rise_enabled = False
+        s._exit_rules = []
+        s._ratio_threshold = 999.0
+        s._itm_pair_gate_enabled = False
+        s._day_low_exit_enabled = False
+        s._initial_net_credit = 200.0
+        s._day_exit_basis = "ltp"
+        s._day_profit_target_pct = 1.0   # trivially low -- any real profit breaches it
+        s._day_loss_sl_pct = 0.0
+        s._defer_exit = lambda reason, now: True
+
+        pos = _hedged(s, ce_hedge_ltp=1.0, pe_hedge_ltp=1.0)  # hedge deep in profit (bought 60/55, now 1/1)
+        hedge_calls = _stub_dispatch(s, {})
+        closed = []
+        s._close_position = lambda reason: closed.append(reason)
+
+        await s._check_exits()
+
+        assert closed == []
+        assert hedge_calls == []
+        assert pos.hedge_ce_leg is not None and pos.hedge_pe_leg is not None
+        assert s._position.status == "open"
+    asyncio.run(run())
+
+
+def test_day_low_reversal_tracking_and_close_both_skipped_while_hedged():
+    """2026-09-13, direct user spec: the day-low block (tracking AND its own
+    close action) is skipped entirely while hedged -- confirmed here by
+    checking _day_low_tracked_pair is never touched (the block never even
+    runs its pair-tracking reset), not just that no close happens."""
+    async def run():
+        s = _make()
+        s._force_exit = datetime.time(23, 59)
+        s._ltp_decay_enabled = False
+        s._tsl_enabled = False
+        s._vwap_rise_enabled = False
+        s._exit_rules = []
+        s._ratio_threshold = 999.0
+        s._itm_pair_gate_enabled = False
+        s._day_profit_target_pct = 0.0
+        s._day_loss_sl_pct = 0.0
+        s._day_low_exit_enabled = True
+        s._post1500_exit_enabled = False
+        s._day_low_tracked_pair = None
+        s._session_min_straddle_frozen = None
+
+        _hedged(s)
+        hedge_calls = _stub_dispatch(s, {})
+        closed = []
+        s._close_position = lambda reason: closed.append(reason)
+
+        await s._check_exits()
+
+        assert closed == []
+        assert hedge_calls == []
+        assert s._day_low_tracked_pair is None, "day-low block must not even run its pair-tracking while hedged"
+        assert s._position.status == "open"
+    asyncio.run(run())
+
+
+def test_post1500_r1_exit_skipped_while_hedged():
+    """2026-09-13, direct user spec: Post-15:00 per-leg R1 exit is skipped
+    entirely while hedged -- _check_post1500_r1_exit must never even be
+    called."""
+    async def run():
+        s = _make()
+        s._force_exit = datetime.time(23, 59)
+        s._ltp_decay_enabled = False
+        s._tsl_enabled = False
+        s._vwap_rise_enabled = False
+        s._exit_rules = []
+        s._ratio_threshold = 999.0
+        s._itm_pair_gate_enabled = False
+        s._day_profit_target_pct = 0.0
+        s._day_loss_sl_pct = 0.0
+        s._day_low_exit_enabled = False
+        s._post1500_exit_enabled = True
+
+        _hedged(s)
+        _stub_dispatch(s, {})
+        calls = []
+        async def _fake_post1500(pos, now):
+            calls.append((pos, now))
+        s._check_post1500_r1_exit = _fake_post1500
+        closed = []
+        s._close_position = lambda reason: closed.append(reason)
+
+        await s._check_exits()
+
+        assert calls == [], "_check_post1500_r1_exit must not be called while hedged"
+        assert closed == []
+        assert s._position.status == "open"
+    asyncio.run(run())
+
+
+def test_post1500_r1_exit_still_active_when_not_hedged():
+    """Sanity: the new hedge gate must not accidentally suppress post1500
+    for a normal, not-yet-hedged position."""
+    async def run():
+        s = _make()
+        s._force_exit = datetime.time(23, 59)
+        s._ltp_decay_enabled = False
+        s._tsl_enabled = False
+        s._vwap_rise_enabled = False
+        s._exit_rules = []
+        s._ratio_threshold = 999.0
+        s._itm_pair_gate_enabled = False
+        s._day_profit_target_pct = 0.0
+        s._day_loss_sl_pct = 0.0
+        s._day_low_exit_enabled = False
+        s._post1500_exit_enabled = True
+        assert s._position.is_hedged_positional is False
+
+        calls = []
+        async def _fake_post1500(pos, now):
+            calls.append((pos, now))
+        s._check_post1500_r1_exit = _fake_post1500
+
+        await s._check_exits()
+
+        assert len(calls) == 1
     asyncio.run(run())
 
 

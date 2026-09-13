@@ -1560,7 +1560,25 @@ class ExitMixin:
         # _close_position_and_hedge's own docstring for the real incident
         # this fixes (day_loss_sl fired on the sold legs' own loss, which
         # the hedge was already offsetting, and orphaned the hedge legs).
-        if self._initial_net_credit > 0:
+        #
+        # 2026-09-13, direct user spec: while a hedge is standing, this whole
+        # block (BOTH day_profit_target and day_loss_sl) is skipped entirely
+        # -- a hedged position is a positional carry with its OWN dedicated
+        # full-close trigger (_check_hedge_cumulative_profit_close, section
+        # 1b above: booked+sold+hedge combined >= Rs500/lot); day_profit_target
+        # doesn't apply (there's no "day" profit concept once carrying past a
+        # loss event) and day_loss_sl already did its job triggering the
+        # hedge in the first place -- re-checking it here would just find the
+        # hedge already active and be a no-op at best, or (before this fix)
+        # risk re-attempting _hedge_or_roll_if_eligible on an already-hedged
+        # position, a case _try_build_hedge was never designed for. Every
+        # OTHER exit below (ITM-gate, ltp_decay, ratio_exit, exit_rules,
+        # vwap_rise, TSL) is deliberately UNCHANGED and still runs while
+        # hedged -- direct user spec: "hedge and sell are 2 diff entity, all
+        # exit which we were checking before hedge will be there except
+        # day_profit_target and day_loss_sl [and day-low reversal / post1500,
+        # gated separately below]."
+        if self._initial_net_credit > 0 and not pos.is_hedged_positional:
             if self._day_exit_basis == "theta" and self._initial_entry_time_value > 0:
                 _etv = float(getattr(pos, "entry_time_value", 0.0) or 0.0)
                 _running_theta = (_etv - pos.current_time_value(self._spot)) if _etv > 0 else pnl
@@ -1682,7 +1700,19 @@ class ExitMixin:
         # "close both legs" ACTION a few lines down stays gated to
         # day_low_exit_enabled specifically, so a post1500-only binding never
         # gets the old both-legs-close behavior this feature replaces.
-        if self._day_low_exit_enabled or self._post1500_exit_enabled:
+        #
+        # 2026-09-13, direct user spec: this ENTIRE block (tracking + both
+        # consumers -- day-low's own close action below, and post1500's R1
+        # exit further down which reads this same frozen value) is skipped
+        # while a hedge is standing. Neither mechanic is meaningful once
+        # hedged: day-low's close and post1500's per-leg close are both
+        # full-close/leg-close actions from the pre-hedge risk regime, and
+        # the ONLY full-close trigger while hedged is the cumulative-profit
+        # check (section 1b) plus the same-strike-collision guard (1c).
+        # Skipping tracking too (not just the close actions) avoids a wasted
+        # REST fetch for the freeze calc that no consumer will ever act on
+        # while hedged.
+        if (self._day_low_exit_enabled or self._post1500_exit_enabled) and not pos.is_hedged_positional:
             _cv = pos.current_value
             # 2026-09-06, direct user follow-up (stale-value audit F6): add
             # expiry_date so an expiry roll landing on identical strike
@@ -1764,7 +1794,11 @@ class ExitMixin:
         # in practice with day_low_exit_enabled's own close action (a binding
         # opts into one or the other), but both can safely read the shared
         # frozen-low state either way.
-        if self._post1500_exit_enabled:
+        #
+        # 2026-09-13, direct user spec: skipped entirely while hedged, same
+        # reasoning as the day-low block above -- see that block's own
+        # 2026-09-13 comment.
+        if self._post1500_exit_enabled and not pos.is_hedged_positional:
             await self._check_post1500_r1_exit(pos, now)
             if not (self._position and self._position.status == "open"):
                 return
