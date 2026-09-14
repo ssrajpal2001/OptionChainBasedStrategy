@@ -12,6 +12,7 @@ from strategies.sell_straddle import StraddleBookManager
 from strategies.oi_orb_screener import OiOrbScreenerBookManager
 from strategies.oi_orb_screener.book_manager import OiOrbScreenerTop20BookManager
 from strategies.cag_straddle import CagStraddleBookManager
+from strategies.iron_fly.book_manager import IronFlyBookManager
 
 
 STRATEGY_REGISTRY: Dict[str, Dict[str, Any]] = {
@@ -64,6 +65,19 @@ STRATEGY_REGISTRY: Dict[str, Dict[str, Any]] = {
     # scripts/nifty_1500_sr_breakout_backtest.py.
     "cag_straddle": {
         "manager_class": CagStraddleBookManager,
+        "per_binding": True,
+    },
+    # 2026-09-14: 9th standalone strategy, NIFTY Weekly Iron Condor -> Iron
+    # Fly. Explicitly a NEW strategy, unrelated to the old IronCondorStrategy
+    # deleted 2026-07-18 (do not conflate). Phase 1 (backtest-validated
+    # detector.py/engine.py mechanic) -> Phase 2 (this registry entry, live
+    # paper_route wiring) built 2026-09-14 per direct user request. Own
+    # Topics (IRON_FLY_ORDER_REQUEST/FILL), own execution bridge
+    # (execution_bridge/iron_fly_bridge.py), own book manager -- same zero-
+    # shared-runtime mandate as every strategy above. Carries positions
+    # across days (no EOD square-off) -- product_type NRML, not MIS.
+    "iron_fly": {
+        "manager_class": IronFlyBookManager,
         "per_binding": True,
     },
 }

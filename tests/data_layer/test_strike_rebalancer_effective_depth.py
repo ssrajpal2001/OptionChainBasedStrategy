@@ -31,6 +31,10 @@ def _make_rebalancer(chain_depth: int = 4) -> StrikeRebalancer:
 
 
 def _stub_index_section(monkeypatch, sections: dict):
+    """The same flat dict answers regardless of which `strategy` is asked
+    for -- sell_straddle's own code only reads pool_otm_depth/pool_itm_depth
+    and iron_fly's only reads chain_depth, so one shared stub dict per
+    index is enough to drive either (or both) code paths in a test."""
     def _fake(index: str, strategy: str) -> dict:
         return dict(sections.get(index, {}))
     monkeypatch.setattr(RuntimeConfig, "index_section", staticmethod(_fake))
@@ -79,6 +83,22 @@ def test_effective_depth_is_scoped_per_underlying(monkeypatch):
     rb = _make_rebalancer(chain_depth=4)
     assert rb._effective_chain_depth("NIFTY") == 7
     assert rb._effective_chain_depth("SENSEX") == 4
+
+
+def test_effective_depth_widens_to_iron_fly_chain_depth(monkeypatch):
+    """2026-09-14: Iron Fly's own wing-strike search needs a much wider band
+    than the global default -- its own RuntimeConfig section (set by
+    IronFlyBookManager._widen_chain_depth) must widen the WS window too,
+    same mechanism as sell_straddle's own pool depth."""
+    _stub_index_section(monkeypatch, {"NIFTY": {"chain_depth": 20}})
+    rb = _make_rebalancer(chain_depth=4)
+    assert rb._effective_chain_depth("NIFTY") == 20
+
+
+def test_effective_depth_takes_max_across_sell_straddle_and_iron_fly(monkeypatch):
+    _stub_index_section(monkeypatch, {"NIFTY": {"pool_otm_depth": 7, "chain_depth": 20}})
+    rb = _make_rebalancer(chain_depth=4)
+    assert rb._effective_chain_depth("NIFTY") == 20
 
 
 def test_effective_depth_falls_back_safely_if_runtime_config_errors(monkeypatch):

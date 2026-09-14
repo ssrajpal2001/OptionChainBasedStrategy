@@ -190,7 +190,15 @@ class StrikeRebalancer:
             ss = RuntimeConfig.index_section(underlying, "sell_straddle")
             otm = int(ss.get("pool_otm_depth", 0) or 0)
             itm = int(ss.get("pool_itm_depth", 0) or 0)
-            return max(base, otm, itm)
+            # 2026-09-14: Iron Fly's own wing-strike search (>Rs20/<Rs20
+            # threshold) can legitimately need a much wider band than the
+            # global default -- same missing-subscription-window bug this
+            # method was already fixed for once (sell_straddle's own pool
+            # depth), extended generically rather than re-copy-pasting a
+            # 4th special case.
+            ironfly = RuntimeConfig.index_section(underlying, "iron_fly")
+            ironfly_depth = int(ironfly.get("chain_depth", 0) or 0)
+            return max(base, otm, itm, ironfly_depth)
         except Exception:
             return base
 

@@ -767,6 +767,7 @@ class DashboardServer:
         oi_orb_manager=None,  # OiOrbScreenerBookManager — OI-Spurt + ORB screener books (F&O stocks)
         oi_orb_top20_manager=None,  # OiOrbScreenerTop20BookManager — sibling top-20 variant, 2026-09-07
         cag_straddle_manager=None,  # CagStraddleBookManager — 15:00-15:35 R1/S1 breach books
+        iron_fly_manager=None,  # IronFlyBookManager — NIFTY Weekly Iron Condor -> Iron Fly, 2026-09-14
     ) -> None:
         self._bus = bus
         self._cfg = cfg
@@ -781,6 +782,7 @@ class DashboardServer:
         self._oi_orb_manager = oi_orb_manager
         self._oi_orb_top20_manager = oi_orb_top20_manager
         self._cag_straddle_manager = cag_straddle_manager
+        self._iron_fly_manager = iron_fly_manager
         self._ws_bridge = WsBridge(bus, cfg=cfg)
         self._uvicorn_server = None
 
@@ -3893,7 +3895,7 @@ class DashboardServer:
 
             allowed_strategies = {
                 "sell_straddle", "sell_straddle_calc_vwap", "oi_orb_screener",
-                "oi_orb_screener_top20", "cag_straddle",
+                "oi_orb_screener_top20", "cag_straddle", "iron_fly",
             }
             if body.strategy_name not in allowed_strategies:
                 return {"ok": False, "error": f"Unknown strategy '{body.strategy_name}'."}
@@ -3901,7 +3903,7 @@ class DashboardServer:
             pt = (body.product_type or "MIS").upper()
             if pt not in ("MIS", "NRML"):
                 # Default product_type by strategy
-                pt = "NRML" if body.strategy_name == "d1_trap_fno" else "MIS"
+                pt = "NRML" if body.strategy_name in ("d1_trap_fno", "iron_fly") else "MIS"
 
             # Validate strategy_params JSON
             import json as _json
@@ -5905,6 +5907,7 @@ pm2 save
 
         self._register_oi_orb_routes(app)
         self._register_cag_straddle_routes(app)
+        self._register_iron_fly_routes(app)
         return app
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -6188,6 +6191,33 @@ pm2 save
             result.sort(key=lambda r: (0 if r.get("position") else 1, r.get("underlying", "")))
             return {"ok": True, "books": result}
 
+    def _register_iron_fly_routes(self, app) -> None:
+        _srv = self
+
+        @app.get("/api/ironfly/status")
+        async def iron_fly_status():
+            """Per-book state straight from IronFlyStrategy.monitoring_state()
+            (strategies/iron_fly/engine.py) -- 4 legs (short_ce/long_ce/
+            short_pe/long_pe), is_flied, cycle P&L, and the recent remarks
+            trail. Same shape convention as every other strategy's own
+            status endpoint above."""
+            if _srv._iron_fly_manager is None:
+                return {"ok": True, "books": []}
+            books = getattr(_srv._iron_fly_manager, "books", [])
+            result = []
+            for b in books:
+                if not hasattr(b, "monitoring_state"):
+                    continue
+                try:
+                    result.append(b.monitoring_state())
+                except Exception:
+                    logger.exception(
+                        "iron_fly_status: monitoring_state() raised for %s -- dropped from panel.",
+                        getattr(b, "_underlying", "?"),
+                    )
+            result.sort(key=lambda r: (0 if not r.get("is_flat") else 1, r.get("underlying", "")))
+            return {"ok": True, "books": result}
+
     def _open_history_rows(self, cid: str) -> list:
         """
         Return synthetic history rows for currently OPEN positions so the dashboard
@@ -6370,6 +6400,26 @@ pm2 save
                                         running += float(pos.get("unrealized_pnl") or 0.0)
                                 except Exception:
                                     logger.debug("_compute_live_pnls: cag_straddle "
+                                                 "monitoring_state() failed for %s/%s",
+                                                 c.client_id, d.get("binding_id", ""))
+                                break
+                    # 2026-09-14: Iron Fly holds up to 4 concurrent legs -- sum
+                    # each one's own unrealized_pnl (already real rupees, qty x
+                    # price-diff, no _lot() multiplier needed) same pattern as
+                    # OI-ORB's multi-position branch above. cycle_realized_pnl
+                    # is intentionally NOT added here -- it's this cycle's
+                    # already-booked P&L, not "running"/unrealized.
+                    elif sname == "iron_fly" and self._iron_fly_manager is not None:
+                        for b in (getattr(self._iron_fly_manager, "books", None) or []):
+                            if (getattr(b, "_client_id", None) == c.client_id
+                                    and getattr(b, "_binding_id", None) == d.get("binding_id", "")):
+                                try:
+                                    ms = b.monitoring_state()
+                                    for leg in (ms.get("legs") or {}).values():
+                                        if leg:
+                                            running += float(leg.get("unrealized_pnl") or 0.0)
+                                except Exception:
+                                    logger.debug("_compute_live_pnls: iron_fly "
                                                  "monitoring_state() failed for %s/%s",
                                                  c.client_id, d.get("binding_id", ""))
                                 break

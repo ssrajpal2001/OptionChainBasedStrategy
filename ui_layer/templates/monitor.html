@@ -2238,7 +2238,7 @@ document.addEventListener('alpine:init', () => {
     async toggleStrategyRun(dep, b) {
       const want = !this.depRunning(dep);
       const did = dep.deploy_id || `${this.authClientId}_${dep.binding_id}_${dep.strategy_name}_${dep.underlying}`;
-      const _stratLabel = {sell_straddle:'Sell Straddle',sell_straddle_calc_vwap:'Sell Straddle (Calc VWAP)',d1_trap_option:'D1 Trap Option',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow',liquidity_sweep:'Liquidity Sweep',liquidity_trap:'Liquidity Trap',oi_orb_screener:'OI-ORB Screener',oi_orb_screener_top20:'OI-ORB Screener (Top-20)',cag_straddle:'CAG Long Straddle'};
+      const _stratLabel = {sell_straddle:'Sell Straddle',sell_straddle_calc_vwap:'Sell Straddle (Calc VWAP)',d1_trap_option:'D1 Trap Option',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow',liquidity_sweep:'Liquidity Sweep',liquidity_trap:'Liquidity Trap',oi_orb_screener:'OI-ORB Screener',oi_orb_screener_top20:'OI-ORB Screener (Top-20)',cag_straddle:'CAG Long Straddle',iron_fly:'Iron Fly'};
       const _undLabel = u => u==='ALL_FNO'?'All FnO Stocks':u==='WATCHLIST'?'Watchlist (top-5)':u;
       const label = (_stratLabel[dep.strategy_name]||dep.strategy_name)+' · '+_undLabel(dep.underlying);
       const ok = want
@@ -7222,6 +7222,19 @@ function amoTest() {
                           deployForm.product_type='MIS';
                           deployForm.underlying='NIFTY';
                           deployForm.squareoff_time='15:35';
+                        } else if(deployForm.strategy_name==='iron_fly'){
+                          // NIFTY Weekly Iron Condor -> Iron Fly (2026-09-14) -- carries
+                          // positions across days (no EOD square-off), so squareoff_time
+                          // is a placeholder here, same convention d1_trap_fno's own NRML
+                          // positional deployment uses. All mechanic tunables are dynamic
+                          // via the dedicated inputs below -- see IronFlyBookManager's
+                          // own _DEFAULT_PARAMS for what each one does.
+                          deployForm.product_type='NRML';
+                          deployForm.underlying='NIFTY';
+                          deployForm.squareoff_time='23:59';
+                          deployForm._if_otm1=50; deployForm._if_adj_dist=100;
+                          deployForm._if_short_thr=20; deployForm._if_long_thr=20;
+                          deployForm._if_profit_pct=65; deployForm._if_chain_depth=20;
                         } else {
                           deployForm.product_type='MIS';
                         }
@@ -7241,6 +7254,15 @@ function amoTest() {
                           ? '{}'
                           : deployForm.strategy_name==='cag_straddle'
                           ? '{}'
+                          : deployForm.strategy_name==='iron_fly'
+                          ? JSON.stringify({
+                              otm1: deployForm._if_otm1||50,
+                              adjustment_distance: deployForm._if_adj_dist||100,
+                              short_threshold: deployForm._if_short_thr||20,
+                              long_threshold: deployForm._if_long_thr||20,
+                              profit_target_pct: (deployForm._if_profit_pct||65)/100,
+                              chain_depth_strikes: deployForm._if_chain_depth||20,
+                            })
                           : JSON.stringify({htf:deployForm._htf||'D1',mtf:deployForm._mtf||'1H',itm:deployForm._itm||1});
                       ">
                 <option value="sell_straddle">Sell Straddle</option>
@@ -7252,6 +7274,7 @@ function amoTest() {
                 <option value="oi_orb_screener">OI-ORB Screener (F&amp;O Stocks, VWAP-retest + HA/StochRSI exit)</option>
                 <option value="oi_orb_screener_top20">OI-ORB Screener Top-20 (No OI% threshold, VWAP-touch entry)</option>
                 <option value="cag_straddle">CAG Long Straddle (15:00-15:35 R1/S1 Breach)</option>
+                <option value="iron_fly">Iron Fly (NIFTY Weekly Iron Condor -&gt; Iron Fly, paper_route)</option>
               </select>
             </div>
             <div>
@@ -7446,6 +7469,57 @@ function amoTest() {
                   Validated baseline (PF 1.77, 56.2% win) is HTF=10m/LTF=3m/BOTH. Step-locked TSL
                   (trigger 25% → lock 15%, then every +15% → +7.5%) and SL/risk-cap use their own
                   code defaults — override via the raw strategy_params JSON if needed.
+                </p>
+              </div>
+            </template>
+            <!-- Iron Fly mechanic tunables (2026-09-14) -- ALL dynamic per deployment,
+                 direct user spec ("all variables as dynamic"). Defaults match
+                 IronFlyEngine's own Phase-1 backtest-validated values. -->
+            <template x-if="deployForm.strategy_name==='iron_fly'">
+              <div class="col-span-2 grid grid-cols-3 gap-3"
+                   x-init="deployForm._if_otm1=deployForm._if_otm1||50;deployForm._if_adj_dist=deployForm._if_adj_dist||100;
+                           deployForm._if_short_thr=deployForm._if_short_thr||20;deployForm._if_long_thr=deployForm._if_long_thr||20;
+                           deployForm._if_profit_pct=deployForm._if_profit_pct||65;deployForm._if_chain_depth=deployForm._if_chain_depth||20;">
+                <div>
+                  <label class="sec-label mb-1">OTM1 (PTS)</label>
+                  <input type="number" class="t-input" x-model.number="deployForm._if_otm1" min="10" step="1"
+                         @change="deployForm.strategy_params=JSON.stringify({otm1:deployForm._if_otm1,adjustment_distance:deployForm._if_adj_dist,short_threshold:deployForm._if_short_thr,long_threshold:deployForm._if_long_thr,profit_target_pct:deployForm._if_profit_pct/100,chain_depth_strikes:deployForm._if_chain_depth})"/>
+                  <p class="text-[10px] mt-0.5" style="color:var(--t-muted)">Protective leg distance (default 50)</p>
+                </div>
+                <div>
+                  <label class="sec-label mb-1">ADJUSTMENT DISTANCE (PTS)</label>
+                  <input type="number" class="t-input" x-model.number="deployForm._if_adj_dist" min="10" step="1"
+                         @change="deployForm.strategy_params=JSON.stringify({otm1:deployForm._if_otm1,adjustment_distance:deployForm._if_adj_dist,short_threshold:deployForm._if_short_thr,long_threshold:deployForm._if_long_thr,profit_target_pct:deployForm._if_profit_pct/100,chain_depth_strikes:deployForm._if_chain_depth})"/>
+                  <p class="text-[10px] mt-0.5" style="color:var(--t-muted)">±100pt roll trigger (default 100)</p>
+                </div>
+                <div>
+                  <label class="sec-label mb-1">PROFIT TARGET (%)</label>
+                  <input type="number" class="t-input" x-model.number="deployForm._if_profit_pct" min="1" max="100" step="1"
+                         @change="deployForm.strategy_params=JSON.stringify({otm1:deployForm._if_otm1,adjustment_distance:deployForm._if_adj_dist,short_threshold:deployForm._if_short_thr,long_threshold:deployForm._if_long_thr,profit_target_pct:deployForm._if_profit_pct/100,chain_depth_strikes:deployForm._if_chain_depth})"/>
+                  <p class="text-[10px] mt-0.5" style="color:var(--t-muted)">% of expected max profit (default 65)</p>
+                </div>
+                <div>
+                  <label class="sec-label mb-1">SHORT THRESHOLD (₹)</label>
+                  <input type="number" class="t-input" x-model.number="deployForm._if_short_thr" min="1" step="1"
+                         @change="deployForm.strategy_params=JSON.stringify({otm1:deployForm._if_otm1,adjustment_distance:deployForm._if_adj_dist,short_threshold:deployForm._if_short_thr,long_threshold:deployForm._if_long_thr,profit_target_pct:deployForm._if_profit_pct/100,chain_depth_strikes:deployForm._if_chain_depth})"/>
+                  <p class="text-[10px] mt-0.5" style="color:var(--t-muted)">Sell strike LTP floor (default 20)</p>
+                </div>
+                <div>
+                  <label class="sec-label mb-1">LONG THRESHOLD (₹)</label>
+                  <input type="number" class="t-input" x-model.number="deployForm._if_long_thr" min="1" step="1"
+                         @change="deployForm.strategy_params=JSON.stringify({otm1:deployForm._if_otm1,adjustment_distance:deployForm._if_adj_dist,short_threshold:deployForm._if_short_thr,long_threshold:deployForm._if_long_thr,profit_target_pct:deployForm._if_profit_pct/100,chain_depth_strikes:deployForm._if_chain_depth})"/>
+                  <p class="text-[10px] mt-0.5" style="color:var(--t-muted)">Buy strike LTP ceiling (default 20)</p>
+                </div>
+                <div>
+                  <label class="sec-label mb-1">CHAIN DEPTH (STRIKES)</label>
+                  <input type="number" class="t-input" x-model.number="deployForm._if_chain_depth" min="4" max="60" step="1"
+                         @change="deployForm.strategy_params=JSON.stringify({otm1:deployForm._if_otm1,adjustment_distance:deployForm._if_adj_dist,short_threshold:deployForm._if_short_thr,long_threshold:deployForm._if_long_thr,profit_target_pct:deployForm._if_profit_pct/100,chain_depth_strikes:deployForm._if_chain_depth})"/>
+                  <p class="text-[10px] mt-0.5" style="color:var(--t-muted)">ATM± live-quote window (default 20)</p>
+                </div>
+                <p class="text-[10px] col-span-3" style="color:var(--t-muted)">
+                  Carries positions across days (NRML, no EOD square-off) -- exits only via the
+                  65% profit target, or manual square-off. Phase 1 backtest-validated mechanic
+                  (2026-09-13); this is its first live (paper_route) deployment -- watch closely.
                 </p>
               </div>
             </template>
@@ -7777,7 +7851,7 @@ function amoTest() {
                   <div class="flex items-center justify-between mb-3">
                     <div>
                       <div class="font-ui font-bold text-sm" style="color:var(--t-bright)"
-                           x-text="({sell_straddle:'Sell Straddle',sell_straddle_calc_vwap:'Sell Straddle (Calc VWAP)',d1_trap_option:'Trap Scanner',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow',liquidity_sweep:'Liquidity Sweep',liquidity_trap:'Liquidity Trap',oi_orb_screener:'OI-ORB Screener',oi_orb_screener_top20:'OI-ORB Screener (Top-20)',cag_straddle:'CAG Long Straddle'}[dep.strategy_name]||dep.strategy_name)"></div>
+                           x-text="({sell_straddle:'Sell Straddle',sell_straddle_calc_vwap:'Sell Straddle (Calc VWAP)',d1_trap_option:'Trap Scanner',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow',liquidity_sweep:'Liquidity Sweep',liquidity_trap:'Liquidity Trap',oi_orb_screener:'OI-ORB Screener',oi_orb_screener_top20:'OI-ORB Screener (Top-20)',cag_straddle:'CAG Long Straddle',iron_fly:'Iron Fly'}[dep.strategy_name]||dep.strategy_name)"></div>
                       <div class="flex items-center gap-2 mt-0.5">
                         <span class="font-mono text-xs" style="color:var(--t-cyan)" x-text="dep.underlying==='ALL_FNO'?'All 30 FnO Stocks':dep.underlying==='WATCHLIST'?'Watchlist (top-5)':dep.underlying"></span>
                         <span class="font-mono text-xs" style="color:var(--t-muted)"
@@ -8577,6 +8651,97 @@ function amoTest() {
                                     'entry':'color:var(--t-green)', 'exit':'color:var(--t-amber)',
                                     'watch':'color:var(--t-cyan)', 'info':'color:var(--t-dim)',
                                   }[r.level]||'color:var(--t-dim)'">
+                                  <span style="color:var(--t-dim)" x-text="(r.ts||'').slice(11,19)"></span>
+                                  <span x-text="' '+r.text"></span>
+                                </div>
+                              </template>
+                            </div>
+                          </div>
+                        </div>
+                      </template>
+                    </div>
+                  </template>
+
+                  <!-- Iron Fly live panel (2026-09-14): IronFlyStrategy's own
+                       monitoring_state() (strategies/iron_fly/engine.py) -- shows all 4
+                       legs (short_ce/long_ce/short_pe/long_pe), whether the position has
+                       converted to a fly, cycle-level P&L (realized this cycle + lifetime
+                       across cycles), and the recent remarks trail. -->
+                  <template x-if="dep.strategy_name==='iron_fly'">
+                    <div class="rounded p-3 mb-2 text-xs font-mono" style="background:rgba(var(--t-cyan-rgb),0.04);border:1px solid rgba(var(--t-cyan-rgb),0.18)"
+                         x-data="{
+                           _bk: null,
+                           async _load() {
+                             try {
+                               const tok = localStorage.getItem('terminus_token') || (authToken||'');
+                               const r = await fetch('/api/ironfly/status', {headers:{'Authorization':'Bearer '+tok}});
+                               const d = await r.json();
+                               if (d.ok) {
+                                 this._bk = (d.books||[]).find(bk => bk.binding_id===b.binding_id && bk.underlying===dep.underlying) || null;
+                               }
+                             } catch(e) {}
+                           }
+                         }"
+                         x-init="_load(); setInterval(()=>_load(), 15000)">
+                      <template x-if="!_bk">
+                        <div class="text-center" style="color:var(--t-dim)">Loading Iron Fly state…</div>
+                      </template>
+                      <template x-if="_bk">
+                        <div>
+                          <div class="flex items-center justify-between mb-2">
+                            <span style="color:var(--t-muted)">MODE
+                              <span :style="_bk.is_flied?'color:var(--t-amber)':'color:var(--t-cyan)'"
+                                    x-text="_bk.is_flied ? 'IRON FLY (locked)' : 'IRON CONDOR'"></span>
+                            </span>
+                            <span class="px-1.5 py-0.5 rounded" style="background:rgba(var(--t-cyan-rgb),0.15);color:var(--t-cyan)"
+                                  x-text="_bk.is_flat ? 'FLAT' : 'IN POSITION'"></span>
+                          </div>
+
+                          <!-- 4 legs -->
+                          <template x-if="!_bk.is_flat">
+                            <div class="mb-2 pb-2" style="border-bottom:1px solid var(--t-border)">
+                              <template x-for="slot in ['short_ce','long_ce','short_pe','long_pe']" :key="slot">
+                                <template x-if="_bk.legs && _bk.legs[slot]">
+                                  <div class="flex items-center justify-between">
+                                    <span style="color:var(--t-muted)"
+                                          x-text="(slot.startsWith('short')?'SELL ':'BUY  ')+slot.slice(-2).toUpperCase()+' '+_bk.legs[slot].strike"></span>
+                                    <span>
+                                      <span x-text="'entry '+fmt(_bk.legs[slot].entry_price)+' → ltp '+(_bk.legs[slot].live_price!=null?fmt(_bk.legs[slot].live_price):'—')"></span>
+                                      <span class="ml-1" :style="(_bk.legs[slot].unrealized_pnl||0)>=0?'color:var(--t-green)':'color:var(--t-red)'"
+                                            x-text="_bk.legs[slot].unrealized_pnl!=null ? fmt(_bk.legs[slot].unrealized_pnl) : ''"></span>
+                                    </span>
+                                  </div>
+                                </template>
+                              </template>
+                            </div>
+                          </template>
+
+                          <!-- Cycle stats -->
+                          <div class="mb-1.5">
+                            <div class="flex items-center justify-between">
+                              <span style="color:var(--t-muted)">Cycle #<span x-text="_bk.cycle_number"></span> target</span>
+                              <span x-text="_bk.cycle_expected_max_profit!=null ? (fmt(_bk.cycle_expected_max_profit*0.65)+' of '+fmt(_bk.cycle_expected_max_profit)) : '—'"></span>
+                            </div>
+                            <div class="flex items-center justify-between">
+                              <span style="color:var(--t-muted)">Cycle realized</span>
+                              <span :style="(_bk.cycle_realized_pnl||0)>=0?'color:var(--t-green)':'color:var(--t-red)'" x-text="fmt(_bk.cycle_realized_pnl)"></span>
+                            </div>
+                            <div class="flex items-center justify-between">
+                              <span style="color:var(--t-muted)">Lifetime realized</span>
+                              <span :style="(_bk.lifetime_realized_pnl||0)>=0?'color:var(--t-green)':'color:var(--t-red)'" x-text="fmt(_bk.lifetime_realized_pnl)"></span>
+                            </div>
+                            <div class="flex items-center justify-between">
+                              <span style="color:var(--t-muted)">Orders placed / reference</span>
+                              <span x-text="_bk.order_count+' / '+(_bk.reference_price!=null?fmt(_bk.reference_price):'—')"></span>
+                            </div>
+                          </div>
+
+                          <!-- Remarks trail -->
+                          <div class="mt-2 pt-2" style="border-top:1px solid var(--t-border)" x-show="(_bk.recent_remarks||[]).length>0">
+                            <div class="mb-1" style="color:var(--t-muted);font-size:10px">RECENT REMARKS</div>
+                            <div style="max-height:110px;overflow-y:auto">
+                              <template x-for="(r,ri) in (_bk.recent_remarks||[]).slice(0,8)" :key="ri">
+                                <div class="mb-0.5" style="color:var(--t-dim)">
                                   <span style="color:var(--t-dim)" x-text="(r.ts||'').slice(11,19)"></span>
                                   <span x-text="' '+r.text"></span>
                                 </div>

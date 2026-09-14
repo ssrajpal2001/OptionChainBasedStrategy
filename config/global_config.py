@@ -201,6 +201,13 @@ class Topic:
                                                       # OI-Flow/Liquidity Sweep/Liquidity Trap/OI-ORB.
                                                       # Built from a real-data-validated backtest --
                                                       # scripts/nifty_1500_sr_breakout_backtest.py.
+    IRON_FLY_ORDER_REQUEST = "iron_fly_order_request"  # NIFTY Weekly Iron Condor -> Iron Fly strategy
+    IRON_FLY_ORDER_FILL    = "iron_fly_order_fill"     # (2026-09-14) -- new standalone strategy, unrelated
+                                                      # to the old IronCondorStrategy deleted 2026-07-18.
+                                                      # Fully standalone, same zero-shared-runtime mandate
+                                                      # as every other strategy above. LEG-CENTRIC events
+                                                      # (one order = one leg's open or close), never a
+                                                      # bundled multi-leg action -- see events.py.
 
 
 # ─────────────────────────────────────────────────────────────────────────────

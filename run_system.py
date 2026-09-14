@@ -814,6 +814,15 @@ async def _run_live(
         bus, router,
         log_dir=os.path.join(cfg.storage.log_dir, "trades"),
     )
+    # 2026-09-14: fully standalone bridge -- own Topics (IRON_FLY_ORDER_
+    # REQUEST/FILL), shares no runtime state with any bridge above. 9th
+    # standalone strategy (NIFTY Weekly Iron Condor -> Iron Fly), unrelated
+    # to the old IronCondorStrategy deleted 2026-07-18.
+    from execution_bridge.iron_fly_bridge import IronFlyExecutionBridge
+    iron_fly_bridge = IronFlyExecutionBridge(
+        bus, router,
+        log_dir=os.path.join(cfg.storage.log_dir, "trades"),
+    )
     client_mgr    = ClientManager(bus, registry)
     risk_mgr      = RiskManager(bus, registry, router=router)
 
@@ -869,6 +878,7 @@ async def _run_live(
                 oi_orb_manager=managers.get("oi_orb_screener"),
                 oi_orb_top20_manager=managers.get("oi_orb_screener_top20"),
                 cag_straddle_manager=managers.get("cag_straddle"),
+                iron_fly_manager=managers.get("iron_fly"),
             )
         except ImportError as exc:
             logger.warning("Could not start dashboard (missing deps): %s", exc)
@@ -1026,6 +1036,7 @@ async def _run_live(
         asyncio.create_task(straddle_hedge_bridge.run(), name="straddle_hedge_bridge"),
         asyncio.create_task(oi_orb_bridge.run(),        name="oi_orb_bridge"),
         asyncio.create_task(cag_straddle_bridge.run(),  name="cag_straddle_bridge"),
+        asyncio.create_task(iron_fly_bridge.run(),      name="iron_fly_bridge"),
         asyncio.create_task(client_mgr.run(),           name="client_mgr"),
         asyncio.create_task(risk_mgr.run(),             name="risk_mgr"),
         asyncio.create_task(rebalancer.run(),           name="rebalancer"),
@@ -1066,6 +1077,7 @@ async def _run_live(
     straddle_hedge_bridge.stop()
     oi_orb_bridge.stop()
     cag_straddle_bridge.stop()
+    iron_fly_bridge.stop()
     await router.stop()
     await client_mgr.stop()
     await admin.stop()   # stops console + dashboard server + cancels dashboard task
