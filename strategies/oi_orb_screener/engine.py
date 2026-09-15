@@ -160,6 +160,30 @@ _SPOT_FEED_RETRY_POLL_SEC = 20.0
 # treated as genuinely priceless.
 _POLL_PRICE_STALE_SEC = 90.0
 
+# 2026-09-16, direct user spec: futures-OI-regime directional gate (opt-in,
+# default OFF until validated -- same graduation discipline as every other
+# feature addition in this codebase). Two mutually-exclusive regimes off the
+# underlying's OWN futures OI (never options OI, never today's opening OI):
+#   OI_Change% > +1%  -> INCREASING -- direction comes ONLY from yesterday's
+#                        candle (green->CALL-only, red->PUT-only), even if
+#                        today's price action initially disagrees.
+#   OI_Change% < -5%  -> DECREASING -- yesterday's candle is discarded;
+#                        direction comes ONLY from today's trend (mapped to
+#                        the stock's own live pChange sign -- the same
+#                        convention screener.side_from_pchange already uses
+#                        everywhere else in this codebase for "today's
+#                        direction", not a separate new definition).
+#   otherwise         -> NEUTRAL -- no trade that stock today.
+# Evaluated ONCE per (symbol, day) at/after OI_REGIME_CHECK_TIME, using
+# Upstox's V3 Full Market Quotes endpoint (oi + previous_oi in one call --
+# verified live 2026-09-15/16 against 4 real contracts, previous_oi matched
+# fetch_upstox_daily's own 'oi' on the last completed session exactly every
+# time) for the OI side, and fetch_upstox_daily's own open/close for
+# yesterday's candle direction.
+_OI_REGIME_CHECK_TIME_DEFAULT = "09:16"
+_OI_REGIME_INCREASE_MIN_PCT_DEFAULT = 1.0
+_OI_REGIME_DECREASE_MAX_PCT_DEFAULT = -5.0
+
 # 2026-09-16, direct user spec: pre-entry trap-target-already-touched gate
 # (see _check_trap_target_touched_today's own docstring). Once a signal is
 # skipped this way, re-checking the (real, network-fetching) touched-today
@@ -614,6 +638,13 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         # touched-today check (rate-limited) and fires immediately if it
         # passes. See _check_trap_target_touched_today's own docstring.
         self._trap_gate_skipped: Dict[tuple, dict] = {}
+        # 2026-09-16, direct user spec: futures-OI-regime directional gate --
+        # computed at most ONCE per (symbol, day), cached here. None means
+        # either "not computed yet" (not in _oi_regime_computed) or "computed
+        # and blocked" (NEUTRAL regime / data failure / flat candle) -- check
+        # membership in _oi_regime_computed to tell those two apart.
+        self._oi_regime_side: Dict[str, Optional[str]] = {}
+        self._oi_regime_computed: Set[str] = set()
         self._spot_tick_subscribed: Dict[str, bool] = {}
         # 2026-09-10, real incident fix: when _ensure_spot_feed's own subscribe
         # attempt was seen, so _spot_feed_retry_loop can detect "subscribed a
@@ -654,6 +685,8 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._rejected = set()
         self._sl_reentry_used = set()
         self._trap_gate_skipped = {}
+        self._oi_regime_side = {}
+        self._oi_regime_computed = set()
         # 2026-09-07: guards the ONE morning call to _apply_historical_vwap_retest
         # (right after the regime freeze block below) so it doesn't re-run on every
         # poll cycle for the life of the day -- the afternoon rescan calls it again
@@ -1738,7 +1771,28 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 for sym in self._shortlist_symbols:
                     if sym in self._positions or sym in self._pending_contracts:
                         continue
-                    side = screener.side_from_pchange(self._shortlist_pchange.get(sym, 0.0))
+
+                    # 2026-09-16, direct user spec: futures-OI-regime
+                    # directional gate (opt-in, default OFF -- see
+                    # _compute_oi_regime_side's own docstring for the full
+                    # mechanic). When enabled, REPLACES the plain pChange-
+                    # based side with the OI-regime's own verdict -- computed
+                    # once per (symbol, day) at/after OI_REGIME_CHECK_TIME;
+                    # a symbol whose regime comes back NEUTRAL/blocked never
+                    # reaches the entry mechanic at all today.
+                    if cfg.get("OI_REGIME_GATE_ENABLED", False):
+                        if sym not in self._oi_regime_computed:
+                            check_time = cfg.get("OI_REGIME_CHECK_TIME", _OI_REGIME_CHECK_TIME_DEFAULT)
+                            if now_key < check_time and not cfg.get("IGNORE_TIME_WINDOWS"):
+                                continue
+                            self._oi_regime_computed.add(sym)
+                            self._oi_regime_side[sym] = await self._compute_oi_regime_side(sym)
+                        side = self._oi_regime_side.get(sym)
+                        if side is None:
+                            continue
+                    else:
+                        side = screener.side_from_pchange(self._shortlist_pchange.get(sym, 0.0))
+
                     if (sym, side) in self._already_fired or (sym, side) in self._rejected:
                         continue
                     # 2026-09-07, direct user spec for oi_orb_screener_top20:
@@ -3609,6 +3663,94 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 "treated as not-touched -- entry proceeds normally).",
                 self._client_id, self._binding_id, sym, exc_info=True)
             return False, None
+
+    async def _compute_oi_regime_side(self, sym: str) -> Optional[str]:
+        """2026-09-16, direct user spec: futures-OI-regime directional gate,
+        evaluated once per (symbol, day) at/after OI_REGIME_CHECK_TIME.
+
+        OI_Change% = (current_futures_oi - previous_session_futures_closing_
+        oi) / previous_session_futures_closing_oi * 100, using ONLY the
+        underlying's own futures contract OI -- never options OI, never
+        today's opening OI as baseline.
+
+        > +1%  (INCREASING): direction comes ONLY from yesterday's candle
+               (close>open -> CALL-only, close<open -> PUT-only) -- today's
+               price action can time entry but never overrides this.
+        < -5%  (DECREASING): yesterday's candle is discarded entirely;
+               direction comes ONLY from "today's trend", mapped to the
+               stock's own live pChange sign (self._shortlist_pchange) --
+               the SAME convention screener.side_from_pchange already uses
+               everywhere else in this codebase for "today's direction",
+               not a new bespoke definition.
+        otherwise (NEUTRAL): no trade -- returns None.
+
+        Best-effort but CONSERVATIVE, unlike most other real-data seeds in
+        this file: this gate is a hard prerequisite for entry per direct
+        spec ("Otherwise: No trade today"), so any failure (no futures key,
+        no token, no quote, no daily candle) also returns None -- blocking
+        the trade -- rather than degrading to "let it proceed" the way
+        purely auxiliary seeds (VWAP backfill, trap-exit zones) do."""
+        try:
+            from data_layer.instrument_registry import REGISTRY
+            await asyncio.to_thread(REGISTRY.load_futures_only_sync, sym, datetime.now(IST).date())
+            fut_key = REGISTRY.get_futures_upstox(sym)
+            if not fut_key:
+                return None
+            from data_layer.client_db import ClientDB
+            creds = await asyncio.to_thread(ClientDB().get_feeder_creds_sync, "upstox")
+            token = (creds or {}).get("access_token", "")
+            if not token:
+                return None
+            from data_layer.historical_candles import fetch_upstox_v3_quote, fetch_upstox_daily
+            quote = await fetch_upstox_v3_quote(fut_key, token)
+            if not quote:
+                return None
+            current_oi = float(quote.get("oi") or 0.0)
+            previous_oi = float(quote.get("previous_oi") or 0.0)
+            if current_oi <= 0 or previous_oi <= 0:
+                return None
+            oi_change_pct = (current_oi - previous_oi) / previous_oi * 100.0
+
+            cfg = self._screener_cfg
+            inc_min = float(cfg.get("OI_REGIME_INCREASE_MIN_PCT", _OI_REGIME_INCREASE_MIN_PCT_DEFAULT))
+            dec_max = float(cfg.get("OI_REGIME_DECREASE_MAX_PCT", _OI_REGIME_DECREASE_MAX_PCT_DEFAULT))
+
+            if oi_change_pct > inc_min:
+                regime = "INCREASING"
+                daily = await fetch_upstox_daily(fut_key, token, lookback_days=7)
+                if not daily:
+                    side = None
+                else:
+                    last = daily[-1]
+                    prev_open, prev_close = float(last["open"]), float(last["close"])
+                    side = "CALL" if prev_close > prev_open else ("PUT" if prev_close < prev_open else None)
+            elif oi_change_pct < dec_max:
+                regime = "DECREASING"
+                pchange = self._shortlist_pchange.get(sym, 0.0)
+                side = "CALL" if pchange > 0 else ("PUT" if pchange < 0 else None)
+            else:
+                regime = "NEUTRAL"
+                side = None
+
+            self._clog.info(
+                "OiOrb[%s/%s]: %s OI-REGIME -- current_oi=%.0f previous_oi=%.0f change=%+.2f%% "
+                "regime=%s -> side=%s",
+                self._client_id, self._binding_id, sym, current_oi, previous_oi, oi_change_pct,
+                regime, side or "NONE (blocked)",
+            )
+            await asyncio.to_thread(
+                store.log_signal_event, self._client_id, self._binding_id, sym,
+                "oi_regime_computed", side=side or "",
+                detail=f"oi_change_pct={oi_change_pct:+.2f}% regime={regime} "
+                       f"current_oi={current_oi:.0f} previous_oi={previous_oi:.0f}")
+            return side
+        except Exception:
+            self._clog.warning(
+                "OiOrb[%s/%s]: %s OI-regime computation failed -- treated as BLOCKED (no trade "
+                "today for this symbol, per direct spec -- conservative, unlike most other "
+                "best-effort seeds in this file).",
+                self._client_id, self._binding_id, sym, exc_info=True)
+            return None
 
     async def _trap_ladder_check(self, sym: str, side: str, ltp: float, ts: datetime, zone: dict,
                                   tier: str, exit_reason: str) -> bool:

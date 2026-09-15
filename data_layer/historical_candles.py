@@ -17,7 +17,7 @@ import asyncio
 import logging
 import time
 from datetime import date, datetime, timedelta
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from config.global_config import IST
 
@@ -124,6 +124,35 @@ async def fetch_upstox_daily(instrument_key: str, access_token: str, lookback_da
         url = (f"https://api.upstox.com/v2/historical-candle/{_q(instrument_key, safe='')}/day/"
                f"{end.isoformat()}/{start.isoformat()}")
         return _parse_candles(_http_get_json(url, access_token))
+
+    return await asyncio.to_thread(_get)
+
+
+async def fetch_upstox_v3_quote(instrument_key: str, access_token: str) -> Optional[dict]:
+    """2026-09-16, direct user spec (OI-ORB Screener futures-OI regime gate):
+    live snapshot via Upstox's V3 Full Market Quotes endpoint
+    (https://api.upstox.com/v3/market-quote/quotes) -- the ONLY endpoint in
+    this codebase that returns a live current 'oi' alongside 'previous_oi'
+    (the previous trading session's closing OI for the SAME contract) in one
+    call. Confirmed live, 2026-09-15/16, against 4 real F&O futures
+    contracts (MPHASIS/RELIANCE/TCS/ABB): previous_oi matched
+    fetch_upstox_daily's own 'oi' field on the last completed daily candle
+    exactly in all 4 cases -- verified empirically, not just trusted from
+    the field name/docs (Upstox's own docs describe previous_oi as "The
+    open interest of the symbol from the previous session (only F&O)").
+
+    Returns the single instrument's quote dict (whatever keys Upstox
+    returns, e.g. 'oi', 'previous_oi', 'last_price', 'ohlc', ...), or None
+    on any failure/empty response -- caller degrades safely, same
+    convention as every other real-data fetch in this module."""
+    def _get():
+        from urllib.parse import quote as _q
+        url = f"https://api.upstox.com/v3/market-quote/quotes?instrument_key={_q(instrument_key, safe='')}"
+        resp = _http_get_json(url, access_token)
+        if not resp or resp.get("status") != "success":
+            return None
+        data = resp.get("data") or {}
+        return next(iter(data.values()), None) if data else None
 
     return await asyncio.to_thread(_get)
 

@@ -3560,3 +3560,279 @@ async def test_entry_loop_gate_recheck_is_throttled(monkeypatch):
     assert checked == []   # throttled -- no recheck performed
     assert emitted == []
     assert book._trap_gate_skipped[("TESTSTOCK", "CALL")]["extreme"] == 101.0   # still updated
+
+
+# ── 2026-09-16, direct user spec: futures-OI-regime directional gate.
+# INCREASING (>+1%) -> yesterday's candle decides CALL/PUT. DECREASING
+# (<-5%) -> today's pChange-sign trend decides. Otherwise -> no trade.
+# Empirically verified live (2026-09-15/16) that Upstox V3's previous_oi
+# equals the previous session's closing futures OI (matched
+# fetch_upstox_daily's own 'oi' exactly on 4 real contracts). ─────────────
+
+def _v3_quote(oi: float, previous_oi: float) -> dict:
+    return {"oi": oi, "previous_oi": previous_oi}
+
+
+@pytest.mark.asyncio
+async def test_oi_regime_increasing_uses_previous_day_green_candle_for_call(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    monkeypatch.setattr("data_layer.instrument_registry.REGISTRY.load_futures_only_sync",
+                         lambda sym, today=None: None)
+    monkeypatch.setattr("data_layer.instrument_registry.REGISTRY.get_futures_upstox",
+                         lambda sym: "NSE_FO|12345")
+    monkeypatch.setattr("data_layer.client_db.ClientDB.get_feeder_creds_sync",
+                         lambda self, provider: {"access_token": "tok"})
+    # +2% OI change -> INCREASING regime
+    monkeypatch.setattr("data_layer.historical_candles.fetch_upstox_v3_quote",
+                         _async_return(_v3_quote(oi=102.0, previous_oi=100.0)))
+    monkeypatch.setattr("data_layer.historical_candles.fetch_upstox_daily",
+                         _async_return([{"ts": "2026-09-15", "open": 100.0, "high": 110.0,
+                                          "low": 99.0, "close": 108.0, "volume": 1000, "oi": 100}]))
+
+    side = await book._compute_oi_regime_side("TESTSTOCK")
+    assert side == "CALL"
+
+
+@pytest.mark.asyncio
+async def test_oi_regime_increasing_uses_previous_day_red_candle_for_put(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    monkeypatch.setattr("data_layer.instrument_registry.REGISTRY.load_futures_only_sync",
+                         lambda sym, today=None: None)
+    monkeypatch.setattr("data_layer.instrument_registry.REGISTRY.get_futures_upstox",
+                         lambda sym: "NSE_FO|12345")
+    monkeypatch.setattr("data_layer.client_db.ClientDB.get_feeder_creds_sync",
+                         lambda self, provider: {"access_token": "tok"})
+    monkeypatch.setattr("data_layer.historical_candles.fetch_upstox_v3_quote",
+                         _async_return(_v3_quote(oi=105.0, previous_oi=100.0)))
+    monkeypatch.setattr("data_layer.historical_candles.fetch_upstox_daily",
+                         _async_return([{"ts": "2026-09-15", "open": 108.0, "high": 110.0,
+                                          "low": 99.0, "close": 100.0, "volume": 1000, "oi": 100}]))
+
+    side = await book._compute_oi_regime_side("TESTSTOCK")
+    assert side == "PUT"
+
+
+@pytest.mark.asyncio
+async def test_oi_regime_decreasing_uses_todays_pchange_trend_not_yesterdays_candle(monkeypatch):
+    """Direct spec: yesterday's candle must be DISCARDED entirely in the
+    DECREASING regime -- seed it bearish (red) but today's pChange positive
+    must still win, proving the two regimes never mix."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._shortlist_pchange["TESTSTOCK"] = 3.5   # today bullish
+    monkeypatch.setattr("data_layer.instrument_registry.REGISTRY.load_futures_only_sync",
+                         lambda sym, today=None: None)
+    monkeypatch.setattr("data_layer.instrument_registry.REGISTRY.get_futures_upstox",
+                         lambda sym: "NSE_FO|12345")
+    monkeypatch.setattr("data_layer.client_db.ClientDB.get_feeder_creds_sync",
+                         lambda self, provider: {"access_token": "tok"})
+    # -8% OI change -> DECREASING regime
+    monkeypatch.setattr("data_layer.historical_candles.fetch_upstox_v3_quote",
+                         _async_return(_v3_quote(oi=92.0, previous_oi=100.0)))
+    daily_calls = []
+    async def _must_not_be_called(*a, **k):
+        daily_calls.append(a)
+        return []
+    monkeypatch.setattr("data_layer.historical_candles.fetch_upstox_daily", _must_not_be_called)
+
+    side = await book._compute_oi_regime_side("TESTSTOCK")
+    assert side == "CALL"          # today's bullish pChange won
+    assert daily_calls == []       # yesterday's candle never even fetched
+
+
+@pytest.mark.asyncio
+async def test_oi_regime_decreasing_bearish_trend_gives_put(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._shortlist_pchange["TESTSTOCK"] = -3.5
+    monkeypatch.setattr("data_layer.instrument_registry.REGISTRY.load_futures_only_sync",
+                         lambda sym, today=None: None)
+    monkeypatch.setattr("data_layer.instrument_registry.REGISTRY.get_futures_upstox",
+                         lambda sym: "NSE_FO|12345")
+    monkeypatch.setattr("data_layer.client_db.ClientDB.get_feeder_creds_sync",
+                         lambda self, provider: {"access_token": "tok"})
+    monkeypatch.setattr("data_layer.historical_candles.fetch_upstox_v3_quote",
+                         _async_return(_v3_quote(oi=90.0, previous_oi=100.0)))
+
+    side = await book._compute_oi_regime_side("TESTSTOCK")
+    assert side == "PUT"
+
+
+@pytest.mark.asyncio
+async def test_oi_regime_neutral_band_blocks_trade():
+    bus = _FakeBus()
+    book = _make_book(bus)
+    import strategies.oi_orb_screener.engine as _engine_mod
+
+    async def _fake_quote(key, token):
+        return {"oi": 100.5, "previous_oi": 100.0}   # +0.5% -- inside -5%..+1%
+    import data_layer.historical_candles as hc
+    orig = hc.fetch_upstox_v3_quote
+    hc.fetch_upstox_v3_quote = _fake_quote
+    try:
+        import strategies.oi_orb_screener.stock_resolve as sr
+        from data_layer.instrument_registry import REGISTRY
+        REGISTRY.load_futures_only_sync = lambda sym, today=None: None
+        REGISTRY.get_futures_upstox = lambda sym: "NSE_FO|12345"
+        from data_layer.client_db import ClientDB
+        ClientDB.get_feeder_creds_sync = lambda self, provider: {"access_token": "tok"}
+        side = await book._compute_oi_regime_side("TESTSTOCK")
+        assert side is None
+    finally:
+        hc.fetch_upstox_v3_quote = orig
+
+
+@pytest.mark.asyncio
+async def test_oi_regime_best_effort_blocks_on_no_futures_key(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    monkeypatch.setattr("data_layer.instrument_registry.REGISTRY.load_futures_only_sync",
+                         lambda sym, today=None: None)
+    monkeypatch.setattr("data_layer.instrument_registry.REGISTRY.get_futures_upstox",
+                         lambda sym: "")
+    side = await book._compute_oi_regime_side("TESTSTOCK")
+    assert side is None
+
+
+@pytest.mark.asyncio
+async def test_oi_regime_best_effort_blocks_on_fetch_exception(monkeypatch):
+    """CRITICAL distinction from every other best-effort seed in this file:
+    this gate is a hard entry prerequisite per direct spec ('Otherwise: No
+    trade today'), so a failure must BLOCK the trade (return None), not
+    silently let it proceed."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    monkeypatch.setattr("data_layer.instrument_registry.REGISTRY.load_futures_only_sync",
+                         lambda sym, today=None: (_ for _ in ()).throw(RuntimeError("boom")))
+    side = await book._compute_oi_regime_side("TESTSTOCK")
+    assert side is None
+
+
+def test_reset_session_clears_oi_regime_state():
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._oi_regime_side["SYM"] = "CALL"
+    book._oi_regime_computed.add("SYM")
+    book.reset_session()
+    assert book._oi_regime_side == {}
+    assert book._oi_regime_computed == set()
+
+
+@pytest.mark.asyncio
+async def test_entry_loop_uses_oi_regime_side_when_gate_enabled(monkeypatch):
+    """Drives the real _run_today_pipeline entry loop to prove the gate is
+    actually wired in, not just correct in isolation -- and that it
+    REPLACES the plain pChange-based side, matching direct spec (previous
+    day's candle can override today's initial price action)."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    _drive_entry_loop_scaffold(book, monkeypatch, datetime(2026, 9, 16, 9, 20, 0, tzinfo=IST))
+    book._screener_cfg["OI_REGIME_GATE_ENABLED"] = True
+    book._live_price = lambda sym, live_df, log_source=False: 100.0
+    book._vwap_check_entry = lambda sym, side, ltp: True
+
+    computed_calls = []
+    async def _spy_compute(sym):
+        computed_calls.append(sym)
+        return "PUT"   # OI-regime says PUT even though shortlist pChange (+3.0) says CALL
+    book._compute_oi_regime_side = _spy_compute
+
+    emitted = []
+    async def _spy_emit(sym, side, ltp, reason, orb_lvl, ts_str, label):
+        emitted.append((sym, side))
+    book._emit_vwap_signal = _spy_emit
+
+    async def _sleep_once(_secs):
+        book._running = False
+    monkeypatch.setattr(asyncio, "sleep", _sleep_once)
+
+    await book._run_today_pipeline()
+
+    assert computed_calls == ["TESTSTOCK"]
+    assert len(emitted) == 1
+    assert emitted[0] == ("TESTSTOCK", "PUT")   # OI-regime side won, not pChange-derived CALL
+    assert "TESTSTOCK" in book._oi_regime_computed
+    assert book._oi_regime_side["TESTSTOCK"] == "PUT"
+
+
+@pytest.mark.asyncio
+async def test_entry_loop_skips_symbol_before_oi_regime_check_time(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    _drive_entry_loop_scaffold(book, monkeypatch, datetime(2026, 9, 16, 9, 10, 0, tzinfo=IST))
+    book._screener_cfg["OI_REGIME_GATE_ENABLED"] = True
+    book._screener_cfg["IGNORE_TIME_WINDOWS"] = False   # must respect the check-time gate itself
+    book._live_price = lambda sym, live_df, log_source=False: 100.0
+
+    computed_calls = []
+    async def _spy_compute(sym):
+        computed_calls.append(sym)
+        return "CALL"
+    book._compute_oi_regime_side = _spy_compute
+
+    async def _sleep_once(_secs):
+        book._running = False
+    monkeypatch.setattr(asyncio, "sleep", _sleep_once)
+
+    await book._run_today_pipeline()
+
+    assert computed_calls == []   # too early -- 09:10 < 09:16 check time
+    assert "TESTSTOCK" not in book._oi_regime_computed
+
+
+@pytest.mark.asyncio
+async def test_entry_loop_blocks_symbol_when_oi_regime_neutral(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    _drive_entry_loop_scaffold(book, monkeypatch, datetime(2026, 9, 16, 9, 20, 0, tzinfo=IST))
+    book._screener_cfg["OI_REGIME_GATE_ENABLED"] = True
+    book._live_price = lambda sym, live_df, log_source=False: 100.0
+    book._vwap_check_entry = lambda sym, side, ltp: True
+
+    async def _spy_compute(sym):
+        return None   # neutral/blocked
+    book._compute_oi_regime_side = _spy_compute
+
+    emitted = []
+    async def _spy_emit(*a, **kw):
+        emitted.append((a, kw))
+    book._emit_vwap_signal = _spy_emit
+
+    async def _sleep_once(_secs):
+        book._running = False
+    monkeypatch.setattr(asyncio, "sleep", _sleep_once)
+
+    await book._run_today_pipeline()
+
+    assert emitted == []
+    assert "TESTSTOCK" in book._oi_regime_computed
+    assert book._oi_regime_side["TESTSTOCK"] is None
+
+
+@pytest.mark.asyncio
+async def test_entry_loop_computes_oi_regime_only_once_per_symbol_per_day(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    _drive_entry_loop_scaffold(book, monkeypatch, datetime(2026, 9, 16, 9, 20, 0, tzinfo=IST))
+    book._screener_cfg["OI_REGIME_GATE_ENABLED"] = True
+    book._live_price = lambda sym, live_df, log_source=False: 100.0
+    book._vwap_check_entry = lambda sym, side, ltp: False   # never actually fires
+
+    computed_calls = []
+    async def _spy_compute(sym):
+        computed_calls.append(sym)
+        return "CALL"
+    book._compute_oi_regime_side = _spy_compute
+
+    call_count = {"n": 0}
+    async def _sleep_twice(_secs):
+        call_count["n"] += 1
+        if call_count["n"] >= 2:
+            book._running = False
+    monkeypatch.setattr(asyncio, "sleep", _sleep_twice)
+
+    await book._run_today_pipeline()
+
+    assert computed_calls == ["TESTSTOCK"]   # computed once, not once per cycle

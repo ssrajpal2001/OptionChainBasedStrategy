@@ -65,3 +65,38 @@ def test_warm_today_short_prepends_prevday(monkeypatch):
     closes = [r["close"] for r in rows]
     # prev-day (older) first, then today
     assert closes == [0, 1, 2, 3, 4, 200, 201, 202]
+
+
+# ── fetch_upstox_v3_quote (2026-09-16, OI-ORB futures-OI-regime gate) ──────
+
+def test_fetch_upstox_v3_quote_returns_single_instrument_dict(monkeypatch):
+    def fake_http(url, token):
+        assert "v3/market-quote/quotes" in url
+        assert "instrument_key=" in url
+        return {"status": "success", "data": {
+            "NSE_FO:MPHASIS26SEPFUT": {"oi": 5544000.0, "previous_oi": 5300075.0,
+                                        "last_price": 2374.0},
+        }}
+    monkeypatch.setattr(hc, "_http_get_json", fake_http)
+    row = asyncio.run(hc.fetch_upstox_v3_quote("NSE_FO|68736", "TOKEN"))
+    assert row["oi"] == 5544000.0
+    assert row["previous_oi"] == 5300075.0
+
+
+def test_fetch_upstox_v3_quote_returns_none_on_non_success_status(monkeypatch):
+    monkeypatch.setattr(hc, "_http_get_json", lambda url, token: {"status": "error"})
+    row = asyncio.run(hc.fetch_upstox_v3_quote("NSE_FO|68736", "TOKEN"))
+    assert row is None
+
+
+def test_fetch_upstox_v3_quote_returns_none_on_empty_response(monkeypatch):
+    monkeypatch.setattr(hc, "_http_get_json", lambda url, token: {})
+    row = asyncio.run(hc.fetch_upstox_v3_quote("NSE_FO|68736", "TOKEN"))
+    assert row is None
+
+
+def test_fetch_upstox_v3_quote_returns_none_on_empty_data(monkeypatch):
+    monkeypatch.setattr(hc, "_http_get_json",
+                         lambda url, token: {"status": "success", "data": {}})
+    row = asyncio.run(hc.fetch_upstox_v3_quote("NSE_FO|68736", "TOKEN"))
+    assert row is None
