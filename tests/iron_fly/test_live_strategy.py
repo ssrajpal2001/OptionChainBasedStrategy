@@ -81,67 +81,70 @@ def test_monitoring_state_when_flat():
     assert state["underlying"] == "NIFTY"
 
 
-# ── expiry-day cutoff (real incident, 2026-09-15) ───────────────────────────
+# ── expiry-day / day-before-expiry rule (real incident, 2026-09-15/16) ──────
 
-def test_resolve_expiry_uses_next_week_past_cutoff_on_expiry_day(monkeypatch):
-    """Real incident: a fresh entry at 15:20 on expiry day itself needed
-    another fly conversion 1 minute before close. Fix: _resolve_expiry()
-    must resolve NEXT week's expiry once past the cutoff (default 15:00) on
-    the active expiry's own day."""
-    from datetime import date, datetime as real_datetime
+def _patch_registry_and_clock(monkeypatch, frozen_dt, expiry_map):
+    from datetime import datetime as real_datetime
     import strategies.iron_fly.engine as engine_mod
-
-    bus = _FakeBus()
-    book = IronFlyStrategy(bus, _fake_cfg(), "NIFTY", "c1", "b1", expiry_day_cutoff="15:00")
+    import sys
 
     class _FrozenDatetime(real_datetime):
         @classmethod
         def now(cls, tz=None):
-            return real_datetime(2026, 9, 15, 15, 20, tzinfo=tz)
+            return frozen_dt.replace(tzinfo=tz)
 
     monkeypatch.setattr(engine_mod, "datetime", _FrozenDatetime)
 
     class _FakeRegistry:
         @staticmethod
         def get_active_expiry_strict(underlying, from_date):
-            if from_date == date(2026, 9, 15):
-                return date(2026, 9, 15)  # today IS the active expiry
-            return date(2026, 9, 22)  # next week's
+            return expiry_map.get(from_date)
 
-    import sys
     fake_module = type(sys)("data_layer.instrument_registry")
     fake_module.REGISTRY = _FakeRegistry()
     monkeypatch.setitem(sys.modules, "data_layer.instrument_registry", fake_module)
 
-    resolved = book._resolve_expiry()
-    assert resolved == date(2026, 9, 22)
 
-
-def test_resolve_expiry_uses_current_before_cutoff_on_expiry_day(monkeypatch):
+def test_resolve_expiry_jumps_to_next_week_on_expiry_day_even_in_the_morning(monkeypatch):
+    """Real incident (2026-09-15), simplified spec (2026-09-16): "we will
+    NEVER take trade of same week expiry on expiry day" -- unconditional,
+    no time-of-day check. This would have changed the real 09:21 first
+    entry of the day to use next week's contract instead."""
     from datetime import date, datetime as real_datetime
-    import strategies.iron_fly.engine as engine_mod
 
     bus = _FakeBus()
-    book = IronFlyStrategy(bus, _fake_cfg(), "NIFTY", "c1", "b1", expiry_day_cutoff="15:00")
+    book = IronFlyStrategy(bus, _fake_cfg(), "NIFTY", "c1", "b1")
+    _patch_registry_and_clock(
+        monkeypatch, real_datetime(2026, 9, 15, 9, 21),
+        {date(2026, 9, 15): date(2026, 9, 15), date(2026, 9, 16): date(2026, 9, 22)},
+    )
 
-    class _FrozenDatetime(real_datetime):
-        @classmethod
-        def now(cls, tz=None):
-            return real_datetime(2026, 9, 15, 9, 21, tzinfo=tz)
+    assert book._resolve_expiry() == date(2026, 9, 22)
 
-    monkeypatch.setattr(engine_mod, "datetime", _FrozenDatetime)
 
-    class _FakeRegistry:
-        @staticmethod
-        def get_active_expiry_strict(underlying, from_date):
-            if from_date == date(2026, 9, 15):
-                return date(2026, 9, 15)
-            return date(2026, 9, 22)
+def test_resolve_expiry_jumps_to_next_week_day_before_expiry_too(monkeypatch):
+    """Direct user spec: "if 1 day before ... 65% is achieved then also it
+    will jump to next week" -- any time of day, same as expiry day itself."""
+    from datetime import date, datetime as real_datetime
 
-    import sys
-    fake_module = type(sys)("data_layer.instrument_registry")
-    fake_module.REGISTRY = _FakeRegistry()
-    monkeypatch.setitem(sys.modules, "data_layer.instrument_registry", fake_module)
+    bus = _FakeBus()
+    book = IronFlyStrategy(bus, _fake_cfg(), "NIFTY", "c1", "b1")
+    _patch_registry_and_clock(
+        monkeypatch, real_datetime(2026, 9, 14, 15, 20),
+        {date(2026, 9, 14): date(2026, 9, 15), date(2026, 9, 16): date(2026, 9, 22)},
+    )
 
-    resolved = book._resolve_expiry()
-    assert resolved == date(2026, 9, 15)
+    assert book._resolve_expiry() == date(2026, 9, 22)
+
+
+def test_resolve_expiry_uses_current_contract_two_days_before_expiry(monkeypatch):
+    from datetime import date, datetime as real_datetime
+
+    bus = _FakeBus()
+    book = IronFlyStrategy(bus, _fake_cfg(), "NIFTY", "c1", "b1")
+    _patch_registry_and_clock(
+        monkeypatch, real_datetime(2026, 9, 13, 15, 20),
+        {date(2026, 9, 13): date(2026, 9, 15), date(2026, 9, 14): date(2026, 9, 22)},
+    )
+
+    assert book._resolve_expiry() == date(2026, 9, 15)

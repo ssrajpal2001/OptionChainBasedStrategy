@@ -35,22 +35,30 @@ the full client-facing spec -- this docstring only summarizes):
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, time
+from datetime import date
 from typing import Dict, List, Optional, Sequence, Tuple
 
 
-def should_use_next_week_expiry(
-    today: date, active_expiry: date, now_time: time, cutoff: time = time(15, 0),
-) -> bool:
-    """Direct user spec (2026-09-15, real incident): a fresh entry (first
-    entry of the day, or a profit-target-triggered restart) that would land
-    on the ACTIVE EXPIRY'S OWN DAY, at or past `cutoff` (default 15:00), is
-    entering a contract with almost no time left before settlement -- "no
-    use of again adding new buy sell" was the real outcome observed live
-    (a fly conversion fired 1 minute before close on a position entered at
-    15:20 on expiry day itself). Returns True when the caller should resolve
-    NEXT week's expiry instead of the current active one for that entry."""
-    return active_expiry == today and now_time >= cutoff
+def should_use_next_week_expiry(today: date, active_expiry: date) -> bool:
+    """Direct user spec (2026-09-15, real incident; simplified 2026-09-16
+    after user review): "we will NEVER take trade of same week expiry on
+    expiry day" and the day before it gets the same treatment -- entirely
+    unconditional, no time-of-day check. An earlier version gated this on a
+    15:00 cutoff for expiry day itself; the user explicitly dropped that
+    once they confirmed the day-before-expiry case needed the SAME
+    unconditional rule, and simplified expiry day to match rather than keep
+    two different mechanics.
+
+    Real incident this exists for: a fresh entry on expiry day itself, late
+    in the day, needed another fly conversion 1 minute before market close
+    -- "no use of again adding new buy sell" on a contract with almost no
+    time left before settlement.
+
+    Returns True (use NEXT week's expiry instead) whenever days-to-expiry
+    is 0 (expiry day itself) or 1 (the day before) -- False (use the
+    current active contract) for DTE >= 2."""
+    days_to_expiry = (active_expiry - today).days
+    return days_to_expiry <= 1
 
 
 def round_to_atm(spot: float, strike_step: float) -> int:

@@ -45,7 +45,7 @@ import asyncio
 import logging
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, timedelta
 from typing import Callable, Deque, Dict, List, Optional, Tuple
 
 from data_layer import position_store
@@ -469,7 +469,6 @@ class IronFlyStrategy:
         profit_target_pct: float = 0.65,
         chain_depth_strikes: int = 20,
         product_type: str = "NRML",
-        expiry_day_cutoff: str = "15:00",
     ) -> None:
         self._bus = bus
         self._cfg = cfg
@@ -484,12 +483,6 @@ class IronFlyStrategy:
         self._profit_target_pct = float(profit_target_pct)
         self._chain_depth_strikes = max(4, int(chain_depth_strikes))
         self._product_type = product_type
-        self._expiry_day_cutoff_str = expiry_day_cutoff
-        try:
-            h, m = str(expiry_day_cutoff or "15:00").split(":")
-            self._expiry_day_cutoff = time(int(h), int(m))
-        except Exception:
-            self._expiry_day_cutoff = time(15, 0)
 
         lot_size = (cfg.exchange.lot_sizes.get(underlying, 75) if cfg else 75)
         strike_step = float(cfg.exchange.strike_steps.get(underlying, 50) if cfg else 50)
@@ -591,10 +584,10 @@ class IronFlyStrategy:
 
     def _resolve_expiry(self):
         """Resolves the expiry a FRESH entry should use right now. Direct
-        user spec (2026-09-15, real incident): if the currently active
-        expiry IS today, and it's already at/past `_expiry_day_cutoff`
-        (default 15:00), a fresh entry has almost no time left before
-        settlement -- resolve NEXT week's expiry instead (falls back to the
+        user spec (2026-09-15, real incident; simplified 2026-09-16): if the
+        currently active contract is 0 or 1 days from expiry, a fresh entry
+        has too little time left to manage -- resolve NEXT week's expiry
+        instead, unconditionally (no time-of-day check; falls back to the
         active one if next week can't be resolved, rather than blocking
         entry entirely)."""
         from data_layer.instrument_registry import REGISTRY
@@ -603,14 +596,13 @@ class IronFlyStrategy:
         active = REGISTRY.get_active_expiry_strict(self._underlying, now.date())
         if active is None:
             return None
-        if should_use_next_week_expiry(now.date(), active, now.time(), self._expiry_day_cutoff):
+        if should_use_next_week_expiry(now.date(), active):
             next_week = REGISTRY.get_active_expiry_strict(self._underlying, active + timedelta(days=1))
             if next_week is not None:
                 self._clog.info(
-                    "Expiry-day cutoff reached (now=%s >= %s) -- resolving NEXT week's expiry "
-                    "(%s) instead of today's (%s) for a fresh entry.",
-                    now.time().strftime("%H:%M"), self._expiry_day_cutoff.strftime("%H:%M"),
-                    next_week, active,
+                    "Active contract (%s) is within 1 day of expiry -- resolving NEXT week's "
+                    "expiry (%s) instead for a fresh entry.",
+                    active, next_week,
                 )
                 return next_week
         return active

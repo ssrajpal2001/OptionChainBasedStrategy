@@ -7235,7 +7235,6 @@ function amoTest() {
                           deployForm._if_otm1=50; deployForm._if_adj_dist=100;
                           deployForm._if_short_thr=20; deployForm._if_long_thr=20;
                           deployForm._if_profit_pct=65; deployForm._if_chain_depth=20;
-                          deployForm._if_expiry_cutoff='15:00';
                         } else {
                           deployForm.product_type='MIS';
                         }
@@ -7263,7 +7262,6 @@ function amoTest() {
                               long_threshold: deployForm._if_long_thr||20,
                               profit_target_pct: (deployForm._if_profit_pct||65)/100,
                               chain_depth_strikes: deployForm._if_chain_depth||20,
-                              expiry_day_cutoff: deployForm._if_expiry_cutoff||'15:00',
                             })
                           : JSON.stringify({htf:deployForm._htf||'D1',mtf:deployForm._mtf||'1H',itm:deployForm._itm||1});
                       ">
@@ -7481,57 +7479,51 @@ function amoTest() {
               <div class="col-span-2 grid grid-cols-3 gap-3"
                    x-init="deployForm._if_otm1=deployForm._if_otm1||50;deployForm._if_adj_dist=deployForm._if_adj_dist||100;
                            deployForm._if_short_thr=deployForm._if_short_thr||20;deployForm._if_long_thr=deployForm._if_long_thr||20;
-                           deployForm._if_profit_pct=deployForm._if_profit_pct||65;deployForm._if_chain_depth=deployForm._if_chain_depth||20;
-                           deployForm._if_expiry_cutoff=deployForm._if_expiry_cutoff||'15:00';">
+                           deployForm._if_profit_pct=deployForm._if_profit_pct||65;deployForm._if_chain_depth=deployForm._if_chain_depth||20;">
                 <div>
                   <label class="sec-label mb-1">OTM1 (PTS)</label>
                   <input type="number" class="t-input" x-model.number="deployForm._if_otm1" min="10" step="1"
-                         @change="deployForm.strategy_params=JSON.stringify({otm1:deployForm._if_otm1,adjustment_distance:deployForm._if_adj_dist,short_threshold:deployForm._if_short_thr,long_threshold:deployForm._if_long_thr,profit_target_pct:deployForm._if_profit_pct/100,chain_depth_strikes:deployForm._if_chain_depth,expiry_day_cutoff:deployForm._if_expiry_cutoff})"/>
+                         @change="deployForm.strategy_params=JSON.stringify({otm1:deployForm._if_otm1,adjustment_distance:deployForm._if_adj_dist,short_threshold:deployForm._if_short_thr,long_threshold:deployForm._if_long_thr,profit_target_pct:deployForm._if_profit_pct/100,chain_depth_strikes:deployForm._if_chain_depth})"/>
                   <p class="text-[10px] mt-0.5" style="color:var(--t-muted)">Protective leg distance (default 50)</p>
                 </div>
                 <div>
                   <label class="sec-label mb-1">ADJUSTMENT DISTANCE (PTS)</label>
                   <input type="number" class="t-input" x-model.number="deployForm._if_adj_dist" min="10" step="1"
-                         @change="deployForm.strategy_params=JSON.stringify({otm1:deployForm._if_otm1,adjustment_distance:deployForm._if_adj_dist,short_threshold:deployForm._if_short_thr,long_threshold:deployForm._if_long_thr,profit_target_pct:deployForm._if_profit_pct/100,chain_depth_strikes:deployForm._if_chain_depth,expiry_day_cutoff:deployForm._if_expiry_cutoff})"/>
+                         @change="deployForm.strategy_params=JSON.stringify({otm1:deployForm._if_otm1,adjustment_distance:deployForm._if_adj_dist,short_threshold:deployForm._if_short_thr,long_threshold:deployForm._if_long_thr,profit_target_pct:deployForm._if_profit_pct/100,chain_depth_strikes:deployForm._if_chain_depth})"/>
                   <p class="text-[10px] mt-0.5" style="color:var(--t-muted)">±100pt roll trigger (default 100)</p>
                 </div>
                 <div>
                   <label class="sec-label mb-1">PROFIT TARGET (%)</label>
                   <input type="number" class="t-input" x-model.number="deployForm._if_profit_pct" min="1" max="100" step="1"
-                         @change="deployForm.strategy_params=JSON.stringify({otm1:deployForm._if_otm1,adjustment_distance:deployForm._if_adj_dist,short_threshold:deployForm._if_short_thr,long_threshold:deployForm._if_long_thr,profit_target_pct:deployForm._if_profit_pct/100,chain_depth_strikes:deployForm._if_chain_depth,expiry_day_cutoff:deployForm._if_expiry_cutoff})"/>
+                         @change="deployForm.strategy_params=JSON.stringify({otm1:deployForm._if_otm1,adjustment_distance:deployForm._if_adj_dist,short_threshold:deployForm._if_short_thr,long_threshold:deployForm._if_long_thr,profit_target_pct:deployForm._if_profit_pct/100,chain_depth_strikes:deployForm._if_chain_depth})"/>
                   <p class="text-[10px] mt-0.5" style="color:var(--t-muted)">% of expected max profit (default 65)</p>
                 </div>
                 <div>
                   <label class="sec-label mb-1">SHORT THRESHOLD (₹)</label>
                   <input type="number" class="t-input" x-model.number="deployForm._if_short_thr" min="1" step="1"
-                         @change="deployForm.strategy_params=JSON.stringify({otm1:deployForm._if_otm1,adjustment_distance:deployForm._if_adj_dist,short_threshold:deployForm._if_short_thr,long_threshold:deployForm._if_long_thr,profit_target_pct:deployForm._if_profit_pct/100,chain_depth_strikes:deployForm._if_chain_depth,expiry_day_cutoff:deployForm._if_expiry_cutoff})"/>
+                         @change="deployForm.strategy_params=JSON.stringify({otm1:deployForm._if_otm1,adjustment_distance:deployForm._if_adj_dist,short_threshold:deployForm._if_short_thr,long_threshold:deployForm._if_long_thr,profit_target_pct:deployForm._if_profit_pct/100,chain_depth_strikes:deployForm._if_chain_depth})"/>
                   <p class="text-[10px] mt-0.5" style="color:var(--t-muted)">Sell strike LTP floor (default 20)</p>
                 </div>
                 <div>
                   <label class="sec-label mb-1">LONG THRESHOLD (₹)</label>
                   <input type="number" class="t-input" x-model.number="deployForm._if_long_thr" min="1" step="1"
-                         @change="deployForm.strategy_params=JSON.stringify({otm1:deployForm._if_otm1,adjustment_distance:deployForm._if_adj_dist,short_threshold:deployForm._if_short_thr,long_threshold:deployForm._if_long_thr,profit_target_pct:deployForm._if_profit_pct/100,chain_depth_strikes:deployForm._if_chain_depth,expiry_day_cutoff:deployForm._if_expiry_cutoff})"/>
+                         @change="deployForm.strategy_params=JSON.stringify({otm1:deployForm._if_otm1,adjustment_distance:deployForm._if_adj_dist,short_threshold:deployForm._if_short_thr,long_threshold:deployForm._if_long_thr,profit_target_pct:deployForm._if_profit_pct/100,chain_depth_strikes:deployForm._if_chain_depth})"/>
                   <p class="text-[10px] mt-0.5" style="color:var(--t-muted)">Buy strike LTP ceiling (default 20)</p>
                 </div>
                 <div>
                   <label class="sec-label mb-1">CHAIN DEPTH (STRIKES)</label>
                   <input type="number" class="t-input" x-model.number="deployForm._if_chain_depth" min="4" max="60" step="1"
-                         @change="deployForm.strategy_params=JSON.stringify({otm1:deployForm._if_otm1,adjustment_distance:deployForm._if_adj_dist,short_threshold:deployForm._if_short_thr,long_threshold:deployForm._if_long_thr,profit_target_pct:deployForm._if_profit_pct/100,chain_depth_strikes:deployForm._if_chain_depth,expiry_day_cutoff:deployForm._if_expiry_cutoff})"/>
+                         @change="deployForm.strategy_params=JSON.stringify({otm1:deployForm._if_otm1,adjustment_distance:deployForm._if_adj_dist,short_threshold:deployForm._if_short_thr,long_threshold:deployForm._if_long_thr,profit_target_pct:deployForm._if_profit_pct/100,chain_depth_strikes:deployForm._if_chain_depth})"/>
                   <p class="text-[10px] mt-0.5" style="color:var(--t-muted)">ATM± live-quote window (default 20)</p>
-                </div>
-                <div>
-                  <label class="sec-label mb-1">EXPIRY-DAY CUTOFF (HH:MM)</label>
-                  <input type="text" class="t-input font-mono" x-model="deployForm._if_expiry_cutoff" placeholder="15:00"
-                         @change="deployForm.strategy_params=JSON.stringify({otm1:deployForm._if_otm1,adjustment_distance:deployForm._if_adj_dist,short_threshold:deployForm._if_short_thr,long_threshold:deployForm._if_long_thr,profit_target_pct:deployForm._if_profit_pct/100,chain_depth_strikes:deployForm._if_chain_depth,expiry_day_cutoff:deployForm._if_expiry_cutoff})"/>
-                  <p class="text-[10px] mt-0.5" style="color:var(--t-muted)">
-                    Real incident 2026-09-15: a fresh entry after this time, ON the active
-                    expiry's own day, uses NEXT week's expiry instead (default 15:00)
-                  </p>
                 </div>
                 <p class="text-[10px] col-span-3" style="color:var(--t-muted)">
                   Carries positions across days (NRML, no EOD square-off) -- exits only via the
                   65% profit target, or manual square-off. Phase 1 backtest-validated mechanic
                   (2026-09-13); this is its first live (paper_route) deployment -- watch closely.
+                  Real incident 2026-09-15/16: a fresh entry (first entry of the day, or a
+                  65%-triggered restart) landing on the active contract's expiry day OR the day
+                  before it ALWAYS uses next week's expiry instead, at any time of day -- not
+                  configurable, this is a fixed platform rule.
                 </p>
               </div>
             </template>

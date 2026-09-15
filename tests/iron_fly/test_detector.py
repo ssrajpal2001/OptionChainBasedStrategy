@@ -21,7 +21,7 @@ from strategies.iron_fly.detector import (
     Leg,
     should_use_next_week_expiry,
 )
-from datetime import date, time
+from datetime import date
 
 
 # ── round_to_atm ─────────────────────────────────────────────────────────────
@@ -226,39 +226,30 @@ def test_profit_target_hit_true_at_or_above_65_pct():
     assert profit_target_hit(current_cycle_pnl=3899.0, expected_max_profit=6000.0, target_pct=0.65) is False
 
 
-# ── should_use_next_week_expiry (real incident, 2026-09-15) ─────────────────
+# ── should_use_next_week_expiry (real incident 2026-09-15, simplified 2026-09-16) ──
+#
+# Direct user spec, final form: "we will NEVER take trade of same week
+# expiry on expiry day" -- unconditional, no time-of-day check at all. Same
+# for the day before expiry ("if 1 day before ... 65% is achieved then also
+# it will jump to next week"). Only DTE (days to expiry) matters now -- the
+# original 15:00 cutoff-time concept was explicitly dropped as too narrow
+# once the user saw DTE=0 needed the SAME unconditional treatment as DTE=1.
 
-def test_expiry_day_past_cutoff_uses_next_week():
-    # Real incident: fresh entry at 15:20 on expiry day itself needed
-    # another fly conversion 1 minute before close -- "no use" per direct
-    # user spec. Cutoff default is 15:00.
-    assert should_use_next_week_expiry(
-        today=date(2026, 9, 15), active_expiry=date(2026, 9, 15), now_time=time(15, 20),
-    ) is True
-
-
-def test_expiry_day_exactly_at_cutoff_uses_next_week():
-    assert should_use_next_week_expiry(
-        today=date(2026, 9, 15), active_expiry=date(2026, 9, 15), now_time=time(15, 0),
-    ) is True
-
-
-def test_expiry_day_before_cutoff_uses_current_expiry():
-    assert should_use_next_week_expiry(
-        today=date(2026, 9, 15), active_expiry=date(2026, 9, 15), now_time=time(9, 21),
-    ) is False
+def test_expiry_day_itself_always_jumps_even_in_the_morning():
+    # This would have changed the real 2026-09-15 09:21 first entry of the
+    # day to use Sep 22 instead of Sep 15 -- direct user confirmation this
+    # is now the intended behavior, overriding the earlier cutoff-gated design.
+    assert should_use_next_week_expiry(today=date(2026, 9, 15), active_expiry=date(2026, 9, 15)) is True
 
 
-def test_non_expiry_day_never_triggers_regardless_of_time():
-    # Today is NOT the active expiry's own day (still days away) -- no
-    # reason to skip ahead even late in the day.
-    assert should_use_next_week_expiry(
-        today=date(2026, 9, 11), active_expiry=date(2026, 9, 15), now_time=time(15, 20),
-    ) is False
+def test_day_before_expiry_always_jumps_even_in_the_morning():
+    assert should_use_next_week_expiry(today=date(2026, 9, 14), active_expiry=date(2026, 9, 15)) is True
 
 
-def test_custom_cutoff_is_respected():
-    assert should_use_next_week_expiry(
-        today=date(2026, 9, 15), active_expiry=date(2026, 9, 15), now_time=time(14, 45),
-        cutoff=time(14, 30),
-    ) is True
+def test_two_days_before_expiry_does_not_jump():
+    # DTE >= 2 -- plenty of runway, use the current contract as normal.
+    assert should_use_next_week_expiry(today=date(2026, 9, 13), active_expiry=date(2026, 9, 15)) is False
+
+
+def test_non_expiry_week_never_triggers():
+    assert should_use_next_week_expiry(today=date(2026, 9, 11), active_expiry=date(2026, 9, 15)) is False
