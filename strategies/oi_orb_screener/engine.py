@@ -160,6 +160,15 @@ _SPOT_FEED_RETRY_POLL_SEC = 20.0
 # treated as genuinely priceless.
 _POLL_PRICE_STALE_SEC = 90.0
 
+# 2026-09-16, direct user spec: pre-entry trap-target-already-touched gate
+# (see _check_trap_target_touched_today's own docstring). Once a signal is
+# skipped this way, re-checking the (real, network-fetching) touched-today
+# condition on EVERY tick that makes a fresh new-high/new-low would hammer
+# the same NSE/Upstox endpoints this codebase has repeatedly documented as
+# throttle-sensitive -- rate-limit the re-check, same philosophy as every
+# other throttled poll in this file.
+_TRAP_GATE_RECHECK_MIN_SEC = 30.0
+
 
 def _make_strategy_logger(client_id: str, binding_id: str) -> logging.Logger:
     """Dedicated, rotating, per-(client,binding,day) log file -- same
@@ -538,6 +547,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._pending_contracts: Dict[str, "stock_resolve.ResolvedContract"] = {}
         self._pending_fills: Dict[str, dict] = {}   # event_id -> context
         self._pending_closes: Dict[str, str] = {}   # event_id -> exit reason (OiOrbFillEvent carries no reason field)
+        self._pending_close_details: Dict[str, str] = {}   # event_id -> human-readable exit detail (candle time/values)
         self._positions: Dict[str, dict] = {}        # stock symbol -> position dict
         self._live_option_ltp: Dict[str, float] = {}
         self._ltp_log_last: Dict[str, float] = {}
@@ -595,6 +605,15 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         # entirely (not just a stale tick) -- see _live_price's own docstring.
         self._last_poll_price: Dict[str, float] = {}
         self._last_poll_price_ts: Dict[str, datetime] = {}
+        # 2026-09-16, direct user spec: pre-entry trap-target-already-touched
+        # gate -- (symbol, side) -> {"extreme": float, "last_check_ts": float
+        # (time.monotonic)} once a VWAP-retest signal is skipped because
+        # today's 180-min trap target was already touched. "extreme" is the
+        # day's-high-so-far (CALL) / day's-low-so-far (PUT) tracked from the
+        # skip point onward; a genuine NEW extreme re-triggers a fresh
+        # touched-today check (rate-limited) and fires immediately if it
+        # passes. See _check_trap_target_touched_today's own docstring.
+        self._trap_gate_skipped: Dict[tuple, dict] = {}
         self._spot_tick_subscribed: Dict[str, bool] = {}
         # 2026-09-10, real incident fix: when _ensure_spot_feed's own subscribe
         # attempt was seen, so _spot_feed_retry_loop can detect "subscribed a
@@ -634,6 +653,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._entry_window_done_logged = False
         self._rejected = set()
         self._sl_reentry_used = set()
+        self._trap_gate_skipped = {}
         # 2026-09-07: guards the ONE morning call to _apply_historical_vwap_retest
         # (right after the regime freeze block below) so it doesn't re-run on every
         # poll cycle for the life of the day -- the afternoon rescan calls it again
@@ -1733,6 +1753,35 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                     ltp = self._live_price(sym, live)
                     if ltp is None:
                         continue
+
+                    # 2026-09-16, direct user spec: a symbol currently gated
+                    # (skipped earlier because its 180-min trap target was
+                    # already touched today) skips the normal entry mechanic
+                    # entirely and instead just watches for a genuine new
+                    # day-high (CALL) / day-low (PUT) -- the re-trigger.
+                    gate_key = (sym, side)
+                    gate_state = self._trap_gate_skipped.get(gate_key)
+                    if gate_state is not None:
+                        extreme = gate_state["extreme"]
+                        breached = (ltp > extreme) if side == "CALL" else (ltp < extreme)
+                        if not breached:
+                            continue
+                        gate_state["extreme"] = ltp
+                        now_mono = _time.monotonic()
+                        if now_mono - gate_state.get("last_check_ts", 0.0) < _TRAP_GATE_RECHECK_MIN_SEC:
+                            continue
+                        gate_state["last_check_ts"] = now_mono
+                        touched, _zone = await self._check_trap_target_touched_today(sym, side)
+                        if touched:
+                            continue   # still spent even with the fresh zone -- keep waiting
+                        del self._trap_gate_skipped[gate_key]
+                        self._already_fired.add(gate_key)
+                        orb_lvl = self._orb_frozen.get(sym, (0.0, 0.0))
+                        await self._emit_vwap_signal(
+                            sym, side, ltp, "trap_gate_new_extreme_retrigger", orb_lvl,
+                            now.strftime("%H:%M:%S"), label="TRAP-GATE-RETRIGGER")
+                        continue
+
                     if self._top20_mode:
                         # 2026-09-09, direct user spec: replaced VwapTouchTracker
                         # (a loose "any touch in the last 15 candles" check, which
@@ -1772,6 +1821,30 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                         reason = "vwap_retest"
                     if not fire:
                         continue
+
+                    # 2026-09-16, direct user spec: a genuine VWAP-retest just
+                    # fired -- before actually taking the trade, check whether
+                    # today's own 180-min trap target has already been
+                    # touched. If so, there's no real edge left for the day;
+                    # skip this trade and start watching for a fresh day-high/
+                    # day-low breach instead (see the gate_state block above).
+                    touched, zone = await self._check_trap_target_touched_today(sym, side)
+                    if touched:
+                        self._trap_gate_skipped[gate_key] = {
+                            "extreme": ltp, "last_check_ts": _time.monotonic()}
+                        zone_str = (f"zone=[{zone['zone_lo']:.2f},{zone['zone_hi']:.2f}]"
+                                    if zone else "zone=n/a")
+                        self._clog.info(
+                            "OiOrb[%s/%s]: %s TRAP-TARGET already touched today -- skipping entry "
+                            "(%s ltp=%.2f), watching for a new day-%s to re-trigger.",
+                            self._client_id, self._binding_id, sym, zone_str, ltp,
+                            "high" if side == "CALL" else "low")
+                        await asyncio.to_thread(
+                            store.log_signal_event, self._client_id, self._binding_id, sym,
+                            "trap_target_already_touched_today_skip", side=side,
+                            detail=f"{zone_str} ltp={ltp:.2f}")
+                        continue
+
                     self._already_fired.add((sym, side))
                     if self._top20_mode:
                         await asyncio.to_thread(
@@ -3033,7 +3106,8 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 return True
         return False
 
-    async def _fire_vwap_close_sl(self, sym: str, side: str, ltp: float, vwap: float) -> None:
+    async def _fire_vwap_close_sl(self, sym: str, side: str, ltp: float, vwap: float,
+                                   candle_bar=None) -> None:
         """Closes the position on a confirmed VWAP-close SL breach, and
         grants a ONE-TIME re-entry allowance for this (symbol, side) today
         (direct user spec, 2026-09-08: "I want re-entry allowed after a SL
@@ -3042,18 +3116,34 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         day via self._sl_reentry_used; a SECOND SL stop-out on the same
         (symbol, side) the same day does NOT grant another re-entry (already
         consumed). Target-hit and EOD exits are completely unaffected --
-        this allowance is specific to the SL close path only."""
+        this allowance is specific to the SL close path only.
+
+        2026-09-16, direct user spec: `candle_bar` (the actual 20-min Bar
+        whose close satisfied the adverse condition, when the caller has
+        one) is used to build a human-readable detail string with the REAL
+        candle/bucket time window + the exact close/VWAP values that fired
+        the SL -- not just the live tick at the moment of closing, which
+        made today's own debugging session (2026-09-15) need several rounds
+        of manual log cross-referencing to reconstruct. Threaded into both
+        signal_events and the positions table (via _emit_close's own
+        detail param) so it's visible without a log dive next time."""
         pos = self._positions.get(sym)
         if pos is None or sym in self._eod_closing:
             return
         self._eod_closing.add(sym)
+        if candle_bar is not None:
+            bucket_end = candle_bar.ts + timedelta(minutes=_VWAP_SL_TF_MIN)
+            detail = (f"candle=[{candle_bar.ts.strftime('%H:%M')}-{bucket_end.strftime('%H:%M')}) "
+                      f"close={candle_bar.close:.2f} vwap={vwap:.2f} live_ltp={ltp:.2f}")
+        else:
+            detail = f"underlying_ltp={ltp:.2f} vwap={vwap:.2f}"
         self._clog.info(
-            "OiOrb[%s/%s]: %s VWAP-CLOSE SL HIT -- underlying_ltp=%.2f vwap=%.2f side=%s -- closing.",
-            self._client_id, self._binding_id, sym, ltp, vwap, side,
+            "OiOrb[%s/%s]: %s VWAP-CLOSE SL HIT -- %s side=%s -- closing.",
+            self._client_id, self._binding_id, sym, detail, side,
         )
         await asyncio.to_thread(
             store.log_signal_event, self._client_id, self._binding_id, sym,
-            "vwap_close_sl_triggered", side=side, detail=f"underlying_ltp={ltp:.2f} vwap={vwap:.2f}")
+            "vwap_close_sl_triggered", side=side, detail=detail)
         key = (sym, side)
         if key not in self._sl_reentry_used:
             self._sl_reentry_used.add(key)
@@ -3061,7 +3151,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             self._clog.info(
                 "OiOrb[%s/%s]: %s %s one-time re-entry allowance granted for today (SL stop-out).",
                 self._client_id, self._binding_id, sym, side)
-        await self._emit_close(sym, pos, "vwap_close_sl")
+        await self._emit_close(sym, pos, "vwap_close_sl", detail=detail)
 
     async def _vwap_close_sl_check(self, sym: str, side: str, ltp: float, ts: datetime) -> None:
         """Live per-tick SL check (2026-09-08, direct user spec): 20-min
@@ -3147,7 +3237,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             else ((latest.close - vwap) / vwap >= _VWAP_SL_MIN_GAP_PCT)
         if not adverse:
             return
-        await self._fire_vwap_close_sl(sym, side, ltp, vwap)
+        await self._fire_vwap_close_sl(sym, side, ltp, vwap, candle_bar=latest)
 
     async def _replay_vwap_close_sl(self, sym: str, side: str, today_bars: list, entry_ts: datetime,
                                      today_rows: Optional[list] = None) -> bool:
@@ -3252,7 +3342,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                     "SL breach (HA %d-min close=%.2f vs vwap-as-of-then=%.2f, real history since "
                     "entry=%s) -- closing now.", self._client_id, self._binding_id, sym,
                     _VWAP_SL_TF_MIN, hb.close, vwap, entry_ts.isoformat())
-                await self._fire_vwap_close_sl(sym, side, hb.close, vwap)
+                await self._fire_vwap_close_sl(sym, side, hb.close, vwap, candle_bar=hb)
                 return True
         acc = _TrapAcc(timeframe_min=1)
         acc.bars = list(today_bars)
@@ -3451,6 +3541,75 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 out.append(z)
         return out
 
+    async def _check_trap_target_touched_today(self, sym: str, side: str) -> tuple:
+        """2026-09-16, direct user spec: pre-ENTRY gate -- when a genuine
+        VWAP-retest signal fires, check whether the 180-min multi-day trap
+        target zone (the SAME zones_fn already used for the exit side) has
+        ALREADY been touched by real price TODAY (market open -> now),
+        BEFORE actually taking the trade. If it has, there's no real target
+        left for the day -- skip this entry rather than take a trade whose
+        own exit target is already spent.
+
+        Distinct from _drop_already_touched_zones above, which only ever
+        excludes zones touched on a PRIOR calendar day (used to pick a
+        target AFTER a position is already open) -- this checks TODAY's own
+        candles specifically, and runs BEFORE entry, not after.
+
+        Returns (touched: bool, zone: Optional[dict]). Best-effort, same
+        discipline as every other real-data seed in this file: any failure
+        (no instrument key, no token, no data, too little multi-day history)
+        returns (False, None) -- an auxiliary data hiccup must never block a
+        real trade, same reasoning _seed_trap_exit_state's own docstring
+        already states for the exit-side seed."""
+        try:
+            eq_key = stock_resolve.resolve_eq_instrument_key(sym)
+            if not eq_key:
+                return False, None
+            from data_layer.client_db import ClientDB
+            creds = await asyncio.to_thread(ClientDB().get_feeder_creds_sync, "upstox")
+            token = (creds or {}).get("access_token", "")
+            if not token:
+                return False, None
+            from data_layer.historical_candles import fetch_upstox_range_1m, fetch_upstox_intraday_1m
+            from strategies.core.trap_zone_utils import Bar as _Bar
+            from strategies.core.candle_indicators import to_n_min_bars_dateaware
+            today = datetime.now(IST).date()
+            start = today - timedelta(days=_TRAP_EXIT_LOOKBACK_CALENDAR_DAYS)
+            prior_rows = await fetch_upstox_range_1m(eq_key, token, start, today)
+            today_rows = await fetch_upstox_intraday_1m(eq_key, token)
+            all_rows = list(prior_rows or []) + list(today_rows or [])
+            if not all_rows:
+                return False, None
+            seen_ts = set()
+            bars = []
+            for r in sorted(all_rows, key=lambda r: r["ts"]):
+                if r["ts"] in seen_ts:
+                    continue
+                seen_ts.add(r["ts"])
+                bars.append(_Bar(ts=datetime.fromisoformat(r["ts"]), open=float(r["open"]),
+                                  high=float(r["high"]), low=float(r["low"]), close=float(r["close"])))
+            htf = to_n_min_bars_dateaware(bars, _TRAP_EXIT_HTF_MULTIDAY_MIN)
+            if len(htf) < 3:
+                return False, None
+            zones_fn = screener.bull_trap_zones if side == "CALL" else screener.sharp_bear_zones
+            zones_all = zones_fn(htf)
+            zone = self._latest_locked_zone(zones_all, datetime.now(IST))
+            if zone is None:
+                return False, None
+            today_start = datetime.combine(today, dtime.min, tzinfo=IST)
+            touched_today = any(
+                zone["lock_ts"] <= b.ts and b.ts >= today_start
+                and zone["zone_lo"] <= b.close <= zone["zone_hi"]
+                for b in bars
+            )
+            return touched_today, zone
+        except Exception:
+            self._clog.warning(
+                "OiOrb[%s/%s]: %s pre-entry trap-target touched-today check failed (non-fatal, "
+                "treated as not-touched -- entry proceeds normally).",
+                self._client_id, self._binding_id, sym, exc_info=True)
+            return False, None
+
     async def _trap_ladder_check(self, sym: str, side: str, ltp: float, ts: datetime, zone: dict,
                                   tier: str, exit_reason: str) -> bool:
         """Shared 3-min S1(CALL)/R1(PUT) ladder, started fresh from the
@@ -3515,14 +3674,22 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         if pos is None:
             return False
         self._eod_closing.add(sym)
+        # 2026-09-16, direct user spec: candle/bucket time + values in the
+        # exit history, not just the bare reason code -- this ladder is
+        # tick-driven (not candle-close based like vwap_close_sl), so the
+        # closest real "candle time" is the last fed LTF bar's own close
+        # time; include it alongside the breach tick's own timestamp.
+        last_bar_ts = acc.bars[-1].ts.strftime('%H:%M') if acc.bars else "n/a"
+        detail = (f"breach_ts={ts.strftime('%H:%M:%S')} last_{_TRAP_EXIT_LTF_MIN}m_bar={last_bar_ts} "
+                  f"underlying_ltp={ltp:.2f} level={lvl:.2f} zone=[{zone['zone_lo']:.2f},{zone['zone_hi']:.2f}]")
         self._clog.info(
-            "OiOrb[%s/%s]: %s %s HIT -- underlying_ltp=%.2f level=%.2f side=%s -- closing.",
-            self._client_id, self._binding_id, sym, exit_reason, ltp, lvl, side,
+            "OiOrb[%s/%s]: %s %s HIT -- %s side=%s -- closing.",
+            self._client_id, self._binding_id, sym, exit_reason, detail, side,
         )
         await asyncio.to_thread(
             store.log_signal_event, self._client_id, self._binding_id, sym,
-            f"{exit_reason}_triggered", detail=f"underlying_ltp={ltp:.2f} level={lvl:.2f}")
-        await self._emit_close(sym, pos, exit_reason)
+            f"{exit_reason}_triggered", detail=detail)
+        await self._emit_close(sym, pos, exit_reason, detail=detail)
         return True
 
     async def _trap_multiday_exit_check(self, sym: str, side: str, ltp: float, ts: datetime) -> None:
@@ -4014,6 +4181,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                     "exit_failed", detail=eid)
                 return
             exit_reason = self._pending_closes.pop(eid, "")
+            exit_detail = self._pending_close_details.pop(eid, "")
             if pos is not None:
                 pnl = round((fill.fill_price - pos["entry_price"]) * pos["qty"], 2)
                 self._clog.info("OiOrb[%s/%s]: EXIT CONFIRMED %s qty=%d @ %.2f (entry %.2f) P&L=%.2f",
@@ -4021,11 +4189,16 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                                  fill.fill_price, pos["entry_price"], pnl)
                 await asyncio.to_thread(
                     store.close_position, self._client_id, self._binding_id, symbol,
-                    fill.fill_price, exit_reason, pnl)
+                    fill.fill_price, exit_reason, pnl, exit_detail=exit_detail)
 
     # ── EOD square-off (the ONLY exit logic this pass) ──────────────────
 
-    async def _emit_close(self, symbol: str, pos: dict, reason: str) -> None:
+    async def _emit_close(self, symbol: str, pos: dict, reason: str, detail: str = "") -> None:
+        """2026-09-16, direct user spec: `detail` carries the WHY behind the
+        exit in human-readable form (the real candle/bucket time + values
+        that satisfied the condition, not just the bare reason code) --
+        threaded through to store.close_position's exit_detail column so
+        it's visible in the trade history, not just buried in the log."""
         contract = pos["contract"]
         exit_price = self._live_option_ltp.get(symbol, pos["entry_price"])
         event_id = f"{self._client_id}_{self._binding_id}_{symbol}_{reason}_{int(_time.time())}"
@@ -4043,8 +4216,10 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             entry_ts=pos.get("opened_at"),
         )
         self._pending_closes[event_id] = reason
-        self._clog.info("OiOrb[%s/%s]: closing %s qty=%d @ %.2f reason=%s",
-                         self._client_id, self._binding_id, symbol, pos["qty"], exit_price, reason)
+        self._pending_close_details[event_id] = detail
+        self._clog.info("OiOrb[%s/%s]: closing %s qty=%d @ %.2f reason=%s%s",
+                         self._client_id, self._binding_id, symbol, pos["qty"], exit_price, reason,
+                         f" ({detail})" if detail else "")
         await self._bus.publish(Topic.OI_ORB_ORDER_REQUEST, order_ev)
 
     async def _eod_loop(self) -> None:

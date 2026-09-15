@@ -13,6 +13,7 @@ Confirms multiple concurrent stock positions are tracked independently
 stock allowed, not capped to 1).
 """
 import asyncio
+import time as _time
 from datetime import date, datetime, time as dtime, timedelta
 
 import pytest
@@ -1188,7 +1189,7 @@ async def test_replay_vwap_close_sl_does_not_fire_on_a_stale_bucket_judged_again
     monkeypatch.setattr(_engine_mod, "datetime", _FixedDT)
 
     fired = []
-    async def _spy_fire(sym, side, ltp, vwap):
+    async def _spy_fire(sym, side, ltp, vwap, candle_bar=None):
         fired.append((sym, side, ltp, vwap))
     book._fire_vwap_close_sl = _spy_fire
 
@@ -1228,7 +1229,7 @@ async def test_replay_vwap_close_sl_still_fires_on_a_genuine_contemporaneous_bre
     monkeypatch.setattr(_engine_mod, "datetime", _FixedDT)
 
     fired = []
-    async def _spy_fire(sym, side, ltp, vwap):
+    async def _spy_fire(sym, side, ltp, vwap, candle_bar=None):
         fired.append((sym, side, ltp, vwap))
     book._fire_vwap_close_sl = _spy_fire
 
@@ -1283,7 +1284,7 @@ async def test_vwap_close_sl_check_skips_a_bucket_that_closed_before_this_entry(
     book._sl_vwap_1m_acc["DIXON"] = acc
 
     fired = []
-    async def _spy_fire(sym, side, ltp, vwap):
+    async def _spy_fire(sym, side, ltp, vwap, candle_bar=None):
         fired.append((sym, side, ltp, vwap))
     book._fire_vwap_close_sl = _spy_fire
 
@@ -1318,7 +1319,7 @@ async def test_vwap_close_sl_check_still_fires_on_a_genuine_post_entry_breach(mo
     book._sl_vwap_1m_acc["DIXON"] = acc
 
     fired = []
-    async def _spy_fire(sym, side, ltp, vwap):
+    async def _spy_fire(sym, side, ltp, vwap, candle_bar=None):
         fired.append((sym, side, ltp, vwap))
     book._fire_vwap_close_sl = _spy_fire
 
@@ -3262,3 +3263,300 @@ async def test_daily_loop_sets_restore_from_db_ready_even_if_restore_raises(monk
     await book._daily_loop()
 
     assert book._restore_from_db_ready is True
+
+
+# ── 2026-09-16, direct user spec: pre-entry trap-target-already-touched
+# gate. Before actually taking a genuine VWAP-retest signal, check whether
+# today's own 180-min multi-day trap target has already been touched by
+# real price -- if so, the target is spent, skip the trade and watch for a
+# fresh day-high (CALL) / day-low (PUT) breach to re-trigger with a freshly
+# recomputed zone. ────────────────────────────────────────────────────────
+
+def _with_open(rows: list) -> list:
+    """The shared _row/_rows_flat helpers above don't set "open" (existing
+    callers build Bar objects with open=close explicitly) -- real Upstox
+    rows always carry it (_parse_candles), and _check_trap_target_touched_
+    today reads r["open"] directly to match _seed_trap_exit_state's own
+    established convention. Adds it defaulting to close for these tests."""
+    out = []
+    for r in rows:
+        r = dict(r)
+        r.setdefault("open", r["close"])
+        out.append(r)
+    return out
+
+
+@pytest.mark.asyncio
+async def test_check_trap_target_touched_today_true_when_real_bar_inside_zone(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    monkeypatch.setattr(stock_resolve, "resolve_eq_instrument_key", lambda sym: "NSE_EQ|INE000A01001")
+    monkeypatch.setattr("data_layer.client_db.ClientDB.get_feeder_creds_sync",
+                         lambda self, provider: {"access_token": "tok"})
+    monkeypatch.setattr("data_layer.historical_candles.fetch_upstox_range_1m", _async_return([]))
+
+    today_rows = _rows_flat(9, 15, 200, 90.0, 10.0)
+    today_rows.append(_row("13:00", 102.0, 101.0, 102.0, 10.0))   # touches [100,105]
+    today_rows += _rows_flat(13, 1, 200, 90.0, 10.0)
+    monkeypatch.setattr("data_layer.historical_candles.fetch_upstox_intraday_1m",
+                         _async_return(_with_open(today_rows)))
+
+    fixed_zone = {"zone_lo": 100.0, "zone_hi": 105.0,
+                  "lock_ts": datetime(2026, 8, 24, 9, 0, 0, tzinfo=IST)}
+    monkeypatch.setattr(screener, "bull_trap_zones", lambda htf: [fixed_zone])
+
+    import strategies.oi_orb_screener.engine as _engine_mod
+    _fixed_now = datetime(2026, 8, 24, 16, 0, 0, tzinfo=_engine_mod.IST)
+    class _FixedDT(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return _fixed_now
+    monkeypatch.setattr(_engine_mod, "datetime", _FixedDT)
+
+    touched, zone = await book._check_trap_target_touched_today("TESTSTOCK", "CALL")
+    assert touched is True
+    assert zone == fixed_zone
+
+
+@pytest.mark.asyncio
+async def test_check_trap_target_touched_today_false_when_no_bar_inside_zone(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    monkeypatch.setattr(stock_resolve, "resolve_eq_instrument_key", lambda sym: "NSE_EQ|INE000A01001")
+    monkeypatch.setattr("data_layer.client_db.ClientDB.get_feeder_creds_sync",
+                         lambda self, provider: {"access_token": "tok"})
+    monkeypatch.setattr("data_layer.historical_candles.fetch_upstox_range_1m", _async_return([]))
+
+    today_rows = _rows_flat(9, 15, 200, 90.0, 10.0) + _rows_flat(13, 0, 200, 90.0, 10.0)
+    monkeypatch.setattr("data_layer.historical_candles.fetch_upstox_intraday_1m",
+                         _async_return(_with_open(today_rows)))
+
+    fixed_zone = {"zone_lo": 100.0, "zone_hi": 105.0,
+                  "lock_ts": datetime(2026, 8, 24, 9, 0, 0, tzinfo=IST)}
+    monkeypatch.setattr(screener, "bull_trap_zones", lambda htf: [fixed_zone])
+
+    import strategies.oi_orb_screener.engine as _engine_mod
+    _fixed_now = datetime(2026, 8, 24, 16, 0, 0, tzinfo=_engine_mod.IST)
+    class _FixedDT(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return _fixed_now
+    monkeypatch.setattr(_engine_mod, "datetime", _FixedDT)
+
+    touched, zone = await book._check_trap_target_touched_today("TESTSTOCK", "CALL")
+    assert touched is False
+    assert zone == fixed_zone
+
+
+@pytest.mark.asyncio
+async def test_check_trap_target_touched_today_best_effort_false_on_no_instrument_key(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    monkeypatch.setattr(stock_resolve, "resolve_eq_instrument_key", lambda sym: "")
+    touched, zone = await book._check_trap_target_touched_today("TESTSTOCK", "CALL")
+    assert touched is False
+    assert zone is None
+
+
+@pytest.mark.asyncio
+async def test_check_trap_target_touched_today_best_effort_false_on_no_token(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    monkeypatch.setattr(stock_resolve, "resolve_eq_instrument_key", lambda sym: "NSE_EQ|INE000A01001")
+    monkeypatch.setattr("data_layer.client_db.ClientDB.get_feeder_creds_sync",
+                         lambda self, provider: {"access_token": ""})
+    touched, zone = await book._check_trap_target_touched_today("TESTSTOCK", "CALL")
+    assert touched is False
+    assert zone is None
+
+
+def test_reset_session_clears_trap_gate_state():
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._trap_gate_skipped[("SYM", "CALL")] = {"extreme": 100.0, "last_check_ts": 0.0}
+    book.reset_session()
+    assert book._trap_gate_skipped == {}
+
+
+# ── 2026-09-16, direct user spec: history must show the real candle/bucket
+# time + values that fired an SL, not just the reason code. ────────────────
+
+@pytest.mark.asyncio
+async def test_fire_vwap_close_sl_detail_includes_real_candle_window_and_values():
+    from strategies.core.trap_zone_utils import Bar as _Bar
+    bus = _FakeBus()
+    book = _make_book(bus)
+    contract = _contract("TESTSTOCK", 100, "CE")
+    book._positions["TESTSTOCK"] = {
+        "contract": contract, "qty": 100, "entry_price": 10.0, "paper_mode": True,
+        "opened_at": datetime(2026, 9, 16, 9, 30, tzinfo=IST), "sl_mechanic": "vwap",
+    }
+    captured = {}
+    async def _spy_emit_close(symbol, pos, reason, detail=""):
+        captured["reason"] = reason
+        captured["detail"] = detail
+    book._emit_close = _spy_emit_close
+
+    bar = _Bar(ts=datetime(2026, 9, 16, 10, 15, tzinfo=IST), open=553.0, high=555.0,
+               low=550.0, close=553.0)
+    await book._fire_vwap_close_sl("TESTSTOCK", "CALL", 553.20, 551.65, candle_bar=bar)
+
+    assert captured["reason"] == "vwap_close_sl"
+    assert "[10:15-10:35)" in captured["detail"]
+    assert "close=553.00" in captured["detail"]
+    assert "vwap=551.65" in captured["detail"]
+    assert "live_ltp=553.20" in captured["detail"]
+
+
+@pytest.mark.asyncio
+async def test_fire_vwap_close_sl_detail_degrades_without_candle_bar():
+    bus = _FakeBus()
+    book = _make_book(bus)
+    contract = _contract("TESTSTOCK", 100, "CE")
+    book._positions["TESTSTOCK"] = {
+        "contract": contract, "qty": 100, "entry_price": 10.0, "paper_mode": True,
+        "opened_at": datetime(2026, 9, 16, 9, 30, tzinfo=IST), "sl_mechanic": "vwap",
+    }
+    captured = {}
+    async def _spy_emit_close(symbol, pos, reason, detail=""):
+        captured["detail"] = detail
+    book._emit_close = _spy_emit_close
+
+    await book._fire_vwap_close_sl("TESTSTOCK", "CALL", 553.20, 551.65)
+
+    assert "candle=" not in captured["detail"]
+    assert "underlying_ltp=553.20" in captured["detail"]
+    assert "vwap=551.65" in captured["detail"]
+
+
+# ── entry-loop wiring: drives the real _run_today_pipeline loop body, same
+# heavy-mock scaffold as test_exit_check_loop_uses_contract_side_not_flipped_
+# pchange above, to prove the gate is actually wired into the live entry
+# path, not just correct in isolation. ─────────────────────────────────────
+
+def _drive_entry_loop_scaffold(book, monkeypatch, fixed_now: datetime):
+    """Real shortlist DataFrame (not a manual self._shortlist_symbols
+    pre-set) -- the pipeline's own morning-build step unconditionally
+    overwrites self._shortlist_symbols/_shortlist_pchange from whatever
+    build_shortlist returns, so a pre-set list would just get wiped."""
+    import strategies.oi_orb_screener.engine as _engine_mod
+    class _FixedDT(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now
+    monkeypatch.setattr(_engine_mod, "datetime", _FixedDT)
+    monkeypatch.setattr(screener, "NSESession", _FakeNSESession)
+    import pandas as pd
+    df = pd.DataFrame([{"symbol": "TESTSTOCK", "pChange": 3.0, "oi_spurt_pct": 8.0,
+                         "score": 0.5, "lastPrice": 100.0, "previousClose": 97.0}])
+    monkeypatch.setattr(screener, "build_shortlist", lambda nse, cfg: (df, 0.4))
+    monkeypatch.setattr(screener, "backfill_orb_from_yahoo", lambda *a, **k: None)
+    monkeypatch.setattr(screener, "backfill_vwap_from_yahoo", lambda *a, **k: None)
+    monkeypatch.setattr(screener, "fetch_fno_price_universe",
+                         lambda nse: pd.DataFrame(columns=["symbol", "lastPrice", "pChange"]))
+    monkeypatch.setattr(screener, "side_allowed_by_regime", lambda side, regime, filt: True)
+    monkeypatch.setattr(asyncio, "to_thread", lambda fn, *a, **k: _async_return(fn(*a, **k))())
+    book._maybe_run_afternoon_scan = _async_return(None)
+    book._ensure_spot_feed = lambda *a, **k: None
+    book._screener_cfg["IGNORE_TIME_WINDOWS"] = True
+    book._running = True
+    book._regime = "BULLISH"
+
+
+@pytest.mark.asyncio
+async def test_entry_loop_skips_trade_when_trap_target_already_touched_today(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    _drive_entry_loop_scaffold(book, monkeypatch, datetime(2026, 9, 16, 10, 0, 0, tzinfo=IST))
+    book._live_price = lambda sym, live_df, log_source=False: 100.0
+    book._vwap_check_entry = lambda sym, side, ltp: True   # genuine retest fires
+
+    emitted = []
+    async def _spy_emit(*a, **kw):
+        emitted.append((a, kw))
+    book._emit_vwap_signal = _spy_emit
+
+    checked = []
+    async def _spy_touched(sym, side):
+        checked.append((sym, side))
+        return True, {"zone_lo": 95.0, "zone_hi": 105.0}   # already touched today
+    book._check_trap_target_touched_today = _spy_touched
+
+    # Run exactly one cycle of the pipeline's inner while-loop: patch
+    # asyncio.sleep to flip _running off the first time the loop body itself
+    # calls it (NOT to_thread's own internal sleeps, already bypassed above).
+    async def _sleep_once(_secs):
+        book._running = False
+    monkeypatch.setattr(asyncio, "sleep", _sleep_once)
+
+    await book._run_today_pipeline()
+
+    assert checked == [("TESTSTOCK", "CALL")]
+    assert emitted == []   # entry was skipped, not fired
+    assert ("TESTSTOCK", "CALL") not in book._already_fired
+    assert ("TESTSTOCK", "CALL") in book._trap_gate_skipped
+    assert book._trap_gate_skipped[("TESTSTOCK", "CALL")]["extreme"] == 100.0
+
+
+@pytest.mark.asyncio
+async def test_entry_loop_retriggers_immediately_on_fresh_day_high_when_zone_no_longer_touched(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    _drive_entry_loop_scaffold(book, monkeypatch, datetime(2026, 9, 16, 11, 0, 0, tzinfo=IST))
+    book._live_price = lambda sym, live_df, log_source=False: 101.0   # new high, breaches 100.0
+    book._trap_gate_skipped[("TESTSTOCK", "CALL")] = {"extreme": 100.0, "last_check_ts": 0.0}  # old -> not throttled
+
+    emitted = []
+    async def _spy_emit(sym, side, ltp, reason, orb_lvl, ts_str, label):
+        emitted.append((sym, side, ltp, reason, label))
+    book._emit_vwap_signal = _spy_emit
+
+    checked = []
+    async def _spy_touched(sym, side):
+        checked.append((sym, side))
+        return False, None   # fresh zone -- no longer touched
+    book._check_trap_target_touched_today = _spy_touched
+
+    async def _sleep_once(_secs):
+        book._running = False
+    monkeypatch.setattr(asyncio, "sleep", _sleep_once)
+
+    await book._run_today_pipeline()
+
+    assert checked == [("TESTSTOCK", "CALL")]
+    assert len(emitted) == 1
+    assert emitted[0][0] == "TESTSTOCK"
+    assert emitted[0][1] == "CALL"
+    assert emitted[0][3] == "trap_gate_new_extreme_retrigger"
+    assert ("TESTSTOCK", "CALL") in book._already_fired
+    assert ("TESTSTOCK", "CALL") not in book._trap_gate_skipped
+
+
+@pytest.mark.asyncio
+async def test_entry_loop_gate_recheck_is_throttled(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    _drive_entry_loop_scaffold(book, monkeypatch, datetime(2026, 9, 16, 11, 0, 0, tzinfo=IST))
+    book._live_price = lambda sym, live_df, log_source=False: 101.0
+    recent_ts = _time.monotonic()
+    book._trap_gate_skipped[("TESTSTOCK", "CALL")] = {"extreme": 100.0, "last_check_ts": recent_ts}
+
+    checked = []
+    async def _spy_touched(sym, side):
+        checked.append((sym, side))
+        return False, None
+    book._check_trap_target_touched_today = _spy_touched
+    emitted = []
+    async def _spy_emit(*a, **kw):
+        emitted.append((a, kw))
+    book._emit_vwap_signal = _spy_emit
+
+    async def _sleep_once(_secs):
+        book._running = False
+    monkeypatch.setattr(asyncio, "sleep", _sleep_once)
+
+    await book._run_today_pipeline()
+
+    assert checked == []   # throttled -- no recheck performed
+    assert emitted == []
+    assert book._trap_gate_skipped[("TESTSTOCK", "CALL")]["extreme"] == 101.0   # still updated

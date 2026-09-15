@@ -151,6 +151,39 @@ def test_close_position_with_no_open_row_is_a_safe_noop():
     assert store.load_open_positions("C1", "B1", trade_date="2026-08-24") == []
 
 
+def test_close_position_records_exit_detail(monkeypatch):
+    """2026-09-16, direct user spec: the history should show WHY an exit
+    happened with real values and the exact candle time, not just the bare
+    exit_reason code."""
+    store.open_position("C1", "B1", "DIXON", "PE", 14500, "2026-08-25", 50, 118.80,
+                         "orb_low_breakdown", True, "EVT1", trade_date="2026-08-24")
+    detail = "candle=[10:15-10:35) close=553.00 vwap=551.65 live_ltp=553.00"
+    store.close_position("C1", "B1", "DIXON", 108.0, "vwap_close_sl", -540.0,
+                          trade_date="2026-08-24", exit_detail=detail)
+
+    con = __import__("sqlite3").connect(store._DB_PATH)
+    row = con.execute(
+        "SELECT exit_reason, exit_detail, pnl FROM positions WHERE client_id=? AND binding_id=? AND symbol=?",
+        ("C1", "B1", "DIXON"),
+    ).fetchone()
+    con.close()
+    assert row == ("vwap_close_sl", detail, -540.0)
+
+
+def test_close_position_exit_detail_defaults_to_empty_string():
+    store.open_position("C1", "B1", "DIXON", "PE", 14500, "2026-08-25", 50, 118.80,
+                         "orb_low_breakdown", True, "EVT1", trade_date="2026-08-24")
+    store.close_position("C1", "B1", "DIXON", 108.0, "eod_squareoff", -540.0, trade_date="2026-08-24")
+
+    con = __import__("sqlite3").connect(store._DB_PATH)
+    row = con.execute(
+        "SELECT exit_detail FROM positions WHERE client_id=? AND binding_id=? AND symbol=?",
+        ("C1", "B1", "DIXON"),
+    ).fetchone()
+    con.close()
+    assert row == ("",)
+
+
 def test_positions_are_scoped_per_client_binding():
     store.open_position("C1", "B1", "DIXON", "PE", 14500, "2026-08-25", 50, 118.80,
                          "orb_low_breakdown", True, "EVT1", trade_date="2026-08-24")

@@ -108,6 +108,7 @@ CREATE TABLE IF NOT EXISTS positions (
     exit_price     REAL,
     exit_ts        TEXT,
     exit_reason    TEXT,
+    exit_detail    TEXT NOT NULL DEFAULT '',
     pnl            REAL,
     paper_mode     INTEGER NOT NULL DEFAULT 1,
     status         TEXT NOT NULL DEFAULT 'open',
@@ -210,6 +211,17 @@ def init_db() -> None:
                             "default journal mode.", exc)
         con.executescript(_DDL)
         con.commit()
+        # 2026-09-16, direct user spec: existing deployed DBs predate the
+        # exit_detail column -- CREATE TABLE IF NOT EXISTS above is a no-op
+        # against an already-existing positions table, so this ALTER is the
+        # real migration path. SQLite has no "ADD COLUMN IF NOT EXISTS";
+        # guard with try/except instead (raises "duplicate column name" once
+        # already applied -- safe to ignore every run after the first).
+        try:
+            con.execute("ALTER TABLE positions ADD COLUMN exit_detail TEXT NOT NULL DEFAULT ''")
+            con.commit()
+        except sqlite3.OperationalError:
+            pass
     finally:
         con.close()
     _initialized = True
@@ -675,10 +687,17 @@ def open_position(client_id: str, binding_id: str, symbol: str, option_type: str
 
 
 def close_position(client_id: str, binding_id: str, symbol: str, exit_price: float,
-                    exit_reason: str, pnl: float, trade_date: Optional[str] = None) -> None:
+                    exit_reason: str, pnl: float, trade_date: Optional[str] = None,
+                    exit_detail: str = "") -> None:
     """Closes the oldest still-open row for this symbol today -- there
     should only ever be one (_handle_signal already blocks a duplicate
-    concurrent position in the same symbol)."""
+    concurrent position in the same symbol).
+
+    2026-09-16, direct user spec: `exit_detail` carries the WHY behind the
+    exit in human-readable form -- the real candle/bucket time and the
+    values (e.g. bucket close vs VWAP) that satisfied the condition, not
+    just the bare exit_reason code. Optional/best-effort: an empty string
+    is fine for exit paths that don't have this detail available."""
     init_db()
     td = trade_date or _today()
     con = sqlite3.connect(_DB_PATH)
@@ -694,9 +713,9 @@ def close_position(client_id: str, binding_id: str, symbol: str, exit_price: flo
                             "nothing to close in the DB.", client_id, binding_id, symbol)
             return
         con.execute(
-            """UPDATE positions SET exit_price=?, exit_ts=?, exit_reason=?, pnl=?, status='closed'
+            """UPDATE positions SET exit_price=?, exit_ts=?, exit_reason=?, exit_detail=?, pnl=?, status='closed'
                WHERE id=?""",
-            (exit_price, _now_ts(), exit_reason, pnl, row[0]),
+            (exit_price, _now_ts(), exit_reason, exit_detail, pnl, row[0]),
         )
         con.commit()
     except Exception as exc:
