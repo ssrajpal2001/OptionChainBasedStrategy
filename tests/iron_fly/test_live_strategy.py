@@ -148,3 +148,28 @@ def test_resolve_expiry_uses_current_contract_two_days_before_expiry(monkeypatch
     )
 
     assert book._resolve_expiry() == date(2026, 9, 15)
+
+
+# ── liquidate() signature (2026-09-16 real incident fix) ────────────────────
+# StrategyBookManager (strategies/core/book_manager.py) always calls
+# `await book.liquidate(reason)` on every deployment-stop/kill-switch/
+# reconcile-removal. The old `def liquidate(self) -> None` (sync, no reason
+# param) raised TypeError on every real call, silently swallowed by the base
+# class's own try/except and merely logged as a WARNING -- so the "position
+# STILL OPEN" fallback fired every time by construction. These tests drive
+# liquidate() exactly the way the real base class does.
+
+@pytest.mark.asyncio
+async def test_liquidate_accepts_reason_kwarg_like_the_real_book_manager_call():
+    bus = _FakeBus()
+    book = IronFlyStrategy(bus, _fake_cfg(), "NIFTY", "c1", "b1")
+    # Mirrors strategies/core/book_manager.py's exact call shape.
+    await book.liquidate(reason="deployment_stop")
+
+
+@pytest.mark.asyncio
+async def test_liquidate_is_a_real_coroutine_awaitable_with_no_reason():
+    bus = _FakeBus()
+    book = IronFlyStrategy(bus, _fake_cfg(), "NIFTY", "c1", "b1")
+    result = await book.liquidate()
+    assert result is None

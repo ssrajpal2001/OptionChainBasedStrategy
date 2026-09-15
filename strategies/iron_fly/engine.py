@@ -561,14 +561,31 @@ class IronFlyStrategy:
     def is_flat(self) -> bool:
         return self._engine.is_flat()
 
-    def liquidate(self) -> None:
+    async def liquidate(self, reason: str = "") -> None:
         """Called by StrategyBookManager when this deployment is removed.
         Deliberately a no-op beyond stopping the book -- per the approved
         plan's "no EOD square-off" decision, an un-deployed binding does
         NOT auto-close a real position; the position (if any) stays open
         and this book will simply stop managing it until re-deployed. This
         matches the multi-day-carry design: undeploying is not the same as
-        wanting a forced exit."""
+        wanting a forced exit.
+
+        2026-09-16, real incident fix: the shared StrategyBookManager base
+        (strategies/core/book_manager.py) always calls `await book.
+        liquidate(reason)` -- this method's old signature (`def liquidate
+        (self) -> None`, no reason param, not async) raised `TypeError:
+        liquidate() takes 1 positional argument but 2 were given` on EVERY
+        real deployment-stop/kill-switch/reconcile-removal attempt, caught
+        by the base class's own try/except and merely logged as a WARNING
+        -- meaning the CRITICAL "position is STILL OPEN, keeping book
+        alive" fallback fired every single time by construction, not
+        because a position genuinely couldn't be closed. Confirmed live,
+        2026-09-15: a real NRML position (short CE23150/long CE23200/
+        short PE23150/long PE23100) sat through this exact path with no
+        working liquidate() call at all. Now accepts `reason` (unused --
+        this strategy's own no-close-on-undeploy design doesn't need it,
+        matching the signature only) and is a real coroutine so `await`
+        doesn't also fail on a plain `None` return."""
         pass
 
     def _is_own_underlying_tick(self, symbol: str) -> bool:
