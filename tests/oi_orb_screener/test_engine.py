@@ -1242,6 +1242,95 @@ async def test_replay_vwap_close_sl_still_fires_on_a_genuine_contemporaneous_bre
 
 
 @pytest.mark.asyncio
+async def test_vwap_close_sl_check_skips_a_bucket_that_closed_before_this_entry(monkeypatch):
+    """2026-09-11 real incident fix: every fresh entry (including a same-day
+    re-entry) resets the SL accumulator then seeds it in the background,
+    via _replay_vwap_close_sl, with TODAY'S FULL-DAY bars -- not just
+    post-entry ones. The live per-tick check (_vwap_close_sl_check) had no
+    guard against evaluating a bucket that closed BEFORE this position's own
+    entry_ts, so a re-entry (or any entry landing mid-bucket) could have its
+    very first live tick see the most-recently-closed bucket as "latest" --
+    one that closed before the position even existed -- and fire an SL off
+    it using TODAY'S CURRENT vwap, seconds after entry, with zero real
+    post-entry price action involved. Real incidents this session: DIXON/
+    ABCAPITAL/HDFCAMC/PRESTIGE/LODHA re-entries and a PIIND historical-fire
+    entry all closed 3-20 seconds after opening.
+
+    Bucket [09:15-09:35) closes at 09:35 with close=90 -- genuinely adverse
+    for a CALL vs a seeded vwap of 120 ((120-90)/120=25%). Position enters
+    AFTER that bucket already closed, at 09:36 -- the very next live tick
+    (09:36:20) must NOT fire off that stale, pre-entry bucket."""
+    from strategies.core.trap_zone_utils import BarAccumulator as _TrapAcc
+
+    bus = _FakeBus()
+    book = _make_book(bus)
+    contract = _contract("DIXON", 13250, "PE")
+    # Same date _row()/_rows_flat() hardcode (2026-08-24) -- entry lands
+    # AFTER the bucket below already closed.
+    entry_ts = datetime(2026, 8, 24, 9, 36, 0, tzinfo=IST)
+    book._positions["DIXON"] = {
+        "contract": contract, "qty": 50, "entry_price": 459.05, "paper_mode": True,
+        "opened_at": entry_ts, "sl_mechanic": "vwap",
+    }
+    book._vwap.seed("DIXON", 120.0 * 10.0, 10.0)   # today's CURRENT vwap snapshot = 120
+
+    # Seed the accumulator exactly like _replay_vwap_close_sl does on a fresh
+    # entry: the WHOLE day's bars, including one closed bucket that predates
+    # this position's own entry_ts.
+    rows = _rows_flat(9, 15, 20, 90.0, 10.0)   # [09:15-09:35) closes 09:35, close=90
+    acc = _TrapAcc(timeframe_min=1)
+    acc.bars = _bars_from_rows(rows)
+    book._sl_vwap_1m_acc["DIXON"] = acc
+
+    fired = []
+    async def _spy_fire(sym, side, ltp, vwap):
+        fired.append((sym, side, ltp, vwap))
+    book._fire_vwap_close_sl = _spy_fire
+
+    # First live tick after entry -- 20 seconds later, still inside the NEXT
+    # (still-forming) bucket. Under the old code this reads "latest" as the
+    # [09:15-09:35) bucket (already closed, pre-entry) and fires immediately.
+    await book._vwap_close_sl_check("DIXON", "CALL", 91.0, datetime(2026, 8, 24, 9, 36, 20, tzinfo=IST))
+
+    assert fired == []
+
+
+@pytest.mark.asyncio
+async def test_vwap_close_sl_check_still_fires_on_a_genuine_post_entry_breach(monkeypatch):
+    """Sanity: the entry_ts guard above must not blanket-suppress a REAL
+    post-entry breach -- same bucket as above, but entry happened BEFORE
+    the bucket closed, so it's genuinely this position's own price action."""
+    from strategies.core.trap_zone_utils import BarAccumulator as _TrapAcc
+
+    bus = _FakeBus()
+    book = _make_book(bus)
+    contract = _contract("DIXON", 13250, "PE")
+    entry_ts = datetime(2026, 8, 24, 9, 16, 0, tzinfo=IST)   # BEFORE the bucket below closes
+    book._positions["DIXON"] = {
+        "contract": contract, "qty": 50, "entry_price": 459.05, "paper_mode": True,
+        "opened_at": entry_ts, "sl_mechanic": "vwap",
+    }
+    book._vwap.seed("DIXON", 120.0 * 10.0, 10.0)
+
+    rows = _rows_flat(9, 15, 20, 90.0, 10.0)   # [09:15-09:35) closes 09:35, close=90
+    acc = _TrapAcc(timeframe_min=1)
+    acc.bars = _bars_from_rows(rows)
+    book._sl_vwap_1m_acc["DIXON"] = acc
+
+    fired = []
+    async def _spy_fire(sym, side, ltp, vwap):
+        fired.append((sym, side, ltp, vwap))
+    book._fire_vwap_close_sl = _spy_fire
+
+    await book._vwap_close_sl_check("DIXON", "CALL", 91.0, datetime(2026, 8, 24, 9, 36, 20, tzinfo=IST))
+
+    assert len(fired) == 1
+    sym, side, ltp, vwap = fired[0]
+    assert ltp == pytest.approx(91.0)
+    assert vwap == pytest.approx(120.0)
+
+
+@pytest.mark.asyncio
 async def test_seed_vwap_from_upstox_intraday_replaces_state_with_hlc3_weighted_real_bars(monkeypatch):
     """2026-09-10, real incident fix: TECHM entered the shortlist via the
     streaming path mid-rally, with VWAP never seeded from any real history

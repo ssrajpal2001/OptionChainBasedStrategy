@@ -118,6 +118,15 @@ _TRAP_EXIT_HTF_MULTIDAY_MIN = 180
 _TRAP_EXIT_HTF_INTRADAY_MIN = 15
 _TRAP_EXIT_LTF_MIN = 3
 _TRAP_EXIT_LOOKBACK_CALENDAR_DAYS = 15   # ~10 real trading days, same validated window
+# (PF 13.47->13.65 via scripts/oi_orb_trap_target_tf_backtest.py). A 2026-09-10 attempt
+# to narrow this to 7 days (reasoning: only the single most-recently-locked zone is ever
+# checked, so less history "shouldn't" matter) was tested against today's real data and
+# REVERTED same-day -- it changed which multiday zone set gets detected (fewer bars can
+# surface a different, closer zone), and materially changed a real trade's outcome
+# (FORCEMOT: 15-day version rode to +Rs6,660 via the intraday-tier fallback; 7-day
+# version's multiday tier touched a different zone and exited far earlier for only
+# +Rs1,150). Don't re-narrow this without a real backtest validating the new value
+# specifically, not just the "recency-only usage" reasoning alone.
 
 # 2026-09-08, direct user spec: hard SL, validated via scripts/oi_orb_trap_
 # target_sl_backtest.py -- HA-candle close on the WRONG side of the running
@@ -3042,7 +3051,29 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         running session VWAP the entry mechanic itself reads, already
         backfilled from real history and refreshed on every restart via
         _run_today_pipeline's own morning flow, so no separate VWAP seeding
-        is needed here beyond what already exists."""
+        is needed here beyond what already exists.
+
+        2026-09-11, direct user spec/real incident fix: added a guard against
+        evaluating a bucket that closed BEFORE this position's own entry_ts
+        (pos["opened_at"]) -- same species of bug as the ATHERENERG/FORCEMOT
+        incidents above, just via a third path neither of those fixes
+        covered. _seed_trap_exit_state resets the SL accumulator on every
+        fresh entry (including a same-day re-entry) then seeds it in the
+        background via _replay_vwap_close_sl with TODAY'S FULL-DAY bars, not
+        just post-entry ones -- that replay itself correctly only checks
+        buckets starting at/after entry_ts for an already-earned breach, but
+        the accumulator it hands back to this live check still carries the
+        whole day. A re-entry (or an entry landing mid-bucket, incl. the
+        historical/immediate-fire path) would then have its FIRST live tick
+        see "latest" as whatever bucket most recently closed -- which, for a
+        late-in-bucket entry, is one that closed BEFORE this position even
+        existed -- and fire an SL off it using TODAY'S CURRENT vwap, seconds
+        after entry, with zero real post-entry price action involved. Real
+        incidents this exact session: DIXON/ABCAPITAL/HDFCAMC/PRESTIGE/LODHA
+        re-entries and a PIIND historical-fire entry all closed 3-20 seconds
+        after opening. Skipping any bucket whose own close time is at/before
+        entry_ts closes this off entirely -- mirrors the guard
+        _replay_vwap_close_sl already has for the same reason."""
         pos = self._positions.get(sym)
         if pos is None or sym in self._eod_closing:
             return
@@ -3064,6 +3095,9 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         if self._sl_vwap_last_checked_bar_ts.get(sym) == latest.ts:
             return
         self._sl_vwap_last_checked_bar_ts[sym] = latest.ts
+        entry_ts = pos.get("opened_at")
+        if entry_ts is not None and latest.ts + timedelta(minutes=_VWAP_SL_TF_MIN) <= entry_ts:
+            return   # this bucket closed before this position existed -- stale, not a real SL
         vwap = self._vwap.current(sym)
         if vwap is None or vwap <= 0:
             return
@@ -3262,8 +3296,15 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             # ---- Multi-day tier ----
             htf_multiday = to_n_min_bars_dateaware(bars, _TRAP_EXIT_HTF_MULTIDAY_MIN)
             if len(htf_multiday) >= 3:
-                zones = zones_fn(htf_multiday)
+                zones_all = zones_fn(htf_multiday)
+                zones = self._drop_already_touched_zones(zones_all, bars, today)
                 self._trap_exit_multiday_zones[sym] = zones
+                if len(zones) != len(zones_all):
+                    self._clog.info(
+                        "OiOrb[%s/%s]: %s %d of %d multi-day zone(s) already touched by real price "
+                        "on a PRIOR day -- treated as used up, dropped; only untouched zones remain "
+                        "candidate.", self._client_id, self._binding_id, sym,
+                        len(zones_all) - len(zones), len(zones_all))
                 self._clog.info(
                     "OiOrb[%s/%s]: %s multi-day trap-exit zones seeded: %d zone(s) from %d real "
                     "75-min bars across %d calendar days (incl. %d real bars from today).",
@@ -3341,6 +3382,32 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         if not locked:
             return None
         return max(locked, key=lambda z: z["lock_ts"])
+
+    @staticmethod
+    def _drop_already_touched_zones(zones: list, bars: list, today: "date") -> list:
+        """2026-09-10, direct user spec: a multi-day zone that real price
+        already entered on any PRIOR calendar day (before today) is treated
+        as "used up" -- no longer a valid candidate, even though it's still
+        the most-recently-locked zone by timestamp. Direct user example:
+        "zone on 8th... already touched on 9th... this zone will not be
+        valid, will check previous zone before 8th." Filters the whole zone
+        list down to only zones NEVER touched by a real 1-min close between
+        their own lock_ts and the start of today -- _latest_locked_zone then
+        naturally falls back to the next-older survivor, since it always
+        just picks the most recent zone from whatever list it's given."""
+        out = []
+        for z in zones:
+            lock_ts = z.get("lock_ts")
+            if lock_ts is None:
+                continue
+            touched_before_today = any(
+                lock_ts <= b.ts < datetime.combine(today, dtime.min, tzinfo=IST)
+                and z["zone_lo"] <= b.close <= z["zone_hi"]
+                for b in bars
+            )
+            if not touched_before_today:
+                out.append(z)
+        return out
 
     async def _trap_ladder_check(self, sym: str, side: str, ltp: float, ts: datetime, zone: dict,
                                   tier: str, exit_reason: str) -> bool:
@@ -3424,7 +3491,14 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         zones right after entry) -- if that seed never produced zones (no
         token, no data, thin history), this tier is permanently a no-op for
         this position and _trap_intraday_exit_check (called right after,
-        every cycle) provides the real protection instead."""
+        every cycle) provides the real protection instead.
+
+        2026-09-10 update: _trap_intraday_exit_check now gates on zones
+        merely EXISTING, not on self._trap_exit_source -- see its own
+        docstring for the reverted priority rule. self._trap_exit_source ==
+        'intraday' can therefore no longer actually happen while multiday
+        zones exist, but the guard below is left in place as a harmless
+        defensive no-op rather than removed."""
         pos = self._positions.get(sym)
         if pos is None or sym in self._eod_closing:
             return
@@ -3442,18 +3516,33 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         """Secondary/fallback exit tier -- the already-validated intraday
         15min HTF same-side trap + 3min S&R ladder (scripts/oi_orb_trap_
         target_full_htf_ltf_sweep.py), built live from THIS SESSION's own
-        ticks (single-day only, matching the backtest exactly). Only runs
-        once _trap_multiday_exit_check has had a chance to fire first and
-        hasn't (either no multi-day zones seeded, or none touched yet) --
-        the moment the multiday tier's ladder actually starts (self.
-        _trap_exit_source[sym] == 'multiday'), this tier steps aside
-        permanently for that position so the two ladders never race each
-        other mid-flight."""
+        ticks (single-day only, matching the backtest exactly).
+
+        2026-09-10, direct user spec, REVERTS the 2026-09-08 "claim on touch,
+        not on find" fix (see _trap_ladder_check's own docstring for that
+        fix's original reasoning): intraday now only ever runs when the
+        multiday tier has ZERO usable zones at all for this position --
+        merely finding a real, genuinely-locked multiday zone blocks
+        intraday for the rest of the day, even if that zone is never
+        actually touched by price. Direct user framing: "if higher
+        timeframe zone is found... it will not jump to the intraday trap
+        concept only and only if the higher timeframe zone is not found."
+        Traced against the real LODHA 2026-09-10 trade: 5 real multiday
+        zones existed but only one was ever touched (11:44, 40min after
+        LODHA had already exited via intraday at 11:04) -- under this
+        reverted rule, LODHA would instead have sat with NO trap-ladder
+        protection at all from entry (10:39) until 11:44 (or never, if that
+        zone was never touched), relying solely on the VWAP-close SL and
+        EOD square-off in the meantime. This tradeoff (favor honoring the
+        higher-timeframe zone's structural priority vs. the 2026-09-08 fix's
+        original "never leave a position unprotected" concern) was
+        explicitly surfaced and accepted before this change, not an
+        oversight."""
         pos = self._positions.get(sym)
         if pos is None or sym in self._eod_closing:
             return
-        if self._trap_exit_source.get(sym) == "multiday":
-            return
+        if self._trap_exit_multiday_zones.get(sym):
+            return   # a real multiday zone exists -- intraday never runs, touched or not
         from strategies.core.trap_zone_utils import BarAccumulator as _TrapAcc
         acc = self._trap_exit_intraday_1m_acc.setdefault(sym, _TrapAcc(timeframe_min=1))
         acc.on_tick(ts, ltp)
