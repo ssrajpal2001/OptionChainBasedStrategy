@@ -641,6 +641,21 @@ class ExitMixin:
             self._clog.critical("HEDGE — CE %d BUY failed/unconfirmed -- aborting hedge, normal EOD close instead", ce_strike)
             return False
 
+        # 2026-09-15, real incident fix: hedge strikes are deliberately far OTM (<=50%
+        # of the sold leg's LTP) and are NOT the position's own pinned CE/PE strikes --
+        # the StrikeRebalancer's normal ATM-window rebalance can drop them the moment
+        # spot drifts, silently killing live ticks for a leg that's still genuinely
+        # open. Pin both hedge strikes the same way the sold legs already are (see
+        # _restore_pool_seed's re-pin comment above) so they can never be unsubscribed
+        # while the hedge is standing.
+        if not self._is_crypto and self._rebalancer:
+            try:
+                self._rebalancer.pin_strike(self._underlying, float(ce_strike))
+                self._rebalancer.pin_strike(self._underlying, float(pe_strike))
+            except Exception as exc:
+                logger.warning("SellStraddle[%s]: pin_strike for hedge legs failed: %s",
+                               self._underlying, exc)
+
         pe_fill = await self._dispatch_hedge_order(
             "BUY", "PE", pe_strike, pe_hedge_ltp, pe_hedge_ltp, pos.expiry_date, "eod_hedge",
         )
@@ -709,6 +724,12 @@ class ExitMixin:
             )
             self._clog.info("HEDGE CLOSED — %s%d @ %.2f (reason=%s)",
                             leg.option_type, int(leg.strike), fill.fill_price, reason)
+            if not self._is_crypto and self._rebalancer:
+                try:
+                    self._rebalancer.unpin_strike(self._underlying, float(leg.strike))
+                except Exception as exc:
+                    logger.warning("SellStraddle[%s]: unpin_strike for hedge leg failed: %s",
+                                   self._underlying, exc)
             setattr(pos, attr, None)
         if pos.hedge_ce_leg is None and pos.hedge_pe_leg is None:
             pos.is_hedged_positional = False

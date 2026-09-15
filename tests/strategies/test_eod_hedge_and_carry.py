@@ -22,9 +22,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from data_layer.base_feeder import EventBus
+from data_layer.base_feeder import EventBus, OptionTick
 from data_layer.instrument_registry import REGISTRY
-from config.global_config import IST, GlobalConfig
+from config.global_config import IST, GlobalConfig, Topic
 from strategies.sell_straddle import SellStraddleStrategy, StraddlePosition, StraddleLeg
 from strategies.sell_straddle.selection import find_hedge_strike
 
@@ -1285,4 +1285,157 @@ def test_close_surviving_leg_and_finalize_no_hedge_calls_when_not_hedged():
         await s._close_surviving_leg_and_finalize("eod_squareoff")
 
         assert calls == []
+    asyncio.run(run())
+
+
+# ── 2026-09-15 real incident fix: hedge legs must receive live tick updates ──
+# Root cause: _option_loop (engine.py) only ever matched incoming OPTION_TICK
+# events against pos.ce_leg/pos.pe_leg (the sold legs) -- hedge_ce_leg/
+# hedge_pe_leg.ltp were set once at fill time and then frozen forever, so
+# hedge_unrealized_pnl silently stayed 0 no matter how the hedge legs' real
+# premium moved. Also verifies the new pin_strike/unpin_strike calls that
+# protect a far-OTM hedge strike from being dropped by the ATM rebalance.
+
+def _option_tick(strike, option_type, ltp, expiry, atp=0.0, underlying="NIFTY"):
+    return OptionTick(
+        symbol=f"{underlying}{strike}{option_type}", underlying=underlying,
+        strike=float(strike), option_type=option_type, expiry=expiry, ltp=ltp,
+        bid=0.0, ask=0.0, oi=0, change_oi=0, volume=0, iv=0.0, delta=0.0,
+        timestamp=datetime.datetime.now(IST), atp=atp,
+    )
+
+
+def test_option_loop_updates_hedge_leg_ltp_and_mark():
+    async def run():
+        bus = EventBus()
+        s = _make(bus=bus)
+        pos = _hedged(s, ce_hedge_ltp=60.0, pe_hedge_ltp=55.0)   # entry prices, unchanged yet
+        s._running = True
+        s._entry_expiry_date = pos.expiry_date
+
+        task = asyncio.create_task(s._option_loop())
+        await asyncio.sleep(0)   # let the loop subscribe before we publish
+        await bus.publish(Topic.OPTION_TICK, _option_tick(
+            pos.hedge_ce_leg.strike, "CE", 123.45, pos.expiry_date, atp=110.0))
+        await bus.publish(Topic.OPTION_TICK, _option_tick(
+            pos.hedge_pe_leg.strike, "PE", 12.5, pos.expiry_date, atp=13.0))
+        await asyncio.sleep(0.05)
+        s._running = False
+        await asyncio.wait_for(task, timeout=2.0)
+
+        assert pos.hedge_ce_leg.ltp == 123.45
+        assert pos.hedge_ce_leg.mark == 110.0
+        assert pos.hedge_pe_leg.ltp == 12.5
+        assert pos.hedge_pe_leg.mark == 13.0
+        # sold legs must be completely unaffected by the hedge-strike ticks above
+        assert pos.ce_leg.ltp == 130.0
+        assert pos.pe_leg.ltp == 120.0
+    asyncio.run(run())
+
+
+def test_option_loop_hedge_pnl_reflects_live_ticks_not_frozen_entry():
+    """Direct regression for the reported symptom: before the fix,
+    hedge_unrealized_pnl stayed exactly 0 forever regardless of real price
+    movement, because hedge_ce_leg.ltp/hedge_pe_leg.ltp never updated."""
+    async def run():
+        bus = EventBus()
+        s = _make(bus=bus)
+        pos = _hedged(s, ce_hedge_ltp=60.0, pe_hedge_ltp=55.0)   # both == entry_price initially
+        assert pos.hedge_unrealized_pnl == 0.0   # nothing has moved yet
+        s._running = True
+        s._entry_expiry_date = pos.expiry_date
+
+        task = asyncio.create_task(s._option_loop())
+        await asyncio.sleep(0)
+        await bus.publish(Topic.OPTION_TICK, _option_tick(
+            pos.hedge_ce_leg.strike, "CE", 100.0, pos.expiry_date))   # 60 -> 100, +40
+        await bus.publish(Topic.OPTION_TICK, _option_tick(
+            pos.hedge_pe_leg.strike, "PE", 30.0, pos.expiry_date))    # 55 -> 30, -25
+        await asyncio.sleep(0.05)
+        s._running = False
+        await asyncio.wait_for(task, timeout=2.0)
+
+        assert pos.hedge_unrealized_pnl == 15.0   # +40 - 25
+    asyncio.run(run())
+
+
+def test_option_loop_ignores_ticks_for_a_different_strike_than_hedge_legs():
+    async def run():
+        bus = EventBus()
+        s = _make(bus=bus)
+        pos = _hedged(s, ce_hedge_ltp=60.0, pe_hedge_ltp=55.0)
+        s._running = True
+        s._entry_expiry_date = pos.expiry_date
+
+        task = asyncio.create_task(s._option_loop())
+        await asyncio.sleep(0)
+        # tick for some unrelated CE strike -- must not touch the hedge leg
+        await bus.publish(Topic.OPTION_TICK, _option_tick(99999, "CE", 5.0, pos.expiry_date))
+        await asyncio.sleep(0.05)
+        s._running = False
+        await asyncio.wait_for(task, timeout=2.0)
+
+        assert pos.hedge_ce_leg.ltp == 60.0
+    asyncio.run(run())
+
+
+class _FakeRebalancer:
+    def __init__(self):
+        self.pinned = set()
+        self.pin_calls = []
+        self.unpin_calls = []
+
+    def pin_strike(self, underlying, strike):
+        self.pin_calls.append((underlying, float(strike)))
+        self.pinned.add(float(strike))
+
+    def unpin_strike(self, underlying, strike):
+        self.unpin_calls.append((underlying, float(strike)))
+        self.pinned.discard(float(strike))
+
+    def pinned_strikes(self, underlying):
+        return set(self.pinned)
+
+
+def test_try_build_hedge_pins_both_hedge_strikes():
+    """2026-09-15 fix: hedge strikes are far OTM and not the position's own
+    pinned CE/PE strikes -- without an explicit pin, the ATM rebalance can
+    drop their subscription while the hedge is still standing."""
+    async def run():
+        s = _make()
+        s._is_crypto = False
+        fake = _FakeRebalancer()
+        s._rebalancer = fake
+        _stub_dispatch(s, {
+            ("BUY", "CE", 24500): _fill("BUY", "CE", 24500, 60.0),
+            ("BUY", "PE", 23500): _fill("BUY", "PE", 23500, 55.0),
+        })
+
+        built = await s._try_build_hedge(s._position, datetime.datetime.now(IST))
+
+        assert built is True
+        assert ("NIFTY", 24500.0) in fake.pin_calls
+        assert ("NIFTY", 23500.0) in fake.pin_calls
+    asyncio.run(run())
+
+
+def test_close_hedge_legs_unpins_both_strikes():
+    async def run():
+        s = _make()
+        s._is_crypto = False
+        fake = _FakeRebalancer()
+        fake.pinned = {24500.0, 23500.0}
+        s._rebalancer = fake
+        pos = _hedged(s, ce_hedge_ltp=90.0, pe_hedge_ltp=40.0)
+        _stub_dispatch(s, {
+            ("SELL", "CE", 24500): _fill("SELL", "CE", 24500, 90.0),
+            ("SELL", "PE", 23500): _fill("SELL", "PE", 23500, 40.0),
+        })
+
+        await s._close_hedge_legs(pos, "eod_hedge_close")
+
+        assert ("NIFTY", 24500.0) in fake.unpin_calls
+        assert ("NIFTY", 23500.0) in fake.unpin_calls
+        assert pos.hedge_ce_leg is None and pos.hedge_pe_leg is None
+    asyncio.run(run())
     asyncio.run(run())

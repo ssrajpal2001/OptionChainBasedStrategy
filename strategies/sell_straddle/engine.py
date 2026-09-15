@@ -832,6 +832,13 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                     try:
                         self._rebalancer.pin_strike(self._underlying, float(pos.ce_leg.strike))
                         self._rebalancer.pin_strike(self._underlying, float(pos.pe_leg.strike))
+                        # 2026-09-15: standing hedge legs need the same restart re-pin --
+                        # otherwise a restart with an active hedge silently loses their
+                        # subscription exactly like the sold legs used to before this fix.
+                        if pos.hedge_ce_leg is not None:
+                            self._rebalancer.pin_strike(self._underlying, float(pos.hedge_ce_leg.strike))
+                        if pos.hedge_pe_leg is not None:
+                            self._rebalancer.pin_strike(self._underlying, float(pos.hedge_pe_leg.strike))
                         logger.info(
                             "SellStraddle[%s]: re-pinned restored position legs CE%d/PE%d "
                             "in StrikeRebalancer (pinned_strikes now %s).",
@@ -1939,6 +1946,22 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                         if _mk > 0:
                             pos.pe_leg.mark = _mk
                         self._pe_ltp_fresh = True
+                    # 2026-09-15, real incident fix: hedge legs (eod_hedge, is_hedged_positional)
+                    # were bought but never had their own .ltp updated by any live tick --
+                    # hedge_unrealized_pnl silently stayed frozen at 0 forever, so the combined
+                    # 4-leg P&L used by _check_hedge_cumulative_profit_close was blind to the
+                    # hedge's real contribution. Mirror the sold-leg matching above for whichever
+                    # hedge legs are standing.
+                    if pos.hedge_ce_leg is not None and tick.option_type == "CE" and \
+                            abs(tick.strike - pos.hedge_ce_leg.strike) < 0.01:
+                        pos.hedge_ce_leg.ltp = tick.ltp
+                        if _mk > 0:
+                            pos.hedge_ce_leg.mark = _mk
+                    elif pos.hedge_pe_leg is not None and tick.option_type == "PE" and \
+                            abs(tick.strike - pos.hedge_pe_leg.strike) < 0.01:
+                        pos.hedge_pe_leg.ltp = tick.ltp
+                        if _mk > 0:
+                            pos.hedge_pe_leg.mark = _mk
         finally:
             self._bus.unsubscribe(Topic.OPTION_TICK, q)
             self._loop_queues.pop("option", None)
