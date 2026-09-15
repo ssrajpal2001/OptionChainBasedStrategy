@@ -3207,19 +3207,60 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 self._client_id, self._binding_id, sym, side)
         await self._emit_close(sym, pos, "vwap_close_sl", detail=detail)
 
-    async def _vwap_close_sl_check(self, sym: str, side: str, ltp: float, ts: datetime) -> None:
-        """Live per-tick SL check (2026-09-08, direct user spec): 20-min
-        candle closes on the wrong side of the running session VWAP -- CALL:
-        close < vwap; PUT: close > vwap. Validated as the best of 4 SL
-        families tested (scripts/oi_orb_trap_target_sl_backtest.py) against
-        the same real 46-trade dataset -- the only candidate that improved
-        BOTH win% and PF over the no-SL baseline while cutting the worst
-        single-trade loss by ~75%. Checked ahead of both trap-exit target
-        tiers in the main exit loop (a real stop takes priority over a
-        target/reversal read).
+    @staticmethod
+    def _ha_vwap_close_sl_adverse(ha_bar, vwap: float, side: str) -> bool:
+        """2026-09-16, direct user spec (reverses the 2026-09-10 plain-
+        candle decision -- see _vwap_close_sl_check's own docstring):
+        combined HA-shape + VWAP-gap adverse condition, BOTH must hold.
 
-        2026-09-10, direct user spec/real incident fix: switched from
-        Heikin-Ashi to plain candles AND from midnight-aligned to
+        Shape half reuses the SAME already-established/validated
+        definition as ha_stoch_shape_exit_signal's own bearish-type/
+        bullish-type check -- CALL: HA_high==HA_open (no upper wick at
+        all); PUT: HA_low==HA_open (no lower wick). EXACT float equality
+        is safe here, not a fragile rounding coincidence -- by
+        construction, to_heikin_ashi's `ha_high = max(b.high, ha_open,
+        ha_close)` returns ha_open completely unchanged (never computed
+        via subtraction) whenever ha_open is the winning branch, same
+        reasoning ha_stoch_shape_exit_signal's own docstring already
+        states.
+
+        Gap half is the original VWAP-relative test, unchanged in shape,
+        just now evaluated against the HA candle's own close instead of a
+        plain candle's close: CALL adverse if close sits >=_VWAP_SL_
+        MIN_GAP_PCT below vwap; PUT mirrored above."""
+        if vwap <= 0:
+            return False
+        if side == "CALL":
+            return (ha_bar.high == ha_bar.open) and \
+                   ((vwap - ha_bar.close) / vwap >= _VWAP_SL_MIN_GAP_PCT)
+        return (ha_bar.low == ha_bar.open) and \
+               ((ha_bar.close - vwap) / vwap >= _VWAP_SL_MIN_GAP_PCT)
+
+    async def _vwap_close_sl_check(self, sym: str, side: str, ltp: float, ts: datetime) -> None:
+        """Live per-tick SL check (2026-09-08, direct user spec): a 20-min
+        Heikin-Ashi candle both (a) shows the genuine no-wick adverse shape
+        AND (b) closes on the wrong side of the running session VWAP by the
+        gap threshold -- see _ha_vwap_close_sl_adverse's own docstring for
+        the exact combined condition. Checked ahead of both trap-exit
+        target tiers in the main exit loop (a real stop takes priority over
+        a target/reversal read).
+
+        History of the candle-type decision, both directions direct user
+        spec: originally Heikin-Ashi. 2026-09-10: switched to PLAIN candles
+        -- an earlier backtest that session found HA-vs-normal made no
+        meaningful difference for the gap-only version of this check, kept
+        plain for simplicity (explicitly NOT because HA itself was ever the
+        bug -- the real 2026-09-10 bug was midnight-aligned vs market-open-
+        anchored bucketing, see below, unrelated to candle type). 2026-09-16:
+        switched BACK to Heikin-Ashi, this time combined with the shape
+        condition above (a materially different test than the earlier
+        gap-only HA version that was found equivalent to plain) -- direct
+        user spec, using the SAME HA-shape definition already validated for
+        ha_stoch_shape_exit_signal.
+
+        2026-09-10, direct user spec/real incident fix (kept unchanged by
+        the 2026-09-16 HA reversal -- this bug was about bucket alignment,
+        not candle type): switched from midnight-aligned to
         market-open-anchored buckets (to_n_min_bars_market_anchored) --
         real trade ATHERENERG entered 09:25:11, SL-stopped 09:25:31 with
         ZERO real price movement in between, because the old midnight-
@@ -3228,11 +3269,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         wall-clock passed 09:20, comparing a stale 5-minute snapshot
         against a materially newer VWAP. Market-anchored buckets
         ([09:15-09:35), [09:35-09:55), ...) give the first bucket a genuine
-        full 20 minutes before it's ever evaluated. HA-vs-normal was
-        already found to make no meaningful difference for this SL in an
-        earlier backtest this session -- normal candles kept for simplicity
-        per direct user preference, not because HA was itself the bug (the
-        bucket-boundary truncation applies equally to either candle type).
+        full 20 minutes before it's ever evaluated.
         Uses self._vwap.current(sym) -- the SAME
         running session VWAP the entry mechanic itself reads, already
         backfilled from real history and refreshed on every restart via
@@ -3264,12 +3301,16 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         if pos is None or sym in self._eod_closing:
             return
         from strategies.core.trap_zone_utils import BarAccumulator as _TrapAcc
-        from strategies.core.candle_indicators import to_n_min_bars_market_anchored
+        from strategies.core.candle_indicators import to_n_min_bars_market_anchored, to_heikin_ashi
         acc = self._sl_vwap_1m_acc.setdefault(sym, _TrapAcc(timeframe_min=1))
         acc.on_tick(ts, ltp)
         if not acc.bars:
             return
-        ha_tf = to_n_min_bars_market_anchored(acc.bars, _VWAP_SL_TF_MIN)
+        # HA MUST be computed on the 1-min series first, then resampled up --
+        # never on an already-aggregated bar (to_heikin_ashi's own docstring;
+        # same rule ha_stoch_check_exit already follows).
+        ha_1m = to_heikin_ashi(acc.bars)
+        ha_tf = to_n_min_bars_market_anchored(ha_1m, _VWAP_SL_TF_MIN)
         if not ha_tf:
             return
         last_bar = ha_tf[-1]
@@ -3287,9 +3328,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         vwap = self._vwap.current(sym)
         if vwap is None or vwap <= 0:
             return
-        adverse = ((vwap - latest.close) / vwap >= _VWAP_SL_MIN_GAP_PCT) if side == "CALL" \
-            else ((latest.close - vwap) / vwap >= _VWAP_SL_MIN_GAP_PCT)
-        if not adverse:
+        if not self._ha_vwap_close_sl_adverse(latest, vwap, side):
             return
         await self._fire_vwap_close_sl(sym, side, ltp, vwap, candle_bar=latest)
 
@@ -3345,8 +3384,12 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         if not today_bars:
             return False
         from strategies.core.trap_zone_utils import BarAccumulator as _TrapAcc
-        from strategies.core.candle_indicators import to_n_min_bars_market_anchored
-        ha_tf = to_n_min_bars_market_anchored(today_bars, _VWAP_SL_TF_MIN)
+        from strategies.core.candle_indicators import to_n_min_bars_market_anchored, to_heikin_ashi
+        # 2026-09-16: HA MUST mirror the live check exactly -- computed on
+        # the 1-min series first, then resampled -- so this replay can never
+        # drift from what the live tick-driven check would have found.
+        ha_1m_full = to_heikin_ashi(today_bars)
+        ha_tf = to_n_min_bars_market_anchored(ha_1m_full, _VWAP_SL_TF_MIN)
         if ha_tf:
             now = datetime.now(IST)
             last_bar = ha_tf[-1]
@@ -3386,9 +3429,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             vwap = _vwap_as_of(hb.ts + timedelta(minutes=_VWAP_SL_TF_MIN))
             if vwap is None or vwap <= 0:
                 continue
-            adverse = ((vwap - hb.close) / vwap >= _VWAP_SL_MIN_GAP_PCT) if side == "CALL" \
-                else ((hb.close - vwap) / vwap >= _VWAP_SL_MIN_GAP_PCT)
-            if adverse:
+            if self._ha_vwap_close_sl_adverse(hb, vwap, side):
                 if sym not in self._positions or sym in self._eod_closing:
                     return False
                 self._clog.critical(

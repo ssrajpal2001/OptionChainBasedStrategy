@@ -1331,6 +1331,82 @@ async def test_vwap_close_sl_check_still_fires_on_a_genuine_post_entry_breach(mo
     assert vwap == pytest.approx(120.0)
 
 
+# ── 2026-09-16, direct user spec: VWAP-close SL reverts to Heikin-Ashi,
+# combined with (not replacing) the VWAP-gap test -- the SAME HA-shape rule
+# already validated for ha_stoch_shape_exit_signal (HA_high==HA_open for
+# CALL/no upper wick, HA_low==HA_open for PUT/no lower wick). BOTH the gap
+# AND the shape must hold. ──────────────────────────────────────────────────
+
+def test_ha_vwap_close_sl_adverse_requires_both_shape_and_gap():
+    from strategies.core.trap_zone_utils import Bar
+    book = _make_book(_FakeBus())
+    vwap = 100.0
+
+    # Clean bearish shape (no upper wick) AND a real gap below vwap -> fires.
+    clean = Bar(ts=None, open=99.0, high=99.0, low=97.0, close=97.5)
+    assert book._ha_vwap_close_sl_adverse(clean, vwap, "CALL") is True
+
+    # Same close (same gap), but an upper wick (high > open) -> shape fails,
+    # must NOT fire even though the price gap alone would qualify.
+    wicked = Bar(ts=None, open=99.0, high=101.0, low=97.0, close=97.5)
+    assert book._ha_vwap_close_sl_adverse(wicked, vwap, "CALL") is False
+
+    # Clean shape but the gap is too small -> must NOT fire.
+    shallow = Bar(ts=None, open=99.9, high=99.9, low=99.7, close=99.85)
+    assert book._ha_vwap_close_sl_adverse(shallow, vwap, "CALL") is False
+
+
+def test_ha_vwap_close_sl_adverse_put_side_mirrors_call():
+    from strategies.core.trap_zone_utils import Bar
+    book = _make_book(_FakeBus())
+    vwap = 100.0
+
+    clean = Bar(ts=None, open=101.0, high=103.0, low=101.0, close=102.5)
+    assert book._ha_vwap_close_sl_adverse(clean, vwap, "PUT") is True
+
+    # Lower wick (low < open) -> shape fails for PUT.
+    wicked = Bar(ts=None, open=101.0, high=103.0, low=99.0, close=102.5)
+    assert book._ha_vwap_close_sl_adverse(wicked, vwap, "PUT") is False
+
+
+@pytest.mark.asyncio
+async def test_vwap_close_sl_check_does_not_fire_on_gap_breach_without_clean_ha_shape(monkeypatch):
+    """The critical proof: a real 20-min bucket that breaches the VWAP gap
+    (would have fired under the pre-2026-09-16 plain-candle test) but whose
+    HA shape shows an upper wick (a brief intrabar spike above the bucket's
+    own open before falling) must NOT fire -- the shape gate is a genuine
+    AND, not decoration."""
+    from strategies.core.trap_zone_utils import BarAccumulator as _TrapAcc
+
+    bus = _FakeBus()
+    book = _make_book(bus)
+    contract = _contract("DIXON", 13250, "PE")
+    entry_ts = datetime(2026, 8, 24, 9, 16, 0, tzinfo=IST)
+    book._positions["DIXON"] = {
+        "contract": contract, "qty": 50, "entry_price": 459.05, "paper_mode": True,
+        "opened_at": entry_ts, "sl_mechanic": "vwap",
+    }
+    book._vwap.seed("DIXON", 120.0 * 10.0, 10.0)   # vwap = 120
+
+    # [09:15-09:35) bucket: opens ~100, spikes to 130 mid-bucket (real upper
+    # wick), then falls and closes well below vwap (a real, large gap).
+    rows = [_row(f"09:{15+i:02d}", 100.0, 100.0, 100.0, 10.0) for i in range(3)]
+    rows.append(_row("09:18", 132.0, 130.0, 131.0, 10.0))   # the spike
+    rows += [_row(f"09:{19+i:02d}", 91.0, 89.0, 90.0, 10.0) for i in range(16)]
+    acc = _TrapAcc(timeframe_min=1)
+    acc.bars = _bars_from_rows(rows)
+    book._sl_vwap_1m_acc["DIXON"] = acc
+
+    fired = []
+    async def _spy_fire(sym, side, ltp, vwap, candle_bar=None):
+        fired.append((sym, side, ltp, vwap))
+    book._fire_vwap_close_sl = _spy_fire
+
+    await book._vwap_close_sl_check("DIXON", "CALL", 91.0, datetime(2026, 8, 24, 9, 36, 20, tzinfo=IST))
+
+    assert fired == []   # gap alone would have fired pre-2026-09-16 -- shape blocks it now
+
+
 @pytest.mark.asyncio
 async def test_seed_vwap_from_upstox_intraday_replaces_state_with_hlc3_weighted_real_bars(monkeypatch):
     """2026-09-10, real incident fix: TECHM entered the shortlist via the
