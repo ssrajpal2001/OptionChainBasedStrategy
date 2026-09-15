@@ -35,7 +35,22 @@ the full client-facing spec -- this docstring only summarizes):
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date, time
 from typing import Dict, List, Optional, Sequence, Tuple
+
+
+def should_use_next_week_expiry(
+    today: date, active_expiry: date, now_time: time, cutoff: time = time(15, 0),
+) -> bool:
+    """Direct user spec (2026-09-15, real incident): a fresh entry (first
+    entry of the day, or a profit-target-triggered restart) that would land
+    on the ACTIVE EXPIRY'S OWN DAY, at or past `cutoff` (default 15:00), is
+    entering a contract with almost no time left before settlement -- "no
+    use of again adding new buy sell" was the real outcome observed live
+    (a fly conversion fired 1 minute before close on a position entered at
+    15:20 on expiry day itself). Returns True when the caller should resolve
+    NEXT week's expiry instead of the current active one for that entry."""
+    return active_expiry == today and now_time >= cutoff
 
 
 def round_to_atm(spot: float, strike_step: float) -> int:

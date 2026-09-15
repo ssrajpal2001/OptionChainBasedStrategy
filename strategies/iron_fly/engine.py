@@ -45,7 +45,7 @@ import asyncio
 import logging
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, time, timedelta
 from typing import Callable, Deque, Dict, List, Optional, Tuple
 
 from data_layer import position_store
@@ -63,6 +63,7 @@ from strategies.iron_fly.detector import (
     profit_target_hit,
     reconcile_protective_leg,
     round_to_atm,
+    should_use_next_week_expiry,
 )
 
 logger = logging.getLogger(__name__)
@@ -468,6 +469,7 @@ class IronFlyStrategy:
         profit_target_pct: float = 0.65,
         chain_depth_strikes: int = 20,
         product_type: str = "NRML",
+        expiry_day_cutoff: str = "15:00",
     ) -> None:
         self._bus = bus
         self._cfg = cfg
@@ -482,6 +484,12 @@ class IronFlyStrategy:
         self._profit_target_pct = float(profit_target_pct)
         self._chain_depth_strikes = max(4, int(chain_depth_strikes))
         self._product_type = product_type
+        self._expiry_day_cutoff_str = expiry_day_cutoff
+        try:
+            h, m = str(expiry_day_cutoff or "15:00").split(":")
+            self._expiry_day_cutoff = time(int(h), int(m))
+        except Exception:
+            self._expiry_day_cutoff = time(15, 0)
 
         lot_size = (cfg.exchange.lot_sizes.get(underlying, 75) if cfg else 75)
         strike_step = float(cfg.exchange.strike_steps.get(underlying, 50) if cfg else 50)
@@ -582,9 +590,30 @@ class IronFlyStrategy:
         return symbol in aliases.get(u, ())
 
     def _resolve_expiry(self):
+        """Resolves the expiry a FRESH entry should use right now. Direct
+        user spec (2026-09-15, real incident): if the currently active
+        expiry IS today, and it's already at/past `_expiry_day_cutoff`
+        (default 15:00), a fresh entry has almost no time left before
+        settlement -- resolve NEXT week's expiry instead (falls back to the
+        active one if next week can't be resolved, rather than blocking
+        entry entirely)."""
         from data_layer.instrument_registry import REGISTRY
         from config.global_config import IST
-        return REGISTRY.get_active_expiry_strict(self._underlying, datetime.now(IST).date())
+        now = datetime.now(IST)
+        active = REGISTRY.get_active_expiry_strict(self._underlying, now.date())
+        if active is None:
+            return None
+        if should_use_next_week_expiry(now.date(), active, now.time(), self._expiry_day_cutoff):
+            next_week = REGISTRY.get_active_expiry_strict(self._underlying, active + timedelta(days=1))
+            if next_week is not None:
+                self._clog.info(
+                    "Expiry-day cutoff reached (now=%s >= %s) -- resolving NEXT week's expiry "
+                    "(%s) instead of today's (%s) for a fresh entry.",
+                    now.time().strftime("%H:%M"), self._expiry_day_cutoff.strftime("%H:%M"),
+                    next_week, active,
+                )
+                return next_week
+        return active
 
     def _get_premium(self, strike: int, side: str) -> Optional[float]:
         return self._live_premium.get((int(strike), side))
@@ -609,10 +638,19 @@ class IronFlyStrategy:
                     continue
                 if getattr(ev, "source", "spot") != "spot":
                     continue
-                if self._day_expiry is None:
+                if self._engine.is_flat():
+                    # Re-resolve on EVERY tick while flat (not just once) so
+                    # a fresh entry always gets the freshest expiry-day-
+                    # cutoff-aware decision -- e.g. a profit-target close at
+                    # 15:20 on expiry day must re-check the cutoff right
+                    # then, not reuse whatever was resolved this morning.
                     self._day_expiry = self._resolve_expiry()
                     if self._day_expiry is None:
                         continue  # can't trade without a resolvable expiry -- retry next tick
+                elif self._day_expiry is None:
+                    self._day_expiry = self._resolve_expiry()
+                    if self._day_expiry is None:
+                        continue
                 prev = snapshot_legs(self._engine)
                 old_len = len(self._engine.trade_log)
                 self._engine.on_spot_tick(ev.ltp, self._get_premium, ts=ev.timestamp)

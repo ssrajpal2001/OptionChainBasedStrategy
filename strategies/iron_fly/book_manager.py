@@ -36,9 +36,15 @@ _DEFAULT_PARAMS = {
     "long_threshold": 20.0,
     "profit_target_pct": 0.65,
     "chain_depth_strikes": 20,
+    # 2026-09-15, real incident: a fresh entry on the active expiry's OWN
+    # day, at/past this time, resolves NEXT week's expiry instead --
+    # entering a near-zero-DTE contract this late produced an unmanageable
+    # position (a fly conversion fired 1 minute before market close).
+    "expiry_day_cutoff": "15:00",
 }
 _INT_KEYS = ("otm1", "chain_depth_strikes")
-_FLOAT_KEYS = tuple(k for k in _DEFAULT_PARAMS if k not in _INT_KEYS)
+_STR_KEYS = ("expiry_day_cutoff",)
+_FLOAT_KEYS = tuple(k for k in _DEFAULT_PARAMS if k not in _INT_KEYS and k not in _STR_KEYS)
 
 
 def _parse_params(raw: str) -> dict:
@@ -72,6 +78,8 @@ class IronFlyBookManager(StrategyBookManager):
                 cfg[k] = int(params.get(k, _DEFAULT_PARAMS[k]))
             for k in _FLOAT_KEYS:
                 cfg[k] = float(params.get(k, _DEFAULT_PARAMS[k]))
+            for k in _STR_KEYS:
+                cfg[k] = str(params.get(k, _DEFAULT_PARAMS[k]))
             wanted[(cid, bid, underlying)] = cfg
         return wanted
 
@@ -89,13 +97,15 @@ class IronFlyBookManager(StrategyBookManager):
             profit_target_pct=value["profit_target_pct"],
             chain_depth_strikes=value["chain_depth_strikes"],
             product_type=value["product_type"],
+            expiry_day_cutoff=value["expiry_day_cutoff"],
         )
         logger.info(
             "IronFlyBookManager: spawned %s/%s/%s (lots=%d otm1=%d adjustment_distance=%.0f "
-            "short_threshold=%.1f long_threshold=%.1f profit_target_pct=%.2f chain_depth_strikes=%d).",
+            "short_threshold=%.1f long_threshold=%.1f profit_target_pct=%.2f chain_depth_strikes=%d "
+            "expiry_day_cutoff=%s).",
             client_id, binding_id, underlying, value["lots"], value["otm1"],
             value["adjustment_distance"], value["short_threshold"], value["long_threshold"],
-            value["profit_target_pct"], value["chain_depth_strikes"],
+            value["profit_target_pct"], value["chain_depth_strikes"], value["expiry_day_cutoff"],
         )
         return book
 
@@ -120,6 +130,12 @@ class IronFlyBookManager(StrategyBookManager):
             return True
         for k in _INT_KEYS + _FLOAT_KEYS:
             if getattr(book, f"_{k}") != value[k]:
+                return True
+        for k in _STR_KEYS:
+            # book stores the parsed form under `_{k}` (e.g. a time object
+            # for expiry_day_cutoff) and the raw string under `_{k}_str` --
+            # compare against the raw string form, same shape `value[k]` is.
+            if getattr(book, f"_{k}_str", None) != value[k]:
                 return True
         return False
 

@@ -79,3 +79,69 @@ def test_monitoring_state_when_flat():
     assert state["is_flat"] is True
     assert state["legs"]["short_ce"] is None
     assert state["underlying"] == "NIFTY"
+
+
+# ── expiry-day cutoff (real incident, 2026-09-15) ───────────────────────────
+
+def test_resolve_expiry_uses_next_week_past_cutoff_on_expiry_day(monkeypatch):
+    """Real incident: a fresh entry at 15:20 on expiry day itself needed
+    another fly conversion 1 minute before close. Fix: _resolve_expiry()
+    must resolve NEXT week's expiry once past the cutoff (default 15:00) on
+    the active expiry's own day."""
+    from datetime import date, datetime as real_datetime
+    import strategies.iron_fly.engine as engine_mod
+
+    bus = _FakeBus()
+    book = IronFlyStrategy(bus, _fake_cfg(), "NIFTY", "c1", "b1", expiry_day_cutoff="15:00")
+
+    class _FrozenDatetime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return real_datetime(2026, 9, 15, 15, 20, tzinfo=tz)
+
+    monkeypatch.setattr(engine_mod, "datetime", _FrozenDatetime)
+
+    class _FakeRegistry:
+        @staticmethod
+        def get_active_expiry_strict(underlying, from_date):
+            if from_date == date(2026, 9, 15):
+                return date(2026, 9, 15)  # today IS the active expiry
+            return date(2026, 9, 22)  # next week's
+
+    import sys
+    fake_module = type(sys)("data_layer.instrument_registry")
+    fake_module.REGISTRY = _FakeRegistry()
+    monkeypatch.setitem(sys.modules, "data_layer.instrument_registry", fake_module)
+
+    resolved = book._resolve_expiry()
+    assert resolved == date(2026, 9, 22)
+
+
+def test_resolve_expiry_uses_current_before_cutoff_on_expiry_day(monkeypatch):
+    from datetime import date, datetime as real_datetime
+    import strategies.iron_fly.engine as engine_mod
+
+    bus = _FakeBus()
+    book = IronFlyStrategy(bus, _fake_cfg(), "NIFTY", "c1", "b1", expiry_day_cutoff="15:00")
+
+    class _FrozenDatetime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return real_datetime(2026, 9, 15, 9, 21, tzinfo=tz)
+
+    monkeypatch.setattr(engine_mod, "datetime", _FrozenDatetime)
+
+    class _FakeRegistry:
+        @staticmethod
+        def get_active_expiry_strict(underlying, from_date):
+            if from_date == date(2026, 9, 15):
+                return date(2026, 9, 15)
+            return date(2026, 9, 22)
+
+    import sys
+    fake_module = type(sys)("data_layer.instrument_registry")
+    fake_module.REGISTRY = _FakeRegistry()
+    monkeypatch.setitem(sys.modules, "data_layer.instrument_registry", fake_module)
+
+    resolved = book._resolve_expiry()
+    assert resolved == date(2026, 9, 15)

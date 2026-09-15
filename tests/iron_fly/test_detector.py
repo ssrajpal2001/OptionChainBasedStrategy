@@ -19,7 +19,9 @@ from strategies.iron_fly.detector import (
     cycle_pnl,
     profit_target_hit,
     Leg,
+    should_use_next_week_expiry,
 )
+from datetime import date, time
 
 
 # ── round_to_atm ─────────────────────────────────────────────────────────────
@@ -222,3 +224,41 @@ def test_cycle_pnl_does_not_collide_when_ce_and_pe_share_a_strike():
 def test_profit_target_hit_true_at_or_above_65_pct():
     assert profit_target_hit(current_cycle_pnl=3900.0, expected_max_profit=6000.0, target_pct=0.65) is True
     assert profit_target_hit(current_cycle_pnl=3899.0, expected_max_profit=6000.0, target_pct=0.65) is False
+
+
+# ── should_use_next_week_expiry (real incident, 2026-09-15) ─────────────────
+
+def test_expiry_day_past_cutoff_uses_next_week():
+    # Real incident: fresh entry at 15:20 on expiry day itself needed
+    # another fly conversion 1 minute before close -- "no use" per direct
+    # user spec. Cutoff default is 15:00.
+    assert should_use_next_week_expiry(
+        today=date(2026, 9, 15), active_expiry=date(2026, 9, 15), now_time=time(15, 20),
+    ) is True
+
+
+def test_expiry_day_exactly_at_cutoff_uses_next_week():
+    assert should_use_next_week_expiry(
+        today=date(2026, 9, 15), active_expiry=date(2026, 9, 15), now_time=time(15, 0),
+    ) is True
+
+
+def test_expiry_day_before_cutoff_uses_current_expiry():
+    assert should_use_next_week_expiry(
+        today=date(2026, 9, 15), active_expiry=date(2026, 9, 15), now_time=time(9, 21),
+    ) is False
+
+
+def test_non_expiry_day_never_triggers_regardless_of_time():
+    # Today is NOT the active expiry's own day (still days away) -- no
+    # reason to skip ahead even late in the day.
+    assert should_use_next_week_expiry(
+        today=date(2026, 9, 11), active_expiry=date(2026, 9, 15), now_time=time(15, 20),
+    ) is False
+
+
+def test_custom_cutoff_is_respected():
+    assert should_use_next_week_expiry(
+        today=date(2026, 9, 15), active_expiry=date(2026, 9, 15), now_time=time(14, 45),
+        cutoff=time(14, 30),
+    ) is True
