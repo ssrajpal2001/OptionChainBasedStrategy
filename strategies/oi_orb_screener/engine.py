@@ -150,6 +150,16 @@ _VWAP_SL_MIN_GAP_PCT = 0.002
 _SPOT_FEED_RETRY_GRACE_SEC = 45.0
 _SPOT_FEED_RETRY_POLL_SEC = 20.0
 
+# 2026-09-15, real incident fix: see _live_price's own docstring -- 7 real
+# shortlisted stocks (INFY/TCS/LTM/PERSISTENT/WIPRO/HDFCBANK/TATAELXSI,
+# 2026-09-15) went completely dark for the entire day (zero signal_events,
+# zero heartbeat lines) because a single incomplete/throttled NSE poll
+# response dropped them from live_df with no fallback at all. POLL_SECONDS
+# default is 20s; this allows several consecutive missed polls (a real
+# Akamai throttle can span minutes, not just one cycle) before a symbol is
+# treated as genuinely priceless.
+_POLL_PRICE_STALE_SEC = 90.0
+
 
 def _make_strategy_logger(client_id: str, binding_id: str) -> logging.Logger:
     """Dedicated, rotating, per-(client,binding,day) log file -- same
@@ -580,6 +590,11 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         # fallback has a price, which is misleading since the heartbeat log
         # right above it clearly has one.
         self._last_known_price: Dict[str, float] = {}
+        # 2026-09-15, real incident fix: carried-forward last-poll price, for
+        # when a shortlisted symbol drops out of a given poll's live_df
+        # entirely (not just a stale tick) -- see _live_price's own docstring.
+        self._last_poll_price: Dict[str, float] = {}
+        self._last_poll_price_ts: Dict[str, datetime] = {}
         self._spot_tick_subscribed: Dict[str, bool] = {}
         # 2026-09-10, real incident fix: when _ensure_spot_feed's own subscribe
         # attempt was seen, so _spot_feed_retry_loop can detect "subscribed a
@@ -2281,9 +2296,22 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         the 20s-polled NSE dataframe (`live_df.loc[symbol, "lastPrice"]`,
         exactly what every call site used unconditionally before this pass)
         so a symbol whose tick feed hasn't started yet (or has gone quiet)
-        never goes blind. Returns None only if NEITHER source has this
-        symbol at all (mirrors the old behavior of skipping symbols not in
-        `live_df.index`)."""
+        never goes blind.
+
+        2026-09-15, real incident fix: a THIRD fallback -- the last known
+        poll price, carried forward for up to _POLL_PRICE_STALE_SEC seconds
+        -- for when `symbol` is missing from `live_df` itself (not just a
+        stale/absent tick). Real incident: INFY/TCS/LTM/PERSISTENT/WIPRO/
+        HDFCBANK/TATAELXSI (all correctly shortlisted, all comfortably past
+        the 2% filter) dropped out of live_df on every poll cycle after the
+        initial shortlist build for the entire 2026-09-15 session -- likely
+        a throttled/incomplete NSE response (this codebase already has
+        multiple confirmed Akamai-throttle incidents, see NSESession's own
+        docstring) -- and with no fallback at all, this function returned
+        None every single cycle, all day, for all 7: zero signal_events,
+        zero heartbeat lines, completely dark despite being live, valid,
+        tradeable candidates the whole time. Returns None only when NONE of
+        tick / current poll / recent-carried-forward poll has a price."""
         ts = self._live_spot_ltp_ts.get(symbol)
         if ts is not None and (datetime.now(IST) - ts).total_seconds() <= self._TICK_STALE_SEC:
             ltp = self._live_spot_ltp.get(symbol)
@@ -2294,11 +2322,25 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 return ltp
         if live_df is not None and symbol in live_df.index:
             ltp = float(live_df.loc[symbol, "lastPrice"])
+            if ltp > 0:
+                self._last_poll_price[symbol] = ltp
+                self._last_poll_price_ts[symbol] = datetime.now(IST)
             if log_source:
                 self._clog.debug("OiOrb[%s/%s]: %s price from NSE-poll fallback ltp=%.2f "
                                   "(tick stale or not yet arrived)",
                                   self._client_id, self._binding_id, symbol, ltp)
             return ltp
+        last_ts = self._last_poll_price_ts.get(symbol)
+        if last_ts is not None and (datetime.now(IST) - last_ts).total_seconds() <= _POLL_PRICE_STALE_SEC:
+            ltp = self._last_poll_price.get(symbol)
+            if ltp is not None and ltp > 0:
+                if log_source:
+                    self._clog.debug(
+                        "OiOrb[%s/%s]: %s price from carried-forward last poll ltp=%.2f "
+                        "(missing from this cycle's live_df -- age=%.0fs)",
+                        self._client_id, self._binding_id, symbol, ltp,
+                        (datetime.now(IST) - last_ts).total_seconds())
+                return ltp
         return None
 
     async def _await_first_ltp(self, stock_symbol: str, timeout: float) -> float:

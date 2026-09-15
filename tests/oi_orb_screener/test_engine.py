@@ -1666,6 +1666,59 @@ def test_ensure_spot_feed_uses_shared_feeder_when_no_dedicated_feeder_configured
     assert bus._global_feeder.subscribed_equity == [("NSE:MANAPPURAM-EQ", "MANAPPURAM")]
 
 
+# ── _live_price carried-forward poll fallback (2026-09-15 real incident) ────
+# INFY/TCS/LTM/PERSISTENT/WIPRO/HDFCBANK/TATAELXSI dropped out of live_df on
+# every poll after the initial shortlist build for a whole real session --
+# _live_price returned None every cycle, all day, with zero fallback.
+
+def test_live_price_returns_none_when_missing_everywhere():
+    import pandas as pd
+    bus = _FakeBus()
+    book = _make_book(bus)
+    live = pd.DataFrame({"lastPrice": [100.0]}, index=["OTHERSTOCK"])
+    assert book._live_price("INFY", live) is None
+
+
+def test_live_price_carries_forward_last_poll_price_when_missing_from_live_df():
+    import pandas as pd
+    bus = _FakeBus()
+    book = _make_book(bus)
+    live1 = pd.DataFrame({"lastPrice": [1500.0]}, index=["INFY"])
+    assert book._live_price("INFY", live1) == 1500.0   # seeds the carry-forward cache
+
+    # Next poll cycle: INFY missing from live_df entirely (the real incident).
+    live2 = pd.DataFrame({"lastPrice": [200.0]}, index=["OTHERSTOCK"])
+    assert book._live_price("INFY", live2) == 1500.0   # carried forward, not None
+
+
+def test_live_price_carried_forward_price_expires_after_stale_window(monkeypatch):
+    import pandas as pd
+    from strategies.oi_orb_screener import engine as engine_mod
+    bus = _FakeBus()
+    book = _make_book(bus)
+    live1 = pd.DataFrame({"lastPrice": [1500.0]}, index=["INFY"])
+    book._live_price("INFY", live1)
+
+    live2 = pd.DataFrame({"lastPrice": [200.0]}, index=["OTHERSTOCK"])
+    # Push the carried-forward timestamp far enough into the past to expire it.
+    book._last_poll_price_ts["INFY"] = datetime.now(IST) - timedelta(
+        seconds=engine_mod._POLL_PRICE_STALE_SEC + 5)
+    assert book._live_price("INFY", live2) is None
+
+
+def test_live_price_prefers_fresh_tick_over_carried_forward_poll_price():
+    import pandas as pd
+    bus = _FakeBus()
+    book = _make_book(bus)
+    live1 = pd.DataFrame({"lastPrice": [1500.0]}, index=["INFY"])
+    book._live_price("INFY", live1)
+
+    book._live_spot_ltp["INFY"] = 1555.0
+    book._live_spot_ltp_ts["INFY"] = datetime.now(IST)
+    live2 = pd.DataFrame({"lastPrice": [200.0]}, index=["OTHERSTOCK"])
+    assert book._live_price("INFY", live2) == 1555.0
+
+
 @pytest.mark.asyncio
 async def test_ensure_option_feed_prefers_dedicated_oiorb_feeder_when_available():
     bus = _FakeBus()
