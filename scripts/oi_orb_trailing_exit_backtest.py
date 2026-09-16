@@ -179,7 +179,20 @@ def _pnl_at(cache, exit_ts):
 
 
 def _giveback_exit(cache, giveback_pct):
-    """On the OPTION's own premium path. Returns exit_ts or None."""
+    """On the OPTION's own premium path. Returns exit_ts or None.
+
+    2026-09-16 bug fix: the first version updated `peak` from THIS bar's
+    own high, then immediately checked THIS SAME bar's low against the
+    trail stop derived from that just-updated peak -- a same-bar
+    lookahead bug (assumes the high happened before the low within a
+    single 1-min bar, which a bar's own OHLC can never actually prove).
+    Confirmed live: gave an identical +0.30 total across all 4 giveback
+    thresholds -- the classic signature of stopping out within the
+    first 1-2 bars on nearly every trade regardless of the threshold
+    value. Fixed: the trail stop used to check THIS bar is always
+    derived from the peak as of the PRIOR bar's close -- only after
+    checking does this bar's own high get folded into the peak for the
+    NEXT bar's check."""
     entry_ts, eod_ts = cache["entry_ts"], cache["eod_ts"]
     entry_price = cache["entry_opt_price"]
     entry_floor = entry_ts.replace(second=0, microsecond=0)
@@ -187,40 +200,60 @@ def _giveback_exit(cache, giveback_pct):
     for b in cache["opt_bars"]:
         if b.ts < entry_floor or b.ts > eod_ts:
             continue
-        peak = max(peak, b.high)
         if peak > entry_price:
             trail_stop = peak - giveback_pct * (peak - entry_price)
             if b.low <= trail_stop:
                 return b.ts
+        peak = max(peak, b.high)
     return None
 
 
-def _sr_exit(cache, tf_min):
+def _sr_exit(cache, tf_min, diag=None):
     """Real SupportResistanceCalculator, fed real N-min SPOT bars from
     market open (so phases are genuinely established before entry, same
     discipline as every other real intraday-warmup in this codebase).
     CALL: exit on a spot close below S1 (once established).
-    PUT: exit on a spot close above R1 (once established)."""
+    PUT: exit on a spot close above R1 (once established).
+
+    `diag`, if passed a dict, is filled with real diagnostic info
+    (final phase reached, whether S1/R1 ever got established, and when)
+    so a zero-impact result can be told apart from a real bug."""
     symbol, side = cache["symbol"], cache["side"]
     entry_ts, eod_ts = cache["entry_ts"], cache["eod_ts"]
     tf_bars = to_n_min_bars_dateaware(cache["spot_bars"], tf_min)
     calc = SupportResistanceCalculator()
     inst_key = f"{symbol}_SR_{tf_min}"
+    s1_established_ts = r1_established_ts = None
+    final_phase = "UNKNOWN"
     for b in tf_bars:
         candle = {"timestamp": b.ts, "high": b.high, "low": b.low, "duration": tf_min}
         calc.process_straddle_candle(inst_key, candle, silent=True)
-        if b.ts < entry_ts:
-            continue
         state = calc.get_calculated_sr_state(inst_key)
+        final_phase = state.get("current_phase", "UNKNOWN")
         levels = state.get("sr_levels") or {}
         s1 = levels.get("S1") or {}
         r1 = levels.get("R1") or {}
+        if s1.get("is_established") and s1_established_ts is None:
+            s1_established_ts = b.ts
+        if r1.get("is_established") and r1_established_ts is None:
+            r1_established_ts = b.ts
+        if b.ts < entry_ts:
+            continue
         if side == "CALL" and s1.get("is_established") and b.close < s1.get("low", float("-inf")):
+            if diag is not None:
+                diag.update(final_phase=final_phase, s1_established_ts=s1_established_ts,
+                             r1_established_ts=r1_established_ts, exit_level=s1.get("low"))
             return b.ts
         if side == "PUT" and r1.get("is_established") and b.close > r1.get("high", float("inf")):
+            if diag is not None:
+                diag.update(final_phase=final_phase, s1_established_ts=s1_established_ts,
+                             r1_established_ts=r1_established_ts, exit_level=r1.get("high"))
             return b.ts
         if b.ts > eod_ts:
             break
+    if diag is not None:
+        diag.update(final_phase=final_phase, s1_established_ts=s1_established_ts,
+                     r1_established_ts=r1_established_ts, exit_level=None)
     return None
 
 
@@ -273,14 +306,22 @@ async def main():
     print("=" * 130)
     for tf in SR_TF_GRID:
         total = 0.0
-        per_trade = []
+        show_diag = (tf == SR_TF_GRID[len(SR_TF_GRID) // 2])
+        if show_diag:
+            print(f"\n  -- per-trade diagnostic for tf={tf}min (final phase / S1,R1 established?) --")
         for c in caches:
-            sr_exit = _sr_exit(c, tf)
+            diag = {} if show_diag else None
+            sr_exit = _sr_exit(c, tf, diag=diag)
             exit_ts = _combine(c, sr_exit)
             pnl = _pnl_at(c, exit_ts)
             if pnl is not None:
                 total += pnl
-                per_trade.append((c["symbol"], c["trade_date"].isoformat(), pnl))
+            if show_diag and diag:
+                fired = f"FIRED@{sr_exit.strftime('%H:%M')}" if sr_exit else "never fired"
+                s1e = diag['s1_established_ts'].strftime('%H:%M') if diag.get('s1_established_ts') else "never"
+                r1e = diag['r1_established_ts'].strftime('%H:%M') if diag.get('r1_established_ts') else "never"
+                print(f"    {c['symbol']:14s} side={c['side']:4s} final_phase={diag['final_phase']:22s} "
+                      f"S1_established={s1e:6s} R1_established={r1e:6s} {fired}")
         print(f"  tf={tf}min  ->  total={total:+.2f} pts  (delta vs baseline: {total-baseline_total:+.2f})")
 
     print("\n" + "=" * 130)
