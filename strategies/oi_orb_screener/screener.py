@@ -137,6 +137,17 @@ CONFIG = {
     # happens after this time; a position already running is unaffected --
     # it still only closes at EOD square-off, target, or SL.
     "ENTRY_WINDOW_END": "15:00",
+    # 2026-09-16, direct user follow-up: this shipped opt-in/default-off
+    # (see engine.py's _compute_oi_regime_side docstring); confirmed live via
+    # 4 real trades (ATHERENERG/SOLARINDS/MCX/NESTLEIND, 2026-09-16) that
+    # firing purely off plain pChange sign with no futures-OI check at all
+    # is NOT what the user wants going forward -- direct instruction "it
+    # should be on by default". Flipped True here (the canonical config
+    # dict every book's _screener_cfg copies); engine.py's own inline
+    # `cfg.get("OI_REGIME_GATE_ENABLED", False)` fallback is deliberately
+    # left at False -- that's only a safety default for a cfg dict that
+    # somehow never went through this CONFIG at all, not the real default.
+    "OI_REGIME_GATE_ENABLED": True,
     "SCORE_WEIGHTS": {"price": 0.25, "oi_spurt": 0.25, "rel_strength": 0.25, "volume": 0.25},
     "POLL_SECONDS": 20,
     "MAX_MONITOR_MINUTES": 90,

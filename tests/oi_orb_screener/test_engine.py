@@ -3535,6 +3535,14 @@ def _drive_entry_loop_scaffold(book, monkeypatch, fixed_now: datetime):
     book._maybe_run_afternoon_scan = _async_return(None)
     book._ensure_spot_feed = lambda *a, **k: None
     book._screener_cfg["IGNORE_TIME_WINDOWS"] = True
+    # 2026-09-16: OI_REGIME_GATE_ENABLED now defaults True in screener.CONFIG
+    # (direct user follow-up after 4 real trades fired on plain pChange with
+    # no futures-OI check at all). Most callers of this scaffold are testing
+    # unrelated entry-loop mechanics (trap-gate) with zero regime-computation
+    # mocking -- default it back off here; the one caller that DOES want the
+    # gate on (test_entry_loop_uses_oi_regime_side_when_gate_enabled and its
+    # siblings) explicitly re-sets it True right after calling this helper.
+    book._screener_cfg["OI_REGIME_GATE_ENABLED"] = False
     book._running = True
     book._regime = "BULLISH"
 
