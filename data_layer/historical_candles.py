@@ -110,6 +110,38 @@ async def fetch_upstox_range_1m(
     return rows
 
 
+async def fetch_upstox_prev_day_last_tick_oi(
+    instrument_key: str, access_token: str, max_step_back: int = 5,
+) -> Optional[float]:
+    """2026-09-16, direct user spec (OI-ORB futures-OI-regime gate): the
+    previous trading day's RAW open interest as of its own last real 1-min
+    tick (e.g. 15:39 IST) -- deliberately distinct from Upstox's own
+    `previous_oi` field (fetch_upstox_v3_quote), which tracks NSE's
+    OFFICIALLY SETTLED end-of-day OI instead. Confirmed live via NSE's own
+    Bhavcopy for a real contract (SOLARINDS futures, 2026-09-15): the
+    official settled OpnIntrst (1,037,850) matched `previous_oi` exactly,
+    while the raw last continuous-trading tick that same day (1,137,750)
+    did not -- NSE's post-close settlement reconciliation genuinely revises
+    the figure. Both numbers are real and meaningful; this function exists
+    to surface the raw pre-settlement one alongside the official one, not
+    to replace it.
+
+    Steps back day-by-day (skipping weekends, matching fetch_upstox_range_1m's
+    own Mon-Fri filter) up to max_step_back times to survive a holiday.
+    Returns None on any failure (no data for the whole step-back window,
+    network error) -- caller degrades safely, same convention as every
+    other real-data fetch in this module."""
+    d = date.today() - timedelta(days=1)
+    for _ in range(max_step_back):
+        if d.weekday() < 5:
+            rows = await fetch_upstox_range_1m(instrument_key, access_token, d, d)
+            if rows:
+                oi = rows[-1].get("oi")
+                return float(oi) if oi else None
+        d -= timedelta(days=1)
+    return None
+
+
 async def fetch_upstox_daily(instrument_key: str, access_token: str, lookback_days: int = 5) -> List[dict]:
     """Daily candles (oldest-first) for instrument_key over the trailing
     lookback_days calendar days, via the 'day' interval endpoint. Each candle

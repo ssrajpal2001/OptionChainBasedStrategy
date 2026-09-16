@@ -614,6 +614,12 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         # symbols) and _compute_oi_regime_side (opportunistically, whenever
         # the gate itself runs) -- whichever fires first for a given symbol.
         self._futures_oi_latest: Dict[str, tuple] = {}
+        # 2026-09-16, direct user follow-up: yesterday's RAW pre-settlement
+        # OI (last real 1-min tick, e.g. 15:39 IST) -- distinct from
+        # previous_oi above (NSE's officially settled EOD OI). symbol ->
+        # float. Fetched lazily, once per (symbol, day), inside
+        # _fetch_futures_oi_snapshot.
+        self._prev_day_last_tick_oi: Dict[str, float] = {}
         # 2026-08-28 real incident fix: chronological history of every ADVERSE
         # bar's own low since entry, per symbol -- feeds
         # screener.pool_sl_from_adverse_lows() so the SL only arms once two
@@ -750,6 +756,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         # see _futures_oi_history_loop's own docstring.
         self._futures_oi_hist_last_poll_ts = 0.0
         self._futures_oi_latest = {}
+        self._prev_day_last_tick_oi = {}
         # 2026-09-10, direct user spec: tick-by-tick VWAP accumulation --
         # see _spot_tick_loop's own VWAP-update block.
         self._vwap_tick_volume_cum_last = {}
@@ -3878,6 +3885,27 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             return None
         oi_change_pct = (current_oi - previous_oi) / previous_oi * 100.0
         self._futures_oi_latest[sym] = (current_oi, previous_oi, oi_change_pct)
+
+        # 2026-09-16, direct user follow-up after independently verifying (via
+        # NSE's own real Bhavcopy) that "previous_oi" above is NSE's OFFICIALLY
+        # SETTLED end-of-day OI, distinct from the raw pre-settlement OI seen
+        # in yesterday's own last real tick (e.g. 15:39 IST) -- both numbers
+        # are real, so surface the raw one too rather than picking one. Fetched
+        # ONCE per (symbol, day), not on every poll -- a full day's 1-min
+        # history is a much heavier call than the V3 quote above. Best-effort:
+        # a failure here never blocks the (current_oi, previous_oi,
+        # oi_change_pct) result this function exists to return.
+        if sym not in self._prev_day_last_tick_oi:
+            try:
+                from data_layer.historical_candles import fetch_upstox_prev_day_last_tick_oi
+                _prev_tick_oi = await fetch_upstox_prev_day_last_tick_oi(fut_key, token)
+                if _prev_tick_oi is not None:
+                    self._prev_day_last_tick_oi[sym] = _prev_tick_oi
+            except Exception:
+                self._clog.warning(
+                    "OiOrb[%s/%s]: %s prev-day-last-tick OI fetch failed (non-fatal).",
+                    self._client_id, self._binding_id, sym, exc_info=True)
+
         return (current_oi, previous_oi, oi_change_pct)
 
     async def _compute_oi_regime_side(self, sym: str) -> Optional[str]:
@@ -4668,7 +4696,8 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             # -- plain, directly visible (not hidden behind the OI ▾ chart
             # toggle), same cache _fetch_futures_oi_snapshot populates.
             _foi = self._futures_oi_latest.get(sym)
-            futures_oi = ({"current_oi": _foi[0], "previous_oi": _foi[1], "oi_change_pct": round(_foi[2], 2)}
+            futures_oi = ({"current_oi": _foi[0], "previous_oi": _foi[1], "oi_change_pct": round(_foi[2], 2),
+                           "prev_day_last_tick_oi": self._prev_day_last_tick_oi.get(sym)}
                           if _foi is not None else None)
             positions[sym] = {
                 "option_type": p["contract"].option_type,
@@ -4735,7 +4764,9 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 "ltp": ltp, "vwap": round(vwap, 2) if vwap is not None else None,
                 "vwap_dist": dist, "vwap_dist_pct": dist_pct,
                 "futures_oi": ({"current_oi": _foi[0], "previous_oi": _foi[1],
-                                "oi_change_pct": round(_foi[2], 2)} if _foi is not None else None),
+                                "oi_change_pct": round(_foi[2], 2),
+                                "prev_day_last_tick_oi": self._prev_day_last_tick_oi.get(sym)}
+                               if _foi is not None else None),
             }
         # 2026-09-09, direct user spec: surface each shortlisted (not-yet-
         # entered) symbol's RollingVwapRetestTracker arm state -- top20 mode

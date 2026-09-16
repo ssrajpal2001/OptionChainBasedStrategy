@@ -8505,6 +8505,15 @@ function amoTest() {
                                     <span :style="(p.futures_oi&&p.futures_oi.oi_change_pct>=0)?'color:var(--t-green)':'color:var(--t-red)'"
                                           x-text="p.futures_oi ? (Math.round(p.futures_oi.current_oi).toLocaleString()+' ('+Math.round(p.futures_oi.previous_oi).toLocaleString()+') '+(p.futures_oi.oi_change_pct>=0?'+':'')+p.futures_oi.oi_change_pct.toFixed(2)+'%') : ''"></span>
                                   </div>
+                                  <!-- 2026-09-16, direct user follow-up: yesterday's RAW pre-settlement
+                                       OI (its own last real 1-min tick, ~15:39 IST) -- distinct from
+                                       "prev close" above (NSE's officially settled EOD OI, confirmed
+                                       via NSE's own Bhavcopy the two can genuinely differ). -->
+                                  <div class="flex justify-between" x-show="p.futures_oi&&p.futures_oi.prev_day_last_tick_oi" style="font-size:10px">
+                                    <span style="color:var(--t-muted)">Futures OI (yday 15:39 tick)</span>
+                                    <span style="color:var(--t-dim)"
+                                          x-text="p.futures_oi&&p.futures_oi.prev_day_last_tick_oi ? Math.round(p.futures_oi.prev_day_last_tick_oi).toLocaleString() : ''"></span>
+                                  </div>
                                   <!-- 2026-09-06 spec, updated 2026-09-09: entry AND exit both trigger
                                        off the underlying's SPOT ticks -- the option is priced by these
                                        signals, never itself the SL/target reference. Spot LTP + its
@@ -8585,6 +8594,15 @@ function amoTest() {
                               <span style="color:var(--t-muted)">Futures OI (prev close)</span>
                               <span :style="(row.foi&&row.foi.oi_change_pct>=0)?'color:var(--t-green)':'color:var(--t-red)'"
                                     x-text="row.foi ? (Math.round(row.foi.current_oi).toLocaleString()+' ('+Math.round(row.foi.previous_oi).toLocaleString()+') '+(row.foi.oi_change_pct>=0?'+':'')+row.foi.oi_change_pct.toFixed(2)+'%') : ''"></span>
+                            </div>
+                            <!-- 2026-09-16, direct user follow-up: yesterday's RAW pre-settlement
+                                 OI (own last real 1-min tick, ~15:39 IST) -- confirmed via NSE's own
+                                 Bhavcopy to genuinely differ from the officially settled "prev close"
+                                 above. -->
+                            <div class="flex justify-between mb-1" x-show="row.foi&&row.foi.prev_day_last_tick_oi" style="font-size:10px">
+                              <span style="color:var(--t-muted)">Futures OI (yday 15:39 tick)</span>
+                              <span style="color:var(--t-dim)"
+                                    x-text="row.foi&&row.foi.prev_day_last_tick_oi ? Math.round(row.foi.prev_day_last_tick_oi).toLocaleString() : ''"></span>
                             </div>
                             <div x-show="oiHistOpen[row.oiKey]" class="mb-2" :id="'oihistchart_'+row.oiKey"></div>
                           </template>

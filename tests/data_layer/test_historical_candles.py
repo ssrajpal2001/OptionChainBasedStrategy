@@ -100,3 +100,76 @@ def test_fetch_upstox_v3_quote_returns_none_on_empty_data(monkeypatch):
                          lambda url, token: {"status": "success", "data": {}})
     row = asyncio.run(hc.fetch_upstox_v3_quote("NSE_FO|68736", "TOKEN"))
     assert row is None
+
+
+# ── fetch_upstox_prev_day_last_tick_oi (2026-09-16, OI-ORB "yday 15:39 tick"
+# display -- distinct from previous_oi's NSE-settled EOD OI) ───────────────
+
+def _candles_with_oi(rows):
+    """rows: [(ts, close, oi), ...] oldest-first -- returns Upstox's own
+    newest-first raw shape (as _parse_candles expects to reverse)."""
+    return {"data": {"candles": [[ts, 1, 2, 0.5, close, 100, oi]
+                                  for ts, close, oi in reversed(rows)]}}
+
+
+def test_returns_last_bars_oi_from_the_most_recent_weekday(monkeypatch):
+    import datetime as _dt
+
+    class _FixedDate(_dt.date):
+        @classmethod
+        def today(cls):
+            return _dt.date(2026, 9, 16)  # a real Wednesday
+
+    monkeypatch.setattr(hc, "date", _FixedDate)
+
+    def fake_http(url, token):
+        assert "2026-09-15" in url
+        return _candles_with_oi([
+            ("2026-09-15T15:37:00+05:30", 100.0, 1137500),
+            ("2026-09-15T15:38:00+05:30", 100.5, 1137600),
+            ("2026-09-15T15:39:00+05:30", 101.0, 1137750),
+        ])
+    monkeypatch.setattr(hc, "_http_get_json", fake_http)
+
+    oi = asyncio.run(hc.fetch_upstox_prev_day_last_tick_oi("NSE_FO|68786", "TOKEN"))
+    assert oi == 1137750.0
+
+
+def test_steps_back_over_a_weekend(monkeypatch):
+    import datetime as _dt
+
+    class _FixedDate(_dt.date):
+        @classmethod
+        def today(cls):
+            return _dt.date(2026, 9, 14)  # a Monday -> yesterday is Sunday
+
+    monkeypatch.setattr(hc, "date", _FixedDate)
+
+    calls = []
+    def fake_http(url, token):
+        calls.append(url)
+        # Only Friday 2026-09-11 has real data; Sat/Sun are skipped entirely
+        # by fetch_upstox_range_1m's own weekday filter (never even called).
+        if "2026-09-11" in url:
+            return _candles_with_oi([("2026-09-11T15:39:00+05:30", 50.0, 999000)])
+        return {"data": {"candles": []}}
+    monkeypatch.setattr(hc, "_http_get_json", fake_http)
+
+    oi = asyncio.run(hc.fetch_upstox_prev_day_last_tick_oi("NSE_FO|68786", "TOKEN"))
+    assert oi == 999000.0
+    assert all("2026-09-13" not in u and "2026-09-12" not in u for u in calls)
+
+
+def test_returns_none_when_no_data_within_step_back_window(monkeypatch):
+    import datetime as _dt
+
+    class _FixedDate(_dt.date):
+        @classmethod
+        def today(cls):
+            return _dt.date(2026, 9, 16)
+
+    monkeypatch.setattr(hc, "date", _FixedDate)
+    monkeypatch.setattr(hc, "_http_get_json", lambda url, token: {"data": {"candles": []}})
+
+    oi = asyncio.run(hc.fetch_upstox_prev_day_last_tick_oi("NSE_FO|68786", "TOKEN", max_step_back=3))
+    assert oi is None
