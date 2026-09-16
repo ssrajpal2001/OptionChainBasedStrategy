@@ -3646,13 +3646,36 @@ async def test_entry_loop_gate_recheck_is_throttled(monkeypatch):
     assert book._trap_gate_skipped[("TESTSTOCK", "CALL")]["extreme"] == 101.0   # still updated
 
 
-# ── 2026-09-16, direct user spec, REVISED same day: futures-OI-regime
-# directional gate now compares TWO FIXED historical points -- today's own
-# 09:15 OI vs yesterday's own 15:39 OI -- not a "live now" reading (the
-# original design, superseded after independently verifying against NSE's
-# own real Bhavcopy exactly what Upstox's various OI fields represent).
-# INCREASING (>+1%) -> yesterday's candle decides CALL/PUT. DECREASING
-# (<-5%) -> today's pChange-sign trend decides. Otherwise -> no trade. ────
+# ── 2026-09-16, real live incident: a symbol the entry loop already removed
+# from the pool for a NEUTRAL/blocked OI-regime result kept getting silently
+# RE-ADDED by the OI-spurt streaming step, since it only ever checked "not
+# already shortlisted" -- confirmed live cycling remove->re-add every ~60s
+# for 4 real stocks. ─────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_stream_new_top20_symbols_never_readds_a_permanently_blocked_symbol(monkeypatch):
+    import pandas as pd
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._screener_cfg["OI_REGIME_GATE_ENABLED"] = True
+    book._oi_regime_computed.add("BLOCKEDSTOCK")
+    book._oi_regime_side["BLOCKEDSTOCK"] = None   # already permanently blocked today
+    book._ensure_spot_feed = lambda *a, **k: None
+    async def _noop_seed(sym):
+        return None
+    book._seed_vwap_from_upstox_intraday = _noop_seed
+
+    ranked = pd.DataFrame([
+        {"symbol": "BLOCKEDSTOCK", "rank": 1, "oi_spurt_pct": 9.0, "pChange": 3.0},
+        {"symbol": "FRESHSTOCK", "rank": 2, "oi_spurt_pct": 8.0, "pChange": 3.0},
+    ])
+
+    await book._stream_new_top20_symbols(ranked, datetime(2026, 9, 16, 11, 55, tzinfo=IST),
+                                          book._screener_cfg)
+
+    assert "BLOCKEDSTOCK" not in book._shortlist_symbols
+    assert "FRESHSTOCK" in book._shortlist_symbols
+
 
 def _mock_futures_key_and_creds(monkeypatch, fut_key="NSE_FO|12345"):
     monkeypatch.setattr("data_layer.instrument_registry.REGISTRY.load_futures_only_sync",

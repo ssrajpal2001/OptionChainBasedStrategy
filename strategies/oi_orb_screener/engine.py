@@ -1112,7 +1112,15 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             return
 
         sl_indexed = shortlist.set_index("symbol")
-        new_symbols = [s for s in shortlist["symbol"].tolist() if s not in self._shortlist_symbols]
+        # 2026-09-16: same guard as _stream_new_top20_symbols -- never
+        # re-add a symbol the OI-regime gate already permanently blocked
+        # for today.
+        oi_gate_on = cfg.get("OI_REGIME_GATE_ENABLED", False)
+        new_symbols = [
+            s for s in shortlist["symbol"].tolist()
+            if s not in self._shortlist_symbols
+            and not (oi_gate_on and s in self._oi_regime_computed and self._oi_regime_side.get(s) is None)
+        ]
         if not new_symbols:
             return
 
@@ -1396,10 +1404,22 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         screener.db's own oi_spurt_history record of when it actually
         entered the ranking."""
         min_pct = cfg.get("PRICE_MOVE_MIN_PCT", 2.0)
+        oi_gate_on = cfg.get("OI_REGIME_GATE_ENABLED", False)
         new_syms = []
         for _, r in ranked.iterrows():
             sym = r["symbol"]
             if sym in self._shortlist_symbols:
+                continue
+            # 2026-09-16, real live incident: a symbol the entry loop already
+            # removed from the pool for a NEUTRAL/blocked OI-regime result
+            # ("comes out of pool for the day") kept getting silently RE-
+            # ADDED here on the very next OI-spurt poll cycle, since this
+            # streaming step only ever checked "not already shortlisted" --
+            # confirmed live, MARICO/COLPAL/PATANJALI/NESTLEIND cycling
+            # remove->re-add->remove every ~60s. Once the gate has already
+            # computed a symbol as blocked today, it must never re-enter the
+            # pool via this path either.
+            if oi_gate_on and sym in self._oi_regime_computed and self._oi_regime_side.get(sym) is None:
                 continue
             pchange = float(r.get("pChange", 0.0) or 0.0)
             if abs(pchange) < min_pct:
