@@ -904,9 +904,12 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             # (from the contract just resolved above), never re-derived from
             # the stock's current/possibly-flipped pChange sign -- see
             # _side_from_option_type's own docstring for the full incident.
-            side_for_zones = self._side_from_option_type(r["option_type"])
-            asyncio.create_task(self._seed_trap_exit_state(
-                r["symbol"], side_for_zones, self._positions[r["symbol"]]["opened_at"]))
+            # 2026-09-17: trap-zone exit tiers disabled (see the main exit
+            # loop's own block comment) -- seeding them on restart would
+            # just be wasted NSE/Upstox calls for state nothing consumes.
+            # side_for_zones = self._side_from_option_type(r["option_type"])
+            # asyncio.create_task(self._seed_trap_exit_state(
+            #     r["symbol"], side_for_zones, self._positions[r["symbol"]]["opened_at"]))
 
         already_fired = await asyncio.to_thread(store.load_already_fired, self._client_id, self._binding_id, td)
         rejected = await asyncio.to_thread(store.load_rejected, self._client_id, self._binding_id, td)
@@ -1780,18 +1783,37 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             # because new entries aren't being evaluated right now.
             # 2026-09-02: "immediate_15m"-tagged positions get their own
             # parallel 15-min S1/R1 TSL instead.
-            # 2026-09-08, direct user spec: the universal exit for EVERY open
-            # position (unconditional on sl_mechanic, same as the HA+StochRSI
-            # check it replaces) is now: (1) a hard SL -- 30-min HA candle
-            # close on the wrong side of session VWAP, checked FIRST every
-            # cycle (a real stop takes priority over a target/reversal read)
-            # -- then (2) the multi-day 75min HTF same-side trap + 3min S&R
-            # ladder, falling back to (3) the already-validated intraday
-            # 15min/3min version of the same mechanic when no multi-day zone
-            # has locked+touched yet -- see _vwap_close_sl_check/
-            # _trap_multiday_exit_check/_trap_intraday_exit_check's own
-            # docstrings. _ha_stoch_check_exit is kept defined, not deleted,
-            # per this codebase's own convention for superseded mechanics.
+            # 2026-09-08, direct user spec (SUPERSEDED 2026-09-17, see below):
+            # the universal exit for EVERY open position used to be (1) a
+            # hard SL -- 20-min HA/plain candle close on the wrong side of
+            # session VWAP, checked FIRST every cycle -- then (2) the
+            # multi-day 180min HTF same-side trap + 3min S&R ladder, falling
+            # back to (3) the intraday 15min/3min version of the same
+            # mechanic when no multi-day zone had locked+touched yet.
+            #
+            # 2026-09-17, direct user decision, backed by a full real-data
+            # backtest series against the same 19 real traded stocks
+            # (scripts/oi_orb_trailing_exit_backtest.py): give-back TSL,
+            # real S&R S1/R1 structural TSL (swept across 15 intraday
+            # timeframes from 1 to 90min, in BOTH a pure-pin and a
+            # trails-to-current-active-level variant -- 0/19 fires on
+            # EVERY combination, a complete and decisive null), and a
+            # from-scratch intraday trap-zone exit concept were all
+            # checked against the plain "20-min VWAP-close SL + EOD,
+            # no target" baseline -- none of them beat it with anything
+            # more than thin, single-sample evidence. Direct user
+            # instruction: "as u have run the backtest and u confirm that
+            # no target is needed only 20 min sl concept stick with that
+            # and move on with live implementation." The
+            # _trap_multiday_exit_check/_trap_intraday_exit_check calls
+            # below are therefore DISABLED (commented out, not deleted --
+            # same convention already used for the superseded
+            # _ha_stoch_check_exit) -- the live exit for every open
+            # position is now just _vwap_close_sl_check (20-min VWAP-close
+            # hard SL) + EOD square-off, matching the validated baseline
+            # exactly. The functions/state they use (self._trap_exit_*,
+            # self._trap_ladder_check) are kept defined, not removed, in
+            # case future real-data evidence ever reopens this.
             for sym, pos in list(self._positions.items()):
                 await self._backfill_futures_oi_display(sym)
 
@@ -1810,12 +1832,13 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 await self._vwap_close_sl_check(sym, side, ltp, now)
                 if sym in self._eod_closing:
                     continue
-                await self._trap_multiday_exit_check(sym, side, ltp, now)
-                if sym in self._eod_closing:
-                    continue
-                await self._trap_intraday_exit_check(sym, side, ltp, now)
-                if sym in self._eod_closing:
-                    continue   # already claimed by the SL/trap-exit checks above this cycle
+                # 2026-09-17: disabled, see the block comment above.
+                # await self._trap_multiday_exit_check(sym, side, ltp, now)
+                # if sym in self._eod_closing:
+                #     continue
+                # await self._trap_intraday_exit_check(sym, side, ltp, now)
+                # if sym in self._eod_closing:
+                #     continue   # already claimed by the SL/trap-exit checks above this cycle
                 mech = pos.get("sl_mechanic")
                 if mech not in ("trap", "immediate_15m"):
                     continue
@@ -4690,7 +4713,11 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             # that must survive a re-entry to correctly block a second allowance).
             self._sl_vwap_1m_acc.pop(symbol, None)
             self._sl_vwap_last_checked_bar_ts.pop(symbol, None)
-            asyncio.create_task(self._seed_trap_exit_state(symbol, side_for_zones, datetime.now(IST)))
+            # 2026-09-17: trap-zone exit tiers disabled (see the main exit
+            # loop's own block comment) -- seeding them on every fresh
+            # entry would just be wasted NSE/Upstox calls for state
+            # nothing consumes.
+            # asyncio.create_task(self._seed_trap_exit_state(symbol, side_for_zones, datetime.now(IST)))
             self._clog.info("OiOrb[%s/%s]: ENTRY CONFIRMED %s %s%d qty=%d @ %.2f (paper_mode=%s) "
                              "-- option-premium SL/target tracking starts now.",
                              self._client_id, self._binding_id, symbol, contract.option_type,

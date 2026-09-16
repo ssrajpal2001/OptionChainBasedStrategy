@@ -1019,62 +1019,6 @@ def test_monitoring_state_side_uses_contract_not_flipped_pchange():
 
 
 @pytest.mark.asyncio
-async def test_restore_from_db_seeds_trap_exit_state_with_contract_side_not_pchange(monkeypatch):
-    bus = _FakeBus()
-    book = _make_book(bus)
-    book._today = date(2026, 9, 10)
-
-    store.open_position(_TEST_CLIENT_ID, _TEST_BINDING_ID, "TECHM", "CE", 1540,
-                         "2026-09-29", 600, 40.80, "vwap_retest_historical_top20", True, "EVT1",
-                         trade_date="2026-09-10")
-    monkeypatch.setattr(stock_resolve, "resolve_contract_exact_async",
-                         _async_return(_contract("TECHM", 1540, "CE")))
-    # Same flip as the real incident -- pChange has gone negative since entry.
-    book._shortlist_pchange["TECHM"] = -1.2
-
-    captured = []
-    async def _spy_seed(sym, side, entry_ts):
-        captured.append((sym, side))
-    book._seed_trap_exit_state = _spy_seed
-
-    await book._restore_from_db()
-    await asyncio.sleep(0.05)   # let the create_task'd seed actually run
-
-    assert ("TECHM", "CALL") in captured
-
-
-@pytest.mark.asyncio
-async def test_on_fill_seeds_trap_exit_state_with_contract_side_not_pchange(monkeypatch):
-    bus = _FakeBus()
-    book = _make_book(bus)
-    contract = _contract("TECHM", 1540, "CE")
-    eid = "evt_techm"
-    book._pending_fills[eid] = {
-        "symbol": "TECHM", "contract": contract, "qty": 600,
-        "entry_price": 40.80, "reason": "vwap_retest_historical_top20",
-    }
-    # If pChange were read at this instant it would (in the real incident)
-    # still be positive at entry -- but assert the fix reads the CONTRACT,
-    # not pChange, regardless, by deliberately mismatching them here too.
-    book._shortlist_pchange["TECHM"] = -1.2
-
-    captured = []
-    async def _spy_seed(sym, side, entry_ts):
-        captured.append((sym, side))
-    book._seed_trap_exit_state = _spy_seed
-
-    fill = OiOrbFillEvent(
-        client_id=_TEST_CLIENT_ID, binding_id=_TEST_BINDING_ID, event_id=eid,
-        action="BUY", underlying="TECHM", option_type="CE", strike=1540,
-        qty=600, fill_price=40.80, paper_mode=True,
-    )
-    await book._on_fill(fill)
-    await asyncio.sleep(0.05)
-
-    assert ("TECHM", "CALL") in captured
-
-
-@pytest.mark.asyncio
 async def test_exit_check_loop_uses_contract_side_not_flipped_pchange(monkeypatch):
     """2026-09-10 real incident, the PRIMARY site: _run_today_pipeline's main
     polling loop re-derived `side` for every open position from screener.
