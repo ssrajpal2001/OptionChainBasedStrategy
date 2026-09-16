@@ -152,6 +152,90 @@ def test_placement_gives_up_after_3_failed_attempts():
     assert b._attempts == 3  # never more than 3 -- no indefinite retrying at this layer
 
 
+# ── 2026-09-16, direct user spec: idempotency guard against a REAL duplicate
+# order. place_order() can raise AFTER the broker already accepted the order
+# -- the request landed, the response never made it back (a network blip
+# mid-response, not mid-request). Blindly retrying here fires a genuine
+# SECOND real order. Before retrying, _place_with_retries now asks the
+# broker's own find_recent_order() whether a matching order already exists.
+# ────────────────────────────────────────────────────────────────────────
+
+class _LandedButLostResponseBroker(_MockBroker):
+    """place_order() raises on attempt 1 (simulating a lost response), but a
+    real order genuinely reached the broker anyway -- find_recent_order()
+    can find it. place_order() must never be called a second time."""
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.place_order_calls = 0
+        self.find_recent_order_calls = 0
+        # The order genuinely landed and filled at the broker -- pre-populate
+        # its status so get_order_status("REAL-LANDED-OID") reflects that
+        # real outcome, exactly as a genuine broker query would.
+        self._status["REAL-LANDED-OID"] = (OrderStatus.COMPLETE, 10, 104.0)
+
+    async def place_order(self, req):
+        self.place_order_calls += 1
+        if self.place_order_calls == 1:
+            raise ConnectionError("response lost after the broker already accepted the order")
+        raise AssertionError("place_order must not be called again once find_recent_order matched")
+
+    async def find_recent_order(self, req, within_sec=30.0):
+        self.find_recent_order_calls += 1
+        return "REAL-LANDED-OID"
+
+
+def test_retry_reuses_matched_order_instead_of_placing_a_duplicate():
+    b = _LandedButLostResponseBroker(script=[("fill", 10, 0.0)])
+    fill = _run(_exec().execute_leg(
+        b, broker_symbol="NIFTY24700CE", exchange="NFO", side=OrderSide.SELL,
+        qty=10, product="NRML", tag="t", client_id="c", use_limit=False))
+    assert b.place_order_calls == 1          # never retried the actual placement
+    assert b.find_recent_order_calls == 1
+    assert fill.filled_qty == 10             # get_order_status("REAL-LANDED-OID") -> the mock's default fill
+
+
+class _BrokerWithoutIdempotencySupport(_FlakyBroker):
+    """No find_recent_order() at all -- matches every real broker adapter
+    that hasn't been given this capability (the safe-no-op default on
+    BaseBroker itself). Must behave EXACTLY like today's existing retry
+    behavior -- the AttributeError from the missing method must be swallowed,
+    never surfaced, never block the retry."""
+    async def place_order(self, req):
+        return await super().place_order(req)
+
+
+def test_retry_falls_back_to_normal_behavior_when_broker_has_no_idempotency_support():
+    b = _BrokerWithoutIdempotencySupport(fail_times=1, script=[("fill", 10, 0.0)])
+    fill = _run(_exec().execute_leg(
+        b, broker_symbol="NIFTY24700CE", exchange="NFO", side=OrderSide.SELL,
+        qty=10, product="NRML", tag="t", client_id="c", use_limit=False))
+    assert fill.completed and fill.filled_qty == 10
+    assert b._attempts == 2   # 1 failure + 1 success, same as the pre-existing behavior
+
+
+class _FindRecentOrderNeverMatchesBroker(_FlakyBroker):
+    """find_recent_order() exists but genuinely finds nothing (the common
+    case: the failure really was pre-transmission) -- must fall through to
+    the normal retry exactly as before."""
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.find_recent_order_calls = 0
+
+    async def find_recent_order(self, req, within_sec=30.0):
+        self.find_recent_order_calls += 1
+        return None
+
+
+def test_retry_proceeds_normally_when_no_matching_order_found():
+    b = _FindRecentOrderNeverMatchesBroker(fail_times=1, script=[("fill", 10, 0.0)])
+    fill = _run(_exec().execute_leg(
+        b, broker_symbol="NIFTY24700CE", exchange="NFO", side=OrderSide.SELL,
+        qty=10, product="NRML", tag="t", client_id="c", use_limit=False))
+    assert fill.completed and fill.filled_qty == 10
+    assert b.find_recent_order_calls == 1
+    assert b._attempts == 2   # genuinely retried and succeeded, same as before
+
+
 def test_ioc_chase_fills_on_second_rung_no_cancel():
     # IOC ladder: rung-0 (mid) doesn't cross → killed (0); rung-1 (more marketable) fills.
     # No resting order ⇒ NO cancel call, and no market fallback needed.

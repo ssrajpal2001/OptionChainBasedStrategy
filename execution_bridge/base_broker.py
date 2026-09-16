@@ -139,6 +139,33 @@ class BaseBroker(ABC):
     async def get_funds(self) -> Dict[str, float]:
         """Return {'available': float, 'used': float}."""
 
+    async def find_recent_order(self, req: "OrderRequest", within_sec: float = 30.0) -> Optional[str]:
+        """2026-09-16, direct user spec: idempotency guard for
+        SmartOrderExecutor._place_with_retries (execution_bridge/
+        smart_executor.py) -- a retry there fires on ANY exception from
+        place_order(), including one that happens AFTER the broker already
+        accepted the order but the response never made it back (a network
+        blip mid-response, not mid-request). Without this check, that retry
+        places a genuine SECOND real order.
+
+        Returns the order_id of a real order at the broker that matches
+        this request's own identity (symbol/side/qty/tag) and was placed
+        within the last `within_sec` seconds, or None if no such order is
+        found (or this broker doesn't support the check at all).
+
+        Default: always None (safe no-op) -- every broker that doesn't
+        override this keeps today's exact retry behavior, zero regression
+        risk. Only overridden for brokers that actually carry retry-wrapped
+        real capital today (Zerodha, Upstox) -- see each adapter's own
+        implementation. This is a best-effort HEURISTIC match (symbol+side+
+        qty+tag+recency), not a cryptographic guarantee -- a genuine
+        coincidental collision within the same few seconds is possible,
+        though unlikely given tags are already strategy-and-underlying-
+        specific. Any failure in an override (network error, broker API
+        change) must be swallowed and return None -- never block or corrupt
+        the caller's own retry loop."""
+        return None
+
     @property
     def is_authenticated(self) -> bool:
         return self._authenticated

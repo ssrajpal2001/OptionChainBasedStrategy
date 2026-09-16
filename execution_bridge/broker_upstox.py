@@ -27,9 +27,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from config.client_profiles import BrokerBinding
+from config.global_config import IST
 from execution_bridge.base_broker import (
     BaseBroker, OrderFill, OrderRequest, OrderSide, OrderStatus,
     OrderType, PositionRecord, BROKER_REGISTRY,
@@ -261,7 +263,66 @@ class UpstoxBroker(BaseBroker):
             order_id=order_id, broker_symbol="",
             side=OrderSide.BUY, qty=0, avg_price=0,
             status=OrderStatus.UNKNOWN,
+            client_id=self.client_id,
         )
+
+    async def find_recent_order(self, req: OrderRequest, within_sec: float = 30.0) -> Optional[str]:
+        """2026-09-16, direct user spec: idempotency guard for SmartOrderExecutor's
+        retry loop -- see BaseBroker.find_recent_order's own docstring for the full
+        rationale. Uses Upstox's own day order book (OrderApi.get_order_book(), the
+        SAME order_api object already used everywhere else in this file) to check
+        whether a real order matching this request's identity already reached
+        Upstox before a retry is allowed to fire a second one. Defensive getattr()
+        throughout, matching get_order_status()'s own style above -- this is a
+        best-effort safety check, never allowed to crash or block the caller's
+        actual retry loop if Upstox's SDK shape ever shifts under us."""
+        if not self._order_api:
+            return None
+        try:
+            ret = await asyncio.to_thread(self._order_api.get_order_book, api_version="2.0")
+        except Exception as exc:
+            logger.debug("UpstoxBroker[%s]: find_recent_order query failed (non-fatal, "
+                         "falling through to normal retry): %s", self.client_id, exc)
+            return None
+        orders = getattr(ret, "data", None) if ret and getattr(ret, "status", "") == "success" else None
+        if not orders:
+            return None
+        instrument_key = self._instrument_map.get(req.broker_symbol, req.broker_symbol)
+        tag = (req.tag or "")[:20]
+        now = datetime.now(IST)
+        best_oid, best_ts = None, None
+        for o in orders:
+            try:
+                o_key = getattr(o, "instrument_token", None) or getattr(o, "trading_symbol", None)
+                if o_key not in (instrument_key, req.broker_symbol):
+                    continue
+                if str(getattr(o, "transaction_type", "")) != req.side.value:
+                    continue
+                if int(getattr(o, "quantity", 0) or 0) != int(req.qty):
+                    continue
+                if tag and str(getattr(o, "tag", "") or "") != tag:
+                    continue
+                ts = getattr(o, "order_timestamp", None)
+                if isinstance(ts, str):
+                    ts = datetime.fromisoformat(ts)
+                if ts is None:
+                    continue
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=IST)
+                age = (now - ts).total_seconds()
+                if 0 <= age <= within_sec and (best_ts is None or ts > best_ts):
+                    best_oid, best_ts = getattr(o, "order_id", None), ts
+            except Exception:
+                continue
+        if best_oid:
+            logger.warning(
+                "UpstoxBroker[%s]: find_recent_order MATCHED an existing real order "
+                "%s (%s %s x%d, placed %.1fs ago) -- a retry here would have been a "
+                "DUPLICATE; reusing it instead.",
+                self.client_id, best_oid, req.side.value, req.broker_symbol, req.qty,
+                (now - best_ts).total_seconds(),
+            )
+        return str(best_oid) if best_oid else None
 
     async def get_positions(self) -> List[PositionRecord]:
         try:

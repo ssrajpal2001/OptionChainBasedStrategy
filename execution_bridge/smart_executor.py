@@ -86,6 +86,29 @@ class SmartOrderExecutor:
                 last_exc = RuntimeError("place_order returned no order_id")
             except Exception as exc:
                 last_exc = exc
+                # 2026-09-16, direct user spec: place_order() can raise AFTER the
+                # broker already accepted the order -- the request landed, but the
+                # response never made it back (a network blip mid-response, not
+                # mid-request). Retrying blindly here would fire a genuine SECOND
+                # real order. Before sleeping and retrying, ask the broker's own
+                # order book whether a matching real order already exists --
+                # find_recent_order() defaults to a safe no-op (returns None) for
+                # any broker that doesn't implement it, so this is purely additive
+                # and never blocks a legitimate retry. See BaseBroker.
+                # find_recent_order's own docstring for the full rationale and its
+                # honest heuristic-matching limits.
+                if attempt < attempts - 1:
+                    try:
+                        existing_oid = await broker.find_recent_order(req)
+                    except Exception:
+                        existing_oid = None
+                    if existing_oid:
+                        logger.warning(
+                            "SmartExec: place_order raised (%s) but a matching order "
+                            "%s already exists at the broker -- using it instead of "
+                            "retrying (would have placed a DUPLICATE).", exc, existing_oid,
+                        )
+                        return str(existing_oid)
             if attempt < attempts - 1:
                 await asyncio.sleep(backoff_sec)
         raise OrderPlacementFailed(f"order placement failed after {attempts} attempts: {last_exc}")

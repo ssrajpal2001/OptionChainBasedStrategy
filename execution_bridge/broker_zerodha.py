@@ -348,6 +348,60 @@ class ZerodhaBroker(BaseBroker):
                 client_id=self.client_id,
             )
 
+    async def find_recent_order(self, req: OrderRequest, within_sec: float = 30.0) -> Optional[str]:
+        """2026-09-16, direct user spec: idempotency guard for SmartOrderExecutor's
+        retry loop -- see BaseBroker.find_recent_order's own docstring for the full
+        rationale. Uses Kite Connect's own day order book (kite.orders(), the SAME
+        SDK object already used everywhere else in this file) to check whether a
+        real order matching this request's identity already reached Zerodha before
+        a retry is allowed to fire a second one."""
+        if not self._kite:
+            return None
+        try:
+            orders = await asyncio.to_thread(self._kite.orders)
+        except Exception as exc:
+            logger.debug("ZerodhaBroker[%s]: find_recent_order query failed (non-fatal, "
+                         "falling through to normal retry): %s", self.client_id, exc)
+            return None
+        transaction = "BUY" if req.side == OrderSide.BUY else "SELL"
+        tag = (req.tag or "")[:20]
+        now = datetime.now(IST)
+        best_oid, best_ts = None, None
+        for o in orders or []:
+            try:
+                if o.get("tradingsymbol") != req.broker_symbol:
+                    continue
+                if o.get("transaction_type") != transaction:
+                    continue
+                if int(o.get("quantity") or 0) != int(req.qty):
+                    continue
+                # Tag match only enforced when we actually sent one -- an order
+                # placed with no tag at all can't be narrowed further than
+                # symbol/side/qty, so accept any recent match in that case.
+                if tag and (o.get("tag") or "") != tag:
+                    continue
+                ts = o.get("order_timestamp")
+                if isinstance(ts, str):
+                    ts = datetime.fromisoformat(ts)
+                if ts is None:
+                    continue
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=IST)
+                age = (now - ts).total_seconds()
+                if 0 <= age <= within_sec and (best_ts is None or ts > best_ts):
+                    best_oid, best_ts = o.get("order_id"), ts
+            except Exception:
+                continue
+        if best_oid:
+            logger.warning(
+                "ZerodhaBroker[%s]: find_recent_order MATCHED an existing real order "
+                "%s (%s %s x%d, placed %.1fs ago) -- a retry here would have been a "
+                "DUPLICATE; reusing it instead.",
+                self.client_id, best_oid, transaction, req.broker_symbol, req.qty,
+                (now - best_ts).total_seconds(),
+            )
+        return str(best_oid) if best_oid else None
+
     async def get_positions(self) -> List[PositionRecord]:
         try:
             raw = await asyncio.to_thread(self._kite.positions)
