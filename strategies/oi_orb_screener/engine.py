@@ -2109,6 +2109,56 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         # _rejected) but wasteful.
         await self._apply_historical_vwap_retest(new_syms, cfg)
 
+    async def _gate_symbols_by_oi_regime(self, symbols: list, cfg: dict) -> list:
+        """2026-09-16 CRITICAL FIX, real incident (COFORGE/top20, see the two
+        callers' own comments): the futures-OI-regime gate (OI_REGIME_GATE_
+        ENABLED, added 2026-09-16) only ever ran inside the live per-cycle
+        entry loop -- both historical catch-up replay functions (the
+        standard variant's _apply_historical_vwap_retest and top20's own
+        _apply_historical_rolling_retest) could fire an entry for a symbol
+        whose retest had already completed earlier today WITHOUT ever
+        checking whether that symbol's OI-regime would have blocked it.
+        This shared helper applies the IDENTICAL gate check + pool-removal
+        behavior the live loop already uses (same self._oi_regime_computed/
+        self._oi_regime_side cache -- computing it here means the live loop
+        below simply reuses the cached result, never recomputes) so a
+        symbol can never trade via either replay path without passing the
+        same gate every other entry has to pass. Returns the subset of
+        `symbols` that are still eligible (gate disabled -> everything
+        passes through unchanged; gate enabled but not yet at its check
+        time -> left in, deferred to the live loop; gate enabled and
+        genuinely NEUTRAL/blocked -> removed from the pool here, same
+        "comes out of pool for the rest of today" behavior as the live
+        loop's own block)."""
+        if not cfg.get("OI_REGIME_GATE_ENABLED", False):
+            return symbols
+        now_key = datetime.now(IST).strftime("%H:%M")
+        check_time = cfg.get("OI_REGIME_CHECK_TIME", _OI_REGIME_CHECK_TIME_DEFAULT)
+        ignore_windows = cfg.get("IGNORE_TIME_WINDOWS")
+        eligible = []
+        for sym in symbols:
+            if sym not in self._oi_regime_computed:
+                if now_key < check_time and not ignore_windows:
+                    # Not yet time to compute -- leave it in the shortlist,
+                    # the live loop will gate it once OI_REGIME_CHECK_TIME
+                    # passes. Do NOT let it fire via the replay path in the
+                    # meantime.
+                    continue
+                self._oi_regime_computed.add(sym)
+                self._oi_regime_side[sym] = await self._compute_oi_regime_side(sym)
+            side = self._oi_regime_side.get(sym)
+            if side is None:
+                if sym in self._shortlist_symbols:
+                    self._shortlist_symbols.remove(sym)
+                self._shortlist_pchange.pop(sym, None)
+                self._clog.info(
+                    "OiOrb[%s/%s]: %s removed from pool -- OI-regime NEUTRAL/blocked "
+                    "for today (checked before historical replay could fire it).",
+                    self._client_id, self._binding_id, sym)
+                continue
+            eligible.append(sym)
+        return eligible
+
     async def _apply_historical_vwap_retest(self, symbols: list, cfg: dict) -> None:
         """2026-09-07, direct user spec: "when we started the application and
         stocks were already there in the scan list it should have called
@@ -2143,6 +2193,20 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         equivalent."""
         if self._top20_mode:
             return await self._apply_historical_rolling_retest(symbols, cfg)
+        if not symbols:
+            return
+        # 2026-09-16 CRITICAL FIX, real incident: this replay path never
+        # applied the futures-OI-regime gate at all -- a symbol whose plain
+        # VWAP-retest already completed earlier today (real history, replayed
+        # once right after shortlist-add) could fire and trade here BEFORE
+        # the live per-cycle entry loop ever got a chance to evaluate/remove
+        # it via _compute_oi_regime_side. Confirmed live: COFORGE (top20
+        # variant, see _apply_historical_rolling_retest's own fix below for
+        # the actual incident) bypassed the gate entirely this way. Applying
+        # the identical gate check here, before this function is allowed to
+        # fire anything, so the historical catch-up path can never trade a
+        # symbol the live loop would have blocked.
+        symbols = await self._gate_symbols_by_oi_regime(symbols, cfg)
         if not symbols:
             return
         # 2026-09-10, same restart-safety fix as _apply_historical_rolling_retest
@@ -2219,10 +2283,28 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         replays screener.RollingVwapRetestTracker (the correct top20 entry
         mechanic -- arm-then-retest bounded to a rolling 15-candle window)
         via screener.historical_rolling_retest_check, not the standard
-        variant's unbounded arm-then-retest. No regime gate here (matches
+        variant's unbounded arm-then-retest. "No regime gate here" (matches
         top20's own live tick-loop entry check, which has never applied
         one -- direct user spec, "no oi spurt threshold... no regime gate
-        in this variant's spec")."""
+        in this variant's spec") refers ONLY to the older NIFTY-spot day
+        regime filter (BULLISH/BEARISH/NEUTRAL), which top20 intentionally
+        never uses. It does NOT mean the newer futures-OI-regime gate
+        (OI_REGIME_GATE_ENABLED, added 2026-09-16) is exempt too.
+
+        2026-09-16 CRITICAL FIX, real incident: confirmed live, COFORGE
+        (top20, real OI change -4.56%, squarely inside the NEUTRAL/blocked
+        band) fired and traded via this exact function on a mid-day
+        restart -- its historical retest had already completed at 12:07,
+        so it fired here before the live per-cycle loop (which DOES gate
+        top20 on OI-regime, see that loop's own comment) ever got a chance
+        to evaluate and remove it. Every other shortlisted symbol that day
+        WAS correctly blocked by the live loop's gate -- only this replay
+        path's own blind spot let COFORGE slip through. Now gated via the
+        shared _gate_symbols_by_oi_regime helper before anything here is
+        allowed to fire."""
+        if not symbols:
+            return
+        symbols = await self._gate_symbols_by_oi_regime(symbols, cfg)
         if not symbols:
             return
         # 2026-09-10, real incident fix: this deterministic replay always

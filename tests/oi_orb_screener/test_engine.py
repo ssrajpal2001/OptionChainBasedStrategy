@@ -761,6 +761,10 @@ async def test_afternoon_scan_noop_when_disabled(monkeypatch):
 async def test_afternoon_scan_adds_new_symbols_without_dropping_existing(monkeypatch):
     bus = _FakeBus()
     book = _make_book(bus)
+    # Orthogonal to the OI-regime gate (2026-09-16 fix now also gates the
+    # historical-retest replay this scan triggers) -- disable it here so
+    # NEWSTOCK isn't removed for lacking mocked futures credentials.
+    book._screener_cfg["OI_REGIME_GATE_ENABLED"] = False
     book._shortlist_symbols = ["EXISTING"]
     book._shortlist_pchange = {"EXISTING": 3.0}
     book._regime = "bullish"   # already frozen at 09:25 -- must stay untouched
@@ -796,6 +800,10 @@ async def test_afternoon_scan_sets_orb_frozen_for_the_new_symbol(monkeypatch):
     bus = _FakeBus()
     book = _make_book(bus)
     book._regime = "bullish"
+    # Orthogonal to the OI-regime gate (2026-09-16 fix now also gates the
+    # historical-retest replay this scan triggers) -- disable it here so
+    # NEWSTOCK isn't removed for lacking mocked futures credentials.
+    book._screener_cfg["OI_REGIME_GATE_ENABLED"] = False
 
     df = _shortlist_df([
         {"symbol": "NEWSTOCK", "pChange": -2.5, "oi_spurt_pct": 9.0, "score": 0.6,
@@ -852,6 +860,10 @@ async def test_afternoon_scan_never_refetches_regime(monkeypatch):
     bus = _FakeBus()
     book = _make_book(bus)
     book._regime = "bearish"
+    # Orthogonal to the OI-regime gate (2026-09-16 fix now also gates the
+    # historical-retest replay this scan triggers) -- disable it here so
+    # NEWSTOCK isn't removed for lacking mocked futures credentials.
+    book._screener_cfg["OI_REGIME_GATE_ENABLED"] = False
     df = _shortlist_df([{"symbol": "NEWSTOCK", "pChange": -3.0, "oi_spurt_pct": 8.0,
                           "score": 0.5, "lastPrice": 50.0, "previousClose": 51.5}])
     monkeypatch.setattr(screener, "build_shortlist", lambda nse, cfg: (df, 0.0))
@@ -3058,6 +3070,10 @@ async def test_apply_historical_vwap_retest_fires_immediately_when_already_retes
     retest state cold and wait for a brand new cross-and-retest cycle."""
     bus = _FakeBus()
     book = _make_book(bus)
+    # Orthogonal to the OI-regime gate (2026-09-16 fix now also gates this
+    # replay function) -- disable it here to isolate the pre-existing
+    # historical-retest firing logic this test actually targets.
+    book._screener_cfg["OI_REGIME_GATE_ENABLED"] = False
     book._shortlist_pchange["MANAPPURAM"] = -3.49  # bearish -> PUT
     book._regime = "bearish"  # PUT is tradeable on both bullish and bearish days
 
@@ -3085,6 +3101,7 @@ async def test_apply_historical_vwap_retest_fires_immediately_when_already_retes
 async def test_apply_historical_vwap_retest_seeds_armed_state_without_firing(monkeypatch):
     bus = _FakeBus()
     book = _make_book(bus)
+    book._screener_cfg["OI_REGIME_GATE_ENABLED"] = False
     book._shortlist_pchange["SOLARINDS"] = 2.19  # bullish -> CALL
 
     monkeypatch.setattr(screener, "historical_vwap_retest_check", lambda symbols_sides, cfg: {
@@ -3179,6 +3196,7 @@ async def test_apply_historical_vwap_retest_skips_symbol_already_checked_today(m
 async def test_apply_historical_vwap_retest_marks_symbol_checked_after_processing(monkeypatch):
     bus = _FakeBus()
     book = _make_book(bus)
+    book._screener_cfg["OI_REGIME_GATE_ENABLED"] = False
     book._shortlist_pchange["SOLARINDS"] = 2.19  # bullish -> CALL
 
     monkeypatch.setattr(screener, "historical_vwap_retest_check", lambda symbols_sides, cfg: {
@@ -3217,6 +3235,7 @@ async def test_apply_historical_rolling_retest_marks_symbol_checked_after_proces
     bus = _FakeBus()
     book = _make_book(bus)
     book._top20_mode = True
+    book._screener_cfg["OI_REGIME_GATE_ENABLED"] = False
     book._shortlist_pchange["GVT&D"] = -2.0  # bearish -> PUT
 
     class _FakeTracker:
@@ -3229,6 +3248,105 @@ async def test_apply_historical_rolling_retest_marks_symbol_checked_after_proces
     await book._apply_historical_rolling_retest(["GVT&D"], book._screener_cfg)
 
     assert ("GVT&D", "PUT") in book._historical_check_done
+
+
+# ── 2026-09-16, real live incident: COFORGE (top20 variant) traded via
+# _apply_historical_rolling_retest on a mid-day restart despite its real
+# futures-OI change (-4.56%) sitting squarely in the NEUTRAL/blocked band --
+# every OTHER shortlisted symbol that day WAS correctly blocked by the live
+# entry loop's own OI-regime gate, but this historical catch-up replay path
+# had no equivalent check at all and fired before the live loop ever got a
+# chance to evaluate/remove it. Fixed via the shared _gate_symbols_by_oi_
+# regime helper, applied to both historical replay functions. ─────────────
+
+@pytest.mark.asyncio
+async def test_apply_historical_rolling_retest_blocked_by_oi_regime_never_fires(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._top20_mode = True
+    book._screener_cfg["OI_REGIME_GATE_ENABLED"] = True
+    book._shortlist_symbols.append("COFORGE")
+    book._shortlist_pchange["COFORGE"] = -2.07
+
+    async def _fake_regime_side(sym):
+        return None   # NEUTRAL -- would be blocked by the live loop too
+    book._compute_oi_regime_side = _fake_regime_side
+
+    checked = []
+    def _fake_check(symbols_sides, cfg, window_min):
+        checked.append(dict(symbols_sides))
+        return {"COFORGE": {"tracker": None, "fired": True, "fire_ts": "12:07",
+                             "fire_price": 1741.30}}
+    monkeypatch.setattr(screener, "historical_rolling_retest_check", _fake_check)
+
+    await book._apply_historical_rolling_retest(["COFORGE"], book._screener_cfg)
+
+    # The gate must remove COFORGE from the pool BEFORE the replay's own
+    # (mocked) real-history check is even reached -- the real bug was this
+    # expensive/real check firing an entry unconditionally.
+    assert checked == []
+    assert "COFORGE" not in book._shortlist_symbols
+    assert ("COFORGE", "PUT") not in book._already_fired
+    assert book._oi_regime_side.get("COFORGE") is None
+
+
+@pytest.mark.asyncio
+async def test_apply_historical_rolling_retest_allowed_by_oi_regime_still_fires(monkeypatch):
+    """Sanity companion to the blocked-case test above -- confirms the gate
+    fix doesn't collaterally block a symbol whose OI-regime genuinely allows
+    a side; the historical catch-up mechanic itself is otherwise untouched."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._top20_mode = True
+    book._screener_cfg["OI_REGIME_GATE_ENABLED"] = True
+    book._shortlist_symbols.append("SOLARINDS")
+    book._shortlist_pchange["SOLARINDS"] = -8.55
+
+    async def _fake_regime_side(sym):
+        return "PUT"   # DECREASING regime, genuine reversal -> allowed
+    book._compute_oi_regime_side = _fake_regime_side
+
+    monkeypatch.setattr(screener, "historical_rolling_retest_check",
+                         lambda symbols_sides, cfg, window_min: {
+                             "SOLARINDS": {"tracker": None, "fired": True,
+                                           "fire_ts": "12:07", "fire_price": 18815.0}})
+
+    await book._apply_historical_rolling_retest(["SOLARINDS"], book._screener_cfg)
+
+    assert "SOLARINDS" in book._shortlist_symbols
+    assert ("SOLARINDS", "PUT") in book._already_fired
+    assert book._oi_regime_side.get("SOLARINDS") == "PUT"
+
+
+@pytest.mark.asyncio
+async def test_apply_historical_vwap_retest_blocked_by_oi_regime_never_fires(monkeypatch):
+    """Standard-variant counterpart -- same latent gap existed in
+    _apply_historical_vwap_retest (not just top20's own rolling-retest
+    path), fixed by the same shared gate."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._screener_cfg["OI_REGIME_GATE_ENABLED"] = True
+    book._shortlist_symbols.append("PREMIERENE")
+    book._shortlist_pchange["PREMIERENE"] = -5.37
+    book._regime = "bearish"
+
+    async def _fake_regime_side(sym):
+        return None
+    book._compute_oi_regime_side = _fake_regime_side
+
+    checked = []
+    def _fake_check(symbols_sides, cfg):
+        checked.append(dict(symbols_sides))
+        return {"PREMIERENE": {"armed": True, "fired": True, "fire_ts": "09:47",
+                                "fire_price": 894.30, "final_vwap": 903.40,
+                                "bars_replayed": 30}}
+    monkeypatch.setattr(screener, "historical_vwap_retest_check", _fake_check)
+
+    await book._apply_historical_vwap_retest(["PREMIERENE"], book._screener_cfg)
+
+    assert checked == []
+    assert "PREMIERENE" not in book._shortlist_symbols
+    assert ("PREMIERENE", "PUT") not in book._already_fired
 
 
 # ── _oi_spurt_history_loop must wait for _restore_from_db to finish before
@@ -3664,6 +3782,14 @@ async def test_stream_new_top20_symbols_never_readds_a_permanently_blocked_symbo
     async def _noop_seed(sym):
         return None
     book._seed_vwap_from_upstox_intraday = _noop_seed
+    # 2026-09-16: this streaming step now feeds newly-added symbols into
+    # _apply_historical_rolling_retest, which (since the OI-regime-gate fix
+    # the same day) gates them too -- FRESHSTOCK needs a real (non-None)
+    # regime verdict to stay eligible, isolating this test to the re-add
+    # guard it actually targets rather than the gate's own computation.
+    async def _fake_regime_side(sym):
+        return "CALL"
+    book._compute_oi_regime_side = _fake_regime_side
 
     ranked = pd.DataFrame([
         {"symbol": "BLOCKEDSTOCK", "rank": 1, "oi_spurt_pct": 9.0, "pChange": 3.0},
