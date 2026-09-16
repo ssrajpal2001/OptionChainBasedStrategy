@@ -78,6 +78,9 @@ EOD_TIME = "15:15"
 PRICE_TRIGGER_PCT = 2.0
 OI_CONFIRM_THRESHOLD_PCT = 3.0
 VWAP_WINDOW_MIN = 15.0
+# 2026-09-16, direct user spec + real evidence (see run_symbol's own
+# comment at the cutoff check): no entry counted after this time.
+ENTRY_CUTOFF_TIME = dtime(13, 30)
 
 CLIENT_ID = "ssrajpal2001"
 BINDING_ID = "UPSTOX"
@@ -286,6 +289,18 @@ async def run_symbol(book, tokens, trade_date: date, symbol: str):
                    f"through VWAP within {VWAP_WINDOW_MIN:.0f}min of arming, for the rest of the day")
         return {"symbol": symbol, "stage": "no_vwap_retest", "side": side, "trig_ts": trig_ts,
                 "confirm_ts": confirm_ts, "detail": detail}
+
+    # 2026-09-16, direct user spec, backed by real evidence checked this
+    # session: entries after 13:30 netted +3.99 pts across 7 real trades
+    # vs +204.20 across the 12 real trades at/before 13:30 -- late
+    # entries add near-zero value once the day's real move (91% of the
+    # 35 real stocks checked had their biggest range in the 09:15-11:30
+    # morning session, none in the afternoon) has typically already
+    # played out. New hard cutoff: no entry counted after 13:30.
+    if fire_ts.time() > ENTRY_CUTOFF_TIME:
+        detail = f"VWAP retest fired at {fire_ts.strftime('%H:%M')}, after the {ENTRY_CUTOFF_TIME.strftime('%H:%M')} entry cutoff"
+        return {"symbol": symbol, "stage": "entry_cutoff_skipped", "side": side, "trig_ts": trig_ts,
+                "confirm_ts": confirm_ts, "fire_ts": fire_ts, "detail": detail}
 
     eod_ts = datetime.combine(trade_date, datetime.strptime(EOD_TIME, "%H:%M").time(), tzinfo=IST)
 
