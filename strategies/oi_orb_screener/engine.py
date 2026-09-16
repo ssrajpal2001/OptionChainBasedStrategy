@@ -2131,31 +2131,30 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         futures-OI numbers that blocked it (step 2), with a plain-English
         reason, into self._oi_regime_blocked so monitoring_state() can keep
         showing it after it's gone from self._shortlist_symbols. The reason
-        bucket (NEUTRAL / INCREASING-no-direction / DECREASING-continuation-
-        or-no-direction / no-data) is re-derived here from the same cached
-        today_0915_oi/prev_day_last_tick_oi + thresholds _compute_oi_regime_
-        side already used, rather than widening that function's own return
-        type (which every caller/test currently treats as a plain
-        Optional[str] side) -- good enough for display purposes without
-        touching a shared, already-tested decision function."""
+        bucket (INCREASING-no-direction / DECREASING-continuation-or-no-
+        direction / no-data -- NEUTRAL removed 2026-09-16, second same-day
+        revision, see _compute_oi_regime_side's own docstring) is re-derived
+        here from the same cached today_0915_oi/prev_day_last_tick_oi +
+        threshold _compute_oi_regime_side already uses, rather than widening
+        that function's own return type (which every caller/test currently
+        treats as a plain Optional[str] side) -- good enough for display
+        purposes without touching a shared, already-tested decision
+        function."""
         today_oi = self._today_0915_oi.get(sym)
         yday_oi = self._prev_day_last_tick_oi.get(sym)
         pchange = self._shortlist_pchange.get(sym)
-        inc_min = float(cfg.get("OI_REGIME_INCREASE_MIN_PCT", _OI_REGIME_INCREASE_MIN_PCT_DEFAULT))
         dec_max = float(cfg.get("OI_REGIME_DECREASE_MAX_PCT", _OI_REGIME_DECREASE_MAX_PCT_DEFAULT))
         if today_oi is None or not yday_oi:
             oi_change_pct = None
             reason = "futures-OI data unavailable (no futures key/token/09:15 bar/prior-day bar)"
         else:
             oi_change_pct = round((today_oi - yday_oi) / yday_oi * 100.0, 2)
-            if oi_change_pct > inc_min:
-                reason = (f"futures OI +{oi_change_pct:.2f}% (INCREASING) but yesterday's candle "
-                          f"gave no clear direction (doji/no data)")
-            elif oi_change_pct < dec_max:
+            if oi_change_pct <= dec_max:
                 reason = (f"futures OI {oi_change_pct:.2f}% (DECREASING) but today's move only "
                           f"continues yesterday's own direction, not a reversal (or flat/no data)")
             else:
-                reason = f"futures OI {oi_change_pct:+.2f}% -- inside the NEUTRAL band ({dec_max:.0f}% to +{inc_min:.0f}%)"
+                reason = (f"futures OI {oi_change_pct:+.2f}% (INCREASING) but yesterday's candle "
+                          f"gave no clear direction (doji/no data)")
         self._oi_regime_blocked[sym] = {
             "pchange": pchange,
             "today_0915_oi": today_oi,
@@ -4011,16 +4010,26 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         repeated re-fetch/refresh loop for this (unlike the superseded
         current-OI-vs-settled-close design this replaced).
 
-        > +1%  (INCREASING): direction comes ONLY from yesterday's candle
-               (close>open -> CALL-only, close<open -> PUT-only) -- today's
-               price action can time entry but never overrides this.
-        < -5%  (DECREASING): direction starts from "today's trend", mapped
+        2026-09-16, second same-day REVISION, direct user spec: the NEUTRAL
+        band is REMOVED entirely -- every stock is now either DECREASING or
+        INCREASING, nothing is blocked purely for sitting "in the middle."
+        ("CONFIRM PLEASE IMPLEMENT AND MAKE IT LIVE" -- explicit confirmation
+        that this eliminates the previous -5%..+1% neutral band, verified
+        against a worked example before implementing: every stock in that
+        day's blocked panel, e.g. PAYTM -1.94%/PREMIERENE -1.09%/OFSS -0.63%,
+        would flip from NEUTRAL/blocked to INCREASING/tradeable under this
+        rule.)
+
+        <= -5%  (DECREASING): direction starts from "today's trend", mapped
                to the stock's own live pChange sign (self._shortlist_pchange,
                the SAME convention screener.side_from_pchange already uses
-               everywhere else in this codebase) -- but REVISED, 2026-09-16
-               direct user follow-up: a trade only fires if that direction
-               is the OPPOSITE of yesterday's own candle (a genuine reversal
-               confirmation), never a continuation of yesterday's own move.
+               everywhere else in this codebase) -- a trade only fires if
+               that direction is the OPPOSITE of yesterday's own candle (a
+               genuine reversal confirmation), never a continuation of
+               yesterday's own move (unchanged from the first 2026-09-16
+               revision, only the boundary itself moved from "< -5%" to
+               "<= -5%", i.e. exactly -5.00% now counts as DECREASING
+               instead of falling into the now-removed NEUTRAL band).
                Worked example: today +2% pChange (would-be CALL) but
                yesterday was ALSO bullish -> BLOCKED (same direction as
                yesterday, not a reversal); today +2% pChange with yesterday
@@ -4028,14 +4037,21 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                Mirrored for a negative today: blocked against a bearish
                yesterday (continuation), fires PUT against a bullish
                yesterday (reversal). A doji yesterday (no directional read)
-               blocks, same as the INCREASING branch's own doji handling.
-        otherwise (NEUTRAL, -5%..+1% inclusive-exclusive): no trade.
+               blocks.
+        > -5%  (INCREASING, everything else): direction comes ONLY from
+               yesterday's candle (close>open -> CALL-only, close<open ->
+               PUT-only) -- today's price action can time entry but never
+               overrides this. A doji yesterday (no directional read) blocks.
+               OI_REGIME_INCREASE_MIN_PCT (+1% default) is no longer
+               consulted for this decision -- left in place as a config key
+               only for backward-compat / any future re-introduction of a
+               narrower band, not read by this method any more.
 
-        Any None result here (NEUTRAL, a same-direction-as-yesterday block
-        in the DECREASING branch, a doji, or a data failure) is treated
-        identically by the caller (the entry loop): the symbol is removed
-        from the pool entirely for the rest of the day, per direct spec
-        ("that stock will come out of pool for whose day") -- one
+        Any None result here (a same-direction-as-yesterday block in the
+        DECREASING branch, a doji in either branch, or a data failure) is
+        treated identically by the caller (the entry loop): the symbol is
+        removed from the pool entirely for the rest of the day, per direct
+        spec ("that stock will come out of pool for whose day") -- one
         consistent rule for every "blocked today" reason, not a special
         case per cause.
 
@@ -4081,14 +4097,13 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             oi_change_pct = (today_oi - yday_oi) / yday_oi * 100.0
 
             cfg = self._screener_cfg
-            inc_min = float(cfg.get("OI_REGIME_INCREASE_MIN_PCT", _OI_REGIME_INCREASE_MIN_PCT_DEFAULT))
             dec_max = float(cfg.get("OI_REGIME_DECREASE_MAX_PCT", _OI_REGIME_DECREASE_MAX_PCT_DEFAULT))
 
-            if oi_change_pct > inc_min:
-                regime = "INCREASING"
-                yday_dir = await self._yesterday_candle_direction(fut_key, token)
-                side = "CALL" if yday_dir == "bullish" else ("PUT" if yday_dir == "bearish" else None)
-            elif oi_change_pct < dec_max:
+            # 2026-09-16, second same-day revision, direct user spec: NEUTRAL
+            # band removed -- <=-5% is DECREASING (reversal-gated, unchanged
+            # logic), everything else (>-5%) is INCREASING (yesterday's
+            # candle direction only). See this method's own docstring.
+            if oi_change_pct <= dec_max:
                 regime = "DECREASING"
                 pchange = self._shortlist_pchange.get(sym, 0.0)
                 today_side = "CALL" if pchange > 0 else ("PUT" if pchange < 0 else None)
@@ -4109,8 +4124,9 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                     else:
                         side = today_side
             else:
-                regime = "NEUTRAL"
-                side = None
+                regime = "INCREASING"
+                yday_dir = await self._yesterday_candle_direction(fut_key, token)
+                side = "CALL" if yday_dir == "bullish" else ("PUT" if yday_dir == "bearish" else None)
 
             self._clog.info(
                 "OiOrb[%s/%s]: %s OI-REGIME -- today_0915_oi=%.0f yday_1539_oi=%.0f change=%+.2f%% "

@@ -3994,18 +3994,61 @@ async def test_oi_regime_decreasing_flat_pchange_blocks_without_fetching_yesterd
 
 
 @pytest.mark.asyncio
-async def test_oi_regime_neutral_band_blocks_trade(monkeypatch):
+async def test_oi_regime_above_decrease_threshold_is_increasing_not_neutral(monkeypatch):
+    """2026-09-16, second same-day revision, direct user spec: the NEUTRAL
+    band (-5%..+1%) is REMOVED entirely -- a change of +0.5% (which used to
+    fall inside that now-gone band) is now INCREASING, taking its side from
+    yesterday's candle direction just like a +8% change would."""
     bus = _FakeBus()
     book = _make_book(bus)
     _mock_futures_key_and_creds(monkeypatch)
-    # +0.5% -- inside -5%..+1% -- NEUTRAL
+    # +0.5% -- above the -5% DECREASING threshold -- now INCREASING (was NEUTRAL)
     monkeypatch.setattr("data_layer.historical_candles.fetch_upstox_today_0915_oi",
                          _async_return(100.5))
     monkeypatch.setattr("data_layer.historical_candles.fetch_upstox_prev_day_last_tick_oi",
                          _async_return(100.0))
+    monkeypatch.setattr("data_layer.historical_candles.fetch_upstox_daily",
+                         _async_return([{"open": 90.0, "close": 95.0}]))   # bullish -> CALL
+
+    side = await book._compute_oi_regime_side("TESTSTOCK")
+    assert side == "CALL"
+
+
+@pytest.mark.asyncio
+async def test_oi_regime_increasing_blocks_on_doji_yesterday(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    _mock_futures_key_and_creds(monkeypatch)
+    # +0.5% -- INCREASING band -- but yesterday was a doji, no direction to take.
+    monkeypatch.setattr("data_layer.historical_candles.fetch_upstox_today_0915_oi",
+                         _async_return(100.5))
+    monkeypatch.setattr("data_layer.historical_candles.fetch_upstox_prev_day_last_tick_oi",
+                         _async_return(100.0))
+    monkeypatch.setattr("data_layer.historical_candles.fetch_upstox_daily",
+                         _async_return([{"open": 92.0, "close": 92.0}]))   # doji
 
     side = await book._compute_oi_regime_side("TESTSTOCK")
     assert side is None
+
+
+@pytest.mark.asyncio
+async def test_oi_regime_exactly_minus5pct_is_decreasing_inclusive(monkeypatch):
+    """2026-09-16, second same-day revision, direct user spec: "CONVERT
+    <-5% TO <=-5%" -- exactly -5.00% must land in the DECREASING branch
+    (reversal-gated), not the now-removed NEUTRAL band."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    _mock_futures_key_and_creds(monkeypatch)
+    monkeypatch.setattr("data_layer.historical_candles.fetch_upstox_today_0915_oi",
+                         _async_return(95.0))
+    monkeypatch.setattr("data_layer.historical_candles.fetch_upstox_prev_day_last_tick_oi",
+                         _async_return(100.0))   # exactly -5.00%
+    monkeypatch.setattr("data_layer.historical_candles.fetch_upstox_daily",
+                         _async_return([{"open": 95.0, "close": 90.0}]))   # bearish yesterday
+    book._shortlist_pchange["TESTSTOCK"] = 2.0   # today bullish -> reverses yesterday's bearish
+
+    side = await book._compute_oi_regime_side("TESTSTOCK")
+    assert side == "CALL"
 
 
 @pytest.mark.asyncio
@@ -4234,8 +4277,10 @@ async def test_entry_loop_records_oi_regime_blocked_reason_for_dashboard(monkeyp
     book._vwap_check_entry = lambda sym, side, ltp: True
 
     async def _spy_compute(sym):
-        # Mirrors what the real _compute_oi_regime_side does on its way to
-        # a NEUTRAL verdict -- caches the two OI points before returning None.
+        # Mirrors what the real _compute_oi_regime_side does on its way to a
+        # blocked INCREASING verdict (-1.09% is above the -5% DECREASING
+        # threshold, so it's INCREASING under the NEUTRAL-band-removed
+        # logic) -- caches the two OI points before returning None.
         book._today_0915_oi[sym] = 9044000.0
         book._prev_day_last_tick_oi[sym] = 9143500.0
         return None
@@ -4253,7 +4298,7 @@ async def test_entry_loop_records_oi_regime_blocked_reason_for_dashboard(monkeyp
     assert blocked["today_0915_oi"] == 9044000.0
     assert blocked["yday_1539_oi"] == 9143500.0
     assert blocked["oi_change_pct"] == pytest.approx(-1.09, abs=0.01)
-    assert "NEUTRAL" in blocked["reason"]
+    assert "INCREASING" in blocked["reason"]
 
     state = book.monitoring_state()
     assert "TESTSTOCK" in state["oi_regime_blocked"]
