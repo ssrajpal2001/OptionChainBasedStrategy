@@ -3188,6 +3188,52 @@ class DashboardServer:
                                     legs.append(leg)
                                     pos = _pos_obj
                                 tracking = _trap_zone_tracking(tb)
+                    elif sname == "iron_fly":
+                        # 2026-09-16, real gap found: Iron Fly had its own dedicated live
+                        # panel (/api/ironfly/status, 2026-09-14) but was never wired into
+                        # this shared broker-style Positions ledger -- a real filled trade
+                        # (confirmed live, 2026-09-16 09:15) showed nowhere here, only in
+                        # its own panel, unlike sell_straddle which appears in both.
+                        strat = _srv._find_iron_fly_book(cid, bid, underlying)
+                        eng = getattr(strat, "_engine", None) if strat else None
+                        if eng is not None and not eng.is_flat():
+                            _live_premium = getattr(strat, "_live_premium", {}) or {}
+                            _exp = getattr(strat, "_day_expiry", None)
+                            _exp_lbl = _fmt_exp(_exp)
+                            for side, leg in (("CE", eng.short_ce), ("CE", eng.long_ce),
+                                              ("PE", eng.short_pe), ("PE", eng.long_pe)):
+                                if leg is None:
+                                    continue
+                                ep = float(leg.entry_price or 0.0)
+                                live = _live_premium.get((leg.strike, side))
+                                ltp = float(live) if live is not None else ep
+                                _pnl = round((ep - ltp) * leg.qty if leg.is_short else (ltp - ep) * leg.qty, 2)
+                                _instr = f"{underlying} {leg.strike} {side}" + (f" {_exp_lbl}" if _exp_lbl else "")
+                                legs.append({
+                                    "symbol": f"{underlying} {leg.strike}{side} " + ("SELL" if leg.is_short else "BUY"),
+                                    "instrument": _instr, "type": "NRML",
+                                    "side": "SELL" if leg.is_short else "BUY", "ccy": "₹",
+                                    "qty": (-leg.qty if leg.is_short else leg.qty),
+                                    "lot_size": leg.qty, "lots": 1,
+                                    "entry_price": round(ep, 2),
+                                    "sell_avg": round(ep, 2) if leg.is_short else 0.0,
+                                    "buy_avg": round(ep, 2) if not leg.is_short else 0.0,
+                                    "ltp": round(ltp, 2), "pnl": _pnl, "mtm": _pnl,
+                                    # Deliberately NOT "option_type": the frontend's leg-price
+                                    # pencil-edit button is gated on that field being truthy and
+                                    # its handler calls a sell_straddle-specific correction
+                                    # endpoint -- setting it here would wrongly expose an edit
+                                    # button with no matching backend support for Iron Fly legs.
+                                    "underlying": str(underlying).upper(),
+                                })
+                            tracking = {
+                                "strategy": "iron_fly",
+                                "is_flied": bool(eng.is_flied),
+                                "cycle_number": eng.cycle_number,
+                                "cycle_expected_max_profit": eng.cycle_expected_max_profit,
+                                "cycle_realized_pnl": eng.cycle_realized_pnl,
+                                "lifetime_realized_pnl": eng.lifetime_realized_pnl,
+                            }
                 except Exception as exc:
                     logger.warning("client/positions: %s/%s build error: %s", sname, underlying, exc, exc_info=True)
                 _entry_time = (getattr(pos, "open_time", None).isoformat(timespec="seconds")
@@ -6119,6 +6165,25 @@ pm2 save
         stub since callers already handle a None trap book gracefully."""
         return None
 
+    def _find_iron_fly_book(self, client_id: str, binding_id: str, underlying: str):
+        """Locate the per-binding IronFlyStrategy book -- same lookup pattern
+        as _find_ss_book above, used by both api_client_positions (the
+        broker-style Positions ledger) and _open_history_rows (the History
+        tab's synthetic "still open" rows). 2026-09-16, real gap found:
+        Iron Fly had its own dedicated live panel (/api/ironfly/status,
+        2026-09-14) but was never wired into either of these two shared
+        views, so a real filled Iron Fly trade showed nowhere except its
+        own panel -- unlike sell_straddle, which appears in both."""
+        if self._iron_fly_manager is None:
+            return None
+        u = str(underlying).upper()
+        for b in (getattr(self._iron_fly_manager, "books", None) or []):
+            if (getattr(b, "_client_id", "") == client_id
+                    and getattr(b, "_binding_id", "") == binding_id
+                    and getattr(b, "_underlying", "") == u):
+                return b
+        return None
+
     def _find_trap_books_for_binding(self, client_id: str, binding_id: str):
         """D1 Trap removed 2026-09-06 -- always returns [] now, kept as a
         stub since callers already handle an empty list gracefully."""
@@ -6319,6 +6384,51 @@ pm2 save
                         "exit_remark": ("Hedged positional carry (NRML)"
                                         if getattr(pos, "is_hedged_positional", False)
                                         else "Live open position"),
+                        "pnl": round(sum(l["pnl"] for l in _legs), 2),
+                        "legs": _legs,
+                    })
+
+            elif sname == "iron_fly":
+                # 2026-09-16, real gap found: a genuinely filled Iron Fly trade
+                # (confirmed live via its own log) showed nowhere in the History
+                # tab -- only sell_straddle ever got this "still open" branch.
+                strat = self._find_iron_fly_book(cid, bid, underlying)
+                eng = getattr(strat, "_engine", None) if strat else None
+                if eng is None or eng.is_flat():
+                    continue
+                _live_premium = getattr(strat, "_live_premium", {}) or {}
+                _legs = []
+                for side, leg in (("CE", eng.short_ce), ("CE", eng.long_ce),
+                                   ("PE", eng.short_pe), ("PE", eng.long_pe)):
+                    if leg is None:
+                        continue
+                    ep = float(leg.entry_price or 0.0)
+                    live = _live_premium.get((leg.strike, side))
+                    ltp = float(live) if live is not None else ep
+                    pnl = round((ep - ltp) * leg.qty if leg.is_short else (ltp - ep) * leg.qty, 2)
+                    _legs.append({
+                        "side": ("SELL" if leg.is_short else "BUY") + " " + side,
+                        "strike": leg.strike,
+                        "entry": round(ep, 2), "exit": 0,
+                        "pnl": pnl,
+                        "entry_ts": None, "exit_ts": None,
+                        # Leg (strategies/iron_fly/detector.py) carries no per-leg open
+                        # reason/timestamp -- unlike sell_straddle's leg objects -- so
+                        # this can't distinguish an original entry leg from one that
+                        # replaced a converted side; left blank rather than guessed.
+                        "entry_reason": "",
+                    })
+                if _legs:
+                    rows.append({
+                        "date": datetime.now(IST).isoformat(timespec="seconds"),
+                        "strategy": "iron_fly",
+                        "instrument": str(underlying).upper(),
+                        "binding_id": bid,
+                        "entry_price": round(sum(l["entry"] for l in _legs), 2),
+                        "exit_price": 0,
+                        "exit_reason": "OPEN",
+                        "exit_remark": ("Iron Fly (converted, locked)" if eng.is_flied
+                                        else "Iron Condor (pre-conversion)") + f" -- cycle #{eng.cycle_number}",
                         "pnl": round(sum(l["pnl"] for l in _legs), 2),
                         "legs": _legs,
                     })
