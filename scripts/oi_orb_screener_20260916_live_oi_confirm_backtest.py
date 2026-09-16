@@ -193,6 +193,26 @@ async def _find_oi_confirm(book: OiOrbScreenerStrategy, sym: str, trigger_ts: da
     return None, None, None, readings
 
 
+def _classify_oi_quadrant(side: str, confirmed: bool, last_change_pct: Optional[float]) -> str:
+    """Label today's price/OI combination against the standard framework
+    (2026-09-16, user-confirmed via the real PATANJALI case -- price up +
+    OI falling was correctly rejected as short covering, not a bug):
+      Price up   + OI rising  = fresh long buildup   (strong, CALL confirms)
+      Price up   + OI falling = short covering        (weak, correctly no trade)
+      Price down + OI rising  = fresh short buildup   (strong, PUT confirms)
+      Price down + OI falling = long unwinding         (weak, correctly no trade)
+    Diagnostic-only label -- does not change the pass/fail decision, which
+    is already driven solely by whether OI actually crossed the rising
+    threshold (see _find_oi_confirm)."""
+    if confirmed:
+        return "fresh long buildup (strong bullish)" if side == "CALL" else "fresh short buildup (strong bearish)"
+    if last_change_pct is None:
+        return "no OI data to classify"
+    if last_change_pct < 0:
+        return "short covering (weak -- correctly no trade)" if side == "CALL" else "long unwinding (weak -- correctly no trade)"
+    return "OI rising but stayed under threshold (weak-to-moderate -- correctly no trade)"
+
+
 async def _find_vwap_retest(sym: str, side: str, confirm_ts: datetime, eq_bars: List[Bar]):
     """Real VWAP arm-then-retest replay from market open (for correct
     session VWAP), only counting a fire AT OR AFTER confirm_ts."""
@@ -344,11 +364,16 @@ async def main():
                   f"peak: {max(r[2] for r in readings):+.2f}%")
         else:
             print(f"  STEP 2 -- futures-OI confirm: NO real per-minute futures OI data available")
+        last_change = readings[-1][2] if readings else None
         if confirm_ts is None:
+            label = _classify_oi_quadrant(side, confirmed=False, last_change_pct=last_change)
+            print(f"  STEP 2 -- OI regime classification: {label}")
             print(f"  RESULT: OI never crossed {OI_CONFIRM_THRESHOLD_PCT}% after the price trigger -- no trade")
             continue
         print(f"  STEP 2 -- CONFIRMED at {confirm_ts.strftime('%H:%M')}: OI={confirm_oi:.0f} "
               f"change={confirm_change:+.2f}% (crossed {OI_CONFIRM_THRESHOLD_PCT}%)")
+        label = _classify_oi_quadrant(side, confirmed=True, last_change_pct=last_change)
+        print(f"  STEP 2 -- OI regime classification: {label}")
 
         fire_ts, fire_price, fire_vwap = await _find_vwap_retest(sym, side, confirm_ts, eq_bars)
         if fire_ts is None:
