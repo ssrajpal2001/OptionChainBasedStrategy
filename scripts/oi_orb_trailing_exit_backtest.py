@@ -24,9 +24,21 @@ real traded stocks, real data throughout:
      spot close breaching it triggers the exit. Sweeps timeframe in
      [3, 5, 15] minutes.
 
-Both race the already-known real 20-min VWAP-close hard SL and EOD
-(15:15) -- whichever fires first, chronologically, wins, exactly like
-the already-validated baseline.
+A and B both race the already-known real 20-min VWAP-close hard SL and
+EOD (15:15) -- whichever fires first, chronologically, wins, exactly
+like the already-validated baseline.
+
+  C) PRIOR-CANDLE-EXTREME SL (on the UNDERLYING SPOT), direct user
+     spec 2026-09-16: "if v change the sl from 20 min to 75 min -- if
+     market closes below prev 75 min then sl of long is hit and it
+     closes above 75 high then short sl is hit -- in spot worth
+     checking." A genuinely different concept from both the existing
+     live VWAP-distance SL and the S&R S1/R1 TSL above -- no VWAP
+     involved at all, just the prior same-timeframe candle's own
+     high/low. This REPLACES the 20-min VWAP-close SL entirely (does
+     NOT race it) -- exactly matches "change the SL from 20min to
+     75min". Sweeps tf_min in [45, 60, 75, 90] for context around the
+     requested 75-min value.
 
 MUST run on EC2 (real Upstox account access tokens + real historical
 range data).
@@ -54,6 +66,7 @@ from strategies.oi_orb_screener.screener import VwapState
 EOD_TIME = "15:15"
 GIVEBACK_GRID = [0.20, 0.30, 0.40, 0.50]
 SR_TF_GRID = [3, 5, 15]
+PREV_CANDLE_SL_TF_GRID = [45, 60, 75, 90]
 
 KNOWN_TRADES = [
     ("2026-09-01", "LTF", "PUT", "14:33", 11.70),
@@ -208,6 +221,39 @@ def _giveback_exit(cache, giveback_pct):
     return None
 
 
+def _prev_candle_sl_exit(cache, tf_min):
+    """Direct user spec: replace the 20-min VWAP-close SL with a 75-min
+    (or other tf) prior-CANDLE-extreme SL, checked on the underlying
+    SPOT, not VWAP-distance at all:
+      LONG (CALL): SL hit when the CURRENT tf_min candle CLOSES below
+      the PREVIOUS tf_min candle's own LOW.
+      SHORT (PUT): SL hit when the CURRENT tf_min candle CLOSES above
+      the PREVIOUS tf_min candle's own HIGH.
+    Market-anchored buckets (09:15 start), same as the existing live
+    20-min VWAP-close SL's own bucketing -- not reimplemented, same
+    real to_n_min_bars_market_anchored function. Returns the exit
+    timestamp (bucket close) or None."""
+    symbol, side = cache["symbol"], cache["side"]
+    entry_ts, eod_ts = cache["entry_ts"], cache["eod_ts"]
+    tf_bars = to_n_min_bars_market_anchored(cache["spot_bars"], tf_min)
+    entry_floor = entry_ts.replace(second=0, microsecond=0)
+    prev_bar = None
+    for b in tf_bars:
+        bucket_end = b.ts + timedelta(minutes=tf_min)
+        if bucket_end <= entry_floor:
+            prev_bar = b
+            continue
+        if bucket_end > eod_ts:
+            break
+        if prev_bar is not None:
+            if side == "CALL" and b.close < prev_bar.low:
+                return bucket_end
+            if side == "PUT" and b.close > prev_bar.high:
+                return bucket_end
+        prev_bar = b
+    return None
+
+
 def _sr_exit(cache, tf_min, diag=None):
     """Real SupportResistanceCalculator, fed real N-min SPOT bars from
     market open. CALL: exit on a spot close below the CURRENT active
@@ -305,7 +351,9 @@ async def main():
     print(f"A) Give-back trailing stop (option premium): giveback_pct in {GIVEBACK_GRID}")
     print(f"B) Real S&R S1(CALL)/R1(PUT) structural TSL (underlying spot, SupportResistanceCalculator): "
           f"tf_min in {SR_TF_GRID}")
-    print("Both race the real 20-min VWAP-close hard SL -- whichever fires first wins, else EOD.")
+    print("A and B race the real 20-min VWAP-close hard SL -- whichever fires first wins, else EOD.")
+    print(f"C) Prior-candle-extreme SL (underlying spot, REPLACES the 20-min VWAP SL entirely): "
+          f"tf_min in {PREV_CANDLE_SL_TF_GRID}")
     print("=" * 130)
 
     print("\nFetching + caching real data per trade (19 trades)...")
@@ -359,9 +407,28 @@ async def main():
         print(f"  tf={tf}min  ->  total={total:+.2f} pts  (delta vs baseline: {total-baseline_total:+.2f})")
 
     print("\n" + "=" * 130)
-    print("CAVEAT: n=19 real trades, single 7-day sample. Both mechanics race the SAME real SL, only the "
-          "'take profit early' side changes per candidate. A combo that wins here needs a larger forward "
-          "sample before being trusted as the final design.")
+    print("C) PRIOR-CANDLE-EXTREME SL SWEEP (replaces the 20-min VWAP SL entirely, spot-based)")
+    print("=" * 130)
+    for tf in PREV_CANDLE_SL_TF_GRID:
+        total = 0.0
+        fired_count = 0
+        for c in caches:
+            exit_ts = _prev_candle_sl_exit(c, tf)
+            if exit_ts is None:
+                exit_ts = c["eod_ts"]
+            else:
+                fired_count += 1
+            pnl = _pnl_at(c, exit_ts)
+            if pnl is not None:
+                total += pnl
+        marker = "  <== requested value" if tf == 75 else ""
+        print(f"  tf={tf}min  ->  total={total:+.2f} pts  ({fired_count}/{len(caches)} real SL fires)  "
+              f"(delta vs baseline: {total-baseline_total:+.2f}){marker}")
+
+    print("\n" + "=" * 130)
+    print("CAVEAT: n=19 real trades, single 7-day sample. A and B race the SAME real 20-min VWAP SL; C "
+          "REPLACES it entirely (no VWAP involved). A combo that wins here needs a larger forward sample "
+          "before being trusted as the final design.")
     print("=" * 130)
 
 
