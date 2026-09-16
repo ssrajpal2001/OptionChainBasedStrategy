@@ -8497,17 +8497,17 @@ function amoTest() {
                                from shortlist to the open-positions section above. -->
                           <template x-if="Object.keys(_bk.oi_regime_blocked||{}).length>0">
                             <div class="mt-2 pt-1.5" style="border-top:1px solid var(--t-border)">
-                              <div class="mb-1" style="color:var(--t-muted)">
+                              <div class="mb-1" style="color:var(--t-text);font-weight:600">
                                 Passed 2% move filter, blocked by futures-OI regime
                                 (<span x-text="Object.keys(_bk.oi_regime_blocked||{}).length"></span>)
                               </div>
                               <template x-for="row in Object.entries(_bk.oi_regime_blocked||{}).slice(0,8).map(([sym,b])=>({sym,...b}))" :key="row.sym">
                                 <div class="mb-1" style="font-size:10px">
                                   <div class="flex items-center justify-between">
-                                    <span style="color:var(--t-dim)" x-text="row.sym"></span>
-                                    <span style="color:var(--t-dim)"
+                                    <span style="color:var(--t-text);font-weight:600" x-text="row.sym"></span>
+                                    <span style="color:var(--t-text)"
                                           x-text="row.pchange==null?'':((row.pchange>0?'+':'')+row.pchange.toFixed(2)+'% move')"></span>
-                                    <span :style="row.oi_change_pct==null?'color:var(--t-dim)':(row.oi_change_pct>=0?'color:var(--t-amber)':'color:var(--t-red)')"
+                                    <span :style="row.oi_change_pct==null?'color:var(--t-text)':(row.oi_change_pct>=0?'color:var(--t-amber)':'color:var(--t-red)')"
                                           :title="row.reason"
                                           x-text="row.oi_change_pct==null?'no OI data':('OI '+(row.oi_change_pct>=0?'+':'')+row.oi_change_pct.toFixed(2)+'%')"></span>
                                   </div>
@@ -8515,8 +8515,8 @@ function amoTest() {
                                        was 1539 value and 915 value of future OI in this panel" --
                                        the two FIXED raw points the change% above was computed from. -->
                                   <div class="flex justify-between" x-show="row.today_0915_oi!=null&&row.yday_1539_oi">
-                                    <span style="color:var(--t-muted)">Futures OI 09:15 / yday 15:39</span>
-                                    <span style="color:var(--t-dim)"
+                                    <span style="color:var(--t-text)">Futures OI 09:15 / yday 15:39</span>
+                                    <span style="color:var(--t-text)"
                                           x-text="(row.today_0915_oi!=null&&row.yday_1539_oi) ? (Math.round(row.today_0915_oi).toLocaleString()+' / '+Math.round(row.yday_1539_oi).toLocaleString()) : ''"></span>
                                   </div>
                                 </div>
