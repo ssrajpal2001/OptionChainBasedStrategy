@@ -1650,43 +1650,69 @@ class DashboardServer:
                     pass
 
         @app.post("/api/admin/feeder/angelone/connect", tags=["Admin"])
-        async def api_feeder_angelone_connect(_: dict = Depends(_require_admin)):
+        async def api_feeder_angelone_connect(request: Request, _: dict = Depends(_require_admin)):
             """
-            2026-09-06: real toggle-ON for AngelOne in the LIVE production
-            feeder (as opposed to /angelone/test above, which only ever
-            spins up a throwaway isolated instance). AngelOne has no OAuth
-            flow at all -- unlike the generic {provider}/connect endpoint
-            below, there's no "cached token" / "redirect to broker login
-            page" fallback ladder to walk; it's headless-only, so this is
-            a single straight path: validate creds are saved, then hand off
-            to the same _start_feeder_stream() every other provider uses
-            (which internally re-derives real creds for whichever provider
-            is configured as primary/secondary via _load_creds -- AngelOne
-            is the default secondary_feeder_provider as of this pass).
+            2026-09-16, direct user spec: "don't use TOTP, instead call the
+            website and I will place the login details as I do for upstox
+            and fyers -- make angelone same." Replaces the old headless-TOTP
+            auto-connect (which this docstring used to describe as "AngelOne
+            has no OAuth flow at all" -- confirmed WRONG the same day: Angel
+            One's real SmartAPI DOES support a browser login,
+            smartapi.angelone.in/publisher-login, already fully implemented
+            in broker_auth/oauth_manager.py's _angelone_auth_url()/
+            _angelone_exchange() and wired into _handle_oauth_callback's
+            generic admin/client routing -- it just had no admin-feeder
+            caller, since this dedicated route always intercepted
+            /api/admin/feeder/angelone/connect before the generic {provider}
+            handler below ever got a chance).
+
+            Same 2-step shape as the generic Upstox/Fyers handler: generate
+            the real publisher-login URL, return {flow:"oauth", auth_url},
+            and the SAME already-generic frontend JS (monitor.html's
+            toggleFeeder) opens it and polls for the token -- no frontend
+            change needed, this endpoint's response shape was already
+            handled there for every other provider.
+
+            SCOPE NOTE, not silently expanded: this only replaces how the
+            REST/data access_token (system_feeder_creds.access_token, what
+            scripts like get_feeder_creds_sync("angelone") read) gets
+            populated. The LIVE WEBSOCKET feed (AngelOneFeeder.connect(),
+            actively streaming real trading ticks) still performs its own
+            internal TOTP handshake every time it starts -- _load_creds()'s
+            own "angelone" branch (this file, above) is architecturally
+            hardcoded to that, independent of any stored access_token.
+            Changing the live feed's own auth path is a separate, larger,
+            higher-risk change to production tick streaming and was NOT
+            part of this ask -- left untouched.
             """
+            from broker_auth.oauth_manager import generate_auth_url, build_state
+
             creds = _srv._client_db.get_feeder_creds_sync("angelone") or {}
-            if not (creds.get("client_id") and creds.get("api_key")
-                    and creds.get("password") and creds.get("totp_secret")):
+            api_key = creds.get("api_key", "")
+            if not api_key:
                 return {
                     "ok": False,
-                    "error": "AngelOne credentials incomplete — need Client ID, API Key, "
-                             "PASSWORD / PIN, and TOTP SECRET saved first.",
+                    "error": "No AngelOne API key saved. Click ⚙ to enter credentials first "
+                             "(Client ID + API Key at minimum for the browser login).",
                 }
-            try:
-                await _start_feeder_stream(_srv._feeder, "angelone", "", "", _srv._client_db, _srv._cfg)
-            except Exception as exc:
-                logger.error("[Feeder/Toggle] [angelone] stream start failed: %s", exc)
-                return {"ok": False, "error": f"AngelOne connect failed: {_safe_error(exc)}"}
-            active = getattr(_srv._feeder, "active_provider", None) if _srv._feeder else None
-            if active not in ("angelone", "dual"):
-                return {
-                    "ok": False,
-                    "error": "AngelOne login/socket setup did not complete — check server logs "
-                             "for the real failure (bad TOTP, SmartAPI rejection, etc.).",
-                }
-            logger.info("[Feeder/Toggle] [angelone] live stream connected (active_provider=%s).", active)
-            return {"ok": True, "connected": True, "flow": "headless",
-                     "message": "AngelOne feeder connected and streaming."}
+            base_url = _redirect_base(request, _srv._client_db)
+            callback_url = f"{base_url}/callback/angelone"
+            state = build_state("admin", "feeder", "angelone")
+            auth_ok, auth_url = await asyncio.to_thread(
+                generate_auth_url, "angelone", api_key, "", callback_url, state, creds.get("client_id", "")
+            )
+            if not auth_ok:
+                logger.error("[Feeder/Toggle] [angelone] auth URL generation failed: %s", auth_url)
+                return {"ok": False, "error": auth_url}
+            _srv._pending_auth["angelone"] = {
+                "role": "admin", "client_id": "feeder", "binding_id": "angelone",
+                "api_key": api_key, "api_secret": "",
+            }
+            logger.info("[Feeder/Toggle] [angelone] browser auth URL ready → awaiting login")
+            return {
+                "ok": False, "connected": False, "flow": "oauth", "auth_url": auth_url,
+                "message": "Open the AngelOne login page to authenticate.",
+            }
 
         @app.post("/api/admin/feeder/{provider}/connect", tags=["Admin"])
         async def api_feeder_provider_connect(
