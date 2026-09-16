@@ -3799,6 +3799,23 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             return None
         return (fut_key, token)
 
+    async def _yesterday_candle_direction(self, fut_key: str, token: str) -> Optional[str]:
+        """Returns "bullish" (close>open), "bearish" (close<open), or None
+        (a doji -- open==close, no directional read possible -- or no
+        daily-candle data at all). Shared by both the INCREASING and
+        DECREASING branches of _compute_oi_regime_side below."""
+        from data_layer.historical_candles import fetch_upstox_daily
+        daily = await fetch_upstox_daily(fut_key, token, lookback_days=7)
+        if not daily:
+            return None
+        last = daily[-1]
+        prev_open, prev_close = float(last["open"]), float(last["close"])
+        if prev_close > prev_open:
+            return "bullish"
+        if prev_close < prev_open:
+            return "bearish"
+        return None
+
     async def _compute_oi_regime_side(self, sym: str) -> Optional[str]:
         """2026-09-16, direct user spec, REVISED same day after independently
         verifying (against NSE's own real Bhavcopy) exactly what Upstox's
@@ -3821,15 +3838,30 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         > +1%  (INCREASING): direction comes ONLY from yesterday's candle
                (close>open -> CALL-only, close<open -> PUT-only) -- today's
                price action can time entry but never overrides this.
-        < -5%  (DECREASING): yesterday's candle is discarded entirely;
-               direction comes ONLY from "today's trend", mapped to the
-               stock's own live pChange sign (self._shortlist_pchange) --
+        < -5%  (DECREASING): direction starts from "today's trend", mapped
+               to the stock's own live pChange sign (self._shortlist_pchange,
                the SAME convention screener.side_from_pchange already uses
-               everywhere else in this codebase for "today's direction".
-        otherwise (NEUTRAL, -5%..+1% inclusive-exclusive): no trade -- the
-               caller (the entry loop) removes this symbol from the pool
-               entirely for the rest of the day, per direct spec ("that
-               stock will come out of pool for whose day").
+               everywhere else in this codebase) -- but REVISED, 2026-09-16
+               direct user follow-up: a trade only fires if that direction
+               is the OPPOSITE of yesterday's own candle (a genuine reversal
+               confirmation), never a continuation of yesterday's own move.
+               Worked example: today +2% pChange (would-be CALL) but
+               yesterday was ALSO bullish -> BLOCKED (same direction as
+               yesterday, not a reversal); today +2% pChange with yesterday
+               BEARISH -> CALL fires (today reverses yesterday's move).
+               Mirrored for a negative today: blocked against a bearish
+               yesterday (continuation), fires PUT against a bullish
+               yesterday (reversal). A doji yesterday (no directional read)
+               blocks, same as the INCREASING branch's own doji handling.
+        otherwise (NEUTRAL, -5%..+1% inclusive-exclusive): no trade.
+
+        Any None result here (NEUTRAL, a same-direction-as-yesterday block
+        in the DECREASING branch, a doji, or a data failure) is treated
+        identically by the caller (the entry loop): the symbol is removed
+        from the pool entirely for the rest of the day, per direct spec
+        ("that stock will come out of pool for whose day") -- one
+        consistent rule for every "blocked today" reason, not a special
+        case per cause.
 
         Best-effort but CONSERVATIVE, unlike most other real-data seeds in
         this file: this gate is a hard prerequisite for entry per direct
@@ -3845,7 +3877,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             fut_key, token = resolved
 
             from data_layer.historical_candles import (
-                fetch_upstox_today_0915_oi, fetch_upstox_prev_day_last_tick_oi, fetch_upstox_daily,
+                fetch_upstox_today_0915_oi, fetch_upstox_prev_day_last_tick_oi,
             )
 
             if sym not in self._today_0915_oi:
@@ -3878,17 +3910,28 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
 
             if oi_change_pct > inc_min:
                 regime = "INCREASING"
-                daily = await fetch_upstox_daily(fut_key, token, lookback_days=7)
-                if not daily:
-                    side = None
-                else:
-                    last = daily[-1]
-                    prev_open, prev_close = float(last["open"]), float(last["close"])
-                    side = "CALL" if prev_close > prev_open else ("PUT" if prev_close < prev_open else None)
+                yday_dir = await self._yesterday_candle_direction(fut_key, token)
+                side = "CALL" if yday_dir == "bullish" else ("PUT" if yday_dir == "bearish" else None)
             elif oi_change_pct < dec_max:
                 regime = "DECREASING"
                 pchange = self._shortlist_pchange.get(sym, 0.0)
-                side = "CALL" if pchange > 0 else ("PUT" if pchange < 0 else None)
+                today_side = "CALL" if pchange > 0 else ("PUT" if pchange < 0 else None)
+                if today_side is None:
+                    side = None
+                else:
+                    yday_dir = await self._yesterday_candle_direction(fut_key, token)
+                    # 2026-09-16, direct user follow-up: only a REVERSAL of
+                    # yesterday's own candle qualifies -- today's direction
+                    # continuing yesterday's own move is blocked outright,
+                    # not just "the other side" -- doji (yday_dir is None)
+                    # also blocks, same as INCREASING's own doji handling.
+                    if yday_dir is None:
+                        side = None
+                    elif (yday_dir == "bullish" and today_side == "CALL") or \
+                         (yday_dir == "bearish" and today_side == "PUT"):
+                        side = None
+                    else:
+                        side = today_side
             else:
                 regime = "NEUTRAL"
                 side = None

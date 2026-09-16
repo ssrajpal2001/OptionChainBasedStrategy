@@ -3721,16 +3721,79 @@ async def test_oi_regime_increasing_uses_previous_day_red_candle_for_put(monkeyp
     assert side == "PUT"
 
 
+def _decreasing_setup(monkeypatch, book, pchange: float, yday_open: float, yday_close: float):
+    """today 09:15=92, yesterday 15:39=100 -> -8% -> DECREASING, every time --
+    only pchange (today's direction) and yesterday's candle shape vary."""
+    book._shortlist_pchange["TESTSTOCK"] = pchange
+    _mock_futures_key_and_creds(monkeypatch)
+    monkeypatch.setattr("data_layer.historical_candles.fetch_upstox_today_0915_oi",
+                         _async_return(92.0))
+    monkeypatch.setattr("data_layer.historical_candles.fetch_upstox_prev_day_last_tick_oi",
+                         _async_return(100.0))
+    monkeypatch.setattr("data_layer.historical_candles.fetch_upstox_daily",
+                         _async_return([{"ts": "2026-09-15", "open": yday_open, "high": 110.0,
+                                          "low": 99.0, "close": yday_close, "volume": 1000, "oi": 100}]))
+
+
+# ── 2026-09-16, direct user follow-up: DECREASING now REQUIRES today's
+# direction to be a REVERSAL of yesterday's own candle -- a continuation of
+# yesterday's own move is blocked entirely, not just "the wrong side". ────
+
 @pytest.mark.asyncio
-async def test_oi_regime_decreasing_uses_todays_pchange_trend_not_yesterdays_candle(monkeypatch):
-    """Direct spec: yesterday's candle must be DISCARDED entirely in the
-    DECREASING regime -- seed it bearish (red) but today's pChange positive
-    must still win, proving the two regimes never mix."""
+async def test_oi_regime_decreasing_blocks_when_today_continues_yesterdays_bullish_move(monkeypatch):
     bus = _FakeBus()
     book = _make_book(bus)
-    book._shortlist_pchange["TESTSTOCK"] = 3.5   # today bullish
+    _decreasing_setup(monkeypatch, book, pchange=3.5, yday_open=100.0, yday_close=108.0)  # yday bullish
+    side = await book._compute_oi_regime_side("TESTSTOCK")
+    assert side is None   # today positive (would-be CALL) continues yesterday's bullish move
+
+
+@pytest.mark.asyncio
+async def test_oi_regime_decreasing_fires_call_when_today_reverses_yesterdays_bearish_move(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    _decreasing_setup(monkeypatch, book, pchange=3.5, yday_open=108.0, yday_close=100.0)  # yday bearish
+    side = await book._compute_oi_regime_side("TESTSTOCK")
+    assert side == "CALL"   # today positive reverses yesterday's bearish move
+
+
+@pytest.mark.asyncio
+async def test_oi_regime_decreasing_blocks_when_today_continues_yesterdays_bearish_move(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    _decreasing_setup(monkeypatch, book, pchange=-3.5, yday_open=108.0, yday_close=100.0)  # yday bearish
+    side = await book._compute_oi_regime_side("TESTSTOCK")
+    assert side is None   # today negative (would-be PUT) continues yesterday's bearish move
+
+
+@pytest.mark.asyncio
+async def test_oi_regime_decreasing_fires_put_when_today_reverses_yesterdays_bullish_move(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    _decreasing_setup(monkeypatch, book, pchange=-3.5, yday_open=100.0, yday_close=108.0)  # yday bullish
+    side = await book._compute_oi_regime_side("TESTSTOCK")
+    assert side == "PUT"   # today negative reverses yesterday's bullish move
+
+
+@pytest.mark.asyncio
+async def test_oi_regime_decreasing_blocks_on_doji_yesterday(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    _decreasing_setup(monkeypatch, book, pchange=3.5, yday_open=100.0, yday_close=100.0)  # doji
+    side = await book._compute_oi_regime_side("TESTSTOCK")
+    assert side is None
+
+
+@pytest.mark.asyncio
+async def test_oi_regime_decreasing_flat_pchange_blocks_without_fetching_yesterdays_candle(monkeypatch):
+    """today's own pChange exactly 0% has no direction to confirm a reversal
+    against -- blocked immediately, yesterday's candle never even fetched
+    (matches the same short-circuit style already used elsewhere in this
+    gate for a clean no-data case)."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._shortlist_pchange["TESTSTOCK"] = 0.0
     _mock_futures_key_and_creds(monkeypatch)
-    # today 09:15=92, yesterday 15:39=100 -> -8% -> DECREASING
     monkeypatch.setattr("data_layer.historical_candles.fetch_upstox_today_0915_oi",
                          _async_return(92.0))
     monkeypatch.setattr("data_layer.historical_candles.fetch_upstox_prev_day_last_tick_oi",
@@ -3742,23 +3805,8 @@ async def test_oi_regime_decreasing_uses_todays_pchange_trend_not_yesterdays_can
     monkeypatch.setattr("data_layer.historical_candles.fetch_upstox_daily", _must_not_be_called)
 
     side = await book._compute_oi_regime_side("TESTSTOCK")
-    assert side == "CALL"          # today's bullish pChange won
-    assert daily_calls == []       # yesterday's candle never even fetched
-
-
-@pytest.mark.asyncio
-async def test_oi_regime_decreasing_bearish_trend_gives_put(monkeypatch):
-    bus = _FakeBus()
-    book = _make_book(bus)
-    book._shortlist_pchange["TESTSTOCK"] = -3.5
-    _mock_futures_key_and_creds(monkeypatch)
-    monkeypatch.setattr("data_layer.historical_candles.fetch_upstox_today_0915_oi",
-                         _async_return(90.0))
-    monkeypatch.setattr("data_layer.historical_candles.fetch_upstox_prev_day_last_tick_oi",
-                         _async_return(100.0))
-
-    side = await book._compute_oi_regime_side("TESTSTOCK")
-    assert side == "PUT"
+    assert side is None
+    assert daily_calls == []
 
 
 @pytest.mark.asyncio
