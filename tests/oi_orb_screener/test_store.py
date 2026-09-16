@@ -266,3 +266,55 @@ def test_update_top20_vwap_touch_on_unscanned_symbol_is_a_safe_noop():
     n = con.execute("SELECT COUNT(*) FROM oi_orb_top20_daily_scan").fetchone()[0]
     con.close()
     assert n == 0
+
+
+# ── futures_oi_history (2026-09-16, direct user spec: real-time futures-OI
+# histogram per shortlisted stock) ──────────────────────────────────────────
+
+def test_record_futures_oi_history_multiple_polls_each_kept_separately():
+    """Same shape as rank_snapshots -- every poll is its own permanent row,
+    not upserted, since the whole point is the intraday time series."""
+    store.record_futures_oi_history("C1", "B1", "DIXON", "2026-09-16T09:16:00",
+                                      5544000.0, 5300075.0, 4.60, trade_date="2026-09-16")
+    store.record_futures_oi_history("C1", "B1", "DIXON", "2026-09-16T09:21:00",
+                                      5560000.0, 5300075.0, 4.90, trade_date="2026-09-16")
+
+    rows = store.get_futures_oi_history("C1", "B1", "DIXON", trade_date="2026-09-16")
+    assert len(rows) == 2
+    assert rows[0]["poll_ts"] == "2026-09-16T09:16:00"
+    assert rows[0]["current_oi"] == 5544000.0
+    assert rows[0]["previous_oi"] == 5300075.0
+    assert rows[0]["oi_change_pct"] == 4.60
+    assert rows[1]["poll_ts"] == "2026-09-16T09:21:00"
+
+
+def test_get_futures_oi_history_returns_oldest_first():
+    store.record_futures_oi_history("C1", "B1", "DIXON", "2026-09-16T10:00:00",
+                                      1.0, 1.0, 0.0, trade_date="2026-09-16")
+    store.record_futures_oi_history("C1", "B1", "DIXON", "2026-09-16T09:00:00",
+                                      1.0, 1.0, 0.0, trade_date="2026-09-16")
+
+    rows = store.get_futures_oi_history("C1", "B1", "DIXON", trade_date="2026-09-16")
+    assert [r["poll_ts"] for r in rows] == ["2026-09-16T09:00:00", "2026-09-16T10:00:00"]
+
+
+def test_get_futures_oi_history_is_scoped_per_client_binding_symbol_and_day():
+    store.record_futures_oi_history("C1", "B1", "DIXON", "2026-09-16T09:16:00",
+                                      1.0, 1.0, 0.0, trade_date="2026-09-16")
+    store.record_futures_oi_history("C2", "B1", "DIXON", "2026-09-16T09:16:00",
+                                      2.0, 2.0, 0.0, trade_date="2026-09-16")
+    store.record_futures_oi_history("C1", "B2", "DIXON", "2026-09-16T09:16:00",
+                                      3.0, 3.0, 0.0, trade_date="2026-09-16")
+    store.record_futures_oi_history("C1", "B1", "SIEMENS", "2026-09-16T09:16:00",
+                                      4.0, 4.0, 0.0, trade_date="2026-09-16")
+    store.record_futures_oi_history("C1", "B1", "DIXON", "2026-09-15T09:16:00",
+                                      5.0, 5.0, 0.0, trade_date="2026-09-15")
+
+    rows = store.get_futures_oi_history("C1", "B1", "DIXON", trade_date="2026-09-16")
+    assert len(rows) == 1
+    assert rows[0]["current_oi"] == 1.0
+
+
+def test_get_futures_oi_history_empty_when_never_polled():
+    rows = store.get_futures_oi_history("C1", "B1", "GHOST", trade_date="2026-09-16")
+    assert rows == []

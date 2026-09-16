@@ -3912,3 +3912,189 @@ async def test_entry_loop_computes_oi_regime_only_once_per_symbol_per_day(monkey
     await book._run_today_pipeline()
 
     assert computed_calls == ["TESTSTOCK"]   # computed once, not once per cycle
+
+
+# ── 2026-09-16, direct user spec: real-time futures-OI histogram in the
+# dashboard for every shortlisted stock, independent of whether
+# OI_REGIME_GATE_ENABLED is on. Backed by store.futures_oi_history, written by
+# _do_futures_oi_history_poll (a separate loop from _oi_spurt_history_loop --
+# different data source entirely, Upstox futures V3 quote not NSE OI-spurt).
+# ─────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_do_futures_oi_history_poll_records_every_shortlisted_symbol(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._shortlist_symbols = ["TESTSTOCK", "OTHERSTOCK"]
+
+    async def _fake_snapshot(sym):
+        return {"TESTSTOCK": (102.0, 100.0, 2.0), "OTHERSTOCK": (95.0, 100.0, -5.0)}[sym]
+    book._fetch_futures_oi_snapshot = _fake_snapshot
+
+    recorded = []
+    monkeypatch.setattr(store, "record_futures_oi_history",
+                         lambda *a, **k: recorded.append((a, k)))
+
+    await book._do_futures_oi_history_poll(datetime(2026, 9, 16, 9, 16, tzinfo=IST))
+
+    assert len(recorded) == 2
+    syms = {call[0][2] for call in recorded}   # (client_id, binding_id, symbol, poll_ts, ...)
+    assert syms == {"TESTSTOCK", "OTHERSTOCK"}
+
+
+@pytest.mark.asyncio
+async def test_do_futures_oi_history_poll_skips_symbol_with_no_snapshot(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._shortlist_symbols = ["TESTSTOCK"]
+    book._fetch_futures_oi_snapshot = _async_return(None)
+
+    recorded = []
+    monkeypatch.setattr(store, "record_futures_oi_history",
+                         lambda *a, **k: recorded.append((a, k)))
+
+    await book._do_futures_oi_history_poll(datetime(2026, 9, 16, 9, 16, tzinfo=IST))
+
+    assert recorded == []
+
+
+@pytest.mark.asyncio
+async def test_do_futures_oi_history_poll_one_symbol_failure_does_not_abort_the_rest(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._shortlist_symbols = ["BADSTOCK", "GOODSTOCK"]
+
+    async def _fake_snapshot(sym):
+        if sym == "BADSTOCK":
+            raise RuntimeError("boom")
+        return (102.0, 100.0, 2.0)
+    book._fetch_futures_oi_snapshot = _fake_snapshot
+
+    recorded = []
+    monkeypatch.setattr(store, "record_futures_oi_history",
+                         lambda *a, **k: recorded.append((a, k)))
+
+    await book._do_futures_oi_history_poll(datetime(2026, 9, 16, 9, 16, tzinfo=IST))
+
+    assert len(recorded) == 1
+    assert recorded[0][0][2] == "GOODSTOCK"
+
+
+@pytest.mark.asyncio
+async def test_fetch_futures_oi_snapshot_returns_tuple_from_live_v3_quote(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    monkeypatch.setattr("data_layer.instrument_registry.REGISTRY.load_futures_only_sync",
+                         lambda sym, today=None: None)
+    monkeypatch.setattr("data_layer.instrument_registry.REGISTRY.get_futures_upstox",
+                         lambda sym: "NSE_FO|12345")
+    monkeypatch.setattr("data_layer.client_db.ClientDB.get_feeder_creds_sync",
+                         lambda self, provider: {"access_token": "tok"})
+    monkeypatch.setattr("data_layer.historical_candles.fetch_upstox_v3_quote",
+                         _async_return(_v3_quote(oi=102.0, previous_oi=100.0)))
+
+    snap = await book._fetch_futures_oi_snapshot("TESTSTOCK")
+
+    assert snap == (102.0, 100.0, 2.0)
+
+
+@pytest.mark.asyncio
+async def test_fetch_futures_oi_snapshot_returns_none_on_no_futures_key(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    monkeypatch.setattr("data_layer.instrument_registry.REGISTRY.load_futures_only_sync",
+                         lambda sym, today=None: None)
+    monkeypatch.setattr("data_layer.instrument_registry.REGISTRY.get_futures_upstox",
+                         lambda sym: "")
+
+    snap = await book._fetch_futures_oi_snapshot("TESTSTOCK")
+
+    assert snap is None
+
+
+@pytest.mark.asyncio
+async def test_futures_oi_history_loop_polls_all_shortlisted_symbols_and_never_touches_trading_state(monkeypatch):
+    """Same zero-trading-effect guarantee as _oi_spurt_history_loop -- this
+    loop must never read/write _positions/_rejected/_already_fired."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._running = True
+    book._restore_from_db_ready = True
+    book._shortlist_symbols = ["TESTSTOCK"]
+    book._screener_cfg = {"FUTURES_OI_HISTORY_POLL_SEC": 0.0}
+    book._rejected = {("SHOULD", "NEVERTOUCH")}
+    book._already_fired = {("SHOULD", "NEVERTOUCH")}
+
+    polled = []
+    async def _fake_poll(now):
+        polled.append(now)
+    book._do_futures_oi_history_poll = _fake_poll
+
+    async def _sleep_once(_secs):
+        book._running = False
+    monkeypatch.setattr(asyncio, "sleep", _sleep_once)
+
+    await book._futures_oi_history_loop()
+
+    assert len(polled) == 1
+    assert book._rejected == {("SHOULD", "NEVERTOUCH")}
+    assert book._already_fired == {("SHOULD", "NEVERTOUCH")}
+
+
+@pytest.mark.asyncio
+async def test_futures_oi_history_loop_waits_for_restore_before_first_poll(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._running = True
+    book._restore_from_db_ready = False
+    book._shortlist_symbols = ["TESTSTOCK"]
+
+    polled = []
+    async def _fake_poll(now):
+        polled.append(now)
+    book._do_futures_oi_history_poll = _fake_poll
+
+    calls = {"n": 0}
+    async def _sleep_then_stop(_secs):
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            book._running = False
+    monkeypatch.setattr(asyncio, "sleep", _sleep_then_stop)
+
+    await book._futures_oi_history_loop()
+
+    assert polled == []   # never polled -- restore never became ready
+
+
+@pytest.mark.asyncio
+async def test_futures_oi_history_loop_disabled_via_config_never_polls(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._running = True
+    book._restore_from_db_ready = True
+    book._shortlist_symbols = ["TESTSTOCK"]
+    book._screener_cfg = {"FUTURES_OI_HISTORY_ENABLED": False}
+
+    polled = []
+    async def _fake_poll(now):
+        polled.append(now)
+    book._do_futures_oi_history_poll = _fake_poll
+
+    calls = {"n": 0}
+    async def _sleep_then_stop(_secs):
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            book._running = False
+    monkeypatch.setattr(asyncio, "sleep", _sleep_then_stop)
+
+    await book._futures_oi_history_loop()
+
+    assert polled == []
+
+
+def test_reset_session_does_not_crash_futures_oi_hist_last_poll_ts():
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._futures_oi_hist_last_poll_ts = 12345.0
+    book.reset_session()
+    assert book._futures_oi_hist_last_poll_ts == 0.0

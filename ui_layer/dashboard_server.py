@@ -6164,6 +6164,24 @@ pm2 save
             result.sort(key=lambda r: (0 if r.get("positions") else 1, r.get("client_id", "")))
             return {"ok": True, "books": result}
 
+        @app.get("/api/oiorb/futures_oi_history")
+        async def oi_orb_futures_oi_history(
+            client_id: str = Query(...),
+            binding_id: str = Query(...),
+            symbol: str = Query(...),
+        ):
+            """2026-09-16, direct user spec: real-time futures-OI histogram
+            per shortlisted stock. Backed by strategies/oi_orb_screener/
+            store.py's futures_oi_history table (written every 5min by
+            OiOrbScreenerStrategy._futures_oi_history_loop for every
+            shortlisted symbol) -- today's full poll series, oldest-first,
+            straight off disk (no book lookup needed, so this works
+            regardless of which manager/variant holds the book)."""
+            from strategies.oi_orb_screener import store as _oiorb_store
+            rows = await asyncio.to_thread(
+                _oiorb_store.get_futures_oi_history, client_id, binding_id, symbol)
+            return {"ok": True, "symbol": symbol, "history": rows}
+
     def _register_cag_straddle_routes(self, app) -> None:
         _srv = self
 

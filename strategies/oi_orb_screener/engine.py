@@ -184,6 +184,13 @@ _OI_REGIME_CHECK_TIME_DEFAULT = "09:16"
 _OI_REGIME_INCREASE_MIN_PCT_DEFAULT = 1.0
 _OI_REGIME_DECREASE_MAX_PCT_DEFAULT = -5.0
 
+# 2026-09-16, direct user spec: real-time futures-OI histogram in the
+# dashboard for every shortlisted stock (not just when OI_REGIME_GATE_ENABLED
+# is on) -- 5-minute poll cadence, direct user choice (coarser than the
+# 60s oi_spurt_history cadence; futures OI moves far less minute-to-minute
+# than NSE's OI-spurt ranking does).
+_FUTURES_OI_HISTORY_POLL_SEC_DEFAULT = 300.0
+
 # 2026-09-16, direct user spec: pre-entry trap-target-already-touched gate
 # (see _check_trap_target_touched_today's own docstring). Once a signal is
 # skipped this way, re-checking the (real, network-fetching) touched-today
@@ -660,6 +667,8 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._rank_dropped: set = set()
         # ── Full-day OI-spurt history capture (2026-09-07, direct user spec) ──
         self._oi_spurt_hist_last_poll_ts: float = 0.0
+        # ── Real-time futures-OI histogram (2026-09-16, direct user spec) ──
+        self._futures_oi_hist_last_poll_ts: float = 0.0
         # ── Tick-by-tick VWAP accumulation (2026-09-10, direct user spec) ──
         self._vwap_tick_volume_cum_last: dict = {}
 
@@ -727,6 +736,9 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         # 2026-09-07, direct user spec: independent full-day, threshold-agnostic
         # OI-spurt history capture -- see _oi_spurt_history_loop's own docstring.
         self._oi_spurt_hist_last_poll_ts = 0.0
+        # 2026-09-16, direct user spec: real-time futures-OI histogram --
+        # see _futures_oi_history_loop's own docstring.
+        self._futures_oi_hist_last_poll_ts = 0.0
         # 2026-09-10, direct user spec: tick-by-tick VWAP accumulation --
         # see _spot_tick_loop's own VWAP-update block.
         self._vwap_tick_volume_cum_last = {}
@@ -759,6 +771,8 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             self._rank_tracking_loop(), name=f"oiorb_rank_{self._client_id}_{self._binding_id}"))
         self._tasks.append(asyncio.create_task(
             self._oi_spurt_history_loop(), name=f"oiorb_spurthist_{self._client_id}_{self._binding_id}"))
+        self._tasks.append(asyncio.create_task(
+            self._futures_oi_history_loop(), name=f"oiorb_futoihist_{self._client_id}_{self._binding_id}"))
         self._tasks.append(asyncio.create_task(
             self._spot_feed_retry_loop(), name=f"oiorb_spotretry_{self._client_id}_{self._binding_id}"))
         self._clog.info("OiOrb[%s/%s]: started.", self._client_id, self._binding_id)
@@ -1360,6 +1374,75 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
 
         if self._top20_mode:
             await self._stream_new_top20_symbols(ranked, now, cfg)
+
+    async def _futures_oi_history_loop(self) -> None:
+        """2026-09-16, direct user spec: "the UI should show the future OI
+        in a histogram basis for that specific stock and it should be
+        updated on real time." Independent of _oi_spurt_history_loop above
+        (different data source entirely -- Upstox's own futures V3 quote,
+        not NSE's OI-spurt/rank endpoints) and independent of whether
+        OI_REGIME_GATE_ENABLED is on (direct user choice: cover every
+        shortlisted stock, not just ones where the gate is actually used).
+
+        _compute_oi_regime_side's own snapshot is a ONE-SHOT, once-per-
+        (symbol,day) read -- it was never a time series. This loop is that
+        missing time series: every FUTURES_OI_HISTORY_POLL_SEC (default
+        300s/5min, direct user choice), for every symbol currently in
+        self._shortlist_symbols, fetch a fresh live (current_oi,
+        previous_oi, oi_change_pct) reading via the same
+        _fetch_futures_oi_snapshot helper the gate uses, and persist it via
+        store.record_futures_oi_history -- purely observational, never
+        reads or writes _positions/_rejected/_already_fired, same
+        zero-trading-effect precedent as _oi_spurt_history_loop."""
+        while self._running:
+            if not self._restore_from_db_ready:
+                await asyncio.sleep(1)
+                continue
+            now = datetime.now(IST)
+            cfg = self._screener_cfg
+            if not cfg.get("FUTURES_OI_HISTORY_ENABLED", True):
+                await asyncio.sleep(60)
+                continue
+            now_ts = now.timestamp()
+            interval = float(cfg.get("FUTURES_OI_HISTORY_POLL_SEC",
+                                      _FUTURES_OI_HISTORY_POLL_SEC_DEFAULT) or
+                              _FUTURES_OI_HISTORY_POLL_SEC_DEFAULT)
+            if now_ts - self._futures_oi_hist_last_poll_ts < interval:
+                await asyncio.sleep(5)
+                continue
+            self._futures_oi_hist_last_poll_ts = now_ts
+            try:
+                await self._do_futures_oi_history_poll(now)
+            except Exception:
+                self._clog.warning(
+                    "OiOrb[%s/%s]: futures-OI history poll failed (non-fatal, will retry "
+                    "next interval).", self._client_id, self._binding_id, exc_info=True)
+            await asyncio.sleep(5)
+
+    async def _do_futures_oi_history_poll(self, now: datetime) -> None:
+        """One poll cycle over today's shortlist -- split out for direct
+        unit testing, same shape as _do_oi_spurt_history_poll. A single
+        symbol's fetch failure (no futures key, stale token, dead quote)
+        never aborts the rest of the cycle -- each symbol is independently
+        best-effort."""
+        poll_ts = now.isoformat(timespec="seconds")
+        for sym in list(self._shortlist_symbols):
+            try:
+                snap = await self._fetch_futures_oi_snapshot(sym)
+            except Exception:
+                self._clog.warning(
+                    "OiOrb[%s/%s]: %s futures-OI history fetch failed (non-fatal).",
+                    self._client_id, self._binding_id, sym, exc_info=True)
+                continue
+            if snap is None:
+                continue
+            current_oi, previous_oi, oi_change_pct = snap
+            await asyncio.to_thread(
+                store.record_futures_oi_history, self._client_id, self._binding_id, sym,
+                poll_ts, current_oi, previous_oi, oi_change_pct)
+        self._clog.info(
+            "OiOrb[%s/%s]: FUTURES-OI HISTORY POLL @%s for %d shortlisted symbol(s).",
+            self._client_id, self._binding_id, now.strftime("%H:%M:%S"), len(self._shortlist_symbols))
 
     async def _stream_new_top20_symbols(self, ranked, now: datetime, cfg: dict) -> None:
         """Adds any symbol from this poll's top-20 that (a) isn't already
@@ -3705,6 +3788,37 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 self._client_id, self._binding_id, sym, exc_info=True)
             return False, None
 
+    async def _fetch_futures_oi_snapshot(self, sym: str) -> Optional[tuple]:
+        """Resolves sym's own futures contract and returns a fresh live
+        (current_oi, previous_oi, oi_change_pct) reading from Upstox's V3
+        quote endpoint -- shared by _compute_oi_regime_side's one-shot gate
+        AND _futures_oi_history_loop's repeated polling below, so the
+        futures-key/token/quote-fetch plumbing exists exactly once. Returns
+        None on any failure (no futures key, no token, no quote, non-
+        positive OI) -- callers decide what "no data" means for their own
+        purpose (blocks a trade for the gate; simply skips a poll cycle for
+        the history loop)."""
+        from data_layer.instrument_registry import REGISTRY
+        await asyncio.to_thread(REGISTRY.load_futures_only_sync, sym, datetime.now(IST).date())
+        fut_key = REGISTRY.get_futures_upstox(sym)
+        if not fut_key:
+            return None
+        from data_layer.client_db import ClientDB
+        creds = await asyncio.to_thread(ClientDB().get_feeder_creds_sync, "upstox")
+        token = (creds or {}).get("access_token", "")
+        if not token:
+            return None
+        from data_layer.historical_candles import fetch_upstox_v3_quote
+        quote = await fetch_upstox_v3_quote(fut_key, token)
+        if not quote:
+            return None
+        current_oi = float(quote.get("oi") or 0.0)
+        previous_oi = float(quote.get("previous_oi") or 0.0)
+        if current_oi <= 0 or previous_oi <= 0:
+            return None
+        oi_change_pct = (current_oi - previous_oi) / previous_oi * 100.0
+        return (current_oi, previous_oi, oi_change_pct)
+
     async def _compute_oi_regime_side(self, sym: str) -> Optional[str]:
         """2026-09-16, direct user spec: futures-OI-regime directional gate,
         evaluated once per (symbol, day) at/after OI_REGIME_CHECK_TIME.
@@ -3732,25 +3846,17 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         the trade -- rather than degrading to "let it proceed" the way
         purely auxiliary seeds (VWAP backfill, trap-exit zones) do."""
         try:
-            from data_layer.instrument_registry import REGISTRY
-            await asyncio.to_thread(REGISTRY.load_futures_only_sync, sym, datetime.now(IST).date())
-            fut_key = REGISTRY.get_futures_upstox(sym)
-            if not fut_key:
+            snap = await self._fetch_futures_oi_snapshot(sym)
+            if snap is None:
                 return None
+            current_oi, previous_oi, oi_change_pct = snap
+
+            from data_layer.historical_candles import fetch_upstox_daily
+            from data_layer.instrument_registry import REGISTRY
             from data_layer.client_db import ClientDB
+            fut_key = REGISTRY.get_futures_upstox(sym)
             creds = await asyncio.to_thread(ClientDB().get_feeder_creds_sync, "upstox")
             token = (creds or {}).get("access_token", "")
-            if not token:
-                return None
-            from data_layer.historical_candles import fetch_upstox_v3_quote, fetch_upstox_daily
-            quote = await fetch_upstox_v3_quote(fut_key, token)
-            if not quote:
-                return None
-            current_oi = float(quote.get("oi") or 0.0)
-            previous_oi = float(quote.get("previous_oi") or 0.0)
-            if current_oi <= 0 or previous_oi <= 0:
-                return None
-            oi_change_pct = (current_oi - previous_oi) / previous_oi * 100.0
 
             cfg = self._screener_cfg
             inc_min = float(cfg.get("OI_REGIME_INCREASE_MIN_PCT", _OI_REGIME_INCREASE_MIN_PCT_DEFAULT))
