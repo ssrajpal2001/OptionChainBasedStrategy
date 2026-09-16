@@ -1164,12 +1164,17 @@ document.addEventListener('alpine:init', () => {
       if (!rows.length) { container.innerHTML = '<div style="color:var(--t-dim);font-size:10px;padding:8px 0">No futures-OI polls recorded yet today.</div>'; return; }
 
       const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim() || '#888';
-      const cyan = css('--t-cyan'), green = css('--t-green'), red = css('--t-red'), muted = css('--t-muted');
+      const cyan = css('--t-cyan'), green = css('--t-green'), red = css('--t-red'), amber = css('--t-amber'), muted = css('--t-muted');
       const gridColor = 'rgba(128,128,128,0.12)';
       // poll_ts is naive IST ISO (no offset) -- parse as local, display HH:mm.
       const labels = rows.map(r => (r.poll_ts || '').slice(11, 16));
       const bars = rows.map(r => Number(r.current_oi || 0));
       const changeColors = rows.map(r => (Number(r.oi_change_pct || 0) >= 0 ? green : red));
+      // 2026-09-16 follow-up: previous session's closing OI (the gate's own
+      // baseline) was previously only visible in the tooltip -- shown here
+      // as a persistent dashed reference line since every poll today shares
+      // the SAME previous_oi value (it never changes intraday).
+      const prevOi = Number((rows[rows.length - 1] || {}).previous_oi || 0);
 
       const inst = new ApexCharts(container, {
         chart: {
@@ -1189,6 +1194,12 @@ document.addEventListener('alpine:init', () => {
           axisTicks: { show: false },
         },
         yaxis: { labels: { style: { colors: muted, fontSize: '9px' }, formatter: (v) => (v/1000).toFixed(0)+'k' } },
+        annotations: prevOi > 0 ? { yaxis: [{
+          y: prevOi, borderColor: amber, strokeDashArray: 4,
+          label: { text: 'Prev-day close OI: ' + prevOi.toLocaleString(),
+                   style: { color: amber, background: 'transparent', fontSize: '9px' },
+                   position: 'top', offsetY: -4 },
+        }] } : {},
         grid: { borderColor: gridColor, strokeDashArray: 3 },
         tooltip: {
           theme: 'dark',
@@ -8474,7 +8485,15 @@ function amoTest() {
                                           x-text="(p.option_type==='CE'?'▲ CALL ':'▼ PUT ')+sym+' '+p.strike"></span>
                                     <span style="color:var(--t-dim);font-size:10px"
                                           x-text="p.opened_at ? Math.max(0,Math.round((Date.now()-new Date(p.opened_at).getTime())/60000))+'m ago' : ''"></span>
+                                    <!-- 2026-09-16, direct user follow-up: futures-OI histogram was
+                                         only wired into the shortlist rows, not open positions -- same
+                                         toggle/data source, added here too so it's visible for a stock
+                                         once it's actually trading, not just while still shortlisted. -->
+                                    <button class="px-1 py-0.5 rounded" style="font-size:10px;border:1px solid var(--t-dim);cursor:pointer"
+                                            :style="oiHistOpen[_bk.binding_id+'_'+sym]?'color:var(--t-cyan);border-color:var(--t-cyan)':'color:var(--t-dim)'"
+                                            @click="toggleOiHistChart(_bk.binding_id+'_'+sym, _bk.client_id, _bk.binding_id, sym)">OI ▾</button>
                                   </div>
+                                  <div x-show="oiHistOpen[_bk.binding_id+'_'+sym]" class="mb-1.5" :id="'oihistchart_'+_bk.binding_id+'_'+sym"></div>
                                   <div class="flex justify-between">
                                     <span style="color:var(--t-muted)">Entry / LTP · Qty</span>
                                     <span x-text="fmt(p.entry_price)+' / '+(p.live_ltp!=null?fmt(p.live_ltp):'—')+' · '+p.qty"></span>
