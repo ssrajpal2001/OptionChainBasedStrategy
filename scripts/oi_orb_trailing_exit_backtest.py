@@ -21,12 +21,47 @@ real traded stocks, real data throughout:
      the SAME real class strategies/cag_straddle already drives live,
      not reimplemented. Feeds real N-min spot bars from market open;
      once S1 is established (CALL) or R1 is established (PUT), a
-     spot close breaching it triggers the exit. Sweeps timeframe in
-     [3, 5, 15] minutes.
+     spot close breaching it triggers the exit.
 
-A and B both race the already-known real 20-min VWAP-close hard SL and
-EOD (15:15) -- whichever fires first, chronologically, wins, exactly
-like the already-validated baseline.
+     2026-09-17, direct user follow-up ("BACTEST S&R structural stop,
+     LOGIC WITH DIFF TIME FRAMES IN INTRADAY BASIS"): timeframe sweep
+     widened from the original [3, 5, 15] to a much broader real
+     intraday grid, AND now sweeps two separate variants at every one
+     of those timeframes:
+       B1) "active level" (the 2026-09-16 fix -- trails to whichever of
+           S1/R1 or a still-FORMING S2/R2 candidate is currently most
+           relevant, not pinned to the original S1/R1 forever)
+       B2) "pure S1/R1" (the ORIGINAL, literal reading of the user's
+           own spec -- "S1 for long, R1 for short" specifically, no
+           trailing to a newer candidate at all) -- only ever tested at
+           [3, 5, 15] before, where it also fired 0/19; now checked at
+           every timeframe in the same broad grid for a fair, complete
+           comparison instead of leaving it under-tested next to B1.
+
+  D) TRAP-ZONE INTRADAY EXIT (on the UNDERLYING SPOT) -- direct user
+     follow-up ("ALWO WORTH CHECKIGN ANY OTHE RCONCEPT USIGN TEH S&R
+     TECH OR TRAP TECH"): reuses the SAME real zone-detection functions
+     the live engine already uses for its pre-entry trap gate
+     (screener.bull_trap_zones for CALL / screener.sharp_bear_zones for
+     PUT, both built on strategies.core.trap_zone_utils.find_all_setups)
+     -- but as an EXIT instead of an entry-gate, and built from
+     TODAY-ONLY intraday bars (no multi-day history needed, unlike the
+     entry-gate's own 180-min multi-day lookback). Re-scans the growing
+     bar list every new tf_min bar close (same "re-scan" discipline
+     every zone consumer in this codebase already uses); the first zone
+     that LOCKS on/after entry, sitting on the favorable side of the
+     entry price (above entry for CALL, below for PUT), becomes this
+     trade's target zone -- exit the instant a later bar's close reaches
+     that zone's own near boundary. This is a genuinely different read
+     from the already-REJECTED 2026-09-16 multi-day trap-zone target
+     (that one used a single zone frozen from BEFORE entry; this one
+     lets a zone still form DURING the trade, off the underlying's own
+     real intraday structure) -- worth a fresh, honest check rather than
+     assuming the earlier rejection settles this variant too.
+
+A, B, and D all race the already-known real 20-min VWAP-close hard SL
+and EOD (15:15) -- whichever fires first, chronologically, wins,
+exactly like the already-validated baseline.
 
   C) PRIOR-CANDLE-EXTREME SL (on the UNDERLYING SPOT), direct user
      spec 2026-09-16: "if v change the sl from 20 min to 75 min -- if
@@ -65,8 +100,12 @@ from strategies.oi_orb_screener.screener import VwapState
 
 EOD_TIME = "15:15"
 GIVEBACK_GRID = [0.20, 0.30, 0.40, 0.50]
-SR_TF_GRID = [3, 5, 15]
+# 2026-09-17: widened from [3, 5, 15] per direct user ask for "diff
+# tframes in intraday basis" -- full real intraday spread, sub-minute
+# scalping tf up through a slow 90-min structural read.
+SR_TF_GRID = [1, 2, 3, 5, 7, 10, 12, 15, 20, 25, 30, 45, 60, 75, 90]
 PREV_CANDLE_SL_TF_GRID = [45, 60, 75, 90]
+TRAP_ZONE_EXIT_TF_GRID = [5, 10, 15, 20, 30, 45]
 
 KNOWN_TRADES = [
     ("2026-09-01", "LTF", "PUT", "14:33", 11.70),
@@ -254,7 +293,7 @@ def _prev_candle_sl_exit(cache, tf_min):
     return None
 
 
-def _sr_exit(cache, tf_min, diag=None):
+def _sr_exit(cache, tf_min, diag=None, use_active_level=True):
     """Real SupportResistanceCalculator, fed real N-min SPOT bars from
     market open. CALL: exit on a spot close below the CURRENT active
     floor. PUT: exit on a spot close above the CURRENT active ceiling.
@@ -272,6 +311,12 @@ def _sr_exit(cache, tf_min, diag=None):
     S1/R1 otherwise -- this is the "trail to the current active level"
     interpretation, not a fixed pin to S1/R1 specifically.
 
+    2026-09-17: `use_active_level=False` reverts to the ORIGINAL, literal
+    "S1 for long / R1 for short" reading -- pinned to the established
+    S1/R1 only, never trailing to a still-forming S2/R2 -- so both
+    interpretations of the user's own spec can be swept side by side
+    across the same broad timeframe grid.
+
     `diag`, if passed a dict, is filled with real diagnostic info
     (final phase, when S1/R1 established, and the live gap between the
     active floor/ceiling and price at EOD) so a zero-impact result can
@@ -280,7 +325,7 @@ def _sr_exit(cache, tf_min, diag=None):
     entry_ts, eod_ts = cache["entry_ts"], cache["eod_ts"]
     tf_bars = to_n_min_bars_dateaware(cache["spot_bars"], tf_min)
     calc = SupportResistanceCalculator()
-    inst_key = f"{symbol}_SR_{tf_min}"
+    inst_key = f"{symbol}_SR_{tf_min}_{'active' if use_active_level else 'pin'}"
     s1_established_ts = r1_established_ts = None
     final_phase = "UNKNOWN"
     last_active_level = last_close = None
@@ -301,12 +346,12 @@ def _sr_exit(cache, tf_min, diag=None):
 
         active_level = None
         if side == "CALL":
-            if s2 is not None and s2.get("low") is not None:
+            if use_active_level and s2 is not None and s2.get("low") is not None:
                 active_level = s2["low"]
             elif s1.get("is_established"):
                 active_level = s1.get("low")
         else:
-            if r2 is not None and r2.get("high") is not None:
+            if use_active_level and r2 is not None and r2.get("high") is not None:
                 active_level = r2["high"]
             elif r1.get("is_established"):
                 active_level = r1.get("high")
@@ -333,6 +378,55 @@ def _sr_exit(cache, tf_min, diag=None):
         diag.update(final_phase=final_phase, s1_established_ts=s1_established_ts,
                      r1_established_ts=r1_established_ts, exit_level=None,
                      last_active_level=last_active_level, last_close=last_close, live_gap_pct=gap_pct)
+    return None
+
+
+def _trap_zone_exit(cache, tf_min):
+    """2026-09-17, direct user ask ("ALWO WORTH CHECKIGN ANY OTHE
+    RCONCEPT USIGN TEH S&R TECH OR TRAP TECH"): reuses the SAME real
+    zone-detection functions the live engine's pre-entry trap gate
+    already uses (screener.bull_trap_zones for CALL / sharp_bear_zones
+    for PUT), as an EXIT instead of an entry-gate, built from
+    TODAY-ONLY intraday bars (re-scanned as they grow, same discipline
+    as every other zone consumer in this codebase). The first zone that
+    LOCKS on/after entry, sitting on the favorable side of the entry
+    price, becomes this trade's target; exit the instant a later bar's
+    close reaches that zone's own near boundary."""
+    from strategies.oi_orb_screener import screener as _screener
+    side = cache["side"]
+    entry_ts, eod_ts = cache["entry_ts"], cache["eod_ts"]
+    tf_bars = to_n_min_bars_dateaware(cache["spot_bars"], tf_min)
+    entry_bars = [b for b in tf_bars if b.ts <= entry_ts]
+    if not entry_bars:
+        return None
+    entry_spot = entry_bars[-1].close
+    zones_fn = _screener.bull_trap_zones if side == "CALL" else _screener.sharp_bear_zones
+    target_zone = None
+    for i, b in enumerate(tf_bars):
+        if b.ts > eod_ts:
+            break
+        if b.ts < entry_ts:
+            continue
+        bars_so_far = tf_bars[: i + 1]
+        try:
+            zones = zones_fn(bars_so_far)
+        except Exception:
+            zones = []
+        if target_zone is None:
+            for z in zones:
+                if z.get("lock_ts") is None or z["lock_ts"] < entry_ts:
+                    continue
+                if side == "CALL" and z["zone_lo"] > entry_spot:
+                    target_zone = z
+                    break
+                if side == "PUT" and z["zone_hi"] < entry_spot:
+                    target_zone = z
+                    break
+        if target_zone is not None:
+            if side == "CALL" and b.close >= target_zone["zone_lo"]:
+                return b.ts
+            if side == "PUT" and b.close <= target_zone["zone_hi"]:
+                return b.ts
     return None
 
 
@@ -383,28 +477,36 @@ async def main():
         print(f"  giveback={gb*100:.0f}%  ->  total={total:+.2f} pts  (delta vs baseline: {total-baseline_total:+.2f})")
 
     print("\n" + "=" * 130)
-    print("B) REAL S&R S1(CALL)/R1(PUT) STRUCTURAL TSL SWEEP")
+    print(f"B) REAL S&R S1(CALL)/R1(PUT) STRUCTURAL TSL SWEEP -- {len(SR_TF_GRID)} timeframes x 2 variants "
+          f"(active-level trailing vs pure S1/R1 pin)")
     print("=" * 130)
-    for tf in SR_TF_GRID:
-        total = 0.0
-        show_diag = (tf == SR_TF_GRID[len(SR_TF_GRID) // 2])
-        if show_diag:
-            print(f"\n  -- per-trade diagnostic for tf={tf}min (final phase / S1,R1 established?) --")
-        for c in caches:
-            diag = {} if show_diag else None
-            sr_exit = _sr_exit(c, tf, diag=diag)
-            exit_ts = _combine(c, sr_exit)
-            pnl = _pnl_at(c, exit_ts)
-            if pnl is not None:
-                total += pnl
-            if show_diag and diag:
-                fired = f"FIRED@{sr_exit.strftime('%H:%M')} level={diag.get('exit_level')}" if sr_exit else "never fired"
-                s1e = diag['s1_established_ts'].strftime('%H:%M') if diag.get('s1_established_ts') else "never"
-                r1e = diag['r1_established_ts'].strftime('%H:%M') if diag.get('r1_established_ts') else "never"
-                gap = f"live_gap={diag['live_gap_pct']:+.2f}%" if diag.get('live_gap_pct') is not None else "no active level ever"
-                print(f"    {c['symbol']:14s} side={c['side']:4s} final_phase={diag['final_phase']:22s} "
-                      f"S1_est={s1e:6s} R1_est={r1e:6s} {fired}  ({gap})")
-        print(f"  tf={tf}min  ->  total={total:+.2f} pts  (delta vs baseline: {total-baseline_total:+.2f})")
+    for variant_name, use_active in (("B1) active-level (trails to current S2/R2 candidate)", True),
+                                      ("B2) pure S1/R1 pin (original literal spec, no trailing)", False)):
+        print(f"\n  --- {variant_name} ---")
+        for tf in SR_TF_GRID:
+            total = 0.0
+            fired_count = 0
+            show_diag = use_active and tf == SR_TF_GRID[len(SR_TF_GRID) // 2]
+            if show_diag:
+                print(f"\n    -- per-trade diagnostic for tf={tf}min (final phase / S1,R1 established?) --")
+            for c in caches:
+                diag = {} if show_diag else None
+                sr_exit = _sr_exit(c, tf, diag=diag, use_active_level=use_active)
+                if sr_exit is not None:
+                    fired_count += 1
+                exit_ts = _combine(c, sr_exit)
+                pnl = _pnl_at(c, exit_ts)
+                if pnl is not None:
+                    total += pnl
+                if show_diag and diag:
+                    fired = f"FIRED@{sr_exit.strftime('%H:%M')} level={diag.get('exit_level')}" if sr_exit else "never fired"
+                    s1e = diag['s1_established_ts'].strftime('%H:%M') if diag.get('s1_established_ts') else "never"
+                    r1e = diag['r1_established_ts'].strftime('%H:%M') if diag.get('r1_established_ts') else "never"
+                    gap = f"live_gap={diag['live_gap_pct']:+.2f}%" if diag.get('live_gap_pct') is not None else "no active level ever"
+                    print(f"      {c['symbol']:14s} side={c['side']:4s} final_phase={diag['final_phase']:22s} "
+                          f"S1_est={s1e:6s} R1_est={r1e:6s} {fired}  ({gap})")
+            print(f"    tf={tf:3d}min  ->  total={total:+.2f} pts  ({fired_count}/{len(caches)} fires)  "
+                  f"(delta vs baseline: {total-baseline_total:+.2f})")
 
     print("\n" + "=" * 130)
     print("C) PRIOR-CANDLE-EXTREME SL SWEEP (replaces the 20-min VWAP SL entirely, spot-based)")
@@ -426,7 +528,25 @@ async def main():
               f"(delta vs baseline: {total-baseline_total:+.2f}){marker}")
 
     print("\n" + "=" * 130)
-    print("CAVEAT: n=19 real trades, single 7-day sample. A and B race the SAME real 20-min VWAP SL; C "
+    print(f"D) TRAP-ZONE INTRADAY EXIT SWEEP (underlying spot, reuses the live entry-gate's own zone "
+          f"functions as an exit): tf_min in {TRAP_ZONE_EXIT_TF_GRID}")
+    print("=" * 130)
+    for tf in TRAP_ZONE_EXIT_TF_GRID:
+        total = 0.0
+        fired_count = 0
+        for c in caches:
+            tz_exit = _trap_zone_exit(c, tf)
+            if tz_exit is not None:
+                fired_count += 1
+            exit_ts = _combine(c, tz_exit)
+            pnl = _pnl_at(c, exit_ts)
+            if pnl is not None:
+                total += pnl
+        print(f"  tf={tf}min  ->  total={total:+.2f} pts  ({fired_count}/{len(caches)} fires)  "
+              f"(delta vs baseline: {total-baseline_total:+.2f})")
+
+    print("\n" + "=" * 130)
+    print("CAVEAT: n=19 real trades, single 7-day sample. A, B, and D race the SAME real 20-min VWAP SL; C "
           "REPLACES it entirely (no VWAP involved). A combo that wins here needs a larger forward sample "
           "before being trusted as the final design.")
     print("=" * 130)
