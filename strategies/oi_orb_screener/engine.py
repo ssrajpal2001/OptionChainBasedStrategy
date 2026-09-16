@@ -3841,12 +3841,22 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 "OiOrb[%s/%s]: %s futures-OI snapshot -- no futures key resolved.",
                 self._client_id, self._binding_id, sym)
             return None
+        # 2026-09-16, direct user correction: the plain "upstox" provider row
+        # is the NIFTY/SENSEX account, shared with sell_straddle/iron_fly/
+        # cag_straddle -- and, confirmed live the same day, effectively also
+        # with this client's OWN execution-broker Upstox session (same real
+        # account, single-session-per-account enforced server-side by
+        # Upstox), so refreshing either one kept silently invalidating the
+        # other. "upstox2" (labeled CRUDEOIL in the admin feeder panel) is
+        # the user's own separate, dedicated account already set up
+        # specifically for sell_straddle + this OI-ORB screener -- using it
+        # here instead avoids the conflict entirely, no new account needed.
         from data_layer.client_db import ClientDB
-        creds = await asyncio.to_thread(ClientDB().get_feeder_creds_sync, "upstox")
+        creds = await asyncio.to_thread(ClientDB().get_feeder_creds_sync, "upstox2")
         token = (creds or {}).get("access_token", "")
         if not token:
             self._clog.warning(
-                "OiOrb[%s/%s]: %s futures-OI snapshot -- no upstox access_token stored "
+                "OiOrb[%s/%s]: %s futures-OI snapshot -- no upstox2 access_token stored "
                 "in ClientDB (feeder_creds) for this client.",
                 self._client_id, self._binding_id, sym)
             return None
@@ -3906,7 +3916,9 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             from data_layer.instrument_registry import REGISTRY
             from data_layer.client_db import ClientDB
             fut_key = REGISTRY.get_futures_upstox(sym)
-            creds = await asyncio.to_thread(ClientDB().get_feeder_creds_sync, "upstox")
+            # Same "upstox2" account as _fetch_futures_oi_snapshot above --
+            # keep both calls on the same dedicated feeder credential.
+            creds = await asyncio.to_thread(ClientDB().get_feeder_creds_sync, "upstox2")
             token = (creds or {}).get("access_token", "")
 
             cfg = self._screener_cfg
