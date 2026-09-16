@@ -260,24 +260,36 @@ async def test_respawn_waits_for_plain_async_stop_to_finish():
 
 class _ControllableLiquidateBook(_FakeBook):
     """Like _FakeBook, but starts with an OPEN position and a controllable
-    async liquidate() that blocks until a test-controlled event is set --
-    exercises the not-flat removal branch of _reconcile(), which must
-    liquidate (real broker-flatten) before the book is actually gone. This is
-    the highest-stakes variant of the duplicate-instance race: a live
-    position, not just an idle book."""
+    async stop_async() that blocks until a test-controlled event is set --
+    exercises the not-flat removal branch of _reconcile(), which must fully
+    stop the book (skip_close=True, see strategies/core/book_manager.py's
+    2026-09-16 change: stopping a strategy never closes its real position
+    any more) before the book is actually gone. This is the highest-stakes
+    variant of the duplicate-instance race: a live position, not just an
+    idle book -- the manager must still not spawn a duplicate while the old
+    instance's stop is in flight, even though no real broker-flatten call
+    happens here any more.
+
+    2026-09-16 update: liquidate() must NEVER be called by the not-flat
+    removal path any more (that's the whole point of the change this test
+    file now protects) -- it stays defined here only so a test could catch
+    a regression back to the old close-on-stop behavior by asserting it was
+    never invoked."""
 
     def __init__(self, key):
         super().__init__(key)
-        self._position = {"open": True}  # not flat
-        self.liquidate_release = asyncio.Event()
+        self._position = {"open": True}  # not flat -- and stays that way,
+        # since skip_close=True means nothing here ever flattens it.
+        self.stop_release = asyncio.Event()
         self.liquidate_called = False
+        self.stop_async_called = False
 
     async def liquidate(self, reason):
-        await self.liquidate_release.wait()
         self.liquidate_called = True
-        self._position = None  # now flat, post-liquidation
+        self._position = None  # would-be post-liquidation state; must never run
 
     async def stop_async(self):
+        await self.stop_release.wait()
         self.stop_async_called = True
 
 
@@ -297,12 +309,15 @@ class _LiquidatableManager(StrategyBookManager):
 
 
 @pytest.mark.asyncio
-async def test_spawn_waits_for_open_position_liquidation_to_finish():
-    """The not-flat removal branch (asyncio.create_task(_liquidate_book))
-    must be tracked in self._stopping exactly like the flat/_stop_book path,
-    so a book carrying an OPEN POSITION can't get a duplicate live instance
-    spawned while the real liquidation (broker-flatten + stop_async) is still
-    in flight."""
+async def test_spawn_waits_for_open_position_stop_to_finish_without_closing_it():
+    """2026-09-16, direct user spec (applies to every strategy): stopping a
+    strategy whose book still carries an OPEN position must NEVER place a
+    real close order any more -- book.liquidate() must never be called from
+    the not-flat removal branch. But the spawn-race guard itself (tracked in
+    self._stopping, blocking a duplicate respawn while the old instance's
+    async stop is still in flight) must still hold -- the ONLY thing that
+    changed is that the "wait" is now for a plain stop_async(), not a real
+    broker-flatten."""
     mgr = _LiquidatableManager()
 
     # Tick 1: spawn the first instance, holding an open position.
@@ -313,28 +328,32 @@ async def test_spawn_waits_for_open_position_liquidation_to_finish():
     assert not mgr._is_flat(old_book)
 
     # Tick 2: key no longer wanted (deployment stopped) while the position is
-    # still open -> not-flat branch schedules liquidation, tracked.
+    # still open -> not-flat branch schedules a skip_close=True stop, tracked.
     mgr._wanted_keys = {}
     mgr._reconcile()
     assert ("c1", "b1", "NIFTY") not in mgr._books
     assert ("c1", "b1", "NIFTY") in mgr._stopping
-    # Liquidation was scheduled but is BLOCKED (release not set yet) -- the
-    # old book's position has not actually been flattened yet.
+    # The stop was scheduled but is BLOCKED (release not set yet).
+    assert old_book.stop_async_called is False
+    # And liquidate() must never even be attempted -- the real position is
+    # left exactly as-is at the broker.
     assert old_book.liquidate_called is False
+    assert old_book._position == {"open": True}
 
     # Tick 3: key wanted again immediately (deployment restarted) -- must NOT
-    # spawn a second live instance while the old one's open position is still
-    # being liquidated.
+    # spawn a second live instance while the old one's stop is still in flight.
     mgr._wanted_keys = {("c1", "b1", "NIFTY"): 1}
     mgr._reconcile()
-    assert len(mgr.spawned) == 1, "must not spawn a duplicate while the old instance's open position is still being liquidated"
+    assert len(mgr.spawned) == 1, "must not spawn a duplicate while the old instance's stop is still in flight"
     assert ("c1", "b1", "NIFTY") not in mgr._books
 
-    # Now let the liquidation (and the old instance's stop_async) actually finish.
-    old_book.liquidate_release.set()
+    # Now let the old instance's stop_async() actually finish.
+    old_book.stop_release.set()
     await asyncio.sleep(0)  # let the scheduled task run to completion
     await asyncio.sleep(0)
-    assert old_book.liquidate_called is True
+    assert old_book.stop_async_called is True
+    assert old_book.liquidate_called is False   # still never called
+    assert old_book._position == {"open": True}   # position genuinely untouched
     assert ("c1", "b1", "NIFTY") not in mgr._stopping
 
     # Tick 4: NOW a replacement may be spawned.

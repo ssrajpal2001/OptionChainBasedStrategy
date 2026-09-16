@@ -401,22 +401,18 @@ def test_reconcile_liquidates_open_position_on_removal():
     assert ("C1", "B1", "NIFTY") not in mgr._books
 
 
-def test_reconcile_keeps_book_alive_when_liquidation_fails():
-    """2026-08-27, real incident: a manual toggle-off/deployment-removal
-    tried to liquidate a book whose exit got aborted (broker rejected the
-    order -- no exception raised, just an internal revert-to-open). The old
-    code stopped the book's tasks regardless, orphaning a real open
-    position with nothing left monitoring or retrying it. A book whose
-    liquidate() call does NOT actually clear the position (simulating a
-    failed/aborted close) must be kept alive in self._books, not stopped."""
-    class _FailingLiquidateBook(_FakeBook):
-        async def liquidate(self, reason: str = "kill_switch") -> None:
-            self.liquidated = (reason,)
-            # Deliberately does NOT clear self._position -- simulates a
-            # real aborted exit (broker rejection) that reverts to "open".
-
+def test_reconcile_never_liquidates_on_deployment_stop_any_more():
+    """2026-09-16 CRITICAL CHANGE, direct user spec (applies to every
+    strategy): a manual toggle-off/deployment-removal must NEVER place a
+    real close order any more -- book.liquidate() must not even be
+    attempted for reason="deployment_stop". The book is still fully
+    stopped (its tasks cancelled); the real position, if any, is left
+    exactly as-is at the broker, to be restored the next time this book is
+    spawned again (position_store/DB-backed, same guarantee
+    scope="system_shutdown" already relies on -- see this method's own
+    2026-09-16 docstring update in strategies/core/book_manager.py)."""
     mgr = _TestBookManager()
-    book = _FailingLiquidateBook()
+    book = _FakeBook()
     book._position = object()
     mgr._books[("C1", "B1", "NIFTY")] = book
 
@@ -427,7 +423,36 @@ def test_reconcile_keeps_book_alive_when_liquidation_fails():
 
     asyncio.run(run_reconcile())
 
-    assert mgr._books.get(("C1", "B1", "NIFTY")) is book, \
-        "a book whose liquidation failed must stay in self._books, not be orphaned"
+    assert book.liquidated == (), "deployment_stop must never call liquidate() any more"
+    assert mgr._books.get(("C1", "B1", "NIFTY")) is None, \
+        "the book is still fully stopped/removed -- only the real close is skipped"
+    assert book.stopped is True, "the book's tasks must still be stopped"
+
+
+def test_reconcile_keeps_book_alive_when_an_explicit_liquidation_fails():
+    """2026-08-27, real incident, still relevant for an EXPLICIT close (a
+    genuine kill-switch / square-off action, scope != deployment_stop): a
+    liquidate() call whose broker order gets rejected -- no exception
+    raised, just an internal revert-to-open -- must not let the book's
+    tasks get stopped anyway, orphaning a real open position with nothing
+    left monitoring or retrying it. Drives _liquidate_book directly with
+    skip_close=False (an explicit close attempt), since deployment_stop
+    itself no longer ever reaches book.liquidate() at all (see the sibling
+    test above)."""
+    class _FailingLiquidateBook(_FakeBook):
+        async def liquidate(self, reason: str = "kill_switch") -> None:
+            self.liquidated = (reason,)
+            # Deliberately does NOT clear self._position -- simulates a
+            # real aborted exit (broker rejection) that reverts to "open".
+
+    mgr = _TestBookManager()
+    book = _FailingLiquidateBook()
+    book._position = object()
+
+    still_open = asyncio.run(mgr._liquidate_book(
+        book, ("C1", "B1", "NIFTY"), reason="kill_switch", skip_close=False))
+
+    assert still_open is True, \
+        "a book whose liquidation failed must be reported as still open, not stopped"
     assert book.stopped is False, "must not stop the book's tasks while a position is still open"
-    assert book.liquidated == ("deployment_stop",)
+    assert book.liquidated == ("kill_switch",)

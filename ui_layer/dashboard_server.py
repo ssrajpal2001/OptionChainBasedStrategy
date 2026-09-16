@@ -2308,12 +2308,19 @@ class DashboardServer:
             # trade, orders can be sent here". Deploy only selects strategies.
             await _srv._client_db.set_engine_active(cid, binding_id, new_state)
 
-            if not new_state and _srv._straddle_bridge is not None:
-                try:
-                    n = await _srv._straddle_bridge.square_off_binding(cid, binding_id, _srv._sell_straddles)
-                    logger.info("Dashboard: Trade OFF %s/%s — squared off %d leg(s).", cid, binding_id, n)
-                except Exception as exc:
-                    logger.error("Dashboard: square-off on Trade OFF failed for %s/%s: %s", cid, binding_id, exc)
+            # 2026-09-16 CRITICAL CHANGE, direct user spec: Trade OFF must only
+            # disconnect -- it must NEVER place a real close order any more.
+            # This used to call square_off_binding() here, force-closing every
+            # open SellStraddle leg on this binding the instant Trade went off
+            # (confirmed live, 2026-09-16: a real position was closed this way
+            # while the user only meant to stop trading for the night, not
+            # square off). Every strategy already restores an open position
+            # (position_store/DB-backed) the next time its book is spawned
+            # again, so nothing is orphaned by leaving it open here -- same
+            # policy as strategies/core/book_manager.py's reconcile() no
+            # longer closing on a strategy Run-toggle-off either. Deliberately
+            # closing a position is now ONLY ever done by an explicit,
+            # separate square-off action (the client-wide "Square Off" button).
 
             if new_state:
                 # Hot-apply every saved deployment for this binding so lot/squareoff
@@ -3825,20 +3832,28 @@ class DashboardServer:
         async def api_client_broker_disconnect(
             binding_id: str, user: dict = Depends(_require_client),
         ):
-            """Terminal toggle OFF — stops engine and clears trade toggle atomically."""
+            """Terminal toggle OFF — disconnects the broker session and stops every
+            strategy running on this binding. Does NOT close any open position.
+
+            2026-09-16 CRITICAL CHANGE, direct user spec (applies to every
+            strategy, not just SellStraddle): this used to square off every
+            open leg FIRST, on the theory that stopping the strategies
+            first would tear the book down before the close order could go
+            out. Direct user correction: Terminal OFF must only disconnect
+            the broker connection and stop each strategy's own engine for
+            that point in time -- never place a real close order. Every
+            strategy already restores an open position (position_store/
+            DB-backed) with full exit logic resumed the next time its book
+            is spawned again (see strategies/core/book_manager.py's
+            reconcile(), which itself no longer closes on a strategy
+            stopping either) -- nothing is orphaned by leaving it open
+            here. Deliberately closing a position is now ONLY ever done by
+            an explicit, separate square-off action (the client-wide
+            "Square Off" button)."""
             cid = user.get("client_id", "")
             await _srv._client_db.set_terminal_connected(cid, binding_id, False)
             await _srv._client_db.set_engine_active(cid, binding_id, False)
             await _srv._client_db.set_trade_enabled(cid, binding_id, False)
-            # ORDER MATTERS: square off open legs FIRST (places BUY-to-close on exchange), THEN
-            # set run toggles OFF. If we flip is_running first, StraddleBookManager's 5s reconcile
-            # tears the book down before square_off_binding runs → nothing closes on exchange.
-            if _srv._straddle_bridge is not None:
-                try:
-                    n = await _srv._straddle_bridge.square_off_binding(cid, binding_id, _srv._sell_straddles)
-                    logger.info("Dashboard: Terminal OFF %s/%s — squared off %d leg(s).", cid, binding_id, n)
-                except Exception as exc:
-                    logger.error("Dashboard: square-off on Terminal OFF failed for %s/%s: %s", cid, binding_id, exc)
             try:
                 for d in _srv._client_db.get_deployments_sync(cid):
                     if d.get("binding_id") == binding_id:

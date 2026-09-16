@@ -112,10 +112,14 @@ class ExecutionRouter:
     async def start(self) -> None:
         """Authenticate brokers and spin up per-client workers.
 
-        Raises RuntimeError if ANY broker auth fails — the system must not start
-        with a missing broker as it leads to confusing 'no broker for binding' errors later.
-        """
-        failed: list[str] = []
+        2026-09-16, direct user spec (real incident, see the inline comment
+        at this method's own auth-failure branch below): no longer raises on
+        a failed broker auth, even for a Trade-enabled binding. The whole
+        system always finishes starting; a binding with no working broker
+        just has no broker entry for that binding_id, and any real order
+        attempted on it is refused and alerted via
+        execution_bridge/broker_resolve.py's resolve_broker_or_alert(),
+        never silently faked."""
         for client in self._registry.all_active():
             self._brokers[client.client_id] = {}
             for binding in client.enabled_brokers():
@@ -173,11 +177,36 @@ class ExecutionRouter:
                                     _idx, client.client_id, binding.binding_id,
                                 )
                 elif binding.is_trade_enabled:
+                    # 2026-09-16 CRITICAL FIX, real incident: this used to hard-abort
+                    # the ENTIRE process (raising below, which pm2 then crash-loops
+                    # forever) the instant ANY Trade-enabled binding's daily broker
+                    # session token had expired and not yet been re-authenticated --
+                    # a NORMAL, expected daily occurrence (Upstox/Fyers/etc tokens
+                    # are day-scoped), not a genuine misconfiguration. Confirmed as
+                    # a real deadlock: since a SellStraddle overnight-carry position
+                    # now requires Trade staying ON through a shutdown (see
+                    # strategies/core/book_manager.py's 2026-09-16 skip_close
+                    # change + this file's own set_trade endpoint fix), a stale
+                    # token on that SAME binding the next morning would previously
+                    # crash-loop the whole app before it ever finished booting --
+                    # taking the dashboard down with it, so there was no way to
+                    # even reach the OAuth reconnect flow to fix it. Now: log just
+                    # as loudly (CRITICAL, unchanged) but DO NOT add this binding
+                    # to `failed` -- the rest of the system (every other binding,
+                    # every strategy) boots normally; a real order attempt on this
+                    # one broken binding hits execution_bridge/broker_resolve.py's
+                    # resolve_broker_or_alert(), which already has a complete
+                    # graceful "broker unavailable" fallback (retries, logs
+                    # CRITICAL, publishes Topic.SYSTEM_EVENT/BROKER_UNAVAILABLE,
+                    # refuses to fake a fill) built for exactly this case.
                     logger.critical(
-                        "Router: Auth FAILED for %s/%s (%s). System cannot start.",
+                        "Router: Auth FAILED for %s/%s (%s) -- Trade is enabled but this "
+                        "binding has NO working broker connection. System is starting "
+                        "anyway; re-authenticate this binding via the dashboard's OAuth "
+                        "reconnect flow. Any real order attempted on it will be refused "
+                        "and alerted, never silently faked.",
                         client.client_id, binding.binding_id, binding.provider,
                     )
-                    failed.append(f"{client.client_id}/{binding.binding_id}({binding.provider})")
                 else:
                     logger.warning(
                         "Router: Auth FAILED for %s/%s (%s) but trading is disabled; skipping.",
@@ -191,12 +220,6 @@ class ExecutionRouter:
                 cfg=self._cfg,
             )
             self._pool.register(worker)
-
-        if failed:
-            raise RuntimeError(
-                f"Broker authentication failed for: {', '.join(failed)}. "
-                "Fix credentials or remove the binding before starting in live mode."
-            )
 
         await self._pool.start_all()
         logger.info("Router: %d client workers active.", len(self._brokers))

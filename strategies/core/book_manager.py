@@ -310,7 +310,8 @@ class StrategyBookManager:
             if key is not None:
                 self._stopping.pop(key, None)
 
-    async def _run_liquidate_and_stop(self, book: Any, key: Key, reason: str) -> None:
+    async def _run_liquidate_and_stop(self, book: Any, key: Key, reason: str,
+                                       skip_close: bool = False) -> None:
         """Same tracked-task discipline as _run_stop_async, but for a book that
         still has an open position and must be liquidated (not just stopped)
         before it's gone. Registered in self._stopping so the spawn loop
@@ -333,9 +334,23 @@ class StrategyBookManager:
         flat, and if it comes back not-flat, the book is put BACK into
         self._books here so the manager keeps it alive (still ticking,
         still retrying the exit on its own normal exit-check cadence) and
-        will simply try to remove it again on a later reconcile tick."""
+        will simply try to remove it again on a later reconcile tick.
+
+        2026-09-16, direct user spec (applies to every strategy, not just
+        SellStraddle): stopping a strategy (its own Run toggle, or a binding's
+        Terminal/Trade going off) must NEVER place a real close order --
+        only an explicit, separate square-off action should ever do that.
+        skip_close=True (the caller's own choice -- see reconcile()'s "book
+        no longer wanted" branch) threads straight through to
+        _liquidate_book, same skip_close=True policy liquidate_all() already
+        uses for scope="system_shutdown". Every current strategy (SellStraddle,
+        both OI-ORB variants, CAG Straddle, Iron Fly) already has its own
+        position_store/DB-backed restore-on-start, so a position left open
+        here is picked back up and its full exit logic resumes automatically
+        the next time this book is spawned again -- it is not orphaned,
+        exactly the same guarantee scope="system_shutdown" already relies on."""
         try:
-            still_open = await self._liquidate_book(book, key, reason=reason)
+            still_open = await self._liquidate_book(book, key, reason=reason, skip_close=skip_close)
             if still_open:
                 logger.critical(
                     "%s: liquidation FAILED for %s (reason=%s) -- position is STILL OPEN. "
@@ -411,16 +426,38 @@ class StrategyBookManager:
                 logger.warning("%s: spawn %s failed: %s",
                                self.__class__.__name__, key, exc, exc_info=True)
 
-        # Stop books whose key is no longer wanted. If a book still has an open
-        # position, liquidate it first so we do not orphan broker legs.
+        # Stop books whose key is no longer wanted.
+        #
+        # 2026-09-16 CRITICAL CHANGE, direct user spec (applies to every
+        # strategy): a book dropping out of "wanted" -- its own Run toggle
+        # going off, or a binding's Terminal/Trade going off -- must NEVER
+        # place a real close order any more. It used to liquidate FIRST
+        # ("if a book still has an open position, liquidate it before
+        # stop") specifically so a stop never orphaned broker legs -- but a
+        # real close here is exactly what the user does NOT want: stopping a
+        # strategy should only stop that strategy's own engine, leaving any
+        # real position exactly as-is at the broker. A genuinely open
+        # position is not orphaned by this: every current strategy already
+        # restores it (position_store/DB-backed) the next time this same
+        # book is spawned again, with its full exit logic resuming --
+        # skip_close=True here is the SAME policy liquidate_all() already
+        # applies on scope="system_shutdown" (see that method's own
+        # docstring), just triggered by a config change instead of a
+        # restart. Deliberately closing a position is now ONLY ever done by
+        # an explicit, separate square-off action (the client-wide "Square
+        # Off" button, or a future per-strategy equivalent) -- never as a
+        # side effect of stopping.
         for key in set(self._books) - set(wanted):
             book = self._books.pop(key)
             if not self._is_flat(book):
-                logger.warning(
-                    "%s: removing %s with open position — liquidating before stop.",
+                logger.info(
+                    "%s: removing %s with open position — stopping WITHOUT closing it "
+                    "(position stays open at the broker; will be restored and re-managed "
+                    "the next time this book is spawned again).",
                     self.__class__.__name__, key,
                 )
-                task = asyncio.create_task(self._run_liquidate_and_stop(book, key, reason="deployment_stop"))
+                task = asyncio.create_task(self._run_liquidate_and_stop(
+                    book, key, reason="deployment_stop", skip_close=True))
                 self._stopping[key] = task
             else:
                 self._stop_book(book, key)
