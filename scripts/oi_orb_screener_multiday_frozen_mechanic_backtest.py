@@ -123,17 +123,30 @@ async def _prev_day_oi_asof(fut_key, token, ref_date, max_step_back=7):
     return None
 
 
+async def _prev_close_asof(eq_key, token, ref_date, max_step_back=10):
+    """2026-09-16 bug fix: fetch_upstox_daily() is hardcoded to
+    date.today()-1 (real wall-clock today), not an arbitrary historical
+    ref_date -- for a past trade_date like 2026-09-01, that window never
+    reaches far enough back, silently returning no usable prev_close and
+    making every single symbol fail identically (confirmed live: this is
+    exactly what happened for 5 of 7 real days before this fix). Same
+    date-parameterized step-back pattern as _prev_day_oi_asof below --
+    real 1-min bars for the actual previous trading day, last close."""
+    d = ref_date - timedelta(days=1)
+    for _ in range(max_step_back):
+        if d.weekday() < 5:
+            rows = await hc.fetch_upstox_range_1m(eq_key, token, d, d)
+            if rows:
+                return float(rows[-1]["close"])
+        d -= timedelta(days=1)
+    return None
+
+
 async def run_symbol(book, token, trade_date: date, symbol: str):
     eq_key = stock_resolve.resolve_eq_instrument_key(symbol)
     if not eq_key:
         return None
-    daily = await hc.fetch_upstox_daily(eq_key, token, lookback_days=10)
-    prev_close = None
-    for row in reversed(daily or []):
-        row_date = row["ts"][:10] if isinstance(row["ts"], str) else row["ts"].date().isoformat()
-        if row_date < trade_date.isoformat():
-            prev_close = float(row["close"])
-            break
+    prev_close = await _prev_close_asof(eq_key, token, trade_date)
     if not prev_close:
         return None
 
