@@ -399,6 +399,25 @@ class CagStraddleStrategy(AbstractStrategyBook):
 
     # ── entry / exit ─────────────────────────────────────────────────────────
 
+    async def liquidate(self, reason: str = "kill_switch") -> None:
+        """2026-09-16, direct user spec: real, explicit close entry point --
+        used by both the generic kill-switch (strategies/core/book_manager.py's
+        liquidate_all) and the new per-strategy Square Off dashboard action.
+        CagStraddleStrategy previously had no public liquidate() at all (unlike
+        SellStraddle/OI-ORB/IronFly), so neither of those could ever actually
+        close a real CAG position -- confirmed by direct inspection, a real
+        gap, not by design (this strategy's own force-exit at 15:00-15:35 just
+        made it unlikely to matter in practice). Same exit_price fallback the
+        existing EOD loop already uses (_eod_loop, above): the position's own
+        live premium if warm, else its entry price."""
+        pos = self._position
+        if pos is None or pos.get("_closing"):
+            return
+        side = pos["side"]
+        strike = pos["strike"]
+        exit_price = self._live_premium.get((strike, side), pos["entry_price"])
+        self._exit(reason=reason, exit_price=exit_price)
+
     def _exit(self, reason: str, exit_price: float) -> None:
         pos = self._position
         if pos is None or pos.get("_closing"):

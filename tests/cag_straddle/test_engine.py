@@ -60,6 +60,66 @@ async def test_mismatched_expiry_tick_is_ignored():
 
 
 @pytest.mark.asyncio
+async def test_liquidate_initiates_close_using_live_premium(monkeypatch):
+    """2026-09-16, direct user spec: CagStraddleStrategy previously had no
+    public liquidate() at all (unlike SellStraddle/OI-ORB/IronFly) -- a real
+    gap confirmed by direct inspection, meaning neither the generic
+    kill-switch (strategies/core/book_manager.py) nor the new per-strategy
+    Square Off dashboard action could ever actually close a real CAG
+    position. liquidate() must route through the SAME real _exit()/
+    _square_off() pipeline every other exit (SL, EOD) already uses --
+    fire-and-forget (spawns the real broker-confirm task, matching
+    _eod_loop's own force-exit call), using the position's own live
+    premium when warm (same fallback _eod_loop already uses)."""
+    book = _make_book()
+    book._position = {
+        "side": "CE", "strike": 23800, "entry_price": 80.0,
+        "qty_unit": 65, "entry_ts": datetime.now(IST),
+    }
+    book._live_premium[(23800, "CE")] = 92.5
+
+    calls = []
+    async def _fake_square_off(pos, reason, exit_price):
+        calls.append((pos, reason, exit_price))
+    monkeypatch.setattr(book, "_square_off", _fake_square_off)
+
+    await book.liquidate("manual_squareoff")
+    await asyncio.sleep(0)   # let the create_task'd _square_off actually run
+
+    assert len(calls) == 1
+    _pos, reason, exit_price = calls[0]
+    assert reason == "manual_squareoff"
+    assert exit_price == 92.5
+
+
+@pytest.mark.asyncio
+async def test_liquidate_falls_back_to_entry_price_when_no_live_premium(monkeypatch):
+    book = _make_book()
+    book._position = {
+        "side": "PE", "strike": 23500, "entry_price": 75.0,
+        "qty_unit": 65, "entry_ts": datetime.now(IST),
+    }
+    calls = []
+    async def _fake_square_off(pos, reason, exit_price):
+        calls.append(exit_price)
+    monkeypatch.setattr(book, "_square_off", _fake_square_off)
+
+    # No self._live_premium entry seeded for this (strike, side) -- must not raise.
+    await book.liquidate("manual_squareoff")
+    await asyncio.sleep(0)
+
+    assert calls == [75.0]
+
+
+@pytest.mark.asyncio
+async def test_liquidate_is_a_noop_when_already_flat():
+    book = _make_book()
+    assert book._position is None
+    await book.liquidate("manual_squareoff")   # must not raise
+    assert book._position is None
+
+
+@pytest.mark.asyncio
 async def test_sl_check_never_fires_off_a_different_expirys_tick():
     """The exact real-incident shape: a position is open on next-week's
     23800CE at entry=83.15; a same-strike tick from TODAY's expiry (a

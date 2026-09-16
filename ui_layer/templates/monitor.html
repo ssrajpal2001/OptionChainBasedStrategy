@@ -2241,9 +2241,13 @@ document.addEventListener('alpine:init', () => {
       const _stratLabel = {sell_straddle:'Sell Straddle',sell_straddle_calc_vwap:'Sell Straddle (Calc VWAP)',d1_trap_option:'D1 Trap Option',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow',liquidity_sweep:'Liquidity Sweep',liquidity_trap:'Liquidity Trap',oi_orb_screener:'OI-ORB Screener',oi_orb_screener_top20:'OI-ORB Screener (Top-20)',cag_straddle:'CAG Long Straddle',iron_fly:'Iron Fly'};
       const _undLabel = u => u==='ALL_FNO'?'All FnO Stocks':u==='WATCHLIST'?'Watchlist (top-5)':u;
       const label = (_stratLabel[dep.strategy_name]||dep.strategy_name)+' · '+_undLabel(dep.underlying);
+      // 2026-09-16 CRITICAL CHANGE, direct user spec: stopping a strategy
+      // no longer squares off its position -- it only stops the engine.
+      // Deliberately closing it is now the separate squareOffStrategy()
+      // action below (its own confirm + its own button).
       const ok = want
         ? confirm(`Start ${label} on ${dep.binding_id}?\n\nThis broker will begin trading this strategy.`)
-        : confirm(`Stop ${label} on ${dep.binding_id}?\n\nThis stops the strategy AND squares off its open position on this broker.`);
+        : confirm(`Stop ${label} on ${dep.binding_id}?\n\nThis stops the strategy engine only -- any open position stays exactly as-is at the broker and resumes full management next time this strategy starts. To close the position instead, use Square Off.`);
       if (!ok) return;
       this.botOk = null; this.botMsg = 'Working…';
       dep._runLoading = true;
@@ -2254,11 +2258,37 @@ document.addEventListener('alpine:init', () => {
         let d = {}; try { d = await r.json(); } catch {}
         this.botOk = r.ok;
         this.botMsg = d.error || d.detail
-                    || (r.ok ? (want ? 'Strategy started.' : `Strategy stopped${d.squared_off?` — squared off ${d.squared_off} leg(s)`:''}.`)
+                    || (r.ok ? (want ? 'Strategy started.' : 'Strategy stopped.')
                              : `Failed (HTTP ${r.status}) for ${did}`);
         if (r.ok) { dep.is_running = want ? 1 : 0; await this._loadAllDeployments(); }
       } catch { this.botOk = false; this.botMsg = 'Request failed.'; }
       finally   { dep._runLoading = false; }
+    },
+
+    // 2026-09-16, direct user spec: PER-STRATEGY square-off -- "for sqoff
+    // the position for that strategy we need to have another toggle which
+    // should be strategy dependent." Closes ONLY this one deployment's own
+    // real open position (and stops it) -- every OTHER strategy on the same
+    // broker, and the broker's own terminal connection, are left untouched.
+    // Distinct from the binding-wide "⊗ Square Off" button (every strategy
+    // on that broker) and the client-wide STOP & SQUARE-OFF (everything).
+    async squareOffStrategy(dep) {
+      const did = dep.deploy_id || `${this.authClientId}_${dep.binding_id}_${dep.strategy_name}_${dep.underlying}`;
+      const _stratLabel = {sell_straddle:'Sell Straddle',sell_straddle_calc_vwap:'Sell Straddle (Calc VWAP)',oi_orb_screener:'OI-ORB Screener',oi_orb_screener_top20:'OI-ORB Screener (Top-20)',cag_straddle:'CAG Long Straddle',iron_fly:'Iron Fly'};
+      const label = _stratLabel[dep.strategy_name] || dep.strategy_name;
+      if (!confirm(`Square off ${label} on ${dep.binding_id}?\n\nThis closes ONLY this strategy's own open position (real buy-to-close at the broker) and stops it. Every other strategy on this broker is unaffected.`)) return;
+      this.botOk = null; this.botMsg = 'Working…';
+      dep._squareOffLoading = true;
+      try {
+        const r = await this._fetch(`/api/client/deployment/${encodeURIComponent(did)}/squareoff`,
+                                    { method: 'POST' });
+        if (!r) return;
+        let d = {}; try { d = await r.json(); } catch {}
+        this.botOk = r.ok;
+        this.botMsg = d.error || d.message || (r.ok ? 'Squared off.' : `Failed (HTTP ${r.status}) for ${did}`);
+        if (r.ok) { dep.is_running = 0; await this._loadAllDeployments(); }
+      } catch { this.botOk = false; this.botMsg = 'Request failed.'; }
+      finally   { dep._squareOffLoading = false; }
     },
 
     // Global STOP & SQUARE-OFF — flatten the whole client.
@@ -6967,25 +6997,40 @@ function amoTest() {
 
                 <!-- ── PER-STRATEGY RUN TOGGLES ──────────────────────────────────
                      One Start/Stop toggle per strategy DEPLOYED on this broker. ON = that
-                     strategy trades on this broker (needs Terminal ON); OFF = stop + square off
-                     that strategy on this broker. No deployment → no toggle. Replaces the old
-                     single Trade toggle. -->
+                     strategy trades on this broker (needs Terminal ON); OFF = stop ONLY --
+                     any open position stays exactly as-is at the broker (2026-09-16, direct
+                     user spec: stopping never squares off any more). No deployment → no
+                     toggle. Replaces the old single Trade toggle.
+
+                     2026-09-16, direct user spec: a separate, strategy-scoped Square Off
+                     button sits next to each toggle -- "for sqoff the position for that
+                     strategy we need to have another toggle which should be strategy
+                     dependent." Distinct from the broker-wide ⊗ Square Off button above
+                     (every strategy on this broker) and the client-wide STOP & SQUARE-OFF
+                     (everything) -- this one closes ONLY this single deployment's position. -->
                 <div class="flex flex-col gap-1.5 min-w-0">
                   <template x-for="dep in (clientDeployments||[]).filter(d=>d.binding_id===b.binding_id)"
                             :key="dep.deploy_id || (b.binding_id+'_'+dep.strategy_name+'_'+dep.underlying)">
-                    <button type="button" @click.stop="toggleStrategyRun(dep, b)"
-                            class="flex items-center gap-2 px-3 py-1.5 rounded-lg border font-mono text-xs font-bold transition-all cursor-pointer"
-                            :title="depRunning(dep) ? 'Stop + square off this strategy on this broker' : 'Start this strategy on this broker'"
-                            :style="depRunning(dep)
-                                ? 'background:rgba(var(--t-green-rgb),0.1);color:var(--t-green);border-color:rgba(var(--t-green-rgb),0.4)'
-                                : 'background:transparent;color:var(--t-text);border-color:var(--t-border)'">
-                      <span class="w-7 h-3.5 rounded-full relative transition-all shrink-0"
-                            :style="depRunning(dep)?'background:var(--t-green)':'background:var(--t-dim)'">
-                        <span class="absolute top-0.5 w-2.5 h-2.5 bg-white rounded-full shadow transition-all"
-                              :style="depRunning(dep)?'left:16px':'left:2px'"></span>
-                      </span>
-                      <span x-text="({sell_straddle:'Sell Straddle',sell_straddle_calc_vwap:'Sell Straddle (Calc VWAP)',d1_trap_option:'D1 Trap',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow',liquidity_sweep:'Liquidity Sweep',liquidity_trap:'Liquidity Trap'}[dep.strategy_name]||dep.strategy_name)+' · '+(dep.underlying==='ALL_FNO'?'All FnO Stocks':dep.underlying)+' — '+(depRunning(dep)?'RUNNING':'stopped')"></span>
-                    </button>
+                    <div class="flex items-center gap-1.5">
+                      <button type="button" @click.stop="toggleStrategyRun(dep, b)"
+                              class="flex items-center gap-2 px-3 py-1.5 rounded-lg border font-mono text-xs font-bold transition-all cursor-pointer flex-1 min-w-0"
+                              :title="depRunning(dep) ? 'Stop this strategy only (position stays open, resumes on next start)' : 'Start this strategy on this broker'"
+                              :style="depRunning(dep)
+                                  ? 'background:rgba(var(--t-green-rgb),0.1);color:var(--t-green);border-color:rgba(var(--t-green-rgb),0.4)'
+                                  : 'background:transparent;color:var(--t-text);border-color:var(--t-border)'">
+                        <span class="w-7 h-3.5 rounded-full relative transition-all shrink-0"
+                              :style="depRunning(dep)?'background:var(--t-green)':'background:var(--t-dim)'">
+                          <span class="absolute top-0.5 w-2.5 h-2.5 bg-white rounded-full shadow transition-all"
+                                :style="depRunning(dep)?'left:16px':'left:2px'"></span>
+                        </span>
+                        <span x-text="({sell_straddle:'Sell Straddle',sell_straddle_calc_vwap:'Sell Straddle (Calc VWAP)',d1_trap_option:'D1 Trap',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow',liquidity_sweep:'Liquidity Sweep',liquidity_trap:'Liquidity Trap',oi_orb_screener:'OI-ORB Screener',oi_orb_screener_top20:'OI-ORB Screener (Top-20)',cag_straddle:'CAG Long Straddle',iron_fly:'Iron Fly'}[dep.strategy_name]||dep.strategy_name)+' · '+(dep.underlying==='ALL_FNO'?'All FnO Stocks':dep.underlying)+' — '+(depRunning(dep)?'RUNNING':'stopped')"></span>
+                      </button>
+                      <button type="button" @click.stop="squareOffStrategy(dep)"
+                              :disabled="dep._squareOffLoading"
+                              class="shrink-0 px-2 py-1.5 rounded-lg border font-mono text-xs font-bold transition-all cursor-pointer"
+                              title="Square off ONLY this strategy's own open position (real close at the broker) — every other strategy on this broker is unaffected"
+                              style="background:transparent;color:var(--t-red);border-color:rgba(239,68,68,0.4)">⊗</button>
+                    </div>
                   </template>
                   <span x-show="!(clientDeployments||[]).some(d=>d.binding_id===b.binding_id)"
                         class="text-xs font-mono" style="color:var(--t-muted)">No strategies deployed — use Deploy.</span>

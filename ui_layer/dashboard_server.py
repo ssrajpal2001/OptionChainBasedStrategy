@@ -2383,20 +2383,65 @@ class DashboardServer:
                         apply_deployment_to_runtime_config(dj)
                 except Exception as exc:
                     logger.warning("deployment_run apply failed for %s: %s", deploy_id, exc)
-            # ORDER MATTERS: square off FIRST (while book still alive), THEN set is_running=False.
-            # Flipping is_running first lets StraddleBookManager's 5s reconcile tear the book down
-            # before square_off_binding finds it → exchange legs left open, nothing in history.
-            squared = 0
-            if not running and strat in ("sell_straddle", "sell_straddle_calc_vwap") and _srv._straddle_bridge is not None:
-                try:
-                    squared = await _srv._straddle_bridge.square_off_binding(
-                        cid, bid, _srv._sell_straddles, underlying=und)
-                except Exception as exc:
-                    logger.error("deployment_run square-off failed for %s: %s", deploy_id, exc)
+            # 2026-09-16 CRITICAL CHANGE, direct user spec (applies to every
+            # strategy): stopping a strategy via this Run toggle must ONLY
+            # stop it -- it must NEVER square off a real position any more.
+            # This used to call square_off_binding() here (SellStraddle
+            # only) on every stop. Every strategy already restores an open
+            # position (position_store/DB-backed) with full exit logic
+            # resumed the next time its book is spawned again (see
+            # strategies/core/book_manager.py's reconcile(), which itself no
+            # longer closes on a strategy stopping either) -- nothing is
+            # orphaned by leaving it open. Deliberately closing ONE
+            # strategy's position is now a separate, explicit action -- see
+            # POST /api/client/deployment/{deploy_id}/squareoff below.
             await _srv._client_db.set_deployment_running(deploy_id, cid, running)
-            logger.info("Dashboard: strategy RUN %s → %s (squared=%d)",
-                        deploy_id, "ON" if running else "OFF", squared)
-            return {"ok": True, "deploy_id": deploy_id, "running": running, "squared_off": squared}
+            logger.info("Dashboard: strategy RUN %s → %s", deploy_id, "ON" if running else "OFF")
+            return {"ok": True, "deploy_id": deploy_id, "running": running}
+
+        # ── CLIENT — PER-STRATEGY square-off (new, 2026-09-16) ──────────────
+        @app.post("/api/client/deployment/{deploy_id}/squareoff", tags=["Client"])
+        async def api_client_deployment_squareoff(
+            deploy_id: str, user: dict = Depends(_require_client),
+        ):
+            """PER-STRATEGY square-off: flatten ONLY this one deployment's own
+            real open position and stop ONLY this strategy. Distinct from the
+            binding-wide "/api/client/broker/{id}/squareoff" (every strategy on
+            that broker) and the client-wide "/api/client/stop_squareoff"
+            (every strategy on every broker) -- direct user spec: "for sqoff
+            the position for that strategy we need to have another toggle
+            which should be strategy dependent."
+
+            Routes through each strategy's own real liquidate() (the SAME
+            method the generic kill-switch uses, see strategies/core/
+            book_manager.py::_liquidate_book) so the close is a genuine
+            broker buy-to-close through that strategy's own exit pipeline,
+            written to trade history -- never a raw discarded position."""
+            cid = user.get("client_id", "")
+            deps = await asyncio.to_thread(_srv._client_db.get_deployments_sync, cid)
+            dep = next((d for d in deps if d.get("deploy_id") == deploy_id), None)
+            if dep is None:
+                raise HTTPException(404, f"Deployment '{deploy_id}' not found.")
+            bid = dep.get("binding_id", "")
+            strat = dep.get("strategy_name", "")
+            und = str(dep.get("underlying", "") or dep.get("assigned_instrument", "") or "")
+
+            book = _srv._find_book_for_deployment(cid, bid, strat, und)
+            squared = False
+            if book is not None and hasattr(book, "liquidate"):
+                try:
+                    await book.liquidate(f"manual_squareoff_{deploy_id}"[:64])
+                    squared = True
+                except Exception as exc:
+                    logger.error("Dashboard: per-strategy square-off failed for %s: %s", deploy_id, exc)
+                    return {"ok": False, "deploy_id": deploy_id,
+                            "error": f"Square-off failed: {exc}"}
+            await _srv._client_db.set_deployment_running(deploy_id, cid, False)
+            logger.info("Dashboard: per-strategy square-off %s (%s/%s/%s) — squared=%s.",
+                        deploy_id, cid, bid, strat, squared)
+            return {"ok": True, "deploy_id": deploy_id, "squared": squared,
+                    "message": (f"Squared off '{strat}' on '{bid}'." if squared
+                                else f"'{strat}' on '{bid}' had no open position -- stopped only.")}
 
         # ── CLIENT — set expiry mode for a deployment ────────────────────────
         @app.post("/api/client/deployment/{deploy_id}/expiry_mode", tags=["Client"])
@@ -6197,6 +6242,39 @@ pm2 save
                     and getattr(b, "_binding_id", "") == binding_id
                     and getattr(b, "_underlying", "") == u):
                 return b
+        return None
+
+    def _find_book_for_deployment(self, client_id: str, binding_id: str,
+                                   strategy_name: str, underlying: str):
+        """2026-09-16, direct user spec: locate the ONE live book for a
+        specific deployment (client, binding, strategy_name, underlying),
+        across whichever manager actually owns that strategy_name. Backs
+        the new per-strategy square-off endpoint -- every strategy's own
+        book already carries self._client_id/_binding_id (set by the shared
+        AbstractStrategyBook base class), so this generalizes the same
+        lookup pattern _find_ss_book/_find_iron_fly_book already use per
+        strategy, in one place, for any of the 5 currently-live strategies.
+        Returns None (never raises) if nothing matches -- callers must
+        treat that as "no book/no open position to close", not an error."""
+        sname = (strategy_name or "").lower()
+        if sname in ("sell_straddle", "sell_straddle_calc_vwap"):
+            return self._find_ss_book(client_id, binding_id, underlying, sname)
+        if sname == "iron_fly":
+            return self._find_iron_fly_book(client_id, binding_id, underlying)
+        if sname == "cag_straddle":
+            for b in (getattr(self._cag_straddle_manager, "books", None) or []):
+                if (getattr(b, "_client_id", "") == client_id
+                        and getattr(b, "_binding_id", "") == binding_id):
+                    return b
+            return None
+        if sname in ("oi_orb_screener", "oi_orb_screener_top20"):
+            mgr = (self._oi_orb_top20_manager if sname == "oi_orb_screener_top20"
+                   else self._oi_orb_manager)
+            for b in (getattr(mgr, "books", None) or []):
+                if (getattr(b, "_client_id", "") == client_id
+                        and getattr(b, "_binding_id", "") == binding_id):
+                    return b
+            return None
         return None
 
     def _find_trap_books_for_binding(self, client_id: str, binding_id: str):
