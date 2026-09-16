@@ -8498,6 +8498,13 @@ function amoTest() {
                                     <span style="color:var(--t-muted)">Entry / LTP · Qty</span>
                                     <span x-text="fmt(p.entry_price)+' / '+(p.live_ltp!=null?fmt(p.live_ltp):'—')+' · '+p.qty"></span>
                                   </div>
+                                  <!-- 2026-09-16, direct user follow-up: prev-day futures OI shown
+                                       plainly here, not just behind the OI ▾ chart toggle above. -->
+                                  <div class="flex justify-between" x-show="p.futures_oi">
+                                    <span style="color:var(--t-muted)">Futures OI (prev close)</span>
+                                    <span :style="(p.futures_oi&&p.futures_oi.oi_change_pct>=0)?'color:var(--t-green)':'color:var(--t-red)'"
+                                          x-text="p.futures_oi ? (Math.round(p.futures_oi.current_oi).toLocaleString()+' ('+Math.round(p.futures_oi.previous_oi).toLocaleString()+') '+(p.futures_oi.oi_change_pct>=0?'+':'')+p.futures_oi.oi_change_pct.toFixed(2)+'%') : ''"></span>
+                                  </div>
                                   <!-- 2026-09-06 spec, updated 2026-09-09: entry AND exit both trigger
                                        off the underlying's SPOT ticks -- the option is priced by these
                                        signals, never itself the SL/target reference. Spot LTP + its
@@ -8547,7 +8554,7 @@ function amoTest() {
                           <template x-if="(_bk.shortlist||[]).length===0">
                             <div class="text-center py-1" style="color:var(--t-dim)">No shortlist yet — scanning</div>
                           </template>
-                          <template x-for="row in (_bk.shortlist||[]).slice(0,8).map(s => ({sym: s, pc: (_bk.shortlist_pchange||{})[s], vw: _liveVwapDist(s, (_bk.shortlist_vwap||{})[s]), rt: (_bk.retest_trackers||{})[s], oiKey: (_bk.binding_id+'_'+s)}))" :key="row.sym">
+                          <template x-for="row in (_bk.shortlist||[]).slice(0,8).map(s => ({sym: s, pc: (_bk.shortlist_pchange||{})[s], vw: _liveVwapDist(s, (_bk.shortlist_vwap||{})[s]), rt: (_bk.retest_trackers||{})[s], oiKey: (_bk.binding_id+'_'+s), foi: ((_bk.shortlist_vwap||{})[s]||{}).futures_oi}))" :key="row.sym">
                             <div class="flex items-center justify-between mb-1">
                               <span class="px-1.5 py-0.5 rounded font-bold"
                                     :style="row.pc>0?'background:rgba(16,185,129,0.15);color:var(--t-green)':'background:rgba(239,68,68,0.15);color:var(--t-red)'"
@@ -8571,6 +8578,13 @@ function amoTest() {
                               <button class="px-1 py-0.5 rounded" style="font-size:10px;border:1px solid var(--t-dim);cursor:pointer"
                                       :style="oiHistOpen[row.oiKey]?'color:var(--t-cyan);border-color:var(--t-cyan)':'color:var(--t-dim)'"
                                       @click="toggleOiHistChart(row.oiKey, _bk.client_id, _bk.binding_id, row.sym)">OI ▾</button>
+                            </div>
+                            <!-- 2026-09-16, direct user follow-up: prev-day futures OI shown
+                                 plainly, not just behind the OI ▾ chart toggle. -->
+                            <div class="flex justify-between mb-1" x-show="row.foi" style="font-size:10px">
+                              <span style="color:var(--t-muted)">Futures OI (prev close)</span>
+                              <span :style="(row.foi&&row.foi.oi_change_pct>=0)?'color:var(--t-green)':'color:var(--t-red)'"
+                                    x-text="row.foi ? (Math.round(row.foi.current_oi).toLocaleString()+' ('+Math.round(row.foi.previous_oi).toLocaleString()+') '+(row.foi.oi_change_pct>=0?'+':'')+row.foi.oi_change_pct.toFixed(2)+'%') : ''"></span>
                             </div>
                             <div x-show="oiHistOpen[row.oiKey]" class="mb-2" :id="'oihistchart_'+row.oiKey"></div>
                           </template>

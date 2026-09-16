@@ -604,6 +604,16 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._option_sl_bar_cur: Dict[str, dict] = {}   # symbol -> {"h","l","c","ts"} for the forming OPTION-premium bar
         self._live_sl: Dict[str, float] = {}         # symbol -> current live SL level (armed bar's low, option-premium terms)
         self._live_target: Dict[str, float] = {}     # symbol -> current live target level (option-premium terms)
+        # 2026-09-16, direct user follow-up: "I also want prev day future data
+        # to be shown in OI scanner stocks section in position part" -- the
+        # futures-OI histogram (OI ▾ toggle) only shows this on click; this
+        # cache makes the latest reading directly, plainly visible on every
+        # open position AND shortlist row without needing to open the chart.
+        # symbol -> (current_oi, previous_oi, oi_change_pct); populated by
+        # both _do_futures_oi_history_poll (every 5min, all shortlisted
+        # symbols) and _compute_oi_regime_side (opportunistically, whenever
+        # the gate itself runs) -- whichever fires first for a given symbol.
+        self._futures_oi_latest: Dict[str, tuple] = {}
         # 2026-08-28 real incident fix: chronological history of every ADVERSE
         # bar's own low since entry, per symbol -- feeds
         # screener.pool_sl_from_adverse_lows() so the SL only arms once two
@@ -739,6 +749,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         # 2026-09-16, direct user spec: real-time futures-OI histogram --
         # see _futures_oi_history_loop's own docstring.
         self._futures_oi_hist_last_poll_ts = 0.0
+        self._futures_oi_latest = {}
         # 2026-09-10, direct user spec: tick-by-tick VWAP accumulation --
         # see _spot_tick_loop's own VWAP-update block.
         self._vwap_tick_volume_cum_last = {}
@@ -747,6 +758,21 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
 
     def start(self) -> None:
         super().start()
+        # 2026-09-16, real live incident: 6+ minutes of active entry-loop
+        # cycling produced zero OI-REGIME log lines (success or failure) even
+        # though screener.CONFIG["OI_REGIME_GATE_ENABLED"] verified True via a
+        # direct fresh import on the same server -- needed a permanent,
+        # unambiguous boot-time record of what THIS book's own resolved
+        # _screener_cfg actually contains, since none existed before.
+        self._clog.info(
+            "OiOrb[%s/%s]: OI_REGIME_GATE_ENABLED=%s OI_REGIME_CHECK_TIME=%s "
+            "OI_REGIME_INCREASE_MIN_PCT=%s OI_REGIME_DECREASE_MAX_PCT=%s",
+            self._client_id, self._binding_id,
+            self._screener_cfg.get("OI_REGIME_GATE_ENABLED"),
+            self._screener_cfg.get("OI_REGIME_CHECK_TIME", _OI_REGIME_CHECK_TIME_DEFAULT),
+            self._screener_cfg.get("OI_REGIME_INCREASE_MIN_PCT", _OI_REGIME_INCREASE_MIN_PCT_DEFAULT),
+            self._screener_cfg.get("OI_REGIME_DECREASE_MAX_PCT", _OI_REGIME_DECREASE_MAX_PCT_DEFAULT),
+        )
         self._subscribe(Topic.OI_ORB_ORDER_FILL)
         self._subscribe(Topic.OPTION_TICK)
         self._subscribe(Topic.EQUITY_TICK)
@@ -3798,25 +3824,50 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         positive OI) -- callers decide what "no data" means for their own
         purpose (blocks a trade for the gate; simply skips a poll cycle for
         the history loop)."""
+        # 2026-09-16, real live incident: every None-return branch below used
+        # to be completely silent -- no futures key/no token/no quote/non-
+        # positive OI all looked identical to a caller, and a caller like
+        # _compute_oi_regime_side that itself just returns None on a None
+        # snapshot meant the WHOLE gate could go quiet with zero log
+        # evidence of why (confirmed live: 6+ minutes of active entry-loop
+        # cycling, zero OI-REGIME lines, no exception either -- this silent-
+        # None path is the only remaining explanation). Each branch now logs
+        # exactly which precondition failed, WARNING-level, once per call.
         from data_layer.instrument_registry import REGISTRY
         await asyncio.to_thread(REGISTRY.load_futures_only_sync, sym, datetime.now(IST).date())
         fut_key = REGISTRY.get_futures_upstox(sym)
         if not fut_key:
+            self._clog.warning(
+                "OiOrb[%s/%s]: %s futures-OI snapshot -- no futures key resolved.",
+                self._client_id, self._binding_id, sym)
             return None
         from data_layer.client_db import ClientDB
         creds = await asyncio.to_thread(ClientDB().get_feeder_creds_sync, "upstox")
         token = (creds or {}).get("access_token", "")
         if not token:
+            self._clog.warning(
+                "OiOrb[%s/%s]: %s futures-OI snapshot -- no upstox access_token stored "
+                "in ClientDB (feeder_creds) for this client.",
+                self._client_id, self._binding_id, sym)
             return None
         from data_layer.historical_candles import fetch_upstox_v3_quote
         quote = await fetch_upstox_v3_quote(fut_key, token)
         if not quote:
+            self._clog.warning(
+                "OiOrb[%s/%s]: %s futures-OI snapshot -- V3 quote fetch returned nothing "
+                "for key=%s (stale/invalid token, or Upstox API error).",
+                self._client_id, self._binding_id, sym, fut_key)
             return None
         current_oi = float(quote.get("oi") or 0.0)
         previous_oi = float(quote.get("previous_oi") or 0.0)
         if current_oi <= 0 or previous_oi <= 0:
+            self._clog.warning(
+                "OiOrb[%s/%s]: %s futures-OI snapshot -- non-positive OI in quote "
+                "(current_oi=%s previous_oi=%s) for key=%s.",
+                self._client_id, self._binding_id, sym, current_oi, previous_oi, fut_key)
             return None
         oi_change_pct = (current_oi - previous_oi) / previous_oi * 100.0
+        self._futures_oi_latest[sym] = (current_oi, previous_oi, oi_change_pct)
         return (current_oi, previous_oi, oi_change_pct)
 
     async def _compute_oi_regime_side(self, sym: str) -> Optional[str]:
@@ -4600,6 +4651,13 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             spot_ltp = self._live_spot_ltp.get(sym)
             vwap_gap_pct = (round((spot_ltp - vwap) / vwap * 100.0, 3)
                              if (vwap and spot_ltp is not None) else None)
+            # 2026-09-16, direct user follow-up: "I also want prev day future
+            # data to be shown in OI scanner stocks section in position part"
+            # -- plain, directly visible (not hidden behind the OI ▾ chart
+            # toggle), same cache _fetch_futures_oi_snapshot populates.
+            _foi = self._futures_oi_latest.get(sym)
+            futures_oi = ({"current_oi": _foi[0], "previous_oi": _foi[1], "oi_change_pct": round(_foi[2], 2)}
+                          if _foi is not None else None)
             positions[sym] = {
                 "option_type": p["contract"].option_type,
                 "strike": p["contract"].strike,
@@ -4635,6 +4693,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 "trap_zone_touched": self._trap_exit_touched.get(sym, False),
                 "sl_reentry_used": (sym, side) in self._sl_reentry_used,
                 "sl_mechanic": p.get("sl_mechanic"),
+                "futures_oi": futures_oi,
             }
         # 2026-09-07, direct user spec: "when stocks are scanned the ui should
         # show how far is ltp from vwap as we have already subscribed to all
@@ -4659,9 +4718,12 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             vwap = self._vwap.current(sym)
             dist = round(ltp - vwap, 2) if (ltp is not None and vwap) else None
             dist_pct = round((ltp - vwap) / vwap * 100.0, 2) if (ltp is not None and vwap) else None
+            _foi = self._futures_oi_latest.get(sym)
             shortlist_vwap[sym] = {
                 "ltp": ltp, "vwap": round(vwap, 2) if vwap is not None else None,
                 "vwap_dist": dist, "vwap_dist_pct": dist_pct,
+                "futures_oi": ({"current_oi": _foi[0], "previous_oi": _foi[1],
+                                "oi_change_pct": round(_foi[2], 2)} if _foi is not None else None),
             }
         # 2026-09-09, direct user spec: surface each shortlisted (not-yet-
         # entered) symbol's RollingVwapRetestTracker arm state -- top20 mode
