@@ -43,15 +43,50 @@ def _fyers_ts_to_iso(ts: int) -> str:
     return datetime.fromtimestamp(ts, tz=IST).isoformat()
 
 
-def _http_get_json(url: str, access_token: str) -> dict:
-    """Blocking curl_cffi GET (Chrome131 TLS) returning parsed JSON. {} on error."""
+def _http_get_json(url: str, access_token: str, max_retries: int = 3) -> dict:
+    """Blocking curl_cffi GET (Chrome131 TLS) returning parsed JSON. {} on error.
+
+    2026-09-16 real incident fix: this had NO retry/backoff at all -- any
+    failure (a transient network error, or a 429 rate-limit response from
+    Upstox) silently returned {} indistinguishable from "genuinely no
+    data for this instrument/range". Confirmed live: a multi-day backtest
+    script that added ~10 extra real range-fetch calls per fired signal
+    (a new pre-entry gate check) started returning "no real data
+    available" for EVERY symbol partway through its run -- every prior
+    real fetch for those same symbols had worked fine seconds earlier,
+    the classic signature of hitting a rate limit mid-run with nothing
+    to recover from it. Retries on a 429 (rate limit) or 5xx (transient
+    server error) with a short exponential backoff (0.5s, 1s, 2s); does
+    NOT retry on a genuine 4xx-other-than-429 (bad request/instrument
+    key -- retrying that would just waste time on a real error) or a
+    successful-but-empty response (that IS genuinely "no data")."""
     from curl_cffi import requests as _cc
     headers = {"Accept": "application/json", "Authorization": f"Bearer {access_token}"}
-    try:
-        return _cc.get(url, headers=headers, impersonate="chrome131", timeout=8).json()
-    except Exception as exc:
-        logger.debug("http_get_json %s: %s", url, exc)
-        return {}
+    delay = 0.5
+    for attempt in range(max_retries + 1):
+        try:
+            resp = _cc.get(url, headers=headers, impersonate="chrome131", timeout=8)
+            if resp.status_code == 429 or resp.status_code >= 500:
+                if attempt < max_retries:
+                    logger.debug("http_get_json %s: status=%d, retrying in %.1fs (attempt %d/%d)",
+                                 url, resp.status_code, delay, attempt + 1, max_retries)
+                    time.sleep(delay)
+                    delay *= 2
+                    continue
+                logger.warning("http_get_json %s: status=%d after %d retries, giving up",
+                                url, resp.status_code, max_retries)
+                return {}
+            return resp.json()
+        except Exception as exc:
+            if attempt < max_retries:
+                logger.debug("http_get_json %s: %s, retrying in %.1fs (attempt %d/%d)",
+                             url, exc, delay, attempt + 1, max_retries)
+                time.sleep(delay)
+                delay *= 2
+                continue
+            logger.debug("http_get_json %s: %s (after %d retries)", url, exc, max_retries)
+            return {}
+    return {}
 
 
 _ORIGINAL_HTTP_GET_JSON = _http_get_json  # used to skip cache when tests monkeypatch
