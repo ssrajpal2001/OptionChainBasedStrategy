@@ -210,14 +210,26 @@ def _giveback_exit(cache, giveback_pct):
 
 def _sr_exit(cache, tf_min, diag=None):
     """Real SupportResistanceCalculator, fed real N-min SPOT bars from
-    market open (so phases are genuinely established before entry, same
-    discipline as every other real intraday-warmup in this codebase).
-    CALL: exit on a spot close below S1 (once established).
-    PUT: exit on a spot close above R1 (once established).
+    market open. CALL: exit on a spot close below the CURRENT active
+    floor. PUT: exit on a spot close above the CURRENT active ceiling.
+
+    2026-09-16, direct user decision after the first version fired on
+    ZERO of 19 real trades across all 3 timeframes: trail to whichever
+    level is MOST RECENTLY relevant, not pinned to the original
+    established S1/R1 forever. The calculator already promotes a
+    confirmed S2/R2 into S1/R1 on full confirmation (S1 =
+    S2.copy()) -- but a NEWER S2/R2 candidate that's still forming
+    (is_established=False, real low/high value already present, not
+    None) represents a tighter, more current pullback level than the
+    older established S1/R1 it hasn't replaced yet. Uses S2's/R2's own
+    raw low/high the moment one exists, falling back to established
+    S1/R1 otherwise -- this is the "trail to the current active level"
+    interpretation, not a fixed pin to S1/R1 specifically.
 
     `diag`, if passed a dict, is filled with real diagnostic info
-    (final phase reached, whether S1/R1 ever got established, and when)
-    so a zero-impact result can be told apart from a real bug."""
+    (final phase, when S1/R1 established, and the live gap between the
+    active floor/ceiling and price at EOD) so a zero-impact result can
+    be told apart from a real bug."""
     symbol, side = cache["symbol"], cache["side"]
     entry_ts, eod_ts = cache["entry_ts"], cache["eod_ts"]
     tf_bars = to_n_min_bars_dateaware(cache["spot_bars"], tf_min)
@@ -225,6 +237,7 @@ def _sr_exit(cache, tf_min, diag=None):
     inst_key = f"{symbol}_SR_{tf_min}"
     s1_established_ts = r1_established_ts = None
     final_phase = "UNKNOWN"
+    last_active_level = last_close = None
     for b in tf_bars:
         candle = {"timestamp": b.ts, "high": b.high, "low": b.low, "duration": tf_min}
         calc.process_straddle_candle(inst_key, candle, silent=True)
@@ -233,27 +246,47 @@ def _sr_exit(cache, tf_min, diag=None):
         levels = state.get("sr_levels") or {}
         s1 = levels.get("S1") or {}
         r1 = levels.get("R1") or {}
+        s2 = levels.get("S2")
+        r2 = levels.get("R2")
         if s1.get("is_established") and s1_established_ts is None:
             s1_established_ts = b.ts
         if r1.get("is_established") and r1_established_ts is None:
             r1_established_ts = b.ts
+
+        active_level = None
+        if side == "CALL":
+            if s2 is not None and s2.get("low") is not None:
+                active_level = s2["low"]
+            elif s1.get("is_established"):
+                active_level = s1.get("low")
+        else:
+            if r2 is not None and r2.get("high") is not None:
+                active_level = r2["high"]
+            elif r1.get("is_established"):
+                active_level = r1.get("high")
+        last_active_level, last_close = active_level, b.close
+
         if b.ts < entry_ts:
             continue
-        if side == "CALL" and s1.get("is_established") and b.close < s1.get("low", float("-inf")):
-            if diag is not None:
-                diag.update(final_phase=final_phase, s1_established_ts=s1_established_ts,
-                             r1_established_ts=r1_established_ts, exit_level=s1.get("low"))
-            return b.ts
-        if side == "PUT" and r1.get("is_established") and b.close > r1.get("high", float("inf")):
-            if diag is not None:
-                diag.update(final_phase=final_phase, s1_established_ts=s1_established_ts,
-                             r1_established_ts=r1_established_ts, exit_level=r1.get("high"))
-            return b.ts
+        if active_level is not None:
+            if side == "CALL" and b.close < active_level:
+                if diag is not None:
+                    diag.update(final_phase=final_phase, s1_established_ts=s1_established_ts,
+                                 r1_established_ts=r1_established_ts, exit_level=active_level)
+                return b.ts
+            if side == "PUT" and b.close > active_level:
+                if diag is not None:
+                    diag.update(final_phase=final_phase, s1_established_ts=s1_established_ts,
+                                 r1_established_ts=r1_established_ts, exit_level=active_level)
+                return b.ts
         if b.ts > eod_ts:
             break
     if diag is not None:
+        gap_pct = (round((last_close - last_active_level) / last_active_level * 100.0, 3)
+                   if last_active_level and last_close else None)
         diag.update(final_phase=final_phase, s1_established_ts=s1_established_ts,
-                     r1_established_ts=r1_established_ts, exit_level=None)
+                     r1_established_ts=r1_established_ts, exit_level=None,
+                     last_active_level=last_active_level, last_close=last_close, live_gap_pct=gap_pct)
     return None
 
 
@@ -317,11 +350,12 @@ async def main():
             if pnl is not None:
                 total += pnl
             if show_diag and diag:
-                fired = f"FIRED@{sr_exit.strftime('%H:%M')}" if sr_exit else "never fired"
+                fired = f"FIRED@{sr_exit.strftime('%H:%M')} level={diag.get('exit_level')}" if sr_exit else "never fired"
                 s1e = diag['s1_established_ts'].strftime('%H:%M') if diag.get('s1_established_ts') else "never"
                 r1e = diag['r1_established_ts'].strftime('%H:%M') if diag.get('r1_established_ts') else "never"
+                gap = f"live_gap={diag['live_gap_pct']:+.2f}%" if diag.get('live_gap_pct') is not None else "no active level ever"
                 print(f"    {c['symbol']:14s} side={c['side']:4s} final_phase={diag['final_phase']:22s} "
-                      f"S1_established={s1e:6s} R1_established={r1e:6s} {fired}")
+                      f"S1_est={s1e:6s} R1_est={r1e:6s} {fired}  ({gap})")
         print(f"  tf={tf}min  ->  total={total:+.2f} pts  (delta vs baseline: {total-baseline_total:+.2f})")
 
     print("\n" + "=" * 130)
