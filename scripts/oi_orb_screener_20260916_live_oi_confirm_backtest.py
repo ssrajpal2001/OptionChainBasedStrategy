@@ -77,6 +77,16 @@ RSI_PERIOD, STOCH_PERIOD, SMOOTH = 9, 9, 3
 
 PRICE_TRIGGER_PCT = 2.0
 OI_CONFIRM_THRESHOLD_PCT = 3.0   # first-pass default, NOT yet tuned -- see module docstring
+# 2026-09-16 user follow-up: "what do u suggest shall v check for" all 4
+# price/OI quadrants, then backtest. Rising OI (either side) is already
+# the STRONG/live confirmation above. This is the symmetric magnitude for
+# the WEAK quadrant (OI falling -- short covering for CALL, long unwinding
+# for PUT) -- evaluated as a SEPARATE hypothetical bucket below, never
+# merged into the strong-quadrant totals, so the already-reasoned default
+# (rising OI = real fresh positioning = the stronger signal) stays the
+# live candidate; this only tells us empirically whether the weak
+# quadrant would have added value or noise on this one real day.
+WEAK_OI_THRESHOLD_PCT = -3.0
 VWAP_WINDOW_MIN = 15.0
 
 CLIENT_ID = "ssrajpal2001"
@@ -191,6 +201,19 @@ async def _find_oi_confirm(book: OiOrbScreenerStrategy, sym: str, trigger_ts: da
         if change_pct > OI_CONFIRM_THRESHOLD_PCT:
             return ts, float(oi), change_pct, readings
     return None, None, None, readings
+
+
+def _find_oi_weak_confirm(readings: list):
+    """Given the SAME readings _find_oi_confirm already walked, find the
+    first minute OI fell past WEAK_OI_THRESHOLD_PCT (short covering for a
+    CALL candidate / long unwinding for a PUT candidate) -- the weak-
+    quadrant hypothetical confirmation. Returns (ts, oi, change_pct) or
+    (None, None, None). Only meaningful when the strong confirm above
+    never fired (a stock can't be in both quadrants for the same trigger)."""
+    for ts, oi, change_pct in readings:
+        if change_pct < WEAK_OI_THRESHOLD_PCT:
+            return ts, oi, change_pct
+    return None, None, None
 
 
 def _classify_oi_quadrant(side: str, confirmed: bool, last_change_pct: Optional[float]) -> str:
@@ -326,6 +349,8 @@ async def main():
 
     total_pnl = 0.0
     trades = 0
+    weak_total_pnl = 0.0
+    weak_trades = 0
     for sym in UNIVERSE:
         print(f"\n{'-' * 130}")
         print(f"{sym}")
@@ -368,7 +393,29 @@ async def main():
         if confirm_ts is None:
             label = _classify_oi_quadrant(side, confirmed=False, last_change_pct=last_change)
             print(f"  STEP 2 -- OI regime classification: {label}")
-            print(f"  RESULT: OI never crossed {OI_CONFIRM_THRESHOLD_PCT}% after the price trigger -- no trade")
+            print(f"  RESULT: OI never crossed {OI_CONFIRM_THRESHOLD_PCT}% after the price trigger -- no trade "
+                  f"(strong quadrant)")
+
+            weak_ts, weak_oi, weak_change = _find_oi_weak_confirm(readings)
+            if weak_ts is not None:
+                weak_kind = "short covering" if side == "CALL" else "long unwinding"
+                print(f"  STEP 2b -- WEAK-QUADRANT HYPOTHETICAL: OI fell past {WEAK_OI_THRESHOLD_PCT}% at "
+                      f"{weak_ts.strftime('%H:%M')} (OI={weak_oi:.0f} change={weak_change:+.2f}%, {weak_kind}) "
+                      f"-- checking if this WOULD have fired a trade under a relaxed weak-quadrant rule")
+                w_fire_ts, w_fire_price, w_fire_vwap = await _find_vwap_retest(sym, side, weak_ts, eq_bars)
+                if w_fire_ts is None:
+                    print(f"  STEP 3b -- VWAP retest: never fired after weak OI confirm -- no weak trade either")
+                else:
+                    print(f"  STEP 3b -- VWAP retest FIRED at {w_fire_ts.strftime('%H:%M')}: "
+                          f"price={w_fire_price:.2f} vwap={w_fire_vwap:.2f}")
+                    w_sim = await _simulate_exit(sym, side, w_fire_ts, w_fire_price, token)
+                    if w_sim.get("pnl") is not None:
+                        print(f"  STEP 4b -- weak-quadrant trade: entry@{w_fire_ts.strftime('%H:%M:%S')} "
+                              f"opt={w_sim['entry_price']} -> exit@{w_sim['exit_ts'].strftime('%H:%M:%S')} "
+                              f"opt={w_sim['exit_price']} reason={w_sim['exit_reason']}")
+                        print(f"  RESULT (WEAK, hypothetical only): {side} {sym}, PNL={w_sim['pnl']:+.2f} pts")
+                        weak_total_pnl += w_sim["pnl"]
+                        weak_trades += 1
             continue
         print(f"  STEP 2 -- CONFIRMED at {confirm_ts.strftime('%H:%M')}: OI={confirm_oi:.0f} "
               f"change={confirm_change:+.2f}% (crossed {OI_CONFIRM_THRESHOLD_PCT}%)")
@@ -394,10 +441,17 @@ async def main():
             print(f"  STEP 4 -- trade outcome: entry fired but P&L not reconstructed ({sim.get('reason')})")
 
     print("\n" + "=" * 130)
-    print(f"TOTAL under this NEW mechanic today: {trades} trade(s), {total_pnl:+.2f} pts")
-    print("CAVEAT: single real day (n=1), OI_CONFIRM_THRESHOLD_PCT=3.0% is an untuned first guess, "
+    print(f"STRONG-QUADRANT TOTAL (rising OI confirms, live-candidate mechanic): "
+          f"{trades} trade(s), {total_pnl:+.2f} pts")
+    print(f"WEAK-QUADRANT TOTAL (falling OI / short-covering-or-long-unwinding, HYPOTHETICAL ONLY, "
+          f"not a live candidate): {weak_trades} trade(s), {weak_total_pnl:+.2f} pts")
+    print(f"COMBINED (both buckets, for reference only): {trades + weak_trades} trade(s), "
+          f"{total_pnl + weak_total_pnl:+.2f} pts")
+    print("CAVEAT: single real day (n=1), both thresholds (3.0% / -3.0%) are untuned first guesses, "
           "and the VWAP replay here uses unweighted (not real-volume-weighted) typical price -- "
-          "directionally informative only, not a validated mechanic.")
+          "directionally informative only, not a validated mechanic. The weak-quadrant bucket exists "
+          "purely to empirically check whether falling OI adds value or noise -- it does NOT change "
+          "the strong-quadrant mechanic above, which stays the live candidate regardless of this result.")
     print("=" * 130)
 
 
