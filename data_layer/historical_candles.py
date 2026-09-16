@@ -145,6 +145,33 @@ async def fetch_upstox_range_1m(
     return rows
 
 
+async def fetch_upstox_range_1m_multi_account(
+    instrument_key: str, access_tokens: List[str], start: date, end: date,
+) -> List[dict]:
+    """2026-09-16 real incident: a multi-day backtest making many real
+    range-fetch calls hit Upstox's rate limit (confirmed live: status=429
+    after 3 retries, giving up) -- retry/backoff alone isn't enough for a
+    SUSTAINED limit on one account. This account is a separate,
+    independently-rate-limited real Upstox login (this codebase already
+    keeps two: "upstox" and "upstox2" in ClientDB's feeder_creds), so
+    falling back to a second account's token genuinely gets a fresh rate
+    budget, not just a longer wait on the same one.
+
+    Tries each access_token in access_tokens IN ORDER, returning the
+    first that yields a non-empty result. NOT a per-day account switch
+    (would multiply real API calls for no benefit) -- if the CURRENT
+    account's fetch for this whole (instrument_key, start, end) range
+    comes back completely empty, tries the next account's token for the
+    same full range. A genuinely empty range (holiday-only window, bad
+    instrument_key) still returns [] after exhausting every account --
+    same convention as the single-account function."""
+    for token in access_tokens:
+        rows = await fetch_upstox_range_1m(instrument_key, token, start, end)
+        if rows:
+            return rows
+    return []
+
+
 async def fetch_upstox_prev_day_last_tick_oi(
     instrument_key: str, access_token: str, max_step_back: int = 5,
 ) -> Optional[float]:

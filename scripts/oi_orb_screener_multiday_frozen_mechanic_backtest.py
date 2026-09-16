@@ -28,8 +28,25 @@ exact same real logic (fetch_upstox_range_1m, step back day-by-day
 skipping weekends, take the last real tick's own OI) for an arbitrary
 historical `ref_date`.
 
-MUST run on EC2 (real Upstox2 access token + real historical range data
-+ the archived DB file).
+2026-09-16 real incident: adding the trap-target-touched pre-entry gate
+(see below) roughly tripled the real API calls this script makes,
+confirmed live to trip Upstox's rate limit mid-run ("status=429 after 3
+retries, giving up" -- retry/backoff alone wasn't enough for a sustained
+limit). Direct user follow-up: "if primary data feeder is rate limit
+jump to secondary data feeder -- we have upstox, upstox2, fyers,
+angelone." Checked what's actually usable: Fyers only has an INTRADAY
+(today-only) fetch function in this codebase (fetch_fyers_intraday_1m,
+no past-date range fetch exists), and AngelOne has no historical fetch
+function here at all -- neither can serve this script's need for PAST
+trading days. The two real, already-configured Upstox accounts
+("upstox2" and "upstox" in ClientDB's feeder_creds) ARE independently
+rate-limited and ARE usable here -- every real fetch now goes through
+hc.fetch_upstox_range_1m_multi_account() with both tokens, falling back
+to the second account only when the first's whole-range fetch comes
+back completely empty.
+
+MUST run on EC2 (real Upstox account access tokens + real historical
+range data + the archived DB file).
 
 Usage: python scripts/oi_orb_screener_multiday_frozen_mechanic_backtest.py
 """
@@ -77,11 +94,19 @@ class _NullBus:
         pass
 
 
-def _access_token():
-    creds = ClientDB().get_feeder_creds_sync("upstox2")
-    if creds and creds.get("access_token"):
-        return creds["access_token"]
-    raise RuntimeError("No upstox2 feeder access_token found -- run this on EC2.")
+def _access_tokens():
+    """Both real Upstox accounts this system has, primary first -- see
+    the module docstring's 2026-09-16 rate-limit incident for why this
+    is a list, not a single token."""
+    db = ClientDB()
+    tokens = []
+    for account in ("upstox2", "upstox"):
+        creds = db.get_feeder_creds_sync(account)
+        if creds and creds.get("access_token"):
+            tokens.append(creds["access_token"])
+    if not tokens:
+        raise RuntimeError("No upstox/upstox2 feeder access_token found -- run this on EC2.")
+    return tokens
 
 
 def _real_day_universe():
@@ -109,7 +134,7 @@ def _to_bars(rows):
     return out
 
 
-async def _prev_day_oi_asof(fut_key, token, ref_date, max_step_back=7):
+async def _prev_day_oi_asof(fut_key, tokens, ref_date, max_step_back=7):
     """Date-parameterized rewrite of fetch_upstox_prev_day_last_tick_oi's
     exact real logic (step back real trading days, take the last real
     tick's own OI) for an arbitrary historical ref_date instead of
@@ -117,7 +142,7 @@ async def _prev_day_oi_asof(fut_key, token, ref_date, max_step_back=7):
     d = ref_date - timedelta(days=1)
     for _ in range(max_step_back):
         if d.weekday() < 5:
-            rows = await hc.fetch_upstox_range_1m(fut_key, token, d, d)
+            rows = await hc.fetch_upstox_range_1m_multi_account(fut_key, tokens, d, d)
             if rows:
                 oi = rows[-1].get("oi")
                 if oi:
@@ -126,7 +151,7 @@ async def _prev_day_oi_asof(fut_key, token, ref_date, max_step_back=7):
     return None
 
 
-async def _trap_target_touched_today(eq_key, token, trade_date, side, entry_ts):
+async def _trap_target_touched_today(eq_key, tokens, trade_date, side, entry_ts):
     """Real, currently-live pre-entry gate (OiOrbScreenerStrategy.
     _check_trap_target_touched_today, added 2026-09-16), faithfully
     date-parameterized for a historical trade_date/entry_ts instead of
@@ -138,7 +163,7 @@ async def _trap_target_touched_today(eq_key, token, trade_date, side, entry_ts):
     real gate -- any failure returns (False, None), never blocks."""
     try:
         start = trade_date - timedelta(days=_TRAP_EXIT_LOOKBACK_CALENDAR_DAYS)
-        rows = await hc.fetch_upstox_range_1m(eq_key, token, start, trade_date)
+        rows = await hc.fetch_upstox_range_1m_multi_account(eq_key, tokens, start, trade_date)
         seen, all_rows = set(), []
         for r in sorted(rows or [], key=lambda r: r["ts"]):
             if r["ts"] in seen:
@@ -167,7 +192,7 @@ async def _trap_target_touched_today(eq_key, token, trade_date, side, entry_ts):
         return False, None
 
 
-async def _prev_close_asof(eq_key, token, ref_date, max_step_back=10):
+async def _prev_close_asof(eq_key, tokens, ref_date, max_step_back=10):
     """2026-09-16 bug fix: fetch_upstox_daily() is hardcoded to
     date.today()-1 (real wall-clock today), not an arbitrary historical
     ref_date -- for a past trade_date like 2026-09-01, that window never
@@ -179,22 +204,22 @@ async def _prev_close_asof(eq_key, token, ref_date, max_step_back=10):
     d = ref_date - timedelta(days=1)
     for _ in range(max_step_back):
         if d.weekday() < 5:
-            rows = await hc.fetch_upstox_range_1m(eq_key, token, d, d)
+            rows = await hc.fetch_upstox_range_1m_multi_account(eq_key, tokens, d, d)
             if rows:
                 return float(rows[-1]["close"])
         d -= timedelta(days=1)
     return None
 
 
-async def run_symbol(book, token, trade_date: date, symbol: str):
+async def run_symbol(book, tokens, trade_date: date, symbol: str):
     eq_key = stock_resolve.resolve_eq_instrument_key(symbol)
     if not eq_key:
         return None
-    prev_close = await _prev_close_asof(eq_key, token, trade_date)
+    prev_close = await _prev_close_asof(eq_key, tokens, trade_date)
     if not prev_close:
         return None
 
-    day_rows = await hc.fetch_upstox_range_1m(eq_key, token, trade_date, trade_date)
+    day_rows = await hc.fetch_upstox_range_1m_multi_account(eq_key, tokens, trade_date, trade_date)
     day_bars = _to_bars(day_rows)
     if not day_bars:
         return None
@@ -213,11 +238,11 @@ async def run_symbol(book, token, trade_date: date, symbol: str):
     if resolved is None:
         return {"symbol": symbol, "stage": "no_futures_key", "side": side, "trig_ts": trig_ts}
     fut_key, _tok = resolved
-    yday_oi = await _prev_day_oi_asof(fut_key, token, trade_date)
+    yday_oi = await _prev_day_oi_asof(fut_key, tokens, trade_date)
     if not yday_oi:
         return {"symbol": symbol, "stage": "no_yday_oi", "side": side, "trig_ts": trig_ts}
 
-    oi_day_rows = await hc.fetch_upstox_range_1m(fut_key, token, trade_date, trade_date)
+    oi_day_rows = await hc.fetch_upstox_range_1m_multi_account(fut_key, tokens, trade_date, trade_date)
     confirm_ts = None
     readings = []
     trig_floor = trig_ts.replace(second=0, microsecond=0)
@@ -272,7 +297,7 @@ async def run_symbol(book, token, trade_date: date, symbol: str):
     # 09-07, touched 7x at market open, over 2hrs before its 11:17
     # entry). Checked here so this multi-day backtest can't count a
     # trade the real live system would never have taken.
-    touched, zone = await _trap_target_touched_today(eq_key, token, trade_date, side, fire_ts)
+    touched, zone = await _trap_target_touched_today(eq_key, tokens, trade_date, side, fire_ts)
     if touched:
         detail = (f"zone=[{zone['zone_lo']:.2f},{zone['zone_hi']:.2f}] locked={zone['lock_ts']} -- "
                    f"already touched by real price before this entry, real live gate would skip it")
@@ -325,7 +350,7 @@ async def run_symbol(book, token, trade_date: date, symbol: str):
     if contract is None:
         return {"symbol": symbol, "stage": "no_contract", "side": side, "trig_ts": trig_ts,
                 "confirm_ts": confirm_ts, "fire_ts": fire_ts}
-    opt_rows = await hc.fetch_upstox_range_1m(contract.upstox_key, token, trade_date, trade_date)
+    opt_rows = await hc.fetch_upstox_range_1m_multi_account(contract.upstox_key, tokens, trade_date, trade_date)
     opt_bars = _to_bars(opt_rows)
     entry_candidates = [b for b in opt_bars if b.ts <= fire_ts]
     exit_candidates = [b for b in opt_bars if b.ts <= exit_ts]
@@ -342,13 +367,14 @@ async def run_symbol(book, token, trade_date: date, symbol: str):
 
 
 async def main():
-    token = _access_token()
+    tokens = _access_tokens()
     universe = _real_day_universe()
     print("=" * 130)
     print("OI-ORB Screener -- MULTI-DAY backtest of the FROZEN mechanic (price trigger -> OI confirm -> "
           "VWAP retest -> 20min VWAP-close hard SL + EOD, NO target)")
     print(f"Real per-day universe recovered from {ARCHIVE_DB}'s shortlist table: "
           f"{sum(len(v) for v in universe.values())} (date,symbol) rows across {len(universe)} real days")
+    print(f"Using {len(tokens)} real Upstox account(s) with automatic fallback on rate limit")
     print("=" * 130)
 
     bus = _NullBus()
@@ -367,7 +393,7 @@ async def main():
         day_total, day_trades = 0.0, 0
         for sym in symbols:
             try:
-                r = await run_symbol(book, token, trade_date, sym)
+                r = await run_symbol(book, tokens, trade_date, sym)
             except Exception as exc:
                 print(f"  {sym:14s} EXCEPTION: {exc}")
                 continue
