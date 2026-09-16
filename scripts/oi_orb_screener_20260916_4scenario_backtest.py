@@ -296,8 +296,14 @@ async def _simulate_exit(symbol: str, side: str, entry_ts: datetime, entry_price
 
     pnl = None
     if entry_price is not None and exit_price is not None:
-        raw = exit_price - entry_price
-        pnl = round(raw if side == "CALL" else -raw, 2)
+        # 2026-09-16 CRITICAL bug fix -- see oi_orb_screener_20260916_
+        # live_oi_confirm_backtest.py's own _simulate_exit for the full
+        # reasoning: entry/exit are the OPTION'S OWN premium, a long
+        # option (CE or PE) profits purely on premium direction, no
+        # side-based sign flip -- confirmed against the real live
+        # engine's own formula (strategies/oi_orb_screener/engine.py:
+        # pnl = (fill_price - entry_price) * qty, no CALL/PUT branch).
+        pnl = round(exit_price - entry_price, 2)
     return {"entry_price": entry_price, "exit_price": exit_price, "exit_ts": exit_signal_ts,
             "exit_reason": exit_reason, "pnl": pnl}
 

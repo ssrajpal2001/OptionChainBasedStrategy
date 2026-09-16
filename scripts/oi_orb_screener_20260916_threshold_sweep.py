@@ -204,8 +204,11 @@ async def _simulate_one(symbol: str, side: str, token: str) -> WhatIfResult:
 
     pnl_pts = None
     if entry_price is not None and exit_price is not None:
-        raw = exit_price - entry_price
-        pnl_pts = round(raw if side == "CALL" else -raw, 2)
+        # 2026-09-16 CRITICAL bug fix: a long option (CE or PE) profits
+        # purely on its own premium direction, no side-based sign flip --
+        # see oi_orb_screener_20260916_live_oi_confirm_backtest.py's
+        # _simulate_exit for the full reasoning.
+        pnl_pts = round(exit_price - entry_price, 2)
     else:
         reason += " -- option premium history unavailable, P&L not reconstructed"
 

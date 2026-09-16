@@ -324,8 +324,19 @@ async def _simulate_exit(symbol: str, side: str, entry_ts: datetime, entry_price
 
     pnl = None
     if entry_price is not None and exit_price is not None:
-        raw = exit_price - entry_price
-        pnl = round(raw if side == "CALL" else -raw, 2)
+        # 2026-09-16 CRITICAL bug fix: entry_price/exit_price are the
+        # OPTION'S OWN premium (fetched from the real option contract's
+        # own price history), and a long-option position (CE or PE, this
+        # strategy only ever buys, never writes) profits/loses purely on
+        # premium direction -- no side-based sign flip is correct here.
+        # Confirmed against the REAL live engine's own P&L formula
+        # (strategies/oi_orb_screener/engine.py: pnl = (fill_price -
+        # entry_price) * qty, no CALL/PUT branch at all). The old
+        # `raw if side=="CALL" else -raw` was silently inverting every
+        # PUT trade's result all session -- that flip only makes sense
+        # for SPOT-index-based P&L (a different strategy's design, e.g.
+        # Liquidity Sweep/Trap), not for option-premium P&L like this.
+        pnl = round(exit_price - entry_price, 2)
     return {"entry_price": entry_price, "exit_price": exit_price, "exit_ts": exit_signal_ts,
             "exit_reason": exit_reason, "pnl": pnl}
 

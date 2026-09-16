@@ -248,8 +248,11 @@ async def _reconstruct_one(symbol, side, strike, expiry_s, qty, entry_ts_s, entr
 
     whatif_pnl = None
     if whatif_entry_price is not None and whatif_exit_price is not None:
-        raw = whatif_exit_price - whatif_entry_price
-        whatif_pnl = round((raw if side == "CALL" else -raw) * qty, 2)
+        # 2026-09-16 CRITICAL bug fix: a long option (CE or PE) profits
+        # purely on its own premium direction, no side-based sign flip --
+        # see oi_orb_screener_20260916_live_oi_confirm_backtest.py's
+        # _simulate_exit for the full reasoning.
+        whatif_pnl = round((whatif_exit_price - whatif_entry_price) * qty, 2)
     else:
         whatif_reason += " -- option premium history unavailable, P&L not reconstructed"
 
