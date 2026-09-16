@@ -108,29 +108,49 @@ async def main():
     print(f"\nReal bars from today's market open through entry_ts ({ENTRY_TS.strftime('%H:%M')}): "
           f"{len(today_bars_up_to_entry)}")
 
-    touches = [b for b in today_bars_up_to_entry
-               if b.ts >= zone["lock_ts"] and zone["zone_lo"] <= b.close <= zone["zone_hi"]]
-    print(f"\nBars whose CLOSE fell inside [{zone['zone_lo']:.2f}, {zone['zone_hi']:.2f}] "
-          f"(zone_lo <= close <= zone_hi), at/after lock_ts, before entry:")
-    if touches:
-        for b in touches[:10]:
+    touches_close = [b for b in today_bars_up_to_entry
+                     if b.ts >= zone["lock_ts"] and zone["zone_lo"] <= b.close <= zone["zone_hi"]]
+    print(f"\n[AS CURRENTLY CODED, real live gate] Bars whose CLOSE fell inside "
+          f"[{zone['zone_lo']:.2f}, {zone['zone_hi']:.2f}], at/after lock_ts, before entry:")
+    if touches_close:
+        for b in touches_close[:10]:
             print(f"  {b.ts.strftime('%H:%M')}  close={b.close:.2f}")
-        if len(touches) > 10:
-            print(f"  ... and {len(touches) - 10} more")
     else:
         print("  NONE")
 
-    touched = len(touches) > 0
-    print("\n" + "=" * 120)
-    print(f"RESULT: touched_today = {touched}")
-    if touched:
-        print(f"Under the REAL live gate, this COFORGE PUT entry at {ENTRY_TS.strftime('%H:%M')} on "
-              f"{TRADE_DATE.isoformat()} should have been SKIPPED -- the -13.70 loss in the 7-day backtest "
-              f"is an artifact of a bug, needs investigating why the backtest counted it as TRADED.")
+    # 2026-09-16, direct user correction: a BEAR zone should be checked
+    # against the candle's own LOW (the wick reaching down into the
+    # zone), a BULL zone against the candle's own HIGH -- not close.
+    # This differs from _check_trap_target_touched_today's actual coded
+    # behavior (close-based) -- checked here as a real, separate
+    # definition to see whether it changes the real conclusion.
+    extreme_field = "low" if SIDE == "PUT" else "high"
+    touches_wick = [b for b in today_bars_up_to_entry
+                     if b.ts >= zone["lock_ts"]
+                     and zone["zone_lo"] <= getattr(b, extreme_field) <= zone["zone_hi"]]
+    print(f"\n[USER-CORRECTED definition] Bars whose {extreme_field.upper()} fell inside "
+          f"[{zone['zone_lo']:.2f}, {zone['zone_hi']:.2f}], at/after lock_ts, before entry:")
+    if touches_wick:
+        for b in touches_wick[:10]:
+            print(f"  {b.ts.strftime('%H:%M')}  {extreme_field}={getattr(b, extreme_field):.2f}")
     else:
-        print("Confirmed: the real bear-zone target had genuinely NOT been touched yet by entry time -- the "
-              "gate correctly let this trade through. The -13.70 loss is a real, legitimate outcome of the "
-              "gap-down-then-recovery pattern, not a gate failure.")
+        print("  NONE")
+    touched_close = len(touches_close) > 0
+    touched_wick = len(touches_wick) > 0
+    print("\n" + "=" * 120)
+    print(f"RESULT (as coded, CLOSE-based): touched_today = {touched_close}")
+    print(f"RESULT (user-corrected, {extreme_field.upper()}-based): touched_today = {touched_wick}")
+    if touched_wick and not touched_close:
+        print(f"\nDISCREPANCY: under the real live (close-based) code this entry was allowed through, but "
+              f"under the corrected ({extreme_field}-based) definition it should have been SKIPPED -- "
+              f"a real candidate bug in _check_trap_target_touched_today's own use of b.close instead of "
+              f"b.{extreme_field}.")
+    elif touched_wick:
+        print(f"\nBoth definitions agree this entry should have been SKIPPED.")
+    else:
+        print(f"\nBoth definitions agree: the real bear-zone target had genuinely NOT been touched yet by "
+              f"entry time -- the gate correctly let this trade through either way. The -13.70 loss is a "
+              f"real, legitimate outcome of the gap-down-then-recovery pattern, not a gate failure.")
     print("=" * 120)
 
 
