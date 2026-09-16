@@ -175,6 +175,7 @@ async def run_symbol(book, token, trade_date: date, symbol: str):
 
     oi_day_rows = await hc.fetch_upstox_range_1m(fut_key, token, trade_date, trade_date)
     confirm_ts = None
+    readings = []
     trig_floor = trig_ts.replace(second=0, microsecond=0)
     for r in oi_day_rows:
         ts = r["ts"]
@@ -187,11 +188,15 @@ async def run_symbol(book, token, trade_date: date, symbol: str):
         if not oi:
             continue
         change_pct = (float(oi) - yday_oi) / yday_oi * 100.0
+        readings.append(change_pct)
         if change_pct > OI_CONFIRM_THRESHOLD_PCT:
             confirm_ts = ts
             break
     if confirm_ts is None:
-        return {"symbol": symbol, "stage": "no_oi_confirm", "side": side, "trig_ts": trig_ts}
+        detail = (f"yday_oi={yday_oi:.0f}, {len(readings)} real readings from {trig_ts.strftime('%H:%M')}, "
+                   f"first={readings[0]:+.2f}% last={readings[-1]:+.2f}% peak={max(readings):+.2f}%"
+                   if readings else f"yday_oi={yday_oi:.0f}, NO real OI readings at/after trigger")
+        return {"symbol": symbol, "stage": "no_oi_confirm", "side": side, "trig_ts": trig_ts, "detail": detail}
 
     tracker = RollingVwapRetestTracker(window_min=VWAP_WINDOW_MIN)
     vwap_state = VwapState()
@@ -208,8 +213,12 @@ async def run_symbol(book, token, trade_date: date, symbol: str):
             fire_ts, fire_price = bar_ts, b.close
             break
     if fire_ts is None:
+        detail = (f"OI-confirmed at {confirm_ts.strftime('%H:%M')} but price never retested back "
+                   f"through VWAP within {VWAP_WINDOW_MIN:.0f}min of arming, for the rest of the day")
         return {"symbol": symbol, "stage": "no_vwap_retest", "side": side, "trig_ts": trig_ts,
-                "confirm_ts": confirm_ts}
+                "confirm_ts": confirm_ts, "detail": detail}
+
+    eod_ts = datetime.combine(trade_date, datetime.strptime(EOD_TIME, "%H:%M").time(), tzinfo=IST)
 
     # -- real 20-min VWAP-close hard SL, same static method as today's scripts --
     ha_1m = to_heikin_ashi(day_bars)
@@ -228,12 +237,20 @@ async def run_symbol(book, token, trade_date: date, symbol: str):
         eligible = [ts for ts in sorted_minutes if ts < bucket_end]
         return vwap_at_minute[eligible[-1]] if eligible else None
 
+    # 2026-09-16 bug fix: an SL bucket whose own close falls AFTER the real
+    # EOD square-off time can never be a genuine live exit -- the position
+    # would already have been flattened by EOD square-off in reality before
+    # that bucket ever finished forming. Cap the scan at eod_ts so a
+    # same-day "last bucket of the trading day" (e.g. 15:15-15:35) can't be
+    # mistaken for a real SL that fired after the market already closed.
     sl_ts = None
     entry_floor = fire_ts.replace(second=0, microsecond=0)
     for hb in ha_tf:
         bucket_end = hb.ts + timedelta(minutes=_VWAP_SL_TF_MIN)
         if bucket_end <= entry_floor:
             continue
+        if bucket_end > eod_ts:
+            break   # no bucket closing after EOD can be a real live SL
         vwap_now = _vwap_as_of(bucket_end)
         if vwap_now is None or vwap_now <= 0:
             continue
@@ -241,7 +258,6 @@ async def run_symbol(book, token, trade_date: date, symbol: str):
             sl_ts = bucket_end
             break
 
-    eod_ts = datetime.combine(trade_date, datetime.strptime(EOD_TIME, "%H:%M").time(), tzinfo=IST)
     exit_ts = sl_ts if sl_ts is not None else eod_ts
     exit_reason = "vwap_close_sl" if sl_ts is not None else "eod_squareoff"
 
@@ -300,7 +316,9 @@ async def main():
                 print(f"  {sym:14s} no real data available")
                 continue
             if r["stage"] != "TRADED":
-                print(f"  {sym:14s} stopped at: {r['stage']}")
+                side_part = f" side={r['side']}" if r.get("side") else ""
+                detail_part = f" -- {r['detail']}" if r.get("detail") else ""
+                print(f"  {sym:14s} stopped at: {r['stage']}{side_part}{detail_part}")
                 continue
             print(f"  {sym:14s} {r['side']:4s} trig={r['trig_ts'].strftime('%H:%M')} "
                   f"oi_confirm={r['confirm_ts'].strftime('%H:%M')} "
