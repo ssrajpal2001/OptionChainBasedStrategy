@@ -425,6 +425,26 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                 _ok = self.clear(self._persist_key)
                 if not _ok:
                     _ok = self.clear(self._persist_key)
+                # 2026-09-16, direct user spec: the position is genuinely
+                # closed now (this branch only runs when self._position is
+                # falsy/not-open) -- any cross-day carry-forward pool state
+                # from a prior hedge-and-carry episode on this same
+                # (client,binding,underlying,strategy) key is stale and must
+                # not be picked up by a future, unrelated fresh position.
+                # Best-effort: a failure here only leaves harmless stale data
+                # behind (the NEXT _persist_pool_engine() call for the new
+                # position, if any, overwrites it before it could ever be
+                # read -- _restore_pool_engine() only ever reads this key
+                # while THIS process is starting, never mid-session), never
+                # blocks the real position clear above.
+                try:
+                    self.clear(self._persist_key + "_pool_carry")
+                except Exception:
+                    pass
+                try:
+                    self.clear(self._persist_key + "_session_carry")
+                except Exception:
+                    pass
                 if not _ok:
                     logger.critical(
                         "SellStraddle[%s|%s|%s]: POSITION CLEAR FAILED TWICE -- a stale "
@@ -451,7 +471,7 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
     def _persist_session(self) -> None:
         try:
             from data_layer import position_store as _ps
-            _ps.save(self._persist_key + "_session", {
+            _payload = {
                 "session_realized_pnl_pts": self._session_realized_pnl_pts,
                 "trades_today": self._trades_today,
                 "stop_for_day": self._stop_for_day,
@@ -499,19 +519,63 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                                    ([self._post1500_pair[2].isoformat()]
                                     if len(self._post1500_pair) > 2 and self._post1500_pair[2] else []))
                                   if getattr(self, "_post1500_pair", None) else None,
-            }, product_type="MIS")
+            }
+            _ps.save(self._persist_key + "_session", _payload, product_type="MIS")
+            # 2026-09-16, direct user spec: while a position is genuinely
+            # carrying overnight (is_hedged_positional=True), ALL of today's
+            # session bookkeeping above -- not just session_realized_pnl_pts
+            # -- needs to survive the day boundary intact, so tomorrow's
+            # first tick can make an immediate, fully-informed decision
+            # ("we require all data for current day so that immediate
+            # decision can be taken when trade starts next day at opening
+            # bell"). Concretely: _check_hedge_cumulative_profit_close's own
+            # "booked" component (session_realized_pnl_pts) would otherwise
+            # silently undercount real cumulative profit the day after a
+            # same-day roll; itm_roll_protection (an armed 70%-of-booked-
+            # profit stop on an already-rolled leg) would otherwise silently
+            # disarm; sl_cooldown_until would otherwise silently lift early.
+            # Same mechanism as _persist_pool_engine()'s own carry-forward
+            # key: saved with product_type="NRML" so position_store's own
+            # generic MIS-new-day-discard rule never wipes it, and it is
+            # NEVER written at all for a normal (non-hedged) position --
+            # that keeps today's existing every-day-resets-fresh behavior
+            # completely unchanged for the common case.
+            if self._position is not None and getattr(self._position, "is_hedged_positional", False):
+                _ps.save(self._persist_key + "_session_carry", _payload, product_type="NRML")
         except Exception as exc:
             logger.debug("SellStraddle[%s]: session persist failed: %s", self._underlying, exc)
 
     def _restore_session(self) -> None:
         try:
             from data_layer import position_store as _ps
-            _sess = _ps.load(self._persist_key + "_session")
-            if _sess and str(_sess.get("session_day", str(self._session_day(datetime.now(IST))))) \
-                    != str(self._session_day(datetime.now(IST))):
-                logger.info("SellStraddle[%s]: persisted session is from a prior trading day "
-                            "(%s) — starting fresh.", self._underlying, _sess.get("session_day"))
-                _sess = None
+            # 2026-09-16, direct user spec: a position that's genuinely
+            # carrying overnight gets ALL of today's session bookkeeping from
+            # the SEPARATE cross-day carry key, day-boundary check skipped
+            # entirely -- see _persist_session()'s own docstring for the full
+            # mechanic. Peeked from the RAW saved position file directly (not
+            # self._position) because this runs BEFORE start() restores
+            # self._position -- see start()'s own call order (same pattern
+            # _restore_pool_engine() already uses).
+            _raw_pos = _ps.load(self._persist_key)
+            _hedged = bool(_raw_pos and (_raw_pos.get("position") or {}).get("is_hedged_positional"))
+            if _hedged:
+                _sess = _ps.load(self._persist_key + "_session_carry")
+                if _sess:
+                    logger.info(
+                        "SellStraddle[%s]: restoring CARRY-FORWARD session state (overnight "
+                        "hedge-and-carry position) -- booked P&L/roll-protection/cooldowns "
+                        "intact from yesterday, not reset for the new day.", self._underlying)
+                else:
+                    logger.info(
+                        "SellStraddle[%s]: position is hedge-and-carry but no carry-forward "
+                        "session state found -- starting fresh this once.", self._underlying)
+            else:
+                _sess = _ps.load(self._persist_key + "_session")
+                if _sess and str(_sess.get("session_day", str(self._session_day(datetime.now(IST))))) \
+                        != str(self._session_day(datetime.now(IST))):
+                    logger.info("SellStraddle[%s]: persisted session is from a prior trading day "
+                                "(%s) — starting fresh.", self._underlying, _sess.get("session_day"))
+                    _sess = None
             if _sess:
                 self._session_realized_pnl_pts = float(_sess.get("session_realized_pnl_pts", 0.0) or 0.0)
                 self._trades_today = max(self._trades_today, int(_sess.get("trades_today", 0) or 0))
@@ -610,12 +674,59 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                 "session_day": str(self._session_day(datetime.now(IST))),
                 "pool_state": self._pool_engine.to_dict(),
             }, product_type="MIS")
+            # 2026-09-16, direct user spec: a position that has genuinely gone
+            # into EOD hedge-and-carry (is_hedged_positional=True) needs its
+            # own SEPARATE, cross-day-surviving copy of the pool engine's real
+            # live-computed state -- so a rollover/re-entry decision the very
+            # next trading morning has a warm baseline instead of waiting
+            # several minutes for VWAP/SLOPE to rebuild from scratch. This is
+            # NOT a reversal of the 'Seed VWAP Contamination' fix above (which
+            # banned REST-*derived* seeding specifically because REST bars
+            # were subtly different from what live ticks actually produced) --
+            # this carries forward the engine's OWN genuine prior-day live
+            # values, the same "not REST-seeding, the same live data
+            # surviving" principle the intraday _pool key above already
+            # relies on, just deliberately NOT wiped at the day boundary.
+            # Saved with product_type="NRML" so position_store's own generic
+            # MIS-new-day-discard rule (see its own module docstring: "NRML
+            # positions carry forward across days -> restored as-is") does the
+            # cross-day survival for free -- no separate day-check needed here.
+            # A same-day close (never actually carried) never writes this key
+            # at all; once written, it's explicitly cleared the moment the
+            # position is genuinely closed (see _persist()'s own clear branch).
+            if self._position is not None and getattr(self._position, "is_hedged_positional", False):
+                _ps.save(self._persist_key + "_pool_carry", {
+                    "pool_state": self._pool_engine.to_dict(),
+                }, product_type="NRML")
         except Exception as exc:
             logger.debug("SellStraddle[%s]: pool engine persist failed: %s", self._underlying, exc)
 
     def _restore_pool_engine(self) -> None:
         try:
             from data_layer import position_store as _ps
+            # 2026-09-16, direct user spec: a position that was genuinely
+            # carrying overnight (is_hedged_positional=True) gets its warm
+            # pool-engine baseline from the SEPARATE cross-day carry key
+            # instead of the intraday-only one below -- see
+            # _persist_pool_engine()'s own docstring for the full mechanic.
+            # Peeked from the RAW saved position file directly (not
+            # self._position) because this runs BEFORE start() restores
+            # self._position -- see start()'s own call order.
+            _raw_pos = _ps.load(self._persist_key)
+            if _raw_pos and (_raw_pos.get("position") or {}).get("is_hedged_positional"):
+                _carry = _ps.load(self._persist_key + "_pool_carry")
+                if _carry:
+                    self._pool_engine.load_dict(_carry.get("pool_state") or {})
+                    logger.info(
+                        "SellStraddle[%s]: restored CARRY-FORWARD pool-engine state "
+                        "(overnight hedge-and-carry position) -- warm from yesterday's "
+                        "own real close, not cold-started.", self._underlying)
+                    return
+                logger.info(
+                    "SellStraddle[%s]: position is hedge-and-carry but no carry-forward "
+                    "pool state found -- starting VWAP/SLOPE fresh this once.",
+                    self._underlying)
+                return
             _saved = _ps.load(self._persist_key + "_pool")
             if not _saved:
                 return
