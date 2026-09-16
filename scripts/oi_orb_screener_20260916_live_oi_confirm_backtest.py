@@ -166,7 +166,15 @@ async def _find_oi_confirm(book: OiOrbScreenerStrategy, sym: str, trigger_ts: da
     if resolved is None:
         return None, None, None, []
     fut_key, _tok = resolved
-    rows = await hc.fetch_upstox_range_1m(fut_key, token, TODAY, TODAY)
+    # 2026-09-16 bug fix: fetch_upstox_range_1m hits Upstox's
+    # historical-candle endpoint, which does NOT serve the CURRENT trading
+    # day (confirmed live -- every single stock came back with zero rows
+    # for today's date). fetch_upstox_today_0915_oi's own already-working
+    # 09:15 read uses fetch_upstox_intraday_1m (the correct endpoint for
+    # today's live-building data, same parser, same real OI column) --
+    # reused here for a full continuous per-minute walk instead of a
+    # single fixed point.
+    rows = await hc.fetch_upstox_intraday_1m(fut_key, token)
     readings = []
     for r in rows:
         ts = r["ts"]
