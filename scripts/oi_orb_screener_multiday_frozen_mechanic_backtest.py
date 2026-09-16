@@ -38,7 +38,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 import sys
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time as dtime, timedelta
 
 sys.path.insert(0, ".")
 
@@ -46,10 +46,13 @@ from config.global_config import IST
 from data_layer import historical_candles as hc
 from data_layer.client_db import ClientDB
 from strategies.core.trap_zone_utils import Bar
-from strategies.core.candle_indicators import to_heikin_ashi, to_n_min_bars_market_anchored
-from strategies.oi_orb_screener import stock_resolve
+from strategies.core.candle_indicators import (
+    to_heikin_ashi, to_n_min_bars_market_anchored, to_n_min_bars_dateaware,
+)
+from strategies.oi_orb_screener import stock_resolve, screener
 from strategies.oi_orb_screener.engine import (
     OiOrbScreenerStrategy, _VWAP_SL_TF_MIN, _VWAP_SL_MIN_GAP_PCT,
+    _TRAP_EXIT_HTF_MULTIDAY_MIN, _TRAP_EXIT_LOOKBACK_CALENDAR_DAYS,
 )
 from strategies.oi_orb_screener.screener import VwapState, RollingVwapRetestTracker
 
@@ -121,6 +124,47 @@ async def _prev_day_oi_asof(fut_key, token, ref_date, max_step_back=7):
                     return float(oi)
         d -= timedelta(days=1)
     return None
+
+
+async def _trap_target_touched_today(eq_key, token, trade_date, side, entry_ts):
+    """Real, currently-live pre-entry gate (OiOrbScreenerStrategy.
+    _check_trap_target_touched_today, added 2026-09-16), faithfully
+    date-parameterized for a historical trade_date/entry_ts instead of
+    wall-clock now(). Confirmed real via a real SOLARINDS 09-07 check:
+    the trap-target zone was touched 7 times at market open, over 2
+    hours before the 11:17 VWAP-retest fired -- under the real live
+    gate, that entry would have been skipped entirely. Returns
+    (touched: bool, zone: dict|None). Same best-effort degrade as the
+    real gate -- any failure returns (False, None), never blocks."""
+    try:
+        start = trade_date - timedelta(days=_TRAP_EXIT_LOOKBACK_CALENDAR_DAYS)
+        rows = await hc.fetch_upstox_range_1m(eq_key, token, start, trade_date)
+        seen, all_rows = set(), []
+        for r in sorted(rows or [], key=lambda r: r["ts"]):
+            if r["ts"] in seen:
+                continue
+            seen.add(r["ts"])
+            all_rows.append(r)
+        bars = _to_bars(all_rows)
+        if not bars:
+            return False, None
+        htf = to_n_min_bars_dateaware(bars, _TRAP_EXIT_HTF_MULTIDAY_MIN)
+        if len(htf) < 3:
+            return False, None
+        zones_fn = screener.bull_trap_zones if side == "CALL" else screener.sharp_bear_zones
+        zones_all = zones_fn(htf)
+        zone = OiOrbScreenerStrategy._latest_locked_zone(zones_all, entry_ts)
+        if zone is None:
+            return False, None
+        today_start = datetime.combine(trade_date, dtime.min, tzinfo=IST)
+        touched = any(
+            zone["lock_ts"] <= b.ts and today_start <= b.ts <= entry_ts
+            and zone["zone_lo"] <= b.close <= zone["zone_hi"]
+            for b in bars
+        )
+        return touched, zone
+    except Exception:
+        return False, None
 
 
 async def _prev_close_asof(eq_key, token, ref_date, max_step_back=10):
@@ -219,6 +263,21 @@ async def run_symbol(book, token, trade_date: date, symbol: str):
                 "confirm_ts": confirm_ts, "detail": detail}
 
     eod_ts = datetime.combine(trade_date, datetime.strptime(EOD_TIME, "%H:%M").time(), tzinfo=IST)
+
+    # 2026-09-16, real live pre-entry gate: if today's own 180-min
+    # multi-day trap-target zone was already touched by real price
+    # (market open -> entry) before this VWAP-retest fired, the real
+    # live system skips the entry entirely (see _check_trap_target_
+    # touched_today's own docstring -- confirmed real via SOLARINDS
+    # 09-07, touched 7x at market open, over 2hrs before its 11:17
+    # entry). Checked here so this multi-day backtest can't count a
+    # trade the real live system would never have taken.
+    touched, zone = await _trap_target_touched_today(eq_key, token, trade_date, side, fire_ts)
+    if touched:
+        detail = (f"zone=[{zone['zone_lo']:.2f},{zone['zone_hi']:.2f}] locked={zone['lock_ts']} -- "
+                   f"already touched by real price before this entry, real live gate would skip it")
+        return {"symbol": symbol, "stage": "trap_gate_skipped", "side": side, "trig_ts": trig_ts,
+                "confirm_ts": confirm_ts, "fire_ts": fire_ts, "detail": detail}
 
     # -- real 20-min VWAP-close hard SL, same static method as today's scripts --
     ha_1m = to_heikin_ashi(day_bars)
