@@ -76,13 +76,13 @@ def main():
         date_col = "trade_date" if "trade_date" in cols else None
         if date_col:
             rows = conn.execute(
-                f"SELECT trade_date, symbol, side, status, entry_price, exit_price, pnl "
+                f"SELECT trade_date, symbol, option_type, status, entry_price, exit_price, pnl "
                 f"FROM positions WHERE trade_date >= ? ORDER BY trade_date, symbol", (START_DATE,)
             ).fetchall()
             if not rows:
                 print("  NO real position rows recorded since 2026-09-01")
             for r in rows:
-                print(f"  {r['trade_date']} {r['symbol']:12s} {r['side']:5s} status={r['status']:8s} "
+                print(f"  {r['trade_date']} {r['symbol']:12s} {r['option_type']:5s} status={r['status']:8s} "
                       f"entry={r['entry_price']} exit={r['exit_price']} pnl={r['pnl']}")
 
     print("\n" + "=" * 110)
