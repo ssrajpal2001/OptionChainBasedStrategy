@@ -912,12 +912,6 @@ document.addEventListener('alpine:init', () => {
     chartData: {},        // deploy_id → series array
     _chartInst: {},       // deploy_id → { prem, rsi, slope } ApexCharts instances
     _chartTimer: {},      // deploy_id → setInterval handle
-    // 2026-09-16: real-time futures-OI histogram per OI-ORB shortlisted stock.
-    // Key = `${binding_id}_${symbol}`.
-    oiHistOpen: {},        // key → bool (panel open)
-    oiHistData: {},        // key → history rows array
-    _oiHistInst: {},       // key → ApexCharts bar instance
-    _oiHistTimer: {},      // key → setInterval handle
     // 2026-08-23: sell_straddle manual entry-price confirmation (broker fill
     // confirmation aborted -- client supplies the real price they see on
     // their own broker terminal). deploy_id → {...} | null.
@@ -1125,92 +1119,6 @@ document.addEventListener('alpine:init', () => {
       }
 
       this._chartInst[deployId] = inst;
-    },
-
-    // ── OI-ORB Screener: real-time futures-OI histogram per shortlisted
-    // stock (2026-09-16, direct user spec). key = `${binding_id}_${symbol}`.
-    toggleOiHistChart(key, clientId, bindingId, symbol) {
-      const open = !this.oiHistOpen[key];
-      this.oiHistOpen = { ...this.oiHistOpen, [key]: open };
-      if (open) {
-        this.loadOiHistChart(key, clientId, bindingId, symbol);
-        if (!this._oiHistTimer[key]) {
-          // 5min server-side poll cadence -- refresh the panel a bit faster
-          // (30s) so a freshly-recorded point shows up promptly once it lands.
-          this._oiHistTimer[key] = setInterval(() => this.loadOiHistChart(key, clientId, bindingId, symbol), 30000);
-        }
-      } else {
-        if (this._oiHistTimer[key]) { clearInterval(this._oiHistTimer[key]); delete this._oiHistTimer[key]; }
-      }
-    },
-
-    async loadOiHistChart(key, clientId, bindingId, symbol) {
-      try {
-        const qs = new URLSearchParams({ client_id: clientId, binding_id: bindingId, symbol: symbol });
-        const r = await this._fetch(`/api/oiorb/futures_oi_history?${qs.toString()}`);
-        if (!r || !r.ok) return;
-        const d = await r.json();
-        const rows = d.history || [];
-        this.oiHistData = { ...this.oiHistData, [key]: rows };
-        this.$nextTick(() => setTimeout(() => this._renderOiHistChart(key, rows), 150));
-      } catch (e) { console.error('[oi-hist] load error', e); }
-    },
-
-    _renderOiHistChart(key, rows) {
-      if (typeof ApexCharts === 'undefined') return;
-      if (this._oiHistInst[key]) { try { this._oiHistInst[key].destroy(); } catch {} }
-      const container = document.getElementById('oihistchart_' + key);
-      if (!container) return;
-      if (!rows.length) { container.innerHTML = '<div style="color:var(--t-dim);font-size:10px;padding:8px 0">No futures-OI polls recorded yet today.</div>'; return; }
-
-      const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim() || '#888';
-      const cyan = css('--t-cyan'), green = css('--t-green'), red = css('--t-red'), amber = css('--t-amber'), muted = css('--t-muted');
-      const gridColor = 'rgba(128,128,128,0.12)';
-      // poll_ts is naive IST ISO (no offset) -- parse as local, display HH:mm.
-      const labels = rows.map(r => (r.poll_ts || '').slice(11, 16));
-      const bars = rows.map(r => Number(r.current_oi || 0));
-      const changeColors = rows.map(r => (Number(r.oi_change_pct || 0) >= 0 ? green : red));
-      // 2026-09-16 follow-up: previous session's closing OI (the gate's own
-      // baseline) was previously only visible in the tooltip -- shown here
-      // as a persistent dashed reference line since every poll today shares
-      // the SAME previous_oi value (it never changes intraday).
-      const prevOi = Number((rows[rows.length - 1] || {}).previous_oi || 0);
-
-      const inst = new ApexCharts(container, {
-        chart: {
-          type: 'bar', height: 140,
-          fontFamily: "'Plus Jakarta Sans', sans-serif",
-          toolbar: { show: false }, animations: { enabled: false },
-        },
-        plotOptions: { bar: { columnWidth: '70%', distributed: true } },
-        series: [{ name: 'Futures OI', data: bars }],
-        colors: changeColors,
-        legend: { show: false },
-        dataLabels: { enabled: false },
-        xaxis: {
-          categories: labels,
-          labels: { style: { colors: muted, fontSize: '9px' }, rotate: 0 },
-          axisBorder: { show: true, color: gridColor },
-          axisTicks: { show: false },
-        },
-        yaxis: { labels: { style: { colors: muted, fontSize: '9px' }, formatter: (v) => (v/1000).toFixed(0)+'k' } },
-        annotations: prevOi > 0 ? { yaxis: [{
-          y: prevOi, borderColor: amber, strokeDashArray: 4,
-          label: { text: 'Prev-day close OI: ' + prevOi.toLocaleString(),
-                   style: { color: amber, background: 'transparent', fontSize: '9px' },
-                   position: 'top', offsetY: -4 },
-        }] } : {},
-        grid: { borderColor: gridColor, strokeDashArray: 3 },
-        tooltip: {
-          theme: 'dark',
-          custom: ({ dataPointIndex }) => {
-            const r = rows[dataPointIndex];
-            return `<div style="padding:6px 8px;font-size:11px">${labels[dataPointIndex]} IST<br/>OI: ${Number(r.current_oi).toLocaleString()}<br/>Prev close OI: ${Number(r.previous_oi).toLocaleString()}<br/>Change: ${r.oi_change_pct>=0?'+':''}${Number(r.oi_change_pct).toFixed(2)}%</div>`;
-          },
-        },
-      });
-      inst.render();
-      this._oiHistInst[key] = inst;
     },
 
     /* ── Manual entry-price confirmation (sell_straddle, 2026-08-23) ───── */
@@ -8485,34 +8393,18 @@ function amoTest() {
                                           x-text="(p.option_type==='CE'?'▲ CALL ':'▼ PUT ')+sym+' '+p.strike"></span>
                                     <span style="color:var(--t-dim);font-size:10px"
                                           x-text="p.opened_at ? Math.max(0,Math.round((Date.now()-new Date(p.opened_at).getTime())/60000))+'m ago' : ''"></span>
-                                    <!-- 2026-09-16, direct user follow-up: futures-OI histogram was
-                                         only wired into the shortlist rows, not open positions -- same
-                                         toggle/data source, added here too so it's visible for a stock
-                                         once it's actually trading, not just while still shortlisted. -->
-                                    <button class="px-1 py-0.5 rounded" style="font-size:10px;border:1px solid var(--t-dim);cursor:pointer"
-                                            :style="oiHistOpen[_bk.binding_id+'_'+sym]?'color:var(--t-cyan);border-color:var(--t-cyan)':'color:var(--t-dim)'"
-                                            @click="toggleOiHistChart(_bk.binding_id+'_'+sym, _bk.client_id, _bk.binding_id, sym)">OI ▾</button>
                                   </div>
-                                  <div x-show="oiHistOpen[_bk.binding_id+'_'+sym]" class="mb-1.5" :id="'oihistchart_'+_bk.binding_id+'_'+sym"></div>
                                   <div class="flex justify-between">
                                     <span style="color:var(--t-muted)">Entry / LTP · Qty</span>
                                     <span x-text="fmt(p.entry_price)+' / '+(p.live_ltp!=null?fmt(p.live_ltp):'—')+' · '+p.qty"></span>
                                   </div>
-                                  <!-- 2026-09-16, direct user follow-up: prev-day futures OI shown
-                                       plainly here, not just behind the OI ▾ chart toggle above. -->
-                                  <div class="flex justify-between" x-show="p.futures_oi">
-                                    <span style="color:var(--t-muted)">Futures OI (prev close)</span>
+                                  <!-- 2026-09-16, direct user spec, REVISED: the gate compares TWO
+                                       FIXED points -- today's own 09:15 OI vs yesterday's own 15:39
+                                       OI -- not a repeatedly-polled live value. Both shown plainly. -->
+                                  <div class="flex justify-between" x-show="p.futures_oi" style="font-size:10px">
+                                    <span style="color:var(--t-muted)">Futures OI 09:15 / yday 15:39</span>
                                     <span :style="(p.futures_oi&&p.futures_oi.oi_change_pct>=0)?'color:var(--t-green)':'color:var(--t-red)'"
-                                          x-text="p.futures_oi ? (Math.round(p.futures_oi.current_oi).toLocaleString()+' ('+Math.round(p.futures_oi.previous_oi).toLocaleString()+') '+(p.futures_oi.oi_change_pct>=0?'+':'')+p.futures_oi.oi_change_pct.toFixed(2)+'%') : ''"></span>
-                                  </div>
-                                  <!-- 2026-09-16, direct user follow-up: yesterday's RAW pre-settlement
-                                       OI (its own last real 1-min tick, ~15:39 IST) -- distinct from
-                                       "prev close" above (NSE's officially settled EOD OI, confirmed
-                                       via NSE's own Bhavcopy the two can genuinely differ). -->
-                                  <div class="flex justify-between" x-show="p.futures_oi&&p.futures_oi.prev_day_last_tick_oi" style="font-size:10px">
-                                    <span style="color:var(--t-muted)">Futures OI (yday 15:39 tick)</span>
-                                    <span style="color:var(--t-dim)"
-                                          x-text="p.futures_oi&&p.futures_oi.prev_day_last_tick_oi ? Math.round(p.futures_oi.prev_day_last_tick_oi).toLocaleString() : ''"></span>
+                                          x-text="p.futures_oi ? (Math.round(p.futures_oi.today_0915_oi).toLocaleString()+' / '+Math.round(p.futures_oi.yday_1539_oi).toLocaleString()+' ('+(p.futures_oi.oi_change_pct>=0?'+':'')+p.futures_oi.oi_change_pct.toFixed(2)+'%)') : ''"></span>
                                   </div>
                                   <!-- 2026-09-06 spec, updated 2026-09-09: entry AND exit both trigger
                                        off the underlying's SPOT ticks -- the option is priced by these
@@ -8563,7 +8455,7 @@ function amoTest() {
                           <template x-if="(_bk.shortlist||[]).length===0">
                             <div class="text-center py-1" style="color:var(--t-dim)">No shortlist yet — scanning</div>
                           </template>
-                          <template x-for="row in (_bk.shortlist||[]).slice(0,8).map(s => ({sym: s, pc: (_bk.shortlist_pchange||{})[s], vw: _liveVwapDist(s, (_bk.shortlist_vwap||{})[s]), rt: (_bk.retest_trackers||{})[s], oiKey: (_bk.binding_id+'_'+s), foi: ((_bk.shortlist_vwap||{})[s]||{}).futures_oi}))" :key="row.sym">
+                          <template x-for="row in (_bk.shortlist||[]).slice(0,8).map(s => ({sym: s, pc: (_bk.shortlist_pchange||{})[s], vw: _liveVwapDist(s, (_bk.shortlist_vwap||{})[s]), rt: (_bk.retest_trackers||{})[s], foi: ((_bk.shortlist_vwap||{})[s]||{}).futures_oi}))" :key="row.sym">
                             <div class="flex items-center justify-between mb-1">
                               <span class="px-1.5 py-0.5 rounded font-bold"
                                     :style="row.pc>0?'background:rgba(16,185,129,0.15);color:var(--t-green)':'background:rgba(239,68,68,0.15);color:var(--t-red)'"
@@ -8581,30 +8473,15 @@ function amoTest() {
                                     :style="row.rt&&row.rt.armed?'background:rgba(6,182,212,0.15);color:var(--t-cyan)':'color:var(--t-dim)'"
                                     :title="row.rt&&row.rt.armed_at?('armed at '+row.rt.armed_at.slice(11,19)):''"
                                     x-text="row.rt&&row.rt.armed?('ARMED '+row.rt.armed_side):'not armed'"></span>
-                              <!-- 2026-09-16, direct user spec: real-time futures-OI histogram
-                                   per shortlisted stock -- toggle to expand a bar chart of
-                                   today's polled futures OI (every 5min, all shortlisted stocks). -->
-                              <button class="px-1 py-0.5 rounded" style="font-size:10px;border:1px solid var(--t-dim);cursor:pointer"
-                                      :style="oiHistOpen[row.oiKey]?'color:var(--t-cyan);border-color:var(--t-cyan)':'color:var(--t-dim)'"
-                                      @click="toggleOiHistChart(row.oiKey, _bk.client_id, _bk.binding_id, row.sym)">OI ▾</button>
                             </div>
-                            <!-- 2026-09-16, direct user follow-up: prev-day futures OI shown
-                                 plainly, not just behind the OI ▾ chart toggle. -->
+                            <!-- 2026-09-16, direct user spec, REVISED: the gate compares TWO
+                                 FIXED points -- today's own 09:15 OI vs yesterday's own 15:39
+                                 OI -- not a repeatedly-polled live value. Both shown plainly. -->
                             <div class="flex justify-between mb-1" x-show="row.foi" style="font-size:10px">
-                              <span style="color:var(--t-muted)">Futures OI (prev close)</span>
+                              <span style="color:var(--t-muted)">Futures OI 09:15 / yday 15:39</span>
                               <span :style="(row.foi&&row.foi.oi_change_pct>=0)?'color:var(--t-green)':'color:var(--t-red)'"
-                                    x-text="row.foi ? (Math.round(row.foi.current_oi).toLocaleString()+' ('+Math.round(row.foi.previous_oi).toLocaleString()+') '+(row.foi.oi_change_pct>=0?'+':'')+row.foi.oi_change_pct.toFixed(2)+'%') : ''"></span>
+                                    x-text="row.foi ? (Math.round(row.foi.today_0915_oi).toLocaleString()+' / '+Math.round(row.foi.yday_1539_oi).toLocaleString()+' ('+(row.foi.oi_change_pct>=0?'+':'')+row.foi.oi_change_pct.toFixed(2)+'%)') : ''"></span>
                             </div>
-                            <!-- 2026-09-16, direct user follow-up: yesterday's RAW pre-settlement
-                                 OI (own last real 1-min tick, ~15:39 IST) -- confirmed via NSE's own
-                                 Bhavcopy to genuinely differ from the officially settled "prev close"
-                                 above. -->
-                            <div class="flex justify-between mb-1" x-show="row.foi&&row.foi.prev_day_last_tick_oi" style="font-size:10px">
-                              <span style="color:var(--t-muted)">Futures OI (yday 15:39 tick)</span>
-                              <span style="color:var(--t-dim)"
-                                    x-text="row.foi&&row.foi.prev_day_last_tick_oi ? Math.round(row.foi.prev_day_last_tick_oi).toLocaleString() : ''"></span>
-                            </div>
-                            <div x-show="oiHistOpen[row.oiKey]" class="mb-2" :id="'oihistchart_'+row.oiKey"></div>
                           </template>
                           <div x-show="(_bk.shortlist||[]).length>8" class="mt-1 text-right" style="color:var(--t-dim);font-size:10px"
                                x-text="'+ '+((_bk.shortlist||[]).length-8)+' more'"></div>

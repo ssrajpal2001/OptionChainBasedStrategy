@@ -184,13 +184,6 @@ _OI_REGIME_CHECK_TIME_DEFAULT = "09:16"
 _OI_REGIME_INCREASE_MIN_PCT_DEFAULT = 1.0
 _OI_REGIME_DECREASE_MAX_PCT_DEFAULT = -5.0
 
-# 2026-09-16, direct user spec: real-time futures-OI histogram in the
-# dashboard for every shortlisted stock (not just when OI_REGIME_GATE_ENABLED
-# is on) -- 5-minute poll cadence, direct user choice (coarser than the
-# 60s oi_spurt_history cadence; futures OI moves far less minute-to-minute
-# than NSE's OI-spurt ranking does).
-_FUTURES_OI_HISTORY_POLL_SEC_DEFAULT = 300.0
-
 # 2026-09-16, direct user spec: pre-entry trap-target-already-touched gate
 # (see _check_trap_target_touched_today's own docstring). Once a signal is
 # skipped this way, re-checking the (real, network-fetching) touched-today
@@ -604,21 +597,15 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._option_sl_bar_cur: Dict[str, dict] = {}   # symbol -> {"h","l","c","ts"} for the forming OPTION-premium bar
         self._live_sl: Dict[str, float] = {}         # symbol -> current live SL level (armed bar's low, option-premium terms)
         self._live_target: Dict[str, float] = {}     # symbol -> current live target level (option-premium terms)
-        # 2026-09-16, direct user follow-up: "I also want prev day future data
-        # to be shown in OI scanner stocks section in position part" -- the
-        # futures-OI histogram (OI ▾ toggle) only shows this on click; this
-        # cache makes the latest reading directly, plainly visible on every
-        # open position AND shortlist row without needing to open the chart.
-        # symbol -> (current_oi, previous_oi, oi_change_pct); populated by
-        # both _do_futures_oi_history_poll (every 5min, all shortlisted
-        # symbols) and _compute_oi_regime_side (opportunistically, whenever
-        # the gate itself runs) -- whichever fires first for a given symbol.
-        self._futures_oi_latest: Dict[str, tuple] = {}
-        # 2026-09-16, direct user follow-up: yesterday's RAW pre-settlement
-        # OI (last real 1-min tick, e.g. 15:39 IST) -- distinct from
-        # previous_oi above (NSE's officially settled EOD OI). symbol ->
-        # float. Fetched lazily, once per (symbol, day), inside
-        # _fetch_futures_oi_snapshot.
+        # 2026-09-16, direct user spec, REVISED: the futures-OI-regime gate
+        # compares two FIXED historical points (today's own 09:15 OI vs
+        # yesterday's own 15:39 OI), not a repeatedly-polled "live now"
+        # value -- see _compute_oi_regime_side's own docstring for the full
+        # mechanic and rationale (independently verified against NSE's own
+        # real Bhavcopy). Both fetched lazily, once per (symbol, day), and
+        # cached forever after that -- they never change once fetched, so
+        # there is deliberately no refresh/poll loop for either.
+        self._today_0915_oi: Dict[str, float] = {}
         self._prev_day_last_tick_oi: Dict[str, float] = {}
         # 2026-08-28 real incident fix: chronological history of every ADVERSE
         # bar's own low since entry, per symbol -- feeds
@@ -683,8 +670,6 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._rank_dropped: set = set()
         # ── Full-day OI-spurt history capture (2026-09-07, direct user spec) ──
         self._oi_spurt_hist_last_poll_ts: float = 0.0
-        # ── Real-time futures-OI histogram (2026-09-16, direct user spec) ──
-        self._futures_oi_hist_last_poll_ts: float = 0.0
         # ── Tick-by-tick VWAP accumulation (2026-09-10, direct user spec) ──
         self._vwap_tick_volume_cum_last: dict = {}
 
@@ -752,10 +737,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         # 2026-09-07, direct user spec: independent full-day, threshold-agnostic
         # OI-spurt history capture -- see _oi_spurt_history_loop's own docstring.
         self._oi_spurt_hist_last_poll_ts = 0.0
-        # 2026-09-16, direct user spec: real-time futures-OI histogram --
-        # see _futures_oi_history_loop's own docstring.
-        self._futures_oi_hist_last_poll_ts = 0.0
-        self._futures_oi_latest = {}
+        self._today_0915_oi = {}
         self._prev_day_last_tick_oi = {}
         # 2026-09-10, direct user spec: tick-by-tick VWAP accumulation --
         # see _spot_tick_loop's own VWAP-update block.
@@ -804,8 +786,6 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             self._rank_tracking_loop(), name=f"oiorb_rank_{self._client_id}_{self._binding_id}"))
         self._tasks.append(asyncio.create_task(
             self._oi_spurt_history_loop(), name=f"oiorb_spurthist_{self._client_id}_{self._binding_id}"))
-        self._tasks.append(asyncio.create_task(
-            self._futures_oi_history_loop(), name=f"oiorb_futoihist_{self._client_id}_{self._binding_id}"))
         self._tasks.append(asyncio.create_task(
             self._spot_feed_retry_loop(), name=f"oiorb_spotretry_{self._client_id}_{self._binding_id}"))
         self._clog.info("OiOrb[%s/%s]: started.", self._client_id, self._binding_id)
@@ -1408,75 +1388,6 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         if self._top20_mode:
             await self._stream_new_top20_symbols(ranked, now, cfg)
 
-    async def _futures_oi_history_loop(self) -> None:
-        """2026-09-16, direct user spec: "the UI should show the future OI
-        in a histogram basis for that specific stock and it should be
-        updated on real time." Independent of _oi_spurt_history_loop above
-        (different data source entirely -- Upstox's own futures V3 quote,
-        not NSE's OI-spurt/rank endpoints) and independent of whether
-        OI_REGIME_GATE_ENABLED is on (direct user choice: cover every
-        shortlisted stock, not just ones where the gate is actually used).
-
-        _compute_oi_regime_side's own snapshot is a ONE-SHOT, once-per-
-        (symbol,day) read -- it was never a time series. This loop is that
-        missing time series: every FUTURES_OI_HISTORY_POLL_SEC (default
-        300s/5min, direct user choice), for every symbol currently in
-        self._shortlist_symbols, fetch a fresh live (current_oi,
-        previous_oi, oi_change_pct) reading via the same
-        _fetch_futures_oi_snapshot helper the gate uses, and persist it via
-        store.record_futures_oi_history -- purely observational, never
-        reads or writes _positions/_rejected/_already_fired, same
-        zero-trading-effect precedent as _oi_spurt_history_loop."""
-        while self._running:
-            if not self._restore_from_db_ready:
-                await asyncio.sleep(1)
-                continue
-            now = datetime.now(IST)
-            cfg = self._screener_cfg
-            if not cfg.get("FUTURES_OI_HISTORY_ENABLED", True):
-                await asyncio.sleep(60)
-                continue
-            now_ts = now.timestamp()
-            interval = float(cfg.get("FUTURES_OI_HISTORY_POLL_SEC",
-                                      _FUTURES_OI_HISTORY_POLL_SEC_DEFAULT) or
-                              _FUTURES_OI_HISTORY_POLL_SEC_DEFAULT)
-            if now_ts - self._futures_oi_hist_last_poll_ts < interval:
-                await asyncio.sleep(5)
-                continue
-            self._futures_oi_hist_last_poll_ts = now_ts
-            try:
-                await self._do_futures_oi_history_poll(now)
-            except Exception:
-                self._clog.warning(
-                    "OiOrb[%s/%s]: futures-OI history poll failed (non-fatal, will retry "
-                    "next interval).", self._client_id, self._binding_id, exc_info=True)
-            await asyncio.sleep(5)
-
-    async def _do_futures_oi_history_poll(self, now: datetime) -> None:
-        """One poll cycle over today's shortlist -- split out for direct
-        unit testing, same shape as _do_oi_spurt_history_poll. A single
-        symbol's fetch failure (no futures key, stale token, dead quote)
-        never aborts the rest of the cycle -- each symbol is independently
-        best-effort."""
-        poll_ts = now.isoformat(timespec="seconds")
-        for sym in list(self._shortlist_symbols):
-            try:
-                snap = await self._fetch_futures_oi_snapshot(sym)
-            except Exception:
-                self._clog.warning(
-                    "OiOrb[%s/%s]: %s futures-OI history fetch failed (non-fatal).",
-                    self._client_id, self._binding_id, sym, exc_info=True)
-                continue
-            if snap is None:
-                continue
-            current_oi, previous_oi, oi_change_pct = snap
-            await asyncio.to_thread(
-                store.record_futures_oi_history, self._client_id, self._binding_id, sym,
-                poll_ts, current_oi, previous_oi, oi_change_pct)
-        self._clog.info(
-            "OiOrb[%s/%s]: FUTURES-OI HISTORY POLL @%s for %d shortlisted symbol(s).",
-            self._client_id, self._binding_id, now.strftime("%H:%M:%S"), len(self._shortlist_symbols))
-
     async def _stream_new_top20_symbols(self, ranked, now: datetime, cfg: dict) -> None:
         """Adds any symbol from this poll's top-20 that (a) isn't already
         shortlisted and (b) clears the same PRICE_MOVE_MIN_PCT filter
@@ -1884,7 +1795,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             immediate_entry_on = cfg.get("IMMEDIATE_ENTRY_ENABLED", False)
             if self._regime is not None and entry_window_open:
                 regime_filter_on = cfg.get("REGIME_FILTER_ENABLED", True)
-                for sym in self._shortlist_symbols:
+                for sym in list(self._shortlist_symbols):
                     if sym in self._positions or sym in self._pending_contracts:
                         continue
 
@@ -1893,9 +1804,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                     # _compute_oi_regime_side's own docstring for the full
                     # mechanic). When enabled, REPLACES the plain pChange-
                     # based side with the OI-regime's own verdict -- computed
-                    # once per (symbol, day) at/after OI_REGIME_CHECK_TIME;
-                    # a symbol whose regime comes back NEUTRAL/blocked never
-                    # reaches the entry mechanic at all today.
+                    # once per (symbol, day) at/after OI_REGIME_CHECK_TIME.
                     if cfg.get("OI_REGIME_GATE_ENABLED", False):
                         if sym not in self._oi_regime_computed:
                             check_time = cfg.get("OI_REGIME_CHECK_TIME", _OI_REGIME_CHECK_TIME_DEFAULT)
@@ -1905,6 +1814,21 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                             self._oi_regime_side[sym] = await self._compute_oi_regime_side(sym)
                         side = self._oi_regime_side.get(sym)
                         if side is None:
+                            # 2026-09-16, direct user spec: a symbol whose OI-
+                            # regime comes back NEUTRAL (or fails to compute
+                            # at all -- conservative, same as the gate's own
+                            # docstring) does not just get skipped this cycle,
+                            # it comes OUT of the pool entirely for the rest
+                            # of today ("that stock will come out of pool for
+                            # whose day"). New stocks keep entering the pool
+                            # separately via the existing OI-spurt streaming
+                            # mechanism, unaffected.
+                            if sym in self._shortlist_symbols:
+                                self._shortlist_symbols.remove(sym)
+                            self._shortlist_pchange.pop(sym, None)
+                            self._clog.info(
+                                "OiOrb[%s/%s]: %s removed from pool -- OI-regime NEUTRAL/blocked "
+                                "for today.", self._client_id, self._binding_id, sym)
                             continue
                     else:
                         side = screener.side_from_pchange(self._shortlist_pchange.get(sym, 0.0))
@@ -3821,101 +3745,58 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 self._client_id, self._binding_id, sym, exc_info=True)
             return False, None
 
-    async def _fetch_futures_oi_snapshot(self, sym: str) -> Optional[tuple]:
-        """Resolves sym's own futures contract and returns a fresh live
-        (current_oi, previous_oi, oi_change_pct) reading from Upstox's V3
-        quote endpoint -- shared by _compute_oi_regime_side's one-shot gate
-        AND _futures_oi_history_loop's repeated polling below, so the
-        futures-key/token/quote-fetch plumbing exists exactly once. Returns
-        None on any failure (no futures key, no token, no quote, non-
-        positive OI) -- callers decide what "no data" means for their own
-        purpose (blocks a trade for the gate; simply skips a poll cycle for
-        the history loop)."""
-        # 2026-09-16, real live incident: every None-return branch below used
-        # to be completely silent -- no futures key/no token/no quote/non-
-        # positive OI all looked identical to a caller, and a caller like
-        # _compute_oi_regime_side that itself just returns None on a None
-        # snapshot meant the WHOLE gate could go quiet with zero log
-        # evidence of why (confirmed live: 6+ minutes of active entry-loop
-        # cycling, zero OI-REGIME lines, no exception either -- this silent-
-        # None path is the only remaining explanation). Each branch now logs
-        # exactly which precondition failed, WARNING-level, once per call.
+    async def _resolve_futures_key_and_token(self, sym: str) -> Optional[tuple]:
+        """Resolves sym's own futures contract key + the dedicated "upstox2"
+        feeder credential -- shared plumbing for both fixed-point OI fetches
+        below. Returns None (with a WARNING log identifying exactly which
+        precondition failed) on any failure, never silently.
+
+        2026-09-16, direct user correction: the plain "upstox" provider row
+        is the NIFTY/SENSEX account, shared with sell_straddle/iron_fly/
+        cag_straddle -- and, confirmed live the same day, effectively also
+        with this client's OWN execution-broker Upstox session (same real
+        account, single-session-per-account enforced server-side by
+        Upstox), so refreshing either one kept silently invalidating the
+        other. "upstox2" (labeled CRUDEOIL in the admin feeder panel) is
+        the user's own separate, dedicated account already set up
+        specifically for sell_straddle + this OI-ORB screener."""
         from data_layer.instrument_registry import REGISTRY
         await asyncio.to_thread(REGISTRY.load_futures_only_sync, sym, datetime.now(IST).date())
         fut_key = REGISTRY.get_futures_upstox(sym)
         if not fut_key:
             self._clog.warning(
-                "OiOrb[%s/%s]: %s futures-OI snapshot -- no futures key resolved.",
+                "OiOrb[%s/%s]: %s futures-OI fetch -- no futures key resolved.",
                 self._client_id, self._binding_id, sym)
             return None
-        # 2026-09-16, direct user correction: the plain "upstox" provider row
-        # is the NIFTY/SENSEX account, shared with sell_straddle/iron_fly/
-        # cag_straddle -- and, confirmed live the same day, effectively also
-        # with this client's OWN execution-broker Upstox session (same real
-        # account, single-session-per-account enforced server-side by
-        # Upstox), so refreshing either one kept silently invalidating the
-        # other. "upstox2" (labeled CRUDEOIL in the admin feeder panel) is
-        # the user's own separate, dedicated account already set up
-        # specifically for sell_straddle + this OI-ORB screener -- using it
-        # here instead avoids the conflict entirely, no new account needed.
         from data_layer.client_db import ClientDB
         creds = await asyncio.to_thread(ClientDB().get_feeder_creds_sync, "upstox2")
         token = (creds or {}).get("access_token", "")
         if not token:
             self._clog.warning(
-                "OiOrb[%s/%s]: %s futures-OI snapshot -- no upstox2 access_token stored "
+                "OiOrb[%s/%s]: %s futures-OI fetch -- no upstox2 access_token stored "
                 "in ClientDB (feeder_creds) for this client.",
                 self._client_id, self._binding_id, sym)
             return None
-        from data_layer.historical_candles import fetch_upstox_v3_quote
-        quote = await fetch_upstox_v3_quote(fut_key, token)
-        if not quote:
-            self._clog.warning(
-                "OiOrb[%s/%s]: %s futures-OI snapshot -- V3 quote fetch returned nothing "
-                "for key=%s (stale/invalid token, or Upstox API error).",
-                self._client_id, self._binding_id, sym, fut_key)
-            return None
-        current_oi = float(quote.get("oi") or 0.0)
-        previous_oi = float(quote.get("previous_oi") or 0.0)
-        if current_oi <= 0 or previous_oi <= 0:
-            self._clog.warning(
-                "OiOrb[%s/%s]: %s futures-OI snapshot -- non-positive OI in quote "
-                "(current_oi=%s previous_oi=%s) for key=%s.",
-                self._client_id, self._binding_id, sym, current_oi, previous_oi, fut_key)
-            return None
-        oi_change_pct = (current_oi - previous_oi) / previous_oi * 100.0
-        self._futures_oi_latest[sym] = (current_oi, previous_oi, oi_change_pct)
-
-        # 2026-09-16, direct user follow-up after independently verifying (via
-        # NSE's own real Bhavcopy) that "previous_oi" above is NSE's OFFICIALLY
-        # SETTLED end-of-day OI, distinct from the raw pre-settlement OI seen
-        # in yesterday's own last real tick (e.g. 15:39 IST) -- both numbers
-        # are real, so surface the raw one too rather than picking one. Fetched
-        # ONCE per (symbol, day), not on every poll -- a full day's 1-min
-        # history is a much heavier call than the V3 quote above. Best-effort:
-        # a failure here never blocks the (current_oi, previous_oi,
-        # oi_change_pct) result this function exists to return.
-        if sym not in self._prev_day_last_tick_oi:
-            try:
-                from data_layer.historical_candles import fetch_upstox_prev_day_last_tick_oi
-                _prev_tick_oi = await fetch_upstox_prev_day_last_tick_oi(fut_key, token)
-                if _prev_tick_oi is not None:
-                    self._prev_day_last_tick_oi[sym] = _prev_tick_oi
-            except Exception:
-                self._clog.warning(
-                    "OiOrb[%s/%s]: %s prev-day-last-tick OI fetch failed (non-fatal).",
-                    self._client_id, self._binding_id, sym, exc_info=True)
-
-        return (current_oi, previous_oi, oi_change_pct)
+        return (fut_key, token)
 
     async def _compute_oi_regime_side(self, sym: str) -> Optional[str]:
-        """2026-09-16, direct user spec: futures-OI-regime directional gate,
-        evaluated once per (symbol, day) at/after OI_REGIME_CHECK_TIME.
+        """2026-09-16, direct user spec, REVISED same day after independently
+        verifying (against NSE's own real Bhavcopy) exactly what Upstox's
+        various OI fields represent: the gate now compares two FIXED
+        historical points, not a "live now" reading --
 
-        OI_Change% = (current_futures_oi - previous_session_futures_closing_
-        oi) / previous_session_futures_closing_oi * 100, using ONLY the
-        underlying's own futures contract OI -- never options OI, never
-        today's opening OI as baseline.
+        OI_Change% = (today's own 09:15 futures OI - yesterday's own 15:39
+        futures OI) / yesterday's own 15:39 futures OI * 100
+
+        -- computed identically regardless of what time of day this symbol
+        actually enters the shortlist (a stock added at 14:00 still gets
+        its own real 09:15 reading, fetched by walking back into today's
+        already-elapsed intraday history, never a "value right now").
+        Evaluated once per (symbol, day) at/after OI_REGIME_CHECK_TIME, then
+        cached forever for that symbol -- these two points never change
+        once the day's 09:15 bar has printed, so there is deliberately no
+        repeated re-fetch/refresh loop for this (unlike the superseded
+        current-OI-vs-settled-close design this replaced).
 
         > +1%  (INCREASING): direction comes ONLY from yesterday's candle
                (close>open -> CALL-only, close<open -> PUT-only) -- today's
@@ -3924,30 +3805,52 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                direction comes ONLY from "today's trend", mapped to the
                stock's own live pChange sign (self._shortlist_pchange) --
                the SAME convention screener.side_from_pchange already uses
-               everywhere else in this codebase for "today's direction",
-               not a new bespoke definition.
-        otherwise (NEUTRAL): no trade -- returns None.
+               everywhere else in this codebase for "today's direction".
+        otherwise (NEUTRAL, -5%..+1% inclusive-exclusive): no trade -- the
+               caller (the entry loop) removes this symbol from the pool
+               entirely for the rest of the day, per direct spec ("that
+               stock will come out of pool for whose day").
 
         Best-effort but CONSERVATIVE, unlike most other real-data seeds in
         this file: this gate is a hard prerequisite for entry per direct
-        spec ("Otherwise: No trade today"), so any failure (no futures key,
-        no token, no quote, no daily candle) also returns None -- blocking
-        the trade -- rather than degrading to "let it proceed" the way
-        purely auxiliary seeds (VWAP backfill, trap-exit zones) do."""
+        spec, so any failure (no futures key, no token, no 09:15 bar yet,
+        no prior-day bar, no daily candle) also returns None -- blocking
+        the trade (and removing the symbol from the pool, same as a
+        genuine NEUTRAL) -- rather than degrading to "let it proceed" the
+        way purely auxiliary seeds (VWAP backfill, trap-exit zones) do."""
         try:
-            snap = await self._fetch_futures_oi_snapshot(sym)
-            if snap is None:
+            resolved = await self._resolve_futures_key_and_token(sym)
+            if resolved is None:
                 return None
-            current_oi, previous_oi, oi_change_pct = snap
+            fut_key, token = resolved
 
-            from data_layer.historical_candles import fetch_upstox_daily
-            from data_layer.instrument_registry import REGISTRY
-            from data_layer.client_db import ClientDB
-            fut_key = REGISTRY.get_futures_upstox(sym)
-            # Same "upstox2" account as _fetch_futures_oi_snapshot above --
-            # keep both calls on the same dedicated feeder credential.
-            creds = await asyncio.to_thread(ClientDB().get_feeder_creds_sync, "upstox2")
-            token = (creds or {}).get("access_token", "")
+            from data_layer.historical_candles import (
+                fetch_upstox_today_0915_oi, fetch_upstox_prev_day_last_tick_oi, fetch_upstox_daily,
+            )
+
+            if sym not in self._today_0915_oi:
+                oi = await fetch_upstox_today_0915_oi(fut_key, token)
+                if oi is not None:
+                    self._today_0915_oi[sym] = oi
+            today_oi = self._today_0915_oi.get(sym)
+            if today_oi is None:
+                self._clog.warning(
+                    "OiOrb[%s/%s]: %s OI-regime -- no 09:15 bar for today yet (key=%s).",
+                    self._client_id, self._binding_id, sym, fut_key)
+                return None
+
+            if sym not in self._prev_day_last_tick_oi:
+                oi = await fetch_upstox_prev_day_last_tick_oi(fut_key, token)
+                if oi is not None:
+                    self._prev_day_last_tick_oi[sym] = oi
+            yday_oi = self._prev_day_last_tick_oi.get(sym)
+            if not yday_oi:
+                self._clog.warning(
+                    "OiOrb[%s/%s]: %s OI-regime -- no prior trading day's 1-min data (key=%s).",
+                    self._client_id, self._binding_id, sym, fut_key)
+                return None
+
+            oi_change_pct = (today_oi - yday_oi) / yday_oi * 100.0
 
             cfg = self._screener_cfg
             inc_min = float(cfg.get("OI_REGIME_INCREASE_MIN_PCT", _OI_REGIME_INCREASE_MIN_PCT_DEFAULT))
@@ -3971,16 +3874,16 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 side = None
 
             self._clog.info(
-                "OiOrb[%s/%s]: %s OI-REGIME -- current_oi=%.0f previous_oi=%.0f change=%+.2f%% "
+                "OiOrb[%s/%s]: %s OI-REGIME -- today_0915_oi=%.0f yday_1539_oi=%.0f change=%+.2f%% "
                 "regime=%s -> side=%s",
-                self._client_id, self._binding_id, sym, current_oi, previous_oi, oi_change_pct,
+                self._client_id, self._binding_id, sym, today_oi, yday_oi, oi_change_pct,
                 regime, side or "NONE (blocked)",
             )
             await asyncio.to_thread(
                 store.log_signal_event, self._client_id, self._binding_id, sym,
                 "oi_regime_computed", side=side or "",
                 detail=f"oi_change_pct={oi_change_pct:+.2f}% regime={regime} "
-                       f"current_oi={current_oi:.0f} previous_oi={previous_oi:.0f}")
+                       f"today_0915_oi={today_oi:.0f} yday_1539_oi={yday_oi:.0f}")
             return side
         except Exception:
             self._clog.warning(
@@ -4691,14 +4594,14 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             spot_ltp = self._live_spot_ltp.get(sym)
             vwap_gap_pct = (round((spot_ltp - vwap) / vwap * 100.0, 3)
                              if (vwap and spot_ltp is not None) else None)
-            # 2026-09-16, direct user follow-up: "I also want prev day future
-            # data to be shown in OI scanner stocks section in position part"
-            # -- plain, directly visible (not hidden behind the OI ▾ chart
-            # toggle), same cache _fetch_futures_oi_snapshot populates.
-            _foi = self._futures_oi_latest.get(sym)
-            futures_oi = ({"current_oi": _foi[0], "previous_oi": _foi[1], "oi_change_pct": round(_foi[2], 2),
-                           "prev_day_last_tick_oi": self._prev_day_last_tick_oi.get(sym)}
-                          if _foi is not None else None)
+            # 2026-09-16, direct user spec, REVISED: the two FIXED points the
+            # regime gate actually compares (today's own 09:15 OI, yesterday's
+            # own 15:39 OI) -- plain, directly visible on the position card.
+            _t0915 = self._today_0915_oi.get(sym)
+            _y1539 = self._prev_day_last_tick_oi.get(sym)
+            futures_oi = ({"today_0915_oi": _t0915, "yday_1539_oi": _y1539,
+                           "oi_change_pct": round((_t0915 - _y1539) / _y1539 * 100.0, 2)}
+                          if (_t0915 is not None and _y1539) else None)
             positions[sym] = {
                 "option_type": p["contract"].option_type,
                 "strike": p["contract"].strike,
@@ -4759,14 +4662,14 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             vwap = self._vwap.current(sym)
             dist = round(ltp - vwap, 2) if (ltp is not None and vwap) else None
             dist_pct = round((ltp - vwap) / vwap * 100.0, 2) if (ltp is not None and vwap) else None
-            _foi = self._futures_oi_latest.get(sym)
+            _t0915 = self._today_0915_oi.get(sym)
+            _y1539 = self._prev_day_last_tick_oi.get(sym)
             shortlist_vwap[sym] = {
                 "ltp": ltp, "vwap": round(vwap, 2) if vwap is not None else None,
                 "vwap_dist": dist, "vwap_dist_pct": dist_pct,
-                "futures_oi": ({"current_oi": _foi[0], "previous_oi": _foi[1],
-                                "oi_change_pct": round(_foi[2], 2),
-                                "prev_day_last_tick_oi": self._prev_day_last_tick_oi.get(sym)}
-                               if _foi is not None else None),
+                "futures_oi": ({"today_0915_oi": _t0915, "yday_1539_oi": _y1539,
+                                "oi_change_pct": round((_t0915 - _y1539) / _y1539 * 100.0, 2)}
+                               if (_t0915 is not None and _y1539) else None),
             }
         # 2026-09-09, direct user spec: surface each shortlisted (not-yet-
         # entered) symbol's RollingVwapRetestTracker arm state -- top20 mode

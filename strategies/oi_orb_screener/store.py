@@ -468,55 +468,6 @@ def load_latest_scan_symbols(client_id: str, binding_id: str, trade_date: Option
         con.close()
 
 
-# ── futures_oi_history (2026-09-16, direct user spec): real-time futures-OI
-# histogram per shortlisted stock in the dashboard. ────────────────────────
-
-def record_futures_oi_history(client_id: str, binding_id: str, symbol: str, poll_ts: str,
-                               current_oi: float, previous_oi: float, oi_change_pct: float,
-                               trade_date: Optional[str] = None) -> None:
-    """One row per (symbol, poll) -- the intraday futures-OI time series
-    _compute_oi_regime_side's own one-shot snapshot never kept anywhere."""
-    init_db()
-    td = trade_date or _today()
-    con = sqlite3.connect(_DB_PATH)
-    try:
-        con.execute(
-            """INSERT INTO futures_oi_history
-                   (client_id, binding_id, trade_date, poll_ts, symbol,
-                    current_oi, previous_oi, oi_change_pct)
-               VALUES (?,?,?,?,?,?,?,?)""",
-            (client_id, binding_id, td, poll_ts, symbol, current_oi, previous_oi, oi_change_pct),
-        )
-        con.commit()
-    except Exception as exc:
-        logger.error("oi_orb store.record_futures_oi_history failed: %s", exc)
-    finally:
-        con.close()
-
-
-def get_futures_oi_history(client_id: str, binding_id: str, symbol: str,
-                            trade_date: Optional[str] = None) -> List[dict]:
-    """Today's full futures-OI poll series for one symbol, oldest-first --
-    what the dashboard's histogram panel renders."""
-    init_db()
-    td = trade_date or _today()
-    con = sqlite3.connect(_DB_PATH)
-    con.row_factory = sqlite3.Row
-    try:
-        rows = con.execute(
-            """SELECT poll_ts, current_oi, previous_oi, oi_change_pct FROM futures_oi_history
-               WHERE client_id=? AND binding_id=? AND trade_date=? AND symbol=?
-               ORDER BY poll_ts""",
-            (client_id, binding_id, td, symbol),
-        ).fetchall()
-        return [dict(r) for r in rows]
-    except Exception as exc:
-        logger.error("oi_orb store.get_futures_oi_history failed: %s", exc)
-        return []
-    finally:
-        con.close()
-
-
 # ── oi_orb_top20_daily_scan (2026-09-07, direct user spec, new strategy
 # "oi_orb_screener_top20"): "register all stocks in database for future
 # backtest and optimisation" -- ALL 20 rank-scanned stocks once per day,

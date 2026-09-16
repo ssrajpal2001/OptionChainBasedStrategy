@@ -200,6 +200,21 @@ async def fetch_upstox_intraday_1m(instrument_key: str, access_token: str) -> Li
     return await asyncio.to_thread(_get)
 
 
+async def fetch_upstox_today_0915_oi(instrument_key: str, access_token: str) -> Optional[float]:
+    """2026-09-16, direct user spec (OI-ORB futures-OI-regime gate, REVISED):
+    today's own 09:15 (market-open) OI, regardless of what time of day this
+    is actually called -- a stock joining the shortlist at, say, 14:00 still
+    gets ITS OWN real 09:15 reading, not a "live now" value. Simply the
+    first row of fetch_upstox_intraday_1m's own oldest-first series (the
+    intraday endpoint always starts at market open). None if today has no
+    bars yet (called before 09:15/09:16) or on any fetch failure."""
+    rows = await fetch_upstox_intraday_1m(instrument_key, access_token)
+    if not rows:
+        return None
+    oi = rows[0].get("oi")
+    return float(oi) if oi else None
+
+
 async def fetch_fyers_intraday_1m(symbol: str, client_id: str, access_token: str) -> List[dict]:
     """TODAY's 1-min candles (oldest-first) for a Fyers symbol.
 
