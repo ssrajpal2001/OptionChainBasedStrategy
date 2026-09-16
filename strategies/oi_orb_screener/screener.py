@@ -136,7 +136,22 @@ CONFIG = {
     # SAME cutoff (was 10:30). No new entries fire and no further scanning
     # happens after this time; a position already running is unaffected --
     # it still only closes at EOD square-off, target, or SL.
-    "ENTRY_WINDOW_END": "15:00",
+    #
+    # 2026-09-17, direct user spec, TIGHTENED from 15:00 to 13:30: real
+    # 7-day backtest evidence (frozen entry+SL mechanic, real 09-01/02/03/
+    # 04/07/08/09 data) found entries firing after 13:30 netted only
+    # +3.99 pts across 7 real trades vs +204.20 pts across the 12 real
+    # trades at/before 13:30 -- late entries add almost no value.
+    # Separately confirmed via a raw threshold-free session-movement check
+    # across all 35 real stocks reached that day: 32 of 35 had their
+    # single biggest intraday range in the 09:15-11:30 morning session,
+    # ZERO in the 13:30-15:30 afternoon -- real movement on these days was
+    # front-loaded, so an entry firing late is usually chasing a move
+    # that's already mostly finished. A tighter 11:30 cutoff was also
+    # tested and rejected (would have excluded SOLARINDS's real +70.30
+    # winner, entered 12:27, for no net benefit -- 13:30 was confirmed the
+    # better line, not just a guess).
+    "ENTRY_WINDOW_END": "13:30",
     # 2026-09-16, direct user follow-up: this shipped opt-in/default-off
     # (see engine.py's _compute_oi_regime_side docstring); confirmed live via
     # 4 real trades (ATHERENERG/SOLARINDS/MCX/NESTLEIND, 2026-09-16) that
