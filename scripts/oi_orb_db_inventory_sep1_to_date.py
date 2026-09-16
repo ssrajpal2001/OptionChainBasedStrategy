@@ -2,15 +2,22 @@
 scripts/oi_orb_db_inventory_sep1_to_date.py
 
 Direct user follow-up, 2026-09-16: "I HAVE DATA FROM 1ST OF SEP TILL DATE
-IN DB." Before building a multi-day backtest across that range, this
-script inspects what's ACTUALLY stored in the real data/oi_orb_screener.db
-on EC2 -- which trade_dates have real shortlist/scan/signal/position rows,
-and how many -- so any multi-day backtest is built on a verified real
-universe per day, not an assumption. Read-only, no writes.
+IN DB." First pass against data/oi_orb_screener.db found only 2026-09-16
+rows -- but the LIVE process's own cwd (confirmed via `pm2 describe`) is
+the same directory we already checked, so that emptiness is real, not a
+path mismatch. What WAS found: a real archived copy from BEFORE a DB
+wipe, at archive/20260910_085314/oi_orb_screener.db (5.4MB vs. the
+current 266KB), dated 2026-09-10 -- almost certainly holds real history
+from whenever the screener started logging through 2026-09-10 08:53.
+This script now accepts that (or any) db path as an optional CLI arg so
+it can inspect the archive without overwriting the DB_PATH default used
+for the live one. Read-only, no writes, either way.
 
-MUST run on EC2 (reads the real data/oi_orb_screener.db).
+MUST run on EC2.
 
-Usage: python scripts/oi_orb_db_inventory_sep1_to_date.py
+Usage:
+  python scripts/oi_orb_db_inventory_sep1_to_date.py                    # live db (data/oi_orb_screener.db)
+  python scripts/oi_orb_db_inventory_sep1_to_date.py archive/20260910_085314/oi_orb_screener.db
 """
 from __future__ import annotations
 
@@ -19,7 +26,7 @@ import sys
 
 sys.path.insert(0, ".")
 
-DB_PATH = "data/oi_orb_screener.db"
+DB_PATH = sys.argv[1] if len(sys.argv) > 1 else "data/oi_orb_screener.db"
 START_DATE = "2026-09-01"
 
 
