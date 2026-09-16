@@ -1781,6 +1781,8 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             # docstrings. _ha_stoch_check_exit is kept defined, not deleted,
             # per this codebase's own convention for superseded mechanics.
             for sym, pos in list(self._positions.items()):
+                await self._backfill_futures_oi_display(sym)
+
                 ltp = self._live_price(sym, live)
                 if ltp is None:
                     continue
@@ -3798,6 +3800,42 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 self._client_id, self._binding_id, sym)
             return None
         return (fut_key, token)
+
+    async def _backfill_futures_oi_display(self, sym: str) -> None:
+        """2026-09-16, real live incident: a process restart (or a position
+        simply outliving the process that opened it) left an open
+        position's futures_oi display data blank forever -- the OI-regime
+        gate only ever populates self._today_0915_oi/_prev_day_last_tick_oi
+        from the entry-loop's own fresh-evaluation path, which a symbol
+        already sitting in self._positions never reaches again (it's
+        skipped there by design). Called once per (open-position) symbol
+        per position-management cycle; a no-op the moment both caches are
+        already populated. Backfill is PURELY for display -- it never
+        re-decides the side or affects the already-open position in any
+        way, and any failure here is non-fatal (position/exits unaffected)."""
+        if sym in self._today_0915_oi and sym in self._prev_day_last_tick_oi:
+            return
+        try:
+            resolved = await self._resolve_futures_key_and_token(sym)
+            if resolved is None:
+                return
+            fut_key, token = resolved
+            from data_layer.historical_candles import (
+                fetch_upstox_today_0915_oi, fetch_upstox_prev_day_last_tick_oi,
+            )
+            if sym not in self._today_0915_oi:
+                oi = await fetch_upstox_today_0915_oi(fut_key, token)
+                if oi is not None:
+                    self._today_0915_oi[sym] = oi
+            if sym not in self._prev_day_last_tick_oi:
+                oi = await fetch_upstox_prev_day_last_tick_oi(fut_key, token)
+                if oi is not None:
+                    self._prev_day_last_tick_oi[sym] = oi
+        except Exception:
+            self._clog.warning(
+                "OiOrb[%s/%s]: %s futures_oi display backfill failed (non-fatal, "
+                "position/exits unaffected).",
+                self._client_id, self._binding_id, sym, exc_info=True)
 
     async def _yesterday_candle_direction(self, fut_key: str, token: str) -> Optional[str]:
         """Returns "bullish" (close>open), "bearish" (close<open), or None

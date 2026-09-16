@@ -3686,6 +3686,56 @@ def _mock_futures_key_and_creds(monkeypatch, fut_key="NSE_FO|12345"):
                          lambda self, provider: {"access_token": "tok"})
 
 
+# ── 2026-09-16, real live incident: a process restart left every already-
+# open position's futures_oi display data blank forever (the gate only ever
+# populates the caches from the entry-loop's own fresh-evaluation path,
+# which an already-positioned symbol never reaches again). ────────────────
+
+@pytest.mark.asyncio
+async def test_backfill_futures_oi_display_populates_both_caches_for_an_open_position(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    _mock_futures_key_and_creds(monkeypatch)
+    monkeypatch.setattr("data_layer.historical_candles.fetch_upstox_today_0915_oi",
+                         _async_return(100.0))
+    monkeypatch.setattr("data_layer.historical_candles.fetch_upstox_prev_day_last_tick_oi",
+                         _async_return(90.0))
+
+    await book._backfill_futures_oi_display("TESTSTOCK")
+
+    assert book._today_0915_oi["TESTSTOCK"] == 100.0
+    assert book._prev_day_last_tick_oi["TESTSTOCK"] == 90.0
+
+
+@pytest.mark.asyncio
+async def test_backfill_futures_oi_display_is_a_noop_once_both_caches_are_warm(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._today_0915_oi["TESTSTOCK"] = 100.0
+    book._prev_day_last_tick_oi["TESTSTOCK"] = 90.0
+    calls = []
+    async def _must_not_be_called(*a, **k):
+        calls.append(a)
+        return 1.0
+    monkeypatch.setattr("data_layer.historical_candles.fetch_upstox_today_0915_oi", _must_not_be_called)
+    monkeypatch.setattr("data_layer.historical_candles.fetch_upstox_prev_day_last_tick_oi", _must_not_be_called)
+
+    await book._backfill_futures_oi_display("TESTSTOCK")
+
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_backfill_futures_oi_display_failure_is_non_fatal(monkeypatch):
+    bus = _FakeBus()
+    book = _make_book(bus)
+    monkeypatch.setattr("data_layer.instrument_registry.REGISTRY.load_futures_only_sync",
+                         lambda sym, today=None: (_ for _ in ()).throw(RuntimeError("boom")))
+    # Must not raise.
+    await book._backfill_futures_oi_display("TESTSTOCK")
+    assert "TESTSTOCK" not in book._today_0915_oi
+
+
 @pytest.mark.asyncio
 async def test_oi_regime_increasing_uses_previous_day_green_candle_for_call(monkeypatch):
     bus = _FakeBus()
