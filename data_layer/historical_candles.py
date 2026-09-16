@@ -111,6 +111,9 @@ async def fetch_upstox_1m(instrument_key: str, access_token: str, max_step_back:
     return []
 
 
+_RANGE_1M_INTER_DAY_DELAY_SEC = 0.35
+
+
 async def fetch_upstox_range_1m(
     instrument_key: str, access_token: str, start: date, end: date,
 ) -> List[dict]:
@@ -120,7 +123,16 @@ async def fetch_upstox_range_1m(
     rebuild) — a production version of the ad-hoc per-day fetch loop used in
     this session's validation scripts. Each candle:
     {'ts','open','high','low','close','volume'}. [] if the range yields
-    nothing (holiday-only range, bad instrument_key, etc)."""
+    nothing (holiday-only range, bad instrument_key, etc).
+
+    2026-09-16 real incident: a multi-day backtest script firing many of
+    these back-to-back (no pacing at all) tripped a sustained Upstox
+    rate limit (confirmed live: BOTH configured accounts got status=429
+    immediately, back-to-back -- an IP-level throttle, not per-account,
+    so account-fallback alone can't outrun it). A small fixed delay
+    between each real per-day call inside one range request keeps this
+    function itself under whatever the real limit is, instead of
+    bursting one call per weekday as fast as Python allows."""
     def _get_day(d: date) -> List[dict]:
         from urllib.parse import quote as _q
         url = (f"https://api.upstox.com/v2/historical-candle/{_q(instrument_key, safe='')}/1minute/"
@@ -134,8 +146,12 @@ async def fetch_upstox_range_1m(
     def _get_all() -> List[dict]:
         rows: List[dict] = []
         d = start
+        first = True
         while d <= end:
             if d.weekday() < 5:  # Mon-Fri only
+                if not first:
+                    time.sleep(_RANGE_1M_INTER_DAY_DELAY_SEC)
+                first = False
                 rows.extend(_get_day(d))
             d += timedelta(days=1)
         return rows
@@ -149,13 +165,18 @@ async def fetch_upstox_range_1m_multi_account(
     instrument_key: str, access_tokens: List[str], start: date, end: date,
 ) -> List[dict]:
     """2026-09-16 real incident: a multi-day backtest making many real
-    range-fetch calls hit Upstox's rate limit (confirmed live: status=429
-    after 3 retries, giving up) -- retry/backoff alone isn't enough for a
-    SUSTAINED limit on one account. This account is a separate,
-    independently-rate-limited real Upstox login (this codebase already
-    keeps two: "upstox" and "upstox2" in ClientDB's feeder_creds), so
-    falling back to a second account's token genuinely gets a fresh rate
-    budget, not just a longer wait on the same one.
+    range-fetch calls hit Upstox's rate limit (status=429 after 3
+    retries). This was ORIGINALLY built assuming a per-account limit
+    (two separate Upstox logins would mean two separate budgets) --
+    confirmed WRONG the same day: re-run with both accounts wired in,
+    BOTH got 429 immediately, back-to-back, on the very first call. That
+    signature (instant failure on a fresh account, not a slow drain)
+    means Upstox is throttling by source IP, not per-token -- account
+    fallback alone cannot outrun it. Kept as a real, still-useful safety
+    net (a token can independently expire/be revoked, which this still
+    correctly falls back for) but the actual fix for a rate limit
+    specifically is _RANGE_1M_INTER_DAY_DELAY_SEC pacing above, not
+    this function.
 
     Tries each access_token in access_tokens IN ORDER, returning the
     first that yields a non-empty result. NOT a per-day account switch
