@@ -655,6 +655,17 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         # membership in _oi_regime_computed to tell those two apart.
         self._oi_regime_side: Dict[str, Optional[str]] = {}
         self._oi_regime_computed: Set[str] = set()
+        # 2026-09-16, direct user spec: a symbol that passed the 2%
+        # price-move filter into the shortlist but then got blocked/removed
+        # by the OI-regime gate used to just vanish from the UI entirely --
+        # nothing persisted why. This keeps a per-symbol record (pChange,
+        # both raw OI points, computed change%, and a human reason string)
+        # so the dashboard can show "this stock passed step 1 (2% move) but
+        # failed step 2 (futures OI regime), here's why" instead of the
+        # symbol silently disappearing. Populated at the two spots a symbol
+        # gets removed for a blocked OI-regime verdict (the live entry loop
+        # and _gate_symbols_by_oi_regime); cleared only on reset_session().
+        self._oi_regime_blocked: Dict[str, dict] = {}
         self._spot_tick_subscribed: Dict[str, bool] = {}
         # 2026-09-10, real incident fix: when _ensure_spot_feed's own subscribe
         # attempt was seen, so _spot_feed_retry_loop can detect "subscribed a
@@ -697,6 +708,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._trap_gate_skipped = {}
         self._oi_regime_side = {}
         self._oi_regime_computed = set()
+        self._oi_regime_blocked = {}
         # 2026-09-07: guards the ONE morning call to _apply_historical_vwap_retest
         # (right after the regime freeze block below) so it doesn't re-run on every
         # poll cycle for the life of the day -- the afternoon rescan calls it again
@@ -1845,6 +1857,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                             # whose day"). New stocks keep entering the pool
                             # separately via the existing OI-spurt streaming
                             # mechanism, unaffected.
+                            self._record_oi_regime_blocked(sym, cfg)
                             if sym in self._shortlist_symbols:
                                 self._shortlist_symbols.remove(sym)
                             self._shortlist_pchange.pop(sym, None)
@@ -2109,6 +2122,48 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         # _rejected) but wasteful.
         await self._apply_historical_vwap_retest(new_syms, cfg)
 
+    def _record_oi_regime_blocked(self, sym: str, cfg: dict) -> None:
+        """2026-09-16, direct user spec: "show which stocks were scanned in
+        2% logic and will show that future OI is the issue due to which it
+        did not pass step 2." Called right before a symbol is removed from
+        the pool for a blocked OI-regime verdict -- snapshots the pChange
+        that got it into the shortlist in the first place (step 1) plus the
+        futures-OI numbers that blocked it (step 2), with a plain-English
+        reason, into self._oi_regime_blocked so monitoring_state() can keep
+        showing it after it's gone from self._shortlist_symbols. The reason
+        bucket (NEUTRAL / INCREASING-no-direction / DECREASING-continuation-
+        or-no-direction / no-data) is re-derived here from the same cached
+        today_0915_oi/prev_day_last_tick_oi + thresholds _compute_oi_regime_
+        side already used, rather than widening that function's own return
+        type (which every caller/test currently treats as a plain
+        Optional[str] side) -- good enough for display purposes without
+        touching a shared, already-tested decision function."""
+        today_oi = self._today_0915_oi.get(sym)
+        yday_oi = self._prev_day_last_tick_oi.get(sym)
+        pchange = self._shortlist_pchange.get(sym)
+        inc_min = float(cfg.get("OI_REGIME_INCREASE_MIN_PCT", _OI_REGIME_INCREASE_MIN_PCT_DEFAULT))
+        dec_max = float(cfg.get("OI_REGIME_DECREASE_MAX_PCT", _OI_REGIME_DECREASE_MAX_PCT_DEFAULT))
+        if today_oi is None or not yday_oi:
+            oi_change_pct = None
+            reason = "futures-OI data unavailable (no futures key/token/09:15 bar/prior-day bar)"
+        else:
+            oi_change_pct = round((today_oi - yday_oi) / yday_oi * 100.0, 2)
+            if oi_change_pct > inc_min:
+                reason = (f"futures OI +{oi_change_pct:.2f}% (INCREASING) but yesterday's candle "
+                          f"gave no clear direction (doji/no data)")
+            elif oi_change_pct < dec_max:
+                reason = (f"futures OI {oi_change_pct:.2f}% (DECREASING) but today's move only "
+                          f"continues yesterday's own direction, not a reversal (or flat/no data)")
+            else:
+                reason = f"futures OI {oi_change_pct:+.2f}% -- inside the NEUTRAL band ({dec_max:.0f}% to +{inc_min:.0f}%)"
+        self._oi_regime_blocked[sym] = {
+            "pchange": pchange,
+            "today_0915_oi": today_oi,
+            "yday_1539_oi": yday_oi,
+            "oi_change_pct": oi_change_pct,
+            "reason": reason,
+        }
+
     async def _gate_symbols_by_oi_regime(self, symbols: list, cfg: dict) -> list:
         """2026-09-16 CRITICAL FIX, real incident (COFORGE/top20, see the two
         callers' own comments): the futures-OI-regime gate (OI_REGIME_GATE_
@@ -2148,6 +2203,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 self._oi_regime_side[sym] = await self._compute_oi_regime_side(sym)
             side = self._oi_regime_side.get(sym)
             if side is None:
+                self._record_oi_regime_blocked(sym, cfg)
                 if sym in self._shortlist_symbols:
                     self._shortlist_symbols.remove(sym)
                 self._shortlist_pchange.pop(sym, None)
@@ -4885,4 +4941,11 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             "regime": self._regime,
             "orb_frozen": self._orb_frozen,
             "positions": positions,
+            # 2026-09-16, direct user spec: stocks that passed the 2%
+            # price-move filter (step 1) but got blocked/removed by the
+            # futures-OI-regime gate (step 2) -- see _record_oi_regime_
+            # blocked's own docstring. Kept even after the symbol leaves
+            # self._shortlist_symbols, so the UI can show WHY it didn't
+            # proceed instead of it just vanishing.
+            "oi_regime_blocked": self._oi_regime_blocked,
         }

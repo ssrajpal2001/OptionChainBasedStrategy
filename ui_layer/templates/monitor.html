@@ -8485,6 +8485,37 @@ function amoTest() {
                           </template>
                           <div x-show="(_bk.shortlist||[]).length>8" class="mt-1 text-right" style="color:var(--t-dim);font-size:10px"
                                x-text="'+ '+((_bk.shortlist||[]).length-8)+' more'"></div>
+
+                          <!-- 2026-09-16, direct user spec: "show which stocks were scanned in
+                               2% logic and will show that future OI is the issue due to which
+                               it did not passed the step 2" -- these stocks passed the initial
+                               price-move filter into the shortlist but were then removed by the
+                               futures-OI-regime gate; unlike the shortlist above they stay
+                               visible here (with the actual OI numbers + reason) instead of just
+                               vanishing. The moment a stock's regime genuinely passes and a real
+                               VWAP touch fires, it never appears here at all -- it goes straight
+                               from shortlist to the open-positions section above. -->
+                          <template x-if="Object.keys(_bk.oi_regime_blocked||{}).length>0">
+                            <div class="mt-2 pt-1.5" style="border-top:1px solid var(--t-border)">
+                              <div class="mb-1" style="color:var(--t-muted)">
+                                Passed 2% move filter, blocked by futures-OI regime
+                                (<span x-text="Object.keys(_bk.oi_regime_blocked||{}).length"></span>)
+                              </div>
+                              <template x-for="row in Object.entries(_bk.oi_regime_blocked||{}).slice(0,8).map(([sym,b])=>({sym,...b}))" :key="row.sym">
+                                <div class="flex items-center justify-between mb-0.5" style="font-size:10px">
+                                  <span style="color:var(--t-dim)" x-text="row.sym"></span>
+                                  <span style="color:var(--t-dim)"
+                                        x-text="row.pchange==null?'':((row.pchange>0?'+':'')+row.pchange.toFixed(2)+'% move')"></span>
+                                  <span :style="row.oi_change_pct==null?'color:var(--t-dim)':(row.oi_change_pct>=0?'color:var(--t-amber)':'color:var(--t-red)')"
+                                        :title="row.reason"
+                                        x-text="row.oi_change_pct==null?'no OI data':('OI '+(row.oi_change_pct>=0?'+':'')+row.oi_change_pct.toFixed(2)+'%')"></span>
+                                </div>
+                              </template>
+                              <div x-show="Object.keys(_bk.oi_regime_blocked||{}).length>8" class="mt-0.5 text-right"
+                                   style="color:var(--t-dim);font-size:10px"
+                                   x-text="'+ '+(Object.keys(_bk.oi_regime_blocked||{}).length-8)+' more'"></div>
+                            </div>
+                          </template>
                         </div>
                       </template>
                     </div>

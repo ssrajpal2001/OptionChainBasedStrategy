@@ -3288,6 +3288,14 @@ async def test_apply_historical_rolling_retest_blocked_by_oi_regime_never_fires(
     assert "COFORGE" not in book._shortlist_symbols
     assert ("COFORGE", "PUT") not in book._already_fired
     assert book._oi_regime_side.get("COFORGE") is None
+    # 2026-09-16 dashboard-visibility follow-up: the historical-replay gate
+    # path must record the block reason too, not just the live entry loop's
+    # own gate -- COFORGE passed the 2% price-move filter (pchange captured
+    # before it's popped) but the mocked regime side never populated any OI
+    # data, so this reflects the "data unavailable" branch.
+    blocked = book._oi_regime_blocked.get("COFORGE")
+    assert blocked is not None
+    assert blocked["pchange"] == -2.07
 
 
 @pytest.mark.asyncio
@@ -4207,6 +4215,49 @@ async def test_entry_loop_removes_symbol_from_pool_when_oi_regime_neutral(monkey
     # regime check at all) -- this test confirms it does NOT survive there.
     assert "TESTSTOCK" not in book._shortlist_symbols
     assert "TESTSTOCK" not in book._shortlist_pchange
+
+
+@pytest.mark.asyncio
+async def test_entry_loop_records_oi_regime_blocked_reason_for_dashboard(monkeypatch):
+    """2026-09-16, direct user spec: "show which stocks were scanned in 2%
+    logic and will show that future OI is the issue due to which it did not
+    passed the step 2" -- a symbol removed from the pool for a blocked
+    OI-regime result must stay visible via self._oi_regime_blocked /
+    monitoring_state()'s "oi_regime_blocked" field, carrying the real OI
+    numbers and a human reason, even after it's gone from
+    self._shortlist_symbols."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    _drive_entry_loop_scaffold(book, monkeypatch, datetime(2026, 9, 16, 9, 20, 0, tzinfo=IST))
+    book._screener_cfg["OI_REGIME_GATE_ENABLED"] = True
+    book._live_price = lambda sym, live_df, log_source=False: 100.0
+    book._vwap_check_entry = lambda sym, side, ltp: True
+
+    async def _spy_compute(sym):
+        # Mirrors what the real _compute_oi_regime_side does on its way to
+        # a NEUTRAL verdict -- caches the two OI points before returning None.
+        book._today_0915_oi[sym] = 9044000.0
+        book._prev_day_last_tick_oi[sym] = 9143500.0
+        return None
+    book._compute_oi_regime_side = _spy_compute
+
+    async def _sleep_once(_secs):
+        book._running = False
+    monkeypatch.setattr(asyncio, "sleep", _sleep_once)
+
+    await book._run_today_pipeline()
+
+    assert "TESTSTOCK" not in book._shortlist_symbols
+    blocked = book._oi_regime_blocked.get("TESTSTOCK")
+    assert blocked is not None
+    assert blocked["today_0915_oi"] == 9044000.0
+    assert blocked["yday_1539_oi"] == 9143500.0
+    assert blocked["oi_change_pct"] == pytest.approx(-1.09, abs=0.01)
+    assert "NEUTRAL" in blocked["reason"]
+
+    state = book.monitoring_state()
+    assert "TESTSTOCK" in state["oi_regime_blocked"]
+    assert state["oi_regime_blocked"]["TESTSTOCK"]["oi_change_pct"] == pytest.approx(-1.09, abs=0.01)
 
 
 @pytest.mark.asyncio
