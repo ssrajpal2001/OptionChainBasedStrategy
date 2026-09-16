@@ -49,6 +49,28 @@ def test_deleted_deployment_never_shows_as_running(db):
     ).fetchone()
     assert raw == (0, 0)
 
+def test_get_running_deployments_by_strategy_includes_squareoff_time(db):
+    """2026-09-16 CRITICAL FIX, real live incident: get_running_deployments_
+    by_strategy_sync's own SELECT never included d.squareoff_time, even
+    though strategies/oi_orb_screener/book_manager.py's _wanted() reads
+    exactly that key from every row to configure each spawned book's real
+    EOD close time. The missing column meant book_manager always silently
+    fell back to its own "15:15" default regardless of what was actually
+    saved (confirmed live: a deployment saved with squareoff_time='15:37'
+    still ran with an effective 15:15 EOD close -- a fresh position entered
+    at 15:20 was force-closed 6 seconds later, reason=eod_squareoff)."""
+    asyncio.run(db.register_client("C1", "Test Client", "pw"))
+    deploy_id = asyncio.run(db.save_deployment(
+        "C1", "Z1", "oi_orb_screener_top20", "SCREENER",
+        lot_multiplier=1, max_profit_rs=0, max_sl_rs=0, squareoff_time="15:37",
+    ))
+    asyncio.run(db.set_deployment_running(deploy_id, "C1", True))
+
+    rows = db.get_running_deployments_by_strategy_sync("oi_orb_screener_top20")
+    assert len(rows) == 1
+    assert rows[0]["squareoff_time"] == "15:37"
+
+
 def test_admin_password_hash_roundtrip(db):
     assert db.get_admin_password_hash_sync() == ""
     asyncio.run(

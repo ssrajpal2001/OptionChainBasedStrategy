@@ -1164,7 +1164,20 @@ class ClientDB:
     def get_running_deployments_by_strategy_sync(self, strategy_name: str) -> list[dict]:
         """Generalized (2026-07-19) version of get_running_straddle_deployments_sync
         — parameterized by strategy_name so any new strategy (v4_cascade, etc.) can
-        query its own deployment topology without a bespoke per-strategy method."""
+        query its own deployment topology without a bespoke per-strategy method.
+
+        2026-09-16 CRITICAL FIX, real live incident: this SELECT never included
+        d.squareoff_time, even though strategies/oi_orb_screener/book_manager.py's
+        _wanted() reads d.get("squareoff_time") from every row this returns to
+        configure each spawned book's own EOD close time. Since the key was
+        always missing, book_manager silently fell back to its own hardcoded
+        "15:15" default REGARDLESS of what was actually configured in the DB/UI
+        (confirmed live: a real deployment with squareoff_time='15:37' saved in
+        strategy_deployments still ran with an effective 15:15 EOD close) --
+        a fresh position entered at 15:20 was closed 6 seconds later,
+        reason=eod_squareoff. cag_straddle/iron_fly (the only other current
+        callers of this method) never read squareoff_time from these rows at
+        all, so including it here doesn't change their behavior."""
         try:
             con = sqlite3.connect(self._db_path)
             con.row_factory = sqlite3.Row
@@ -1172,6 +1185,7 @@ class ClientDB:
                 """
                 SELECT c.client_id, d.binding_id, d.underlying, d.lot_multiplier,
                        d.strategy_name, d.is_running, d.product_type,
+                       d.squareoff_time,
                        COALESCE(d.strategy_params, '{}') AS strategy_params
                 FROM clients c
                 JOIN strategy_deployments d ON c.client_id = d.client_id
