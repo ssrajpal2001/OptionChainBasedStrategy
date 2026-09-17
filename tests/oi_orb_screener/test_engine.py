@@ -1543,7 +1543,6 @@ async def test_restore_from_db_restores_shortlist_and_regime_regardless_of_time_
     bus = _FakeBus()
     book = _make_book(bus)
     book._today = date(2026, 9, 10)
-    book._top20_mode = True
 
     store.record_scan(_TEST_CLIENT_ID, _TEST_BINDING_ID, -0.8, "ok", trade_date="2026-09-10")
     store.update_scan_regime(_TEST_CLIENT_ID, _TEST_BINDING_ID, "bearish", trade_date="2026-09-10")
@@ -1823,14 +1822,22 @@ async def test_spot_tick_loop_reacts_to_index_tick_not_just_equity_tick():
 
 
 @pytest.mark.asyncio
-async def test_spot_tick_loop_accumulates_vwap_tick_by_tick_top20_mode():
+async def test_spot_tick_loop_accumulates_vwap_tick_by_tick():
     """2026-09-10, direct user spec: real tick-by-tick VWAP accumulation off
     IndexTick.volume deltas, replacing the old 20s poll-snapshot method --
     proves consecutive ticks with real cumulative-volume deltas produce a
-    genuine volume-weighted VWAP, not just the latest LTP."""
+    genuine volume-weighted VWAP, not just the latest LTP.
+
+    2026-09-17 CRITICAL FIX regression: this real tick-accumulation call was
+    found wrongly gated behind "if self._top20_mode:" while removing the
+    oi_orb_screener_top20 variant -- meaning the STANDARD variant's VWAP was
+    likely frozen at its one-time seed value all day, every day. This test
+    (renamed from its own misleading "_top20_mode" suffix -- it always
+    exercised the real shared code path, the gate was simply wrong) now
+    proves the standard variant gets live VWAP updates with no top20 flag
+    set at all."""
     bus = _FakeBus()
     book = _make_book(bus)
-    book._top20_mode = True
     book._shortlist_symbols = ["TECHM"]
     book._subscribe(Topic.EQUITY_TICK)
     book._subscribe(Topic.INDEX_TICK)
@@ -3154,127 +3161,11 @@ async def test_apply_historical_vwap_retest_marks_symbol_checked_after_processin
 
 
 @pytest.mark.asyncio
-async def test_apply_historical_rolling_retest_skips_symbol_already_checked_today(monkeypatch):
-    """Same restart-safety gate as the standard-variant test above, applied
-    to the top20-mode rolling-retest counterpart."""
-    bus = _FakeBus()
-    book = _make_book(bus)
-    book._top20_mode = True
-    book._shortlist_pchange["GVT&D"] = -2.0  # bearish -> PUT
-    book._historical_check_done.add(("GVT&D", "PUT"))
-
-    calls = []
-    def _fake_check(symbols_sides, cfg, window_min):
-        calls.append(dict(symbols_sides))
-        return {}
-    monkeypatch.setattr(screener, "historical_rolling_retest_check", _fake_check)
-
-    await book._apply_historical_rolling_retest(["GVT&D"], book._screener_cfg)
-
-    assert calls == []
-
-
-@pytest.mark.asyncio
-async def test_apply_historical_rolling_retest_marks_symbol_checked_after_processing(monkeypatch):
-    bus = _FakeBus()
-    book = _make_book(bus)
-    book._top20_mode = True
-    book._screener_cfg["OI_REGIME_GATE_ENABLED"] = False
-    book._shortlist_pchange["GVT&D"] = -2.0  # bearish -> PUT
-
-    class _FakeTracker:
-        pass
-
-    monkeypatch.setattr(screener, "historical_rolling_retest_check",
-                         lambda symbols_sides, cfg, window_min: {
-                             "GVT&D": {"tracker": _FakeTracker(), "fired": False}})
-
-    await book._apply_historical_rolling_retest(["GVT&D"], book._screener_cfg)
-
-    assert ("GVT&D", "PUT") in book._historical_check_done
-
-
-# ── 2026-09-16, real live incident: COFORGE (top20 variant) traded via
-# _apply_historical_rolling_retest on a mid-day restart despite its real
-# futures-OI change (-4.56%) sitting squarely in the NEUTRAL/blocked band --
-# every OTHER shortlisted symbol that day WAS correctly blocked by the live
-# entry loop's own OI-regime gate, but this historical catch-up replay path
-# had no equivalent check at all and fired before the live loop ever got a
-# chance to evaluate/remove it. Fixed via the shared _gate_symbols_by_oi_
-# regime helper, applied to both historical replay functions. ─────────────
-
-@pytest.mark.asyncio
-async def test_apply_historical_rolling_retest_blocked_by_oi_regime_never_fires(monkeypatch):
-    bus = _FakeBus()
-    book = _make_book(bus)
-    book._top20_mode = True
-    book._screener_cfg["OI_REGIME_GATE_ENABLED"] = True
-    book._shortlist_symbols.append("COFORGE")
-    book._shortlist_pchange["COFORGE"] = -2.07
-
-    async def _fake_regime_side(sym):
-        return None   # NEUTRAL -- would be blocked by the live loop too
-    book._compute_oi_regime_side = _fake_regime_side
-
-    checked = []
-    def _fake_check(symbols_sides, cfg, window_min):
-        checked.append(dict(symbols_sides))
-        return {"COFORGE": {"tracker": None, "fired": True, "fire_ts": "12:07",
-                             "fire_price": 1741.30}}
-    monkeypatch.setattr(screener, "historical_rolling_retest_check", _fake_check)
-
-    await book._apply_historical_rolling_retest(["COFORGE"], book._screener_cfg)
-
-    # The gate must remove COFORGE from the pool BEFORE the replay's own
-    # (mocked) real-history check is even reached -- the real bug was this
-    # expensive/real check firing an entry unconditionally.
-    assert checked == []
-    assert "COFORGE" not in book._shortlist_symbols
-    assert ("COFORGE", "PUT") not in book._already_fired
-    assert book._oi_regime_side.get("COFORGE") is None
-    # 2026-09-16 dashboard-visibility follow-up: the historical-replay gate
-    # path must record the block reason too, not just the live entry loop's
-    # own gate -- COFORGE passed the 2% price-move filter (pchange captured
-    # before it's popped) but the mocked regime side never populated any OI
-    # data, so this reflects the "data unavailable" branch.
-    blocked = book._oi_regime_blocked.get("COFORGE")
-    assert blocked is not None
-    assert blocked["pchange"] == -2.07
-
-
-@pytest.mark.asyncio
-async def test_apply_historical_rolling_retest_allowed_by_oi_regime_still_fires(monkeypatch):
-    """Sanity companion to the blocked-case test above -- confirms the gate
-    fix doesn't collaterally block a symbol whose OI-regime genuinely allows
-    a side; the historical catch-up mechanic itself is otherwise untouched."""
-    bus = _FakeBus()
-    book = _make_book(bus)
-    book._top20_mode = True
-    book._screener_cfg["OI_REGIME_GATE_ENABLED"] = True
-    book._shortlist_symbols.append("SOLARINDS")
-    book._shortlist_pchange["SOLARINDS"] = -8.55
-
-    async def _fake_regime_side(sym):
-        return "PUT"   # DECREASING regime, genuine reversal -> allowed
-    book._compute_oi_regime_side = _fake_regime_side
-
-    monkeypatch.setattr(screener, "historical_rolling_retest_check",
-                         lambda symbols_sides, cfg, window_min: {
-                             "SOLARINDS": {"tracker": None, "fired": True,
-                                           "fire_ts": "12:07", "fire_price": 18815.0}})
-
-    await book._apply_historical_rolling_retest(["SOLARINDS"], book._screener_cfg)
-
-    assert "SOLARINDS" in book._shortlist_symbols
-    assert ("SOLARINDS", "PUT") in book._already_fired
-    assert book._oi_regime_side.get("SOLARINDS") == "PUT"
-
-
-@pytest.mark.asyncio
 async def test_apply_historical_vwap_retest_blocked_by_oi_regime_never_fires(monkeypatch):
-    """Standard-variant counterpart -- same latent gap existed in
-    _apply_historical_vwap_retest (not just top20's own rolling-retest
-    path), fixed by the same shared gate."""
+    """2026-09-16, real live incident: a symbol whose plain VWAP-retest
+    already completed earlier today could fire and trade via this replay
+    path before the live per-cycle entry loop ever got a chance to
+    evaluate/remove it via the futures-OI-regime gate."""
     bus = _FakeBus()
     book = _make_book(bus)
     book._screener_cfg["OI_REGIME_GATE_ENABLED"] = True
@@ -3714,45 +3605,6 @@ async def test_entry_loop_gate_recheck_is_throttled(monkeypatch):
     assert checked == []   # throttled -- no recheck performed
     assert emitted == []
     assert book._trap_gate_skipped[("TESTSTOCK", "CALL")]["extreme"] == 101.0   # still updated
-
-
-# ── 2026-09-16, real live incident: a symbol the entry loop already removed
-# from the pool for a NEUTRAL/blocked OI-regime result kept getting silently
-# RE-ADDED by the OI-spurt streaming step, since it only ever checked "not
-# already shortlisted" -- confirmed live cycling remove->re-add every ~60s
-# for 4 real stocks. ─────────────────────────────────────────────────────
-
-@pytest.mark.asyncio
-async def test_stream_new_top20_symbols_never_readds_a_permanently_blocked_symbol(monkeypatch):
-    import pandas as pd
-    bus = _FakeBus()
-    book = _make_book(bus)
-    book._screener_cfg["OI_REGIME_GATE_ENABLED"] = True
-    book._oi_regime_computed.add("BLOCKEDSTOCK")
-    book._oi_regime_side["BLOCKEDSTOCK"] = None   # already permanently blocked today
-    book._ensure_spot_feed = lambda *a, **k: None
-    async def _noop_seed(sym):
-        return None
-    book._seed_vwap_from_upstox_intraday = _noop_seed
-    # 2026-09-16: this streaming step now feeds newly-added symbols into
-    # _apply_historical_rolling_retest, which (since the OI-regime-gate fix
-    # the same day) gates them too -- FRESHSTOCK needs a real (non-None)
-    # regime verdict to stay eligible, isolating this test to the re-add
-    # guard it actually targets rather than the gate's own computation.
-    async def _fake_regime_side(sym):
-        return "CALL"
-    book._compute_oi_regime_side = _fake_regime_side
-
-    ranked = pd.DataFrame([
-        {"symbol": "BLOCKEDSTOCK", "rank": 1, "oi_spurt_pct": 9.0, "pChange": 3.0},
-        {"symbol": "FRESHSTOCK", "rank": 2, "oi_spurt_pct": 8.0, "pChange": 3.0},
-    ])
-
-    await book._stream_new_top20_symbols(ranked, datetime(2026, 9, 16, 11, 55, tzinfo=IST),
-                                          book._screener_cfg)
-
-    assert "BLOCKEDSTOCK" not in book._shortlist_symbols
-    assert "FRESHSTOCK" in book._shortlist_symbols
 
 
 def _mock_futures_key_and_creds(monkeypatch, fut_key="NSE_FO|12345"):

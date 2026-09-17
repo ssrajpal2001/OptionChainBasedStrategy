@@ -10,7 +10,6 @@ from typing import Any, Dict, List
 
 from strategies.sell_straddle import StraddleBookManager
 from strategies.oi_orb_screener import OiOrbScreenerBookManager
-from strategies.oi_orb_screener.book_manager import OiOrbScreenerTop20BookManager
 from strategies.cag_straddle import CagStraddleBookManager
 from strategies.iron_fly.book_manager import IronFlyBookManager
 
@@ -43,18 +42,20 @@ STRATEGY_REGISTRY: Dict[str, Dict[str, Any]] = {
     # NO SL/target/risk-cap logic this pass, EOD square-off only. First
     # strategy in this codebase's live pipeline to trade individual F&O
     # STOCKS (chosen dynamically each day) rather than a fixed underlying.
+    # 2026-09-17, direct user decision: the sibling "oi_orb_screener_top20"
+    # variant (top-20-by-OI-spurt shortlist + a VWAP-touch-only directional
+    # read, no pChange direction gate, no futures-OI breach confirmation)
+    # was REMOVED entirely -- it deviated from the actually-validated
+    # backtest mechanic (OI spurt scan -> pChange direction gate ->
+    # futures-OI breach confirm -> side-gated VWAP retest -> 20-min VWAP
+    # SL) by silently combining a magnitude-only move filter with an
+    # independent, direction-agnostic VWAP-touch signal -- confirmed live
+    # the same day via a real trade (POLICYBZR, pChange=-4.24% yet entered
+    # CALL side). Recoverable via git history if ever reconsidered with a
+    # genuine backtest of its own. "oi_orb_screener" below (unchanged) is
+    # the one strategy_name that actually matches the validated mechanic.
     "oi_orb_screener": {
         "manager_class": OiOrbScreenerBookManager,
-        "per_binding": True,
-    },
-    # 2026-09-07, direct user spec: sibling strategy_name reusing the exact
-    # same OiOrbScreenerStrategy engine/exit mechanic -- top-20-by-OI-spurt
-    # (no pct threshold) shortlist + a rolling 15x1min-candle directional
-    # VWAP-touch entry, instead of the standard variant's OI_SPURT_MIN_PCT
-    # gate + arm/retest entry. See OiOrbScreenerTop20BookManager's own
-    # docstring and OiOrbScreenerStrategy.__init__'s strategy_name param.
-    "oi_orb_screener_top20": {
-        "manager_class": OiOrbScreenerTop20BookManager,
         "per_binding": True,
     },
     # 2026-08-27: 8th standalone strategy -- explicit exception to the prior

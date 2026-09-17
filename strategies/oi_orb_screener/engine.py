@@ -354,24 +354,11 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         # premium (its own VWAP, its own bars), not the underlying stock's
         # spot price -- see screener.compute_option_premium_sl_arm/_target.
         rr_multiple: float = 2.0,
-        # 2026-09-07, direct user spec: new sibling variant -- top-20-by-OI-spurt
-        # (no pct threshold) + a rolling-15x1min-candle directional VWAP-touch
-        # entry (strategies/oi_orb_screener/screener.py's VwapTouchTracker),
-        # rather than the standard variant's OI_SPURT_MIN_PCT-gated shortlist +
-        # arm/retest _vwap_check_entry. Everything else (ORB/VWAP backfill,
-        # chain subscription, HA+StochRSI exit, EOD square-off) is untouched and
-        # shared byte-for-byte between both variants -- only shortlist-building
-        # and entry-detection branch on this flag. Deliberately a constructor
-        # flag, not a second engine file, so a bug fix to shared machinery never
-        # has to be applied twice (same reasoning as SellStraddle's own
-        # sell_straddle_calc_vwap variant).
         strategy_name: str = "oi_orb_screener",
     ) -> None:
         super().__init__(bus, cfg, _UNDERLYING_SENTINEL, client_id, binding_id)
         self._strategy_name = strategy_name
-        self._top20_mode = (strategy_name == "oi_orb_screener_top20")
-        self._vwap_touch_trackers: dict = {}   # legacy, left unused not deleted -- see RollingVwapRetestTracker below
-        self._rolling_retest_trackers: dict = {}   # top20 mode's real live entry mechanic, 2026-09-09
+        self._vwap_touch_trackers: dict = {}   # legacy, left unused not deleted
         self._lot_multiplier = max(1, lot_multiplier)
         self._product_type = product_type
         try:
@@ -727,7 +714,6 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._oi_history_last_poll_ts = 0.0
         self._vwap = screener.VwapState()
         self._vwap_armed = {}
-        self._rolling_retest_trackers = {}
         self._trap_1m_acc = {}
         self._trap_3m_acc = {}
         self._trap_zones = {}
@@ -1127,9 +1113,8 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             return
 
         sl_indexed = shortlist.set_index("symbol")
-        # 2026-09-16: same guard as _stream_new_top20_symbols -- never
-        # re-add a symbol the OI-regime gate already permanently blocked
-        # for today.
+        # 2026-09-16: never re-add a symbol the OI-regime gate already
+        # permanently blocked for today.
         oi_gate_on = cfg.get("OI_REGIME_GATE_ENABLED", False)
         new_symbols = [
             s for s in shortlist["symbol"].tolist()
@@ -1372,22 +1357,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
 
     async def _do_oi_spurt_history_poll(self, now: datetime, cfg: dict) -> None:
         """One purely-observational poll cycle -- split out for direct unit
-        testing, same shape as _do_rank_poll.
-
-        2026-09-09, direct user spec (top20-mode ONLY, standard variant
-        untouched): "we are still finding out what is the best time to
-        take trade... as soon as a stock enters the top 20 scanner we
-        start to check for entry trigger in that stock." Reuses this SAME
-        poll (already fetching top-20 every OI_SPURT_HISTORY_POLL_SEC,
-        default 60s) to ALSO stream newly-qualifying symbols into
-        self._shortlist_symbols the moment they first appear -- not just
-        log them -- rather than the single 09:25/26 lock the standard
-        variant still uses. A symbol already in the shortlist is never
-        re-added or re-processed. This is deliberately layered ON TOP of
-        the existing one-shot morning build_top20_shortlist() call in
-        _run_today_pipeline (kept unchanged, still gives the first quick
-        batch right at open) -- this streaming step only ever ADDS symbols
-        that emerge later in the day."""
+        testing, same shape as _do_rank_poll."""
         top_n = int(cfg.get("OI_SPURT_HISTORY_TOP_N", 20) or 20)
         ranked = await asyncio.to_thread(screener.poll_oi_rank, self._nse, cfg, top_n)
         if ranked is None or ranked.empty:
@@ -1407,59 +1377,6 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             ", ".join(f"{r['symbol']}(#{int(r['rank'])},{r['oi_spurt_pct']:.1f}%)"
                       for _, r in ranked.iterrows()),
         )
-
-        if self._top20_mode:
-            await self._stream_new_top20_symbols(ranked, now, cfg)
-
-    async def _stream_new_top20_symbols(self, ranked, now: datetime, cfg: dict) -> None:
-        """Adds any symbol from this poll's top-20 that (a) isn't already
-        shortlisted and (b) clears the same PRICE_MOVE_MIN_PCT filter
-        build_top20_shortlist itself applies -- real first-seen streaming,
-        the timestamp this poll happens to run at, matching data/oi_orb_
-        screener.db's own oi_spurt_history record of when it actually
-        entered the ranking."""
-        min_pct = cfg.get("PRICE_MOVE_MIN_PCT", 2.0)
-        oi_gate_on = cfg.get("OI_REGIME_GATE_ENABLED", False)
-        new_syms = []
-        for _, r in ranked.iterrows():
-            sym = r["symbol"]
-            if sym in self._shortlist_symbols:
-                continue
-            # 2026-09-16, real live incident: a symbol the entry loop already
-            # removed from the pool for a NEUTRAL/blocked OI-regime result
-            # ("comes out of pool for the day") kept getting silently RE-
-            # ADDED here on the very next OI-spurt poll cycle, since this
-            # streaming step only ever checked "not already shortlisted" --
-            # confirmed live, MARICO/COLPAL/PATANJALI/NESTLEIND cycling
-            # remove->re-add->remove every ~60s. Once the gate has already
-            # computed a symbol as blocked today, it must never re-enter the
-            # pool via this path either.
-            if oi_gate_on and sym in self._oi_regime_computed and self._oi_regime_side.get(sym) is None:
-                continue
-            pchange = float(r.get("pChange", 0.0) or 0.0)
-            if abs(pchange) < min_pct:
-                continue
-            self._shortlist_symbols.append(sym)
-            self._shortlist_pchange[sym] = pchange
-            self._ensure_spot_feed(sym)
-            # 2026-09-10, real incident fix (TECHM): this path never seeded VWAP
-            # from any historical source before -- see _seed_vwap_from_upstox_
-            # intraday's own docstring for the full incident.
-            await self._seed_vwap_from_upstox_intraday(sym)
-            new_syms.append(sym)
-        if not new_syms:
-            return
-        self._clog.info(
-            "OiOrb[%s/%s]: STREAMING shortlist add @%s: %s -- checking real intraday "
-            "history immediately for each.",
-            self._client_id, self._binding_id, now.strftime("%H:%M:%S"), new_syms)
-        await asyncio.to_thread(
-            store.record_shortlist, self._client_id, self._binding_id,
-            [{"symbol": s, "price_change_pct": self._shortlist_pchange.get(s),
-              "oi_spurt_pct": None, "score": None,
-              "side_bias": "bullish" if self._shortlist_pchange.get(s, 0) > 0 else "bearish"}
-             for s in new_syms])
-        await self._apply_historical_rolling_retest(new_syms, cfg)
 
     async def _run_today_pipeline(self) -> None:
         cfg = self._screener_cfg
@@ -1482,27 +1399,8 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         last_exc: Optional[Exception] = None
         for attempt in range(1, _BUILD_SHORTLIST_MAX_ATTEMPTS + 1):
             try:
-                if self._top20_mode:
-                    top20_all, shortlist, nifty_pchange = await asyncio.to_thread(
-                        screener.build_top20_shortlist, self._nse, cfg)
-                    if top20_all is not None and not top20_all.empty:
-                        await asyncio.to_thread(
-                            store.record_top20_daily_scan, self._client_id, self._binding_id,
-                            [
-                                {
-                                    "symbol": r["symbol"],
-                                    "rank": int(r["rank"]),
-                                    "oi_spurt_pct": float(r.get("oi_spurt_pct", 0.0) or 0.0),
-                                    "price_change_pct": float(r.get("pChange", 0.0) or 0.0),
-                                    "price_move_pass": bool(abs(float(r.get("pChange", 0.0) or 0.0))
-                                                             >= cfg.get("PRICE_MOVE_MIN_PCT", 2.0)),
-                                }
-                                for r in top20_all.to_dict("records")
-                            ],
-                        )
-                else:
-                    shortlist, nifty_pchange = await asyncio.to_thread(
-                        screener.build_shortlist, self._nse, cfg)
+                shortlist, nifty_pchange = await asyncio.to_thread(
+                    screener.build_shortlist, self._nse, cfg)
                 last_exc = None
                 break
             except Exception as exc:
@@ -1893,13 +1791,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
 
                     if (sym, side) in self._already_fired or (sym, side) in self._rejected:
                         continue
-                    # 2026-09-07, direct user spec for oi_orb_screener_top20:
-                    # "no oi spurt threshold... 2% high or low from prev day...
-                    # if any stocks which passes this criteria is checked for
-                    # vwap touch" -- no NIFTY-regime gate in this variant's spec,
-                    # both CALL and PUT sides are always eligible once a genuine
-                    # directional VWAP touch fires.
-                    if not self._top20_mode and not screener.side_allowed_by_regime(
+                    if not screener.side_allowed_by_regime(
                             side, self._regime, regime_filter_on):
                         continue
                     ltp = self._live_price(sym, live)
@@ -1934,32 +1826,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                             now.strftime("%H:%M:%S"), label="TRAP-GATE-RETRIGGER")
                         continue
 
-                    if self._top20_mode:
-                        # 2026-09-09, direct user spec: replaced VwapTouchTracker
-                        # (a loose "any touch in the last 15 candles" check, which
-                        # was never actually the entry mechanic firing top20 trades
-                        # in production -- see below) with screener.
-                        # RollingVwapRetestTracker -- the confirmed-correct arm-
-                        # then-retest sequence ("go up then come back to touch"),
-                        # bounded to a rolling 15-candle window with expiring arm
-                        # state, checked continuously from the moment this symbol
-                        # was added to the shortlist (self._rolling_retest_trackers
-                        # is created at streaming-add time, not lazily here).
-                        vwap = self._vwap.current(sym)
-                        if vwap is None:
-                            continue
-                        tracker = self._rolling_retest_trackers.get(sym)
-                        if tracker is None:
-                            tracker = screener.RollingVwapRetestTracker(
-                                window_min=self._screener_cfg.get("VWAP_TOUCH_WINDOW_MIN", 15))
-                            self._rolling_retest_trackers[sym] = tracker
-                        fire = tracker.check(side, now, ltp, vwap)
-                        reason = "vwap_retest_top20"
-                        if fire:
-                            await asyncio.to_thread(
-                                store.update_top20_vwap_touch, self._client_id,
-                                self._binding_id, sym, side)
-                    elif immediate_entry_on:
+                    if immediate_entry_on:
                         fire = self._immediate_check_entry(sym, side, now)
                         reason = "immediate_orb_entry"
                     else:
@@ -1998,14 +1865,10 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                         continue
 
                     self._already_fired.add((sym, side))
-                    if self._top20_mode:
-                        await asyncio.to_thread(
-                            store.update_top20_traded, self._client_id, self._binding_id, sym)
                     orb_lvl = self._orb_frozen.get(sym, (0.0, 0.0))
                     await self._emit_vwap_signal(
                         sym, side, ltp, reason, orb_lvl, now.strftime("%H:%M:%S"),
-                        label=("TOP20-VWAP-TOUCH" if self._top20_mode
-                               else ("IMMEDIATE-ORB" if immediate_entry_on else "TRAP-RETEST")),
+                        label=("IMMEDIATE-ORB" if immediate_entry_on else "TRAP-RETEST"),
                     )
             elif (not cfg.get("IGNORE_TIME_WINDOWS") and now_key >= cfg["ENTRY_WINDOW_END"]
                   and not self._entry_window_done_logged):
@@ -2091,13 +1954,13 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             datetime.now(IST).date().isoformat())
         if not rows:
             return
-        min_pct = cfg.get("PRICE_MOVE_MIN_PCT", 2.0) if self._top20_mode else cfg.get("OI_SPURT_MIN_PCT", 7.0)
+        min_pct = cfg.get("OI_SPURT_MIN_PCT", 7.0)
         new_syms = []
         for r in rows:
             sym = r.get("symbol")
             if not sym or sym in self._shortlist_symbols:
                 continue
-            metric = r.get("price_change_pct") if self._top20_mode else r.get("oi_spurt_pct")
+            metric = r.get("oi_spurt_pct")
             if metric is None or abs(metric) < min_pct:
                 continue
             pchange = r.get("price_change_pct") or 0.0
@@ -2187,12 +2050,11 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         }
 
     async def _gate_symbols_by_oi_regime(self, symbols: list, cfg: dict) -> list:
-        """2026-09-16 CRITICAL FIX, real incident (COFORGE/top20, see the two
-        callers' own comments): the futures-OI-regime gate (OI_REGIME_GATE_
-        ENABLED, added 2026-09-16) only ever ran inside the live per-cycle
-        entry loop -- both historical catch-up replay functions (the
-        standard variant's _apply_historical_vwap_retest and top20's own
-        _apply_historical_rolling_retest) could fire an entry for a symbol
+        """2026-09-16 CRITICAL FIX, real incident (COFORGE, see the caller's
+        own comment): the futures-OI-regime gate (OI_REGIME_GATE_ENABLED,
+        added 2026-09-16) only ever ran inside the live per-cycle entry
+        loop -- the historical catch-up replay function
+        (_apply_historical_vwap_retest) could fire an entry for a symbol
         whose retest had already completed earlier today WITHOUT ever
         checking whether that symbol's OI-regime would have blocked it.
         This shared helper applies the IDENTICAL gate check + pool-removal
@@ -2259,31 +2121,17 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         leaves it at the safe cold-start default (armed=False), identical to
         today's pre-existing behavior for that symbol.
 
-        2026-09-09 CRITICAL FIX, real incident: this function has NO
-        top20-mode gate below -- confirmed live, COFORGE/BSE/MUTHOOTFIN all
-        fired with entry_reason=vwap_retest_historical on 2026-09-09 despite
-        being top20 deployments, meaning THIS arm-then-retest mechanic (the
-        STANDARD variant's own entry logic) was silently controlling top20
-        entries instead of RollingVwapRetestTracker, which only ever ran in
-        the live tick loop and never actually got to fire first. Fixed by
-        dispatching top20 symbols to _apply_historical_rolling_retest
-        instead -- the correct, top20-native historical-immediate-fire
-        equivalent."""
-        if self._top20_mode:
-            return await self._apply_historical_rolling_retest(symbols, cfg)
+        2026-09-16 CRITICAL FIX, real incident: this replay path never
+        applied the futures-OI-regime gate at all -- a symbol whose plain
+        VWAP-retest already completed earlier today (real history, replayed
+        once right after shortlist-add) could fire and trade here BEFORE
+        the live per-cycle entry loop ever got a chance to evaluate/remove
+        it via _compute_oi_regime_side. Applying the identical gate check
+        here, before this function is allowed to fire anything, so the
+        historical catch-up path can never trade a symbol the live loop
+        would have blocked."""
         if not symbols:
             return
-        # 2026-09-16 CRITICAL FIX, real incident: this replay path never
-        # applied the futures-OI-regime gate at all -- a symbol whose plain
-        # VWAP-retest already completed earlier today (real history, replayed
-        # once right after shortlist-add) could fire and trade here BEFORE
-        # the live per-cycle entry loop ever got a chance to evaluate/remove
-        # it via _compute_oi_regime_side. Confirmed live: COFORGE (top20
-        # variant, see _apply_historical_rolling_retest's own fix below for
-        # the actual incident) bypassed the gate entirely this way. Applying
-        # the identical gate check here, before this function is allowed to
-        # fire anything, so the historical catch-up path can never trade a
-        # symbol the live loop would have blocked.
         symbols = await self._gate_symbols_by_oi_regime(symbols, cfg)
         if not symbols:
             return
@@ -2352,102 +2200,6 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                         "OiOrb[%s/%s]: %s %s armed from real intraday history (bars_replayed=%d) "
                         "-- waiting for the retest touch on the next live tick.",
                         self._client_id, self._binding_id, sym, side, result["bars_replayed"])
-
-    async def _apply_historical_rolling_retest(self, symbols: list, cfg: dict) -> None:
-        """2026-09-09, top20-mode counterpart to _apply_historical_vwap_
-        retest -- the fix for the real cross-wiring incident described in
-        that function's own docstring. Same "check history the instant a
-        symbol is added, fire immediately if already satisfied" intent, but
-        replays screener.RollingVwapRetestTracker (the correct top20 entry
-        mechanic -- arm-then-retest bounded to a rolling 15-candle window)
-        via screener.historical_rolling_retest_check, not the standard
-        variant's unbounded arm-then-retest. "No regime gate here" (matches
-        top20's own live tick-loop entry check, which has never applied
-        one -- direct user spec, "no oi spurt threshold... no regime gate
-        in this variant's spec") refers ONLY to the older NIFTY-spot day
-        regime filter (BULLISH/BEARISH/NEUTRAL), which top20 intentionally
-        never uses. It does NOT mean the newer futures-OI-regime gate
-        (OI_REGIME_GATE_ENABLED, added 2026-09-16) is exempt too.
-
-        2026-09-16 CRITICAL FIX, real incident: confirmed live, COFORGE
-        (top20, real OI change -4.56%, squarely inside the NEUTRAL/blocked
-        band) fired and traded via this exact function on a mid-day
-        restart -- its historical retest had already completed at 12:07,
-        so it fired here before the live per-cycle loop (which DOES gate
-        top20 on OI-regime, see that loop's own comment) ever got a chance
-        to evaluate and remove it. Every other shortlisted symbol that day
-        WAS correctly blocked by the live loop's gate -- only this replay
-        path's own blind spot let COFORGE slip through. Now gated via the
-        shared _gate_symbols_by_oi_regime helper before anything here is
-        allowed to fire."""
-        if not symbols:
-            return
-        symbols = await self._gate_symbols_by_oi_regime(symbols, cfg)
-        if not symbols:
-            return
-        # 2026-09-10, real incident fix: this deterministic replay always
-        # finds/re-reports the SAME first-ever retest moment for a symbol
-        # no matter how many times it's called -- skip anything already
-        # evaluated (this process lifetime OR a prior restart, restored via
-        # self._historical_check_done). Any genuinely new retest for these
-        # symbols from here forward is caught by the live tick loop's own
-        # continuously-running tracker (seeded below either way), not by
-        # re-running this replay. See store.load_historical_check_done's
-        # own docstring for the full incident (GVT&D re-fired off a 09:18
-        # price=4638.90 reference across 10+ restarts through 12:21, while
-        # real spot by then was trading ~4540-4547).
-        symbols_sides = {
-            sym: screener.side_from_pchange(self._shortlist_pchange.get(sym, 0.0))
-            for sym in symbols
-            if (sym, screener.side_from_pchange(self._shortlist_pchange.get(sym, 0.0)))
-               not in self._historical_check_done
-        }
-        if not symbols_sides:
-            return
-        try:
-            results = await asyncio.to_thread(
-                screener.historical_rolling_retest_check, symbols_sides, cfg,
-                cfg.get("VWAP_TOUCH_WINDOW_MIN", 15))
-        except Exception:
-            self._clog.exception("OiOrb[%s/%s]: historical rolling-retest check failed "
-                                  "(non-fatal, tracker starts cold for %s).",
-                                  self._client_id, self._binding_id, symbols)
-            return
-        now = datetime.now(IST)
-        for sym, side in symbols_sides.items():
-            result = results.get(sym)
-            if not result:
-                continue
-            # tracker is seeded with the real replay either way -- keep using it
-            # live from here forward regardless of whether it already fired.
-            self._rolling_retest_trackers[sym] = result["tracker"]
-            # This symbol's ONE-TIME historical replay is now complete --
-            # persist a marker so a future restart's load_historical_check_done
-            # never re-runs it, regardless of the outcome below.
-            self._historical_check_done.add((sym, side))
-            await asyncio.to_thread(
-                store.log_signal_event, self._client_id, self._binding_id, sym,
-                "historical_check_evaluated", side=side,
-                detail=f"fired={result['fired']}")
-            if not result["fired"]:
-                continue
-            if (sym, side) in self._already_fired or (sym, side) in self._rejected:
-                continue
-            self._clog.info(
-                "OiOrb[%s/%s]: %s %s HISTORICAL ROLLING-RETEST already completed at %s "
-                "(price=%.2f) before this book started watching it -- firing immediately.",
-                self._client_id, self._binding_id, sym, side,
-                result["fire_ts"], result["fire_price"])
-            self._already_fired.add((sym, side))
-            await asyncio.to_thread(
-                store.update_top20_vwap_touch, self._client_id, self._binding_id, sym, side)
-            await asyncio.to_thread(
-                store.update_top20_traded, self._client_id, self._binding_id, sym)
-            orb_lvl = self._orb_frozen.get(sym, (0.0, 0.0))
-            await self._emit_vwap_signal(
-                sym, side, result["fire_price"], "vwap_retest_historical_top20", orb_lvl,
-                now.strftime("%H:%M:%S"), label="HISTORICAL-RETEST-TOP20",
-            )
 
     async def _wait_until_actionable(self, cfg) -> bool:
         """Waits for SCAN_START (session 1's single point-in-time scan,
@@ -3101,13 +2853,20 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 # value, mirroring the exact price*volume-delta formula the
                 # old poll-based method used, just driven by every real tick
                 # instead of a 20s snapshot.
-                # 2026-09-10, real incident fix: also accumulate for a symbol
-                # with an OPEN POSITION even if it's momentarily not back in
-                # self._shortlist_symbols yet (e.g. right after a restart,
-                # before _reconcile_shortlist_from_db re-adds it) -- an open
-                # position's own VWAP-close SL needs live accumulation
-                # regardless of shortlist membership.
-                if self._top20_mode and (symbol in self._shortlist_symbols or symbol in self._positions):
+                #
+                # 2026-09-17 CRITICAL FIX, real gap found while removing the
+                # oi_orb_screener_top20 variant: this real tick-by-tick VWAP
+                # accumulation call was wrongly gated behind
+                # "if self._top20_mode:" -- meaning the STANDARD variant's
+                # self._vwap has likely been frozen at its one-time seed
+                # value (_seed_vwap_from_upstox_intraday) all day, every day,
+                # since this design was introduced (see this block's own
+                # 2026-09-10 comment above, which describes this as THE real
+                # tick-by-tick source for BOTH variants, replacing the old
+                # poll-based update -- it was never actually top20-exclusive).
+                # Ungated now so the standard variant's VWAP genuinely
+                # updates continuously, matching what was always documented.
+                if symbol in self._shortlist_symbols or symbol in self._positions:
                     cum_vol = float(ev.volume or 0)
                     last_cum = self._vwap_tick_volume_cum_last.get(symbol)
                     if last_cum is not None and cum_vol >= last_cum:
@@ -3115,17 +2874,6 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                         if vol_delta > 0:
                             self._vwap.update(symbol, ltp, vol_delta)
                     self._vwap_tick_volume_cum_last[symbol] = cum_vol
-                # 2026-09-07, top20 variant only: real tick-by-tick feed into
-                # this symbol's rolling 15x1min VWAP-touch window (see
-                # screener.VwapTouchTracker) -- the standard variant's
-                # arm/retest _vwap_check_entry does not use this tracker at all.
-                if self._top20_mode and symbol in self._shortlist_symbols:
-                    tracker = self._vwap_touch_trackers.get(symbol)
-                    if tracker is None:
-                        tracker = screener.VwapTouchTracker(
-                            self._screener_cfg.get("VWAP_TOUCH_WINDOW_MIN", 15))
-                        self._vwap_touch_trackers[symbol] = tracker
-                    tracker.on_tick(datetime.now(IST), ltp)
             except Exception:
                 self._clog.exception("OiOrb[%s/%s]: spot tick processing error (recovered).",
                                       self._client_id, self._binding_id)
@@ -4953,28 +4701,13 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                                 "oi_change_pct": round((_t0915 - _y1539) / _y1539 * 100.0, 2)}
                                if (_t0915 is not None and _y1539) else None),
             }
-        # 2026-09-09, direct user spec: surface each shortlisted (not-yet-
-        # entered) symbol's RollingVwapRetestTracker arm state -- top20 mode
-        # only, since the standard variant's own arm/retest state already
-        # shows via self._vwap_armed elsewhere. Lets the UI show "armed,
-        # waiting for retest" vs "not armed yet" per stock while scanning.
-        retest_trackers = {}
-        if self._top20_mode:
-            for sym in self._shortlist_symbols:
-                tracker = self._rolling_retest_trackers.get(sym)
-                if tracker is None:
-                    continue
-                retest_trackers[sym] = {
-                    "armed": tracker._armed, "armed_side": tracker._armed_side,
-                    "armed_at": tracker._armed_at.isoformat() if tracker._armed_at else None,
-                }
+        # Standard variant's own arm/retest state shows via self._vwap_armed
+        # elsewhere -- retest_trackers stays present (empty) for frontend
+        # backwards-compatibility.
+        retest_trackers: dict = {}
         return {
             "client_id": self._client_id,
             "binding_id": self._binding_id,
-            # 2026-09-07: a binding can now run both oi_orb_screener AND
-            # oi_orb_screener_top20 at once -- the dashboard needs this to
-            # tell the two books' panels apart (matching on binding_id alone
-            # is no longer unambiguous).
             "strategy_name": self._strategy_name,
             "today": self._today.isoformat() if self._today else None,
             "shortlist": self._shortlist_symbols,

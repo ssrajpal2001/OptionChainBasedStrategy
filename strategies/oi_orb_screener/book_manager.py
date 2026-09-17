@@ -163,21 +163,6 @@ _FILTER_BOOL_KEYS = ("oi_wall_check_enabled", "distance_to_wall_enabled", "pcr_g
                       "volume_confirmation_enabled", "oi_roc_enabled")
 
 
-# 2026-09-08, direct user spec: the top-20 variant has no ORB-breakout
-# dependency at all (its entry is a rolling VWAP-touch, not an ORB freeze),
-# so there's no structural reason to wait for the standard variant's
-# SCAN_START=09:26 (which exists specifically to let the 09:15-09:25 ORB
-# range complete first). User confirmed the whole top20 pipeline -- scan,
-# top-20 rank, 2% price-move filter, DB save, VWAP-touch check, entry,
-# exit -- should start at 09:15. ORB_START/ORB_END stay 09:15/09:25
-# (still computed+stored for the dashboard/backtest data even though top20
-# entries don't gate on them), only SCAN_START/ENTRY_WINDOW_START move
-# earlier for this variant specifically.
-_TOP20_DEFAULT_PARAMS = dict(_DEFAULT_PARAMS)
-_TOP20_DEFAULT_PARAMS["scan_start"] = "09:15"
-_TOP20_DEFAULT_PARAMS["entry_window_start"] = "09:15"
-
-
 def _parse_params(raw: str, defaults: dict = _DEFAULT_PARAMS) -> dict:
     try:
         params = json.loads(raw or "{}")
@@ -189,13 +174,7 @@ def _parse_params(raw: str, defaults: dict = _DEFAULT_PARAMS) -> dict:
 
 
 class OiOrbScreenerBookManager(StrategyBookManager):
-    # 2026-09-07: overridden by OiOrbScreenerTop20BookManager so the same
-    # book class/reconcile logic serves both deployment rows
-    # ("oi_orb_screener" vs "oi_orb_screener_top20") -- only the DB query
-    # and the strategy_name threaded into the spawned book differ.
     STRATEGY_NAME = _STRATEGY_NAME
-    # 2026-09-08: per-variant defaults (see _TOP20_DEFAULT_PARAMS above) --
-    # overridden by OiOrbScreenerTop20BookManager.
     DEFAULT_PARAMS = _DEFAULT_PARAMS
 
     def _wanted(self) -> Dict[tuple, dict]:
@@ -359,30 +338,3 @@ class OiOrbScreenerBookManager(StrategyBookManager):
 
     def _log_stopped(self, key: tuple) -> None:
         logger.info("OiOrbScreenerBookManager: reconcile stopped %s", key)
-
-
-class OiOrbScreenerTop20BookManager(OiOrbScreenerBookManager):
-    """2026-09-07, direct user spec: sibling deployment/strategy_name to the
-    standard oi_orb_screener -- same shortlist->ORB/VWAP scaffolding, own
-    scan (top-20-by-OI-spurt, no pct threshold) + own entry mechanic
-    (rolling 15x1min VWAP-touch, see screener.VwapTouchTracker), reusing the
-    identical exit mechanic (HA+StochRSI, EOD square-off). See
-    OiOrbScreenerStrategy.__init__'s strategy_name param + engine.py's
-    self._top20_mode branches for the actual behavioral difference -- this
-    class only changes WHICH deployment rows get read and WHICH strategy_name
-    gets threaded into the spawned book; everything else (reconcile/respawn
-    logic, config parsing) is inherited unchanged.
-
-    A client/binding could in principle run BOTH variants -- since each is a
-    separate strategy_deployments row keyed by strategy_name, and this class's
-    own _wanted() only ever queries "oi_orb_screener_top20" rows, the two
-    managers can never accidentally spawn duplicate/colliding books for the
-    same deployment.
-
-    2026-09-08, direct user spec: the whole pipeline (scan, top-20 rank, 2%
-    price-move filter, DB save, VWAP-touch check, entry, exit) starts at
-    09:15, not the standard variant's 09:26 -- see _TOP20_DEFAULT_PARAMS'
-    own comment for why the standard variant's SCAN_START delay doesn't
-    apply here (no ORB-breakout dependency)."""
-    STRATEGY_NAME = "oi_orb_screener_top20"
-    DEFAULT_PARAMS = _TOP20_DEFAULT_PARAMS

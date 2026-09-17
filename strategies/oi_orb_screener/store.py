@@ -468,84 +468,10 @@ def load_latest_scan_symbols(client_id: str, binding_id: str, trade_date: Option
         con.close()
 
 
-# ── oi_orb_top20_daily_scan (2026-09-07, direct user spec, new strategy
-# "oi_orb_screener_top20"): "register all stocks in database for future
-# backtest and optimisation" -- ALL 20 rank-scanned stocks once per day,
-# whether or not they went on to pass the price-move filter or fire a
-# real VWAP-touch entry. ──────────────────────────────────────────────
-
-def record_top20_daily_scan(client_id: str, binding_id: str, rows: List[dict],
-                             trade_date: Optional[str] = None) -> None:
-    """rows: [{"symbol", "rank", "oi_spurt_pct", "price_change_pct",
-    "price_move_pass"}, ...] -- the full top-20 scan, ALL stocks, called
-    once at scan time. ON CONFLICT UPDATE so a re-scan after a restart
-    corrects rather than duplicates each symbol's row for the day."""
-    init_db()
-    td = trade_date or _today()
-    now_ts = datetime.now(IST).isoformat(timespec="seconds")
-    con = sqlite3.connect(_DB_PATH)
-    try:
-        for r in rows:
-            con.execute(
-                """INSERT INTO oi_orb_top20_daily_scan
-                       (client_id, binding_id, trade_date, symbol, rank,
-                        oi_spurt_pct, price_change_pct, price_move_pass, scanned_ts)
-                   VALUES (?,?,?,?,?,?,?,?,?)
-                   ON CONFLICT(client_id, binding_id, trade_date, symbol) DO UPDATE SET
-                       rank=excluded.rank, oi_spurt_pct=excluded.oi_spurt_pct,
-                       price_change_pct=excluded.price_change_pct,
-                       price_move_pass=excluded.price_move_pass""",
-                (client_id, binding_id, td, r["symbol"], int(r["rank"]),
-                 r.get("oi_spurt_pct"), r.get("price_change_pct"),
-                 int(bool(r.get("price_move_pass"))), now_ts),
-            )
-        con.commit()
-    except Exception as exc:
-        logger.error("oi_orb store.record_top20_daily_scan failed: %s", exc)
-    finally:
-        con.close()
-
-
-def update_top20_vwap_touch(client_id: str, binding_id: str, symbol: str, touch_side: str,
-                             trade_date: Optional[str] = None) -> None:
-    """Marks a symbol's VWAP-touch condition as satisfied -- called the
-    moment VwapTouchTracker.check_touch() first fires for it. No-op
-    (safe) if the symbol was never scanned into today's row at all."""
-    init_db()
-    td = trade_date or _today()
-    now_ts = datetime.now(IST).isoformat(timespec="seconds")
-    con = sqlite3.connect(_DB_PATH)
-    try:
-        con.execute(
-            """UPDATE oi_orb_top20_daily_scan
-               SET vwap_touch_pass=1, touch_side=?, touch_ts=?
-               WHERE client_id=? AND binding_id=? AND trade_date=? AND symbol=?""",
-            (touch_side, now_ts, client_id, binding_id, td, symbol),
-        )
-        con.commit()
-    except Exception as exc:
-        logger.error("oi_orb store.update_top20_vwap_touch failed: %s", exc)
-    finally:
-        con.close()
-
-
-def update_top20_traded(client_id: str, binding_id: str, symbol: str,
-                         trade_date: Optional[str] = None) -> None:
-    """Marks a symbol as having actually fired a real entry today."""
-    init_db()
-    td = trade_date or _today()
-    con = sqlite3.connect(_DB_PATH)
-    try:
-        con.execute(
-            """UPDATE oi_orb_top20_daily_scan SET traded=1
-               WHERE client_id=? AND binding_id=? AND trade_date=? AND symbol=?""",
-            (client_id, binding_id, td, symbol),
-        )
-        con.commit()
-    except Exception as exc:
-        logger.error("oi_orb store.update_top20_traded failed: %s", exc)
-    finally:
-        con.close()
+# 2026-09-17: oi_orb_screener_top20's own record/update functions removed
+# (the strategy itself was deleted -- see registry.py's own comment for
+# why). The oi_orb_top20_daily_scan table schema below is left in place,
+# unwritten going forward, so its historical rows remain queryable.
 
 
 # ── signal_events -- the "why" audit trail ──────────────────────────────
