@@ -555,9 +555,13 @@ def test_hedge_cumulative_profit_close_fires_and_closes_all_four_legs():
         assert ("SELL", "PE", 23500) in hedge_calls
         assert pos.hedge_ce_leg is None and pos.hedge_pe_leg is None
         assert closed == ["hedge_cumulative_profit"]
-        # Next entry must use BEGINNING rules, not re-entry -- the whole point
-        # of "start fresh" (user spec).
-        assert cooldowns == ["entry_rules_beginning"]
+        # 2026-09-17, direct user spec, overrides the original 2026-08-24
+        # cooldown: "when we close complete 4 leg no cooldown needed
+        # immediate start to check for beginning entry logic." No cooldown
+        # at all now -- the next entry is evaluated as BEGINNING starting
+        # the very next tick (already guaranteed by trades_today resetting
+        # once flat, independent of any cooldown).
+        assert cooldowns == []
     asyncio.run(run())
 
 

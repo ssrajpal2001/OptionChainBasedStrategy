@@ -1102,7 +1102,15 @@ class ExitMixin:
         )
         await self._close_hedge_legs(pos, "hedge_cumulative_profit")
         await self._close_position("hedge_cumulative_profit")
-        self._apply_sl_cooldown(rule_key="entry_rules_beginning")
+        # 2026-09-17, direct user spec, OVERRIDES the 2026-08-24 original
+        # design (which deliberately cooled down before the next entry --
+        # see this method's own opening docstring): "when we close complete
+        # 4 leg no cooldown needed immediate start to check for beginning
+        # entry logic." A hedge-cumulative-profit close is a genuine, clean,
+        # profit-driven exit (not an SL/loss event) -- the next entry should
+        # be evaluated as BEGINNING starting the very next tick, no delay.
+        # _close_position's own generic cooldown call is also skipped for
+        # this reason (see its exclusion-list comment).
         return True
 
     _POST1500_START = dtime(15, 0)
@@ -2342,7 +2350,12 @@ class ExitMixin:
                 )
             # Cooldown is for organic SL events; forced liquidation / deployment removal
             # should not penalise future entries (and kill-switch means no future entries).
-            if reason not in ("itm_pair_gate_profit", "kill_switch", "deployment_stop", "system_shutdown"):
+            # 2026-09-17, direct user spec: hedge_cumulative_profit added alongside
+            # itm_pair_gate_profit -- both are genuine profit-driven full closes, not
+            # SL/loss events, and the next entry should be evaluated as BEGINNING
+            # immediately, no cooldown delay.
+            if reason not in ("itm_pair_gate_profit", "hedge_cumulative_profit", "kill_switch",
+                              "deployment_stop", "system_shutdown"):
                 self._apply_sl_cooldown()
             audit_exit_exec(
                 client_id=_cid,
