@@ -1695,8 +1695,19 @@ class DashboardServer:
                     "error": "No AngelOne API key saved. Click ⚙ to enter credentials first "
                              "(Client ID + API Key at minimum for the browser login).",
                 }
-            base_url = _redirect_base(request, _srv._client_db)
-            callback_url = f"{base_url}/callback/angelone"
+            # 2026-09-18, TEMPORARY direct user instruction (market about to
+            # open, AngelOne's own console won't let this app's redirect URL
+            # be edited or a fresh app be created): hardcode the callback to
+            # the OLD trycloudflare.com URL still registered against this
+            # api_key on AngelOne's side, instead of the real current
+            # _redirect_base() (sslip.io) this server actually answers on.
+            # This ONLY works if that old Cloudflare quick-tunnel is still
+            # genuinely running and forwarding to this same server -- if it
+            # isn't, the browser will hit a dead/unreachable host after
+            # AngelOne login instead of a clean "invalid redirect" error.
+            # REVERT to _redirect_base(request, _srv._client_db) once
+            # AngelOne support fixes the registered redirect URL properly.
+            callback_url = "https://inflation-technologies-current-queue.trycloudflare.com/callback/angelone"
             state = build_state("admin", "feeder", "angelone")
             auth_ok, auth_url = await asyncio.to_thread(
                 generate_auth_url, "angelone", api_key, "", callback_url, state, creds.get("client_id", "")
