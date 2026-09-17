@@ -90,6 +90,20 @@ class IronFlyBookManager(StrategyBookManager):
             chain_depth_strikes=value["chain_depth_strikes"],
             product_type=value["product_type"],
         )
+        # 2026-09-17 CRITICAL FIX, real gap found via direct user log check:
+        # the base StrategyBookManager.set_rebalancer() only reaches books
+        # that ALREADY EXIST at the moment it's called (once, at process
+        # startup, per run_system.py's own wiring) -- it never re-injects
+        # into a book spawned LATER by this manager's own reconcile loop,
+        # which is exactly how every Iron Fly book actually comes to exist.
+        # Confirmed live: zero "strikes pinned in StrikeRebalancer" log
+        # lines ever appeared despite a real, actively-adjusting Iron Fly
+        # position running all day -- the 2026-09-17 pin fix in engine.py
+        # was correct but silently inert because self._rebalancer was
+        # always None on every real book. StraddleBookManager._spawn_book
+        # already does this same injection -- mirrored here.
+        if self._rebalancer is not None and hasattr(book, "set_rebalancer"):
+            book.set_rebalancer(self._rebalancer)
         logger.info(
             "IronFlyBookManager: spawned %s/%s/%s (lots=%d otm1=%d adjustment_distance=%.0f "
             "short_threshold=%.1f long_threshold=%.1f profit_target_pct=%.2f chain_depth_strikes=%d).",
