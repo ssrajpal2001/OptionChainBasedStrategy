@@ -647,6 +647,30 @@ class IronFlyStrategy:
                     continue
                 if getattr(ev, "source", "spot") != "spot":
                     continue
+                # 2026-09-17 CRITICAL FIX, real incident: this loop had NO
+                # market-hours gate at all -- a real INDEX_TICK arriving
+                # during NSE's 09:00-09:15 pre-open/call-auction session (or
+                # after 15:30 close) would still flow straight into
+                # self._engine.on_spot_tick() below, and if the engine's own
+                # adjustment/entry logic decided a leg needed to open/close
+                # off that tick, _fire_orders() placed a REAL order via the
+                # broker. Zerodha correctly rejects a regular order placed
+                # outside continuous trading hours ("Your order could not be
+                # converted to a After Market Order (AMO)") -- confirmed live
+                # 2026-09-17 09:07 IST, PE23200/CE23400 rejected 3x each,
+                # repeating on every subsequent pre-open tick. Every other
+                # strategy in this codebase gates its own entry/adjustment
+                # evaluation on a real trading-hours window; this one never
+                # did. Ticks outside [market_open, market_close) are now
+                # simply ignored for adjustment/order purposes -- the engine
+                # still holds whatever position it already has (no EOD
+                # square-off, unchanged), it just won't act on a tick that
+                # arrived before/after the exchange is genuinely open.
+                from config.global_config import ExchangeConfig as _ExCfg, IST as _IST
+                _now_t = ev.timestamp.astimezone(_IST).time() if getattr(ev, "timestamp", None) else \
+                    datetime.now(_IST).time()
+                if not (_ExCfg().market_open <= _now_t < _ExCfg().market_close):
+                    continue
                 if self._engine.is_flat():
                     # Re-resolve on EVERY tick while flat (not just once) so
                     # a fresh entry always gets the freshest expiry-day-
