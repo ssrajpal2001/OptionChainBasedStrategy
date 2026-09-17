@@ -2929,10 +2929,36 @@ class DashboardServer:
                         try:
                             from data_layer import trade_history as _th
                             _today = datetime.now(IST).date().isoformat()
+                            # 2026-09-17, direct user spec: "when we close the 4 leg
+                            # concept that profit or loss should not be added to this
+                            # running fresh position -- cumulative profit will not be
+                            # shown here, that is only used when we are in same cycle."
+                            # Booked P&L must be scoped to the CURRENT cycle (this
+                            # position's own open_time onward), not the whole
+                            # calendar day -- otherwise a fresh position opened right
+                            # after a hedge_cumulative_profit (or any other full)
+                            # close kept showing the PREVIOUS cycle's already-booked
+                            # total, confirmed live (₹3062 bleeding into a brand-new
+                            # position). A same-cycle roll/re-entry's own closed leg
+                            # still has a close ts strictly after this position's own
+                            # open_time, so it correctly stays included.
+                            _cycle_start = getattr(pos, "open_time", None) if pos else None
                             _recs = _th.load(cid, 500)
+                            def _in_cycle(r) -> bool:
+                                if str(r.get("ts", ""))[:10] != _today:
+                                    return False
+                                if _cycle_start is None:
+                                    return True
+                                try:
+                                    _r_ts = datetime.fromisoformat(str(r.get("ts", "")))
+                                    if _r_ts.tzinfo is None:
+                                        _r_ts = _r_ts.replace(tzinfo=IST)
+                                    return _r_ts >= _cycle_start
+                                except Exception:
+                                    return True
                             booked = round(sum(
                                 float(r.get("pnl", 0) or 0) for r in _recs
-                                if str(r.get("ts", ""))[:10] == _today
+                                if _in_cycle(r)
                                 and r.get("strategy") == sname
                                 and str(r.get("instrument", "")).upper() == str(underlying).upper()
                                 and str(r.get("binding_id", "")) == bid
