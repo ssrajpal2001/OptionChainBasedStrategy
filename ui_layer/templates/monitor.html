@@ -2877,6 +2877,19 @@ document.addEventListener('alpine:init', () => {
             for (const lg of legs) {
               if (!(lg.exit > 0)) continue;
               const _x = lg.exit_ts || tr.date || tr.ts || '';
+              // 2026-09-17, direct user spec: a leg carried forward from a
+              // PREVIOUS day (e.g. an EOD hedge-and-carry leg opened
+              // yesterday, closed today) shows up in TODAY's history group
+              // with no visible OPEN row -- that row lives in yesterday's
+              // own day-group instead, so on its own this close looks like
+              // it "came from nowhere." Flag it explicitly in the remark
+              // whenever the leg's own open date differs from its close
+              // date, so it's clear without having to go hunting through a
+              // separate day's group.
+              const _openDay = (lg.entry_ts || '').slice(0, 10);
+              const _closeDay = String(_x).slice(0, 10);
+              const _carriedNote = (_openDay && _closeDay && _openDay !== _closeDay)
+                ? `(opened ${_openDay}) ` : '';
               flat.push({
                 _ts: _x,
                 time: this.fmtHMS(_x),
@@ -2887,7 +2900,7 @@ document.addEventListener('alpine:init', () => {
                 // show '—' instead of a garbage number.
                 pnl: (lg.entry > 0 ? (lg.pnl != null ? lg.pnl : 0) : null),
                 reason: tr.exit_reason || '—',
-                remark: tr.exit_remark || '',
+                remark: _carriedNote + (tr.exit_remark || ''),
               });
             }
           }
