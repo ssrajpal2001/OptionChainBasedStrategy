@@ -72,6 +72,57 @@ async def test_stop_async_cancels_tasks_and_unsubscribes():
     assert book._loop_queues == {}
 
 
+class _FakeRebalancer:
+    def __init__(self):
+        self.pinned: set = set()
+        self.pin_calls: list = []
+        self.unpin_calls: list = []
+
+    def pin_strike(self, underlying, strike):
+        self.pinned.add(strike)
+        self.pin_calls.append(strike)
+
+    def unpin_strike(self, underlying, strike):
+        self.pinned.discard(strike)
+        self.unpin_calls.append(strike)
+
+
+def test_sync_strike_pins_pins_all_four_held_legs():
+    """2026-09-17 real gap fix: unlike SellStraddle, this engine never pinned
+    its own held strikes at all -- confirmed via a repo-wide grep finding
+    zero pin_strike/rebalancer references before this fix. A restart or a
+    fresh entry must now explicitly pin every currently-held leg."""
+    from strategies.iron_fly.detector import Leg
+    bus = _FakeBus()
+    book = IronFlyStrategy(bus, _fake_cfg(), "NIFTY", "c1", "b1")
+    reb = _FakeRebalancer()
+    book._engine.short_ce = Leg(strike=23700, entry_price=21.65, qty=65, is_short=True, side="CE")
+    book._engine.long_ce = Leg(strike=23750, entry_price=16.55, qty=65, is_short=False, side="CE")
+    book._engine.short_pe = Leg(strike=22850, entry_price=23.85, qty=65, is_short=True, side="PE")
+    book._engine.long_pe = Leg(strike=22800, entry_price=19.85, qty=65, is_short=False, side="PE")
+
+    book.set_rebalancer(reb)
+
+    assert reb.pinned == {23700, 23750, 22850, 22800}
+
+
+def test_sync_strike_pins_unpins_strikes_no_longer_held():
+    from strategies.iron_fly.detector import Leg
+    bus = _FakeBus()
+    book = IronFlyStrategy(bus, _fake_cfg(), "NIFTY", "c1", "b1")
+    reb = _FakeRebalancer()
+    book._engine.short_ce = Leg(strike=23700, entry_price=21.65, qty=65, is_short=True, side="CE")
+    book.set_rebalancer(reb)
+    assert reb.pinned == {23700}
+
+    book._engine.short_ce = None
+    book._engine.short_pe = Leg(strike=22850, entry_price=23.85, qty=65, is_short=True, side="PE")
+    book._sync_strike_pins()
+
+    assert reb.pinned == {22850}
+    assert 23700 in reb.unpin_calls
+
+
 def test_monitoring_state_when_flat():
     bus = _FakeBus()
     book = IronFlyStrategy(bus, _fake_cfg(), "NIFTY", "c1", "b1")

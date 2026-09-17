@@ -504,8 +504,62 @@ class IronFlyStrategy:
         self._running = False
         self._tasks: list = []
         self._loop_queues: Dict[str, "asyncio.Queue"] = {}
+        # 2026-09-17 CRITICAL FIX, real gap found via direct user question
+        # ("still spectical if sell straddle and iron fly strikes are
+        # subscribed to websocket immediately"): unlike SellStraddle, this
+        # engine never pinned its own held strikes into the shared
+        # StrikeRebalancer at all -- confirmed via a repo-wide grep of this
+        # file (zero references to pin_strike/rebalancer/subscribe before
+        # this fix). Ticks for this book's own legs arrived purely
+        # passively, riding on whatever ATM+/-N window happened to be
+        # subscribed for OTHER reasons (e.g. SellStraddle's own window on
+        # the same underlying) -- if Iron Fly's actual held strikes (its
+        # wing legs especially, which can sit well OTM) ever fell outside
+        # that shared window, those legs would silently stop receiving live
+        # ticks with zero warning. _rebalancer is injected the same way
+        # SellStraddle's own set_rebalancer() is (see run_system.py's
+        # generic "if hasattr(manager, 'set_rebalancer')" wiring, which was
+        # already calling this -- it just had nothing to call before now).
+        self._rebalancer = None
+        self._pinned_strikes: set = set()
 
     # ── lifecycle ────────────────────────────────────────────────────────
+
+    def set_rebalancer(self, rebalancer) -> None:
+        """Injected by run_system.py the same way SellStraddle's own
+        set_rebalancer() is -- see this engine's __init__ for the real gap
+        this closes (2026-09-17)."""
+        self._rebalancer = rebalancer
+        self._sync_strike_pins()
+
+    def _sync_strike_pins(self) -> None:
+        """Re-pins whatever strikes this book currently holds (any of its 4
+        leg slots) into the shared StrikeRebalancer, and unpins any strike
+        this book itself pinned earlier that it no longer holds. Idempotent
+        -- safe to call on every tick that changes a leg, on restore, and
+        the instant a rebalancer is first injected. Never touches a strike
+        this book didn't pin itself (another book's own pin on the same
+        strike is untouched)."""
+        if self._rebalancer is None:
+            return
+        held = {leg.strike for leg in snapshot_legs(self._engine).values() if leg is not None}
+        for strike in held - self._pinned_strikes:
+            try:
+                self._rebalancer.pin_strike(self._underlying, float(strike))
+            except Exception:
+                logger.warning("IronFlyStrategy[%s/%s]: pin_strike(%s) failed.",
+                                self._binding_id, self._underlying, strike)
+        for strike in self._pinned_strikes - held:
+            try:
+                self._rebalancer.unpin_strike(self._underlying, float(strike))
+            except Exception:
+                logger.warning("IronFlyStrategy[%s/%s]: unpin_strike(%s) failed.",
+                                self._binding_id, self._underlying, strike)
+        self._pinned_strikes = held
+        logger.info(
+            "IronFlyStrategy[%s/%s]: strikes pinned in StrikeRebalancer: %s.",
+            self._binding_id, self._underlying, sorted(held) if held else "none (flat)",
+        )
 
     def reset_session(self) -> None:
         """No daily reset by design -- this strategy carries positions
@@ -521,6 +575,7 @@ class IronFlyStrategy:
         self._subscribe(Topic.OPTION_TICK)
         self._subscribe(Topic.IRON_FLY_ORDER_FILL)
         self._restore_position()
+        self._sync_strike_pins()
         self._tasks.append(asyncio.create_task(
             self._index_tick_loop(), name=f"ironfly_idx_{self._underlying}_{self._binding_id}"))
         self._tasks.append(asyncio.create_task(
@@ -694,6 +749,7 @@ class IronFlyStrategy:
                         self._fire_orders(closed, opened, new_events)
                         self._persist_position()
                         self._log_remark(new_events)
+                        self._sync_strike_pins()
             except Exception:
                 logger.exception("IronFlyStrategy[%s/%s]: _index_tick_loop iteration error (recovered).",
                                   self._binding_id, self._underlying)

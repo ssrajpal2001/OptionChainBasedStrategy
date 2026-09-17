@@ -946,15 +946,26 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                         # 2026-09-15: standing hedge legs need the same restart re-pin --
                         # otherwise a restart with an active hedge silently loses their
                         # subscription exactly like the sold legs used to before this fix.
+                        _hedge_pinned = []
                         if pos.hedge_ce_leg is not None:
                             self._rebalancer.pin_strike(self._underlying, float(pos.hedge_ce_leg.strike))
+                            _hedge_pinned.append(f"CE{int(pos.hedge_ce_leg.strike)}")
                         if pos.hedge_pe_leg is not None:
                             self._rebalancer.pin_strike(self._underlying, float(pos.hedge_pe_leg.strike))
+                            _hedge_pinned.append(f"PE{int(pos.hedge_pe_leg.strike)}")
+                        # 2026-09-17, direct user ask ("still spectical if sell straddle
+                        # and iron fly strikes are subscribed to websocket immediately...
+                        # i cant see that in log"): the pin calls above always ran, but
+                        # this log line never explicitly said whether a standing hedge
+                        # got re-subscribed too -- made it unverifiable from the log alone
+                        # whether a restart's hedge legs actually resumed receiving live
+                        # ticks. Now states hedge status explicitly every restart.
                         logger.info(
                             "SellStraddle[%s]: re-pinned restored position legs CE%d/PE%d "
-                            "in StrikeRebalancer (pinned_strikes now %s).",
+                            "in StrikeRebalancer (pinned_strikes now %s). Hedge legs: %s.",
                             self._underlying, int(pos.ce_leg.strike), int(pos.pe_leg.strike),
                             sorted(self._rebalancer.pinned_strikes(self._underlying)),
+                            (f"re-pinned {', '.join(_hedge_pinned)}" if _hedge_pinned else "none standing"),
                         )
                     except Exception as exc:
                         logger.warning("SellStraddle[%s]: re-pin of restored position legs "
