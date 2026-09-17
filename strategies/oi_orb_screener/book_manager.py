@@ -71,7 +71,22 @@ _DEFAULT_PARAMS = {
     # 10:30). No new entries fire and no further scanning after this time;
     # a position already running is unaffected -- it only closes at EOD
     # square-off, target, or SL.
-    "entry_window_end": "15:00",
+    #
+    # 2026-09-17 CRITICAL FIX, real gap found via a direct log check: this
+    # dict is COMPLETELY SEPARATE from screener.py's own CONFIG default --
+    # screener.CONFIG["ENTRY_WINDOW_END"] was already tightened to "13:30"
+    # earlier today (real 7-day backtest evidence: entries firing after
+    # 13:30 netted only +3.99 pts across 7 real trades vs +204.20 pts across
+    # the 12 real trades at/before 13:30; separately, 32 of 35 real stocks
+    # checked had their single biggest intraday range in the 09:15-11:30
+    # morning session, ZERO in the afternoon), but book_manager.py's own
+    # _parse_params() always passes value["entry_window_end"] from THIS
+    # dict, never reading screener.CONFIG at all -- confirmed live: the
+    # actual running deployment's reconcile log still showed
+    # 'entry_window_end': '15:00' hours after the screener.py fix was
+    # deployed and restarted. Updated here to match -- this is the value
+    # that actually governs the live engine.
+    "entry_window_end": "13:30",
     # 2026-08-25, direct user spec: five additive, independently-toggleable
     # filters (see strategies/oi_orb_screener/filters.py's module docstring
     # for the real incident -- a SAIL CALL breakout fired right under a
