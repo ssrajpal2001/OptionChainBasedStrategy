@@ -113,6 +113,40 @@ def test_5min_ceiling_closes_position_instead_of_arming_stale_data(caplog):
     assert any(r.levelno == logging.CRITICAL for r in caplog.records)
 
 
+def test_5min_ceiling_never_touches_hedge_legs(caplog):
+    """2026-09-17, direct user spec: "when we bring back the positions dont
+    close hedge leg -- hedge leg will get closed in only 1 case when there
+    is cumulative profit of already booked plus running 4 leg >500 then
+    only hedge leg will get closed." The post-restore stale-feed safety
+    close must call the plain _close_position (sold legs only, which
+    stashes any standing hedge into _pending_hedge_ce_leg/_pe_leg to carry
+    forward into the next entry), never _close_position_and_hedge (which
+    would close the hedge legs too)."""
+    import logging
+    s = _restored_strategy(EventBus(), elapsed_sec=301.0, ce_fresh=False, pe_fresh=True)
+    s._market_genuinely_open = lambda: True
+    s._position.hedge_ce_leg = StraddleLeg("CE", 23600, 39.05, 39.05)
+    s._position.hedge_pe_leg = StraddleLeg("PE", 22950, 65.85, 65.85)
+    s._position.is_hedged_positional = True
+
+    hedge_close_calls = []
+    async def _fake_close_position_and_hedge(reason):
+        hedge_close_calls.append(reason)
+    s._close_position_and_hedge = _fake_close_position_and_hedge
+
+    sold_close_calls = []
+    async def _fake_close_position(reason):
+        sold_close_calls.append(reason)
+        s._position.status = "closed"
+    s._close_position = _fake_close_position
+
+    with caplog.at_level(logging.CRITICAL, logger="strategies.sell_straddle.exits"):
+        asyncio.run(s._check_exits())
+
+    assert hedge_close_calls == [], "hedge legs must never be closed by the stale-feed guard"
+    assert sold_close_calls == ["post_restore_data_stale"]
+
+
 def test_5min_ceiling_defers_close_when_market_not_genuinely_open(caplog):
     """2026-09-17 real live incident: a restart shortly before market open
     (e.g. 08:56:50) hit the 5-min ceiling at ~09:01:50 -- still inside NSE's

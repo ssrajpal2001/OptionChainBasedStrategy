@@ -1520,10 +1520,19 @@ class ExitMixin:
                     self._POST_RESTORE_WARMUP_MAX_SEC,
                     pos.ce_leg.ltp, pos.pe_leg.ltp, pos.unrealized_pnl,
                 )
-                # 2026-08-28 fix: a stuck feed affects the hedge legs' own LTP
-                # too -- this is a full exit, so close any standing hedge legs
-                # alongside the sold legs (same "treat all 4 legs as one" fix).
-                await self._close_position_and_hedge("post_restore_data_stale")
+                # 2026-09-17, direct user spec, OVERRIDES the 2026-08-28
+                # "treat all 4 legs as one" fix for THIS specific reason only:
+                # "when we bring back the positions dont close hedge leg --
+                # hedge leg will get closed in only 1 case when there is
+                # cumulative profit of already booked plus running 4 leg
+                # >500 then only hedge leg will get closed." A stuck/stale
+                # feed on restore is a data-quality problem, not a trading
+                # decision -- it must never be allowed to close a standing
+                # hedge; only _check_hedge_cumulative_profit_close (the real
+                # >=Rs500/lot combined-P&L rule) may do that. Close ONLY the
+                # sold legs here -- any standing hedge keeps running
+                # untouched, protected regardless of this guard's outcome.
+                await self._close_position("post_restore_data_stale")
                 if not (self._position and self._position.status == "open"):
                     self._post_restore_warmup = False
                 else:
