@@ -1089,6 +1089,25 @@ class ExitMixin:
         _threshold_rs = _HEDGE_CLOSE_PROFIT_RS * self._lot_multiplier
         if total_pnl_rs < _threshold_rs:
             return False
+        if pos.status != "open":
+            # 2026-09-17 CRITICAL FIX, real live incident: _tick_loop and
+            # _eod_backstop_loop are two INDEPENDENT asyncio tasks that can
+            # both reach _check_exits() for the same position around the
+            # same moment (see _eod_backstop_loop's own docstring -- this is
+            # already a documented, accepted risk for _close_position, which
+            # guards itself by setting pos.status="closing" SYNCHRONOUSLY
+            # before its first await). This method had NO equivalent guard:
+            # both tasks could independently pass the threshold check above
+            # and both call _close_hedge_legs before either one set any
+            # status flag. Confirmed live: PE22950's real SELL order was
+            # dispatched TWICE (two identical rows in the broker's own order
+            # book, both REJECTED only because this account has zero margin
+            # -- had margin existed, this would have doubled the real
+            # hedge-close size). Re-checking pos.status here (now genuinely
+            # racy-safe since the caller always re-reads self._position
+            # fresh) catches the second task before it repeats the dispatch.
+            return False
+        pos.status = "closing"
         logger.info(
             "SellStraddle[%s]: HEDGE CUMULATIVE PROFIT — total=₹%.2f (%.2f pts, threshold=₹%.2f) "
             "(booked=%.2f sold=%.2f hedge=%.2f pts) — closing all 4 legs, starting fresh.",

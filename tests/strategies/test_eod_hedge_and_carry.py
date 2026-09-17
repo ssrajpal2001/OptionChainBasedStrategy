@@ -565,6 +565,43 @@ def test_hedge_cumulative_profit_close_fires_and_closes_all_four_legs():
     asyncio.run(run())
 
 
+def test_hedge_cumulative_profit_close_guards_against_concurrent_double_dispatch():
+    """2026-09-17 CRITICAL FIX, real live incident: _tick_loop and
+    _eod_backstop_loop are two independent asyncio tasks that can both reach
+    _check_hedge_cumulative_profit_close for the same position around the
+    same moment. Before this fix, neither call set any status flag before
+    calling _close_hedge_legs, so a second concurrent call could re-dispatch
+    a real SELL order for a leg the first call was already closing --
+    confirmed live via TWO identical real SELL order-book rows for PE22950.
+    Simulates the race directly: first call sets pos.status="closing"
+    synchronously; a second call on the SAME pos object (as if from the
+    other task) must see that and refuse to dispatch again."""
+    async def run():
+        s = _make()   # sold legs net -50 (ce -30, pe -20)
+        pos = _hedged(s, ce_hedge_ltp=200.0, pe_hedge_ltp=40.0)
+        # total = -50 (sold) + 125 (hedge) = +75 -> should fire
+        hedge_calls = _stub_dispatch(s, {
+            ("SELL", "CE", 24500): _fill("SELL", "CE", 24500, 200.0),
+            ("SELL", "PE", 23500): _fill("SELL", "PE", 23500, 40.0),
+        })
+        async def _fake_close(reason):
+            s._position.status = "closed"
+        s._close_position = _fake_close
+
+        first = await s._check_hedge_cumulative_profit_close(pos, datetime.datetime.now(IST))
+        assert first is True
+        first_call_count = len(hedge_calls)
+
+        # Simulate the second task's concurrent call landing right after --
+        # pos.status is now "closing" (set synchronously by the first call,
+        # before it awaited anything), so this must be a clean no-op.
+        second = await s._check_hedge_cumulative_profit_close(pos, datetime.datetime.now(IST))
+
+        assert second is False
+        assert len(hedge_calls) == first_call_count, "must not re-dispatch a real order on the second call"
+    asyncio.run(run())
+
+
 def test_hedge_cumulative_profit_close_does_not_fire_when_still_negative():
     async def run():
         s = _make()   # sold legs net -50
