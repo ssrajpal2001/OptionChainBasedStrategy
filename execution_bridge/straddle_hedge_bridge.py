@@ -201,8 +201,19 @@ class StraddleHedgeExecutionBridge:
             from data_layer import trade_history as _th
             pnl = round((fill_price - ev.entry_price) * ev.quantity, 2)
             _entry_ts = ev.entry_ts
+            # 2026-09-17, direct user spec ("all should have been combined"):
+            # the dashboard's History tab groups by (underlying, strategy,
+            # binding_id) -- recording hedge legs under a separate
+            # "sell_straddle_hedge" strategy tag split every hedge-and-carry
+            # day's trades into two disconnected History groups instead of
+            # one combined view of the whole 4-leg cycle. Now tagged
+            # "sell_straddle" (same as the sold-leg bridge) so both groups
+            # merge into one. The per-day flat-file trade LOG (this file's
+            # own _StraddleHedgeTradeLogger, a few lines up) is untouched --
+            # that's an internal, dashboard-invisible namespace, not what
+            # this fix is about.
             _th.record(
-                ev.client_id, "sell_straddle_hedge", ev.underlying,
+                ev.client_id, "sell_straddle", ev.underlying,
                 ev.entry_price, fill_price, ev.reason, pnl,
                 binding_id=ev.binding_id,
                 legs=[{
