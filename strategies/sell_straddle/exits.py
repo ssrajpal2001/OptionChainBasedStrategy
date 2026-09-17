@@ -555,7 +555,7 @@ class ExitMixin:
 
     async def _dispatch_hedge_order(
         self, action: str, side: str, strike: int, price: float, entry_price: float,
-        expiry, reason: str,
+        expiry, reason: str, entry_ts=None,
     ):
         """BUY (open) or SELL (close) one hedge leg via the standalone
         StraddleHedgeExecutionBridge (Topic.STRADDLE_HEDGE_ORDER_REQUEST/FILL) --
@@ -572,7 +572,7 @@ class ExitMixin:
             underlying=self._underlying, option_type=side, strike=int(strike),
             expiry=expiry, quantity=qty, entry_price=entry_price,
             exit_price=price if action == "SELL" else 0.0,
-            reason=reason, event_id=eid,
+            reason=reason, event_id=eid, entry_ts=entry_ts,
             product_type=self._current_product_type(),
             # 2026-09-07 real incident fix: left at the dataclass default
             # ("sell_straddle") this would fail straddle_hedge_bridge.py's own
@@ -705,7 +705,7 @@ class ExitMixin:
             current_ltp = float(current.get("ltp", 0.0) or 0.0) or float(leg.ltp or 0.0)
             fill = await self._dispatch_hedge_order(
                 "SELL", leg.option_type, int(leg.strike), current_ltp,
-                leg.entry_price, pos.expiry_date, reason,
+                leg.entry_price, pos.expiry_date, reason, entry_ts=leg.open_time,
             )
             if fill is None or fill.exit_failed or fill.routing_failed:
                 logger.critical(

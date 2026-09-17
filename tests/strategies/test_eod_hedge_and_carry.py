@@ -106,7 +106,7 @@ def _stub_dispatch(s, fills: dict) -> list:
     dispatch). Returns the list of calls made, for assertions."""
     calls = []
 
-    async def _fake(action, side, strike, price, entry_price, expiry, reason):
+    async def _fake(action, side, strike, price, entry_price, expiry, reason, entry_ts=None):
         calls.append((action, side, int(strike)))
         return fills.get((action, side, int(strike)))
 
@@ -1479,4 +1479,36 @@ def test_close_hedge_legs_unpins_both_strikes():
         assert ("NIFTY", 23500.0) in fake.unpin_calls
         assert pos.hedge_ce_leg is None and pos.hedge_pe_leg is None
     asyncio.run(run())
+    asyncio.run(run())
+
+
+def test_close_hedge_legs_forwards_leg_open_time_as_entry_ts():
+    """2026-09-17 real-incident fix: _dispatch_hedge_order never received or
+    forwarded an entry_ts at all, so every hedge-leg CLOSE's trade_history
+    record carried entry_ts=null regardless of when the leg was genuinely
+    opened -- discovered via a real dashboard History-tab record dump
+    showing entry_ts:null on a closed hedge leg. _close_hedge_legs must pass
+    the leg's own open_time through so the history record can tell when it
+    was actually opened (e.g. flagging a leg carried forward from a prior
+    day)."""
+    async def run():
+        s = _make()
+        s._is_crypto = True   # skip rebalancer pin/unpin bookkeeping
+        opened_at = datetime.datetime(2026, 9, 16, 9, 54, 52, tzinfo=IST)
+        pos = s._position
+        pos.hedge_ce_leg = StraddleLeg("CE", 24500, 60.0, 90.0, open_time=opened_at)
+        pos.hedge_pe_leg = StraddleLeg("PE", 23500, 55.0, 40.0, open_time=opened_at)
+        pos.is_hedged_positional = True
+
+        captured = []
+        async def _fake(action, side, strike, price, entry_price, expiry, reason, entry_ts=None):
+            captured.append((side, entry_ts))
+            return _fill(action, side, int(strike), price)
+        s._dispatch_hedge_order = _fake
+
+        await s._close_hedge_legs(pos, "eod_hedge_close")
+
+        assert len(captured) == 2
+        for _side, entry_ts in captured:
+            assert entry_ts == opened_at
     asyncio.run(run())
