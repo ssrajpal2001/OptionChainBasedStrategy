@@ -1467,6 +1467,35 @@ class ExitMixin:
                 logger.info("SellStraddle[%s]: post-restore warm-up complete — exits armed "
                             "(CE_ltp=%.2f PE_ltp=%.2f pnl=%.2f pts).",
                             self._underlying, pos.ce_leg.ltp, pos.pe_leg.ltp, pos.unrealized_pnl)
+            elif _elapsed > self._POST_RESTORE_WARMUP_MAX_SEC and not self._market_genuinely_open():
+                # 2026-09-17 CRITICAL FIX, real live incident: a restart that
+                # happens shortly before market open (e.g. 08:56:50, common
+                # for a pre-market pm2 restart) hits this 5-min timeout at
+                # ~09:01:50 -- still inside NSE's 09:00-09:15 pre-open/call-
+                # auction window, where CE/PE option ticks legitimately may
+                # not be flowing meaningfully yet (that's not a "stuck feed",
+                # it's just genuinely too early). The safety-close below then
+                # placed a REAL order every single tick (no backoff by
+                # design -- see the retry-until-confirmed comment further
+                # down), and Zerodha correctly rejected every single one with
+                # "Your order could not be converted to a After Market Order
+                # (AMO)" (the same root cause as the Iron Fly pre-open
+                # rejection incident, same day) -- confirmed live: 100+ real
+                # order-placement attempts in under 3 minutes, hammering the
+                # broker's real order API before it was even open. Fix:
+                # while genuinely before market_open, do NOT attempt the
+                # safety close at all -- just wait; a real tick after 09:15
+                # will either resolve _both_fresh naturally (no close
+                # needed) or this same elapsed-time check will correctly
+                # fire the close once the exchange is actually open to
+                # accept it.
+                logger.warning(
+                    "SellStraddle[%s]: post-restore warm-up timeout (%.0fs) reached before "
+                    "market open -- deferring the safety close until the exchange is "
+                    "genuinely open, not attempting a real order into the pre-open session.",
+                    self._underlying, _elapsed,
+                )
+                return
             elif _elapsed > self._POST_RESTORE_WARMUP_MAX_SEC:
                 # 2026-08-06 fix: do NOT clear _post_restore_warmup until the safety
                 # close actually confirms. The old order (clear the flag, then
@@ -2011,6 +2040,18 @@ class ExitMixin:
     # slow warm-up, is the real explanation; past this the position is CLOSED rather
     # than armed for trading on an unknown/frozen leg price.
     _POST_RESTORE_WARMUP_MAX_SEC = 300.0
+
+    @staticmethod
+    def _market_genuinely_open() -> bool:
+        """2026-09-17: real wall-clock check, independent of self._market_open_dt
+        (which is only set by the first 1-min CANDLE_CLOSE and may still be None
+        this early) -- used to stop the post-restore warm-up safety close from
+        attempting a real order during NSE's pre-open/call-auction session. See
+        the POST-RESTORE WARM-UP GUARD's own comment for the real incident."""
+        from config.global_config import ExchangeConfig, IST
+        now_t = datetime.now(IST).time()
+        cfg = ExchangeConfig()
+        return cfg.market_open <= now_t < cfg.market_close
 
     async def _close_surviving_leg_and_finalize(self, reason: str) -> None:
         """2026-08-28: EOD (or any other future caller) closing a position that

@@ -89,6 +89,11 @@ def test_90s_no_longer_closes_or_arms_either_still_under_5min_ceiling():
 def test_5min_ceiling_closes_position_instead_of_arming_stale_data(caplog):
     import logging
     s = _restored_strategy(EventBus(), elapsed_sec=301.0, ce_fresh=False, pe_fresh=True)
+    # 2026-09-17: the safety close now additionally requires the exchange to
+    # be genuinely open (real incident -- see _market_genuinely_open's own
+    # docstring) -- force that True here so this test stays deterministic
+    # regardless of the real wall-clock time it happens to run at.
+    s._market_genuinely_open = lambda: True
     close_calls = []
 
     async def _fake_close_position(reason):
@@ -108,6 +113,34 @@ def test_5min_ceiling_closes_position_instead_of_arming_stale_data(caplog):
     assert any(r.levelno == logging.CRITICAL for r in caplog.records)
 
 
+def test_5min_ceiling_defers_close_when_market_not_genuinely_open(caplog):
+    """2026-09-17 real live incident: a restart shortly before market open
+    (e.g. 08:56:50) hit the 5-min ceiling at ~09:01:50 -- still inside NSE's
+    pre-open/call-auction window. The safety close must NOT attempt a real
+    order in that window at all (Zerodha rejects it with "could not be
+    converted to AMO", and the retry-until-confirmed design then hammers the
+    broker every tick) -- it must defer instead, staying ARMED, and try
+    again on a later tick once the exchange is genuinely open."""
+    import logging
+    s = _restored_strategy(EventBus(), elapsed_sec=301.0, ce_fresh=False, pe_fresh=True)
+    s._market_genuinely_open = lambda: False
+    close_calls = []
+
+    async def _fake_close_position(reason):
+        close_calls.append(reason)
+        s._position.status = "closed"
+    s._close_position = _fake_close_position
+
+    with caplog.at_level(logging.WARNING, logger="strategies.sell_straddle.exits"):
+        asyncio.run(s._check_exits())
+
+    assert close_calls == [], "must not attempt a real close before market is genuinely open"
+    assert s._post_restore_warmup is True
+    assert s._position is not None and s._position.status == "open"
+    s._check_itm_pair_gate.assert_not_awaited()
+    assert any("deferring the safety close" in r.message for r in caplog.records)
+
+
 def test_5min_ceiling_keeps_guard_armed_when_close_is_not_confirmed(caplog):
     """2026-08-06 CRITICAL FIX regression test. If the safety close itself
     fails to confirm (broker unavailable/timeout -- plausible under the same
@@ -118,6 +151,7 @@ def test_5min_ceiling_keeps_guard_armed_when_close_is_not_confirmed(caplog):
     now stay ARMED so the safety close is retried next cycle instead."""
     import logging
     s = _restored_strategy(EventBus(), elapsed_sec=301.0, ce_fresh=False, pe_fresh=True)
+    s._market_genuinely_open = lambda: True
 
     async def _fake_close_position_that_fails(reason):
         # Simulates _close_position's own fail-safe behavior: broker
