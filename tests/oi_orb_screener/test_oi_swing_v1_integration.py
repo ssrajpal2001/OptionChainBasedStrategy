@@ -264,6 +264,19 @@ async def test_on_fill_resets_stale_oi_swing_state_for_reentry():
 # ── OI-swing exit check, wired end-to-end ────────────────────────────────
 
 class TestOiSwingExitCheck:
+    @pytest.fixture(autouse=True)
+    def _no_history_seed(self, monkeypatch):
+        # 2026-09-18 fix: _oi_swing_exit_check now calls _seed_oi_swing_history
+        # once per symbol (real ZYDUSLIFE incident -- see that method's own
+        # docstring). This class exercises the LIVE per-bucket loop in
+        # isolation, same as before that fix -- stub the seed to a no-op so
+        # these tests aren't incidentally exercising (or depending on) real
+        # network calls; the seed's own real logic gets its own dedicated
+        # test class below (TestSeedOiSwingHistory).
+        async def _noop(self_, sym):
+            pass
+        monkeypatch.setattr(OiOrbScreenerStrategy, "_seed_oi_swing_history", _noop)
+
     def _open_position(self, book, sym="SIEMENS", side_opt="CE", opened_at=None):
         contract = _contract(sym, 4050, side_opt)
         book._positions[sym] = {
@@ -588,3 +601,109 @@ class TestRestoreFromDbSlMechanicReconstruction:
         assert book._oi_swing_low.get("SIEMENS") is None
         # And the position itself IS correctly restored/tracked despite that.
         assert book._positions["SIEMENS"]["qty"] == 300
+
+
+# ── _seed_oi_swing_history (2026-09-18, real ZYDUSLIFE incident fix) ───────
+# ZYDUSLIFE entered 09:51, closed 09:59 (hard risk cap, since removed) --
+# only 2 of the 3 bars needed for a swing confirmation had time to record
+# live. The real 09:15-onward price+OI history already existed the whole
+# time; these tests confirm the seed backfills it correctly instead of
+# starting the tracker cold at the entry tick.
+
+def _row(ts: str, close: float, oi=None) -> dict:
+    r = {"ts": ts, "open": close, "high": close, "low": close, "close": close, "volume": 100}
+    if oi is not None:
+        r["oi"] = oi
+    return r
+
+
+class TestSeedOiSwingHistory:
+    @pytest.mark.asyncio
+    async def test_backfills_series_and_confirms_a_real_swing_from_history(self, monkeypatch):
+        bus = _FakeBus()
+        book = _make_book(bus, entry_exit_mode="oi_swing_v1")
+        monkeypatch.setattr(stock_resolve, "resolve_eq_instrument_key",
+                             lambda sym: "NSE_EQ|ZYDUSFAKE")
+        monkeypatch.setattr(book, "_resolve_futures_key_and_token",
+                             _async_return(("NSE_FO|ZYDUSLIFEFUT", "fut_tok")))
+        from data_layer.client_db import ClientDB
+        monkeypatch.setattr(ClientDB, "get_feeder_creds_sync",
+                             lambda self, provider: {"access_token": "eq_tok"})
+
+        # 4 real 5-min bars, 09:15/09:20/09:25/09:30. OI: 1000,1100,1050,1200
+        # -- bar2 (1100) is a confirmed swing HIGH (1100>1000 and 1100>1050).
+        price_rows = [_row("2026-09-18T09:15:00+05:30", 50.0),
+                      _row("2026-09-18T09:20:00+05:30", 51.0),
+                      _row("2026-09-18T09:25:00+05:30", 52.0),
+                      _row("2026-09-18T09:30:00+05:30", 53.0)]
+        oi_rows = [_row("2026-09-18T09:15:00+05:30", 50.0, oi=1000.0),
+                   _row("2026-09-18T09:20:00+05:30", 51.0, oi=1100.0),
+                   _row("2026-09-18T09:25:00+05:30", 52.0, oi=1050.0),
+                   _row("2026-09-18T09:30:00+05:30", 53.0, oi=1200.0)]
+
+        import data_layer.historical_candles as hc
+        async def _fake_fetch(key, token):
+            return price_rows if key == "NSE_EQ|ZYDUSFAKE" else oi_rows
+        monkeypatch.setattr(hc, "fetch_upstox_intraday_1m", _fake_fetch)
+        from strategies.oi_orb_screener import engine as engine_mod
+        monkeypatch.setattr(engine_mod, "fetch_upstox_intraday_1m", _fake_fetch, raising=False)
+
+        await book._seed_oi_swing_history("ZYDUSLIFE")
+
+        # bar2 (1100) confirms as a swing HIGH once bar3 (1050) is known;
+        # bar3 (1050) then ALSO confirms as a swing LOW once bar4 (1200) is
+        # known (1050 < both its neighbors 1100 and 1200) -- exactly what
+        # the live loop would find bar-by-bar, replayed here from history.
+        assert len(book._oi_swing_series["ZYDUSLIFE"]) == 4
+        assert book._oi_swing_high["ZYDUSLIFE"] == 1100.0
+        assert book._oi_swing_low["ZYDUSLIFE"] == 1050.0
+        # last real bucket is 09:30 -- the live loop's next call must treat
+        # this as "already recorded", not append a duplicate.
+        from strategies.oi_orb_screener import oi_swing
+        assert book._oi_swing_last_bucket["ZYDUSLIFE"] == oi_swing.floor_to_bucket(
+            datetime(2026, 9, 18, 9, 30, tzinfo=IST))
+
+    @pytest.mark.asyncio
+    async def test_missing_eq_key_degrades_safely_no_seed(self, monkeypatch):
+        bus = _FakeBus()
+        book = _make_book(bus, entry_exit_mode="oi_swing_v1")
+        monkeypatch.setattr(stock_resolve, "resolve_eq_instrument_key", lambda sym: "")
+        monkeypatch.setattr(book, "_resolve_futures_key_and_token",
+                             _async_return(("NSE_FO|ZYDUSLIFEFUT", "fut_tok")))
+
+        await book._seed_oi_swing_history("ZYDUSLIFE")
+
+        assert "ZYDUSLIFE" not in book._oi_swing_series
+
+    @pytest.mark.asyncio
+    async def test_called_exactly_once_per_symbol_from_exit_check(self, monkeypatch):
+        """_oi_swing_exit_check must only seed on the symbol's first-ever
+        call (sym not in self._oi_swing_series), never re-seed on every
+        subsequent bucket -- that would stomp the live ratchet with a
+        replayed one every cycle."""
+        bus = _FakeBus()
+        book = _make_book(bus, entry_exit_mode="oi_swing_v1")
+        contract = _contract("SIEMENS", 4050, "CE")
+        book._positions["SIEMENS"] = {
+            "contract": contract, "qty": 300, "entry_price": 100.0, "paper_mode": True,
+            "opened_at": datetime(2026, 9, 18, 9, 15, tzinfo=IST),
+            "sl_mechanic": _ENTRY_EXIT_MODE_OI_SWING,
+        }
+        calls = []
+        async def _fake_seed(sym):
+            calls.append(sym)
+            book._oi_swing_series[sym] = []   # seed "succeeded" with an empty real history
+        monkeypatch.setattr(book, "_seed_oi_swing_history", _fake_seed)
+        monkeypatch.setattr(book, "_resolve_futures_key_and_token",
+                             _async_return(("NSE_FO|SIEMENSFUT", "tok")))
+        import data_layer.historical_candles as hc
+        async def _fake_quote(key, tok):
+            return {"oi": 1000.0}
+        monkeypatch.setattr(hc, "fetch_upstox_v3_quote", _fake_quote)
+
+        t1 = datetime(2026, 9, 18, 9, 20, tzinfo=IST)
+        t2 = datetime(2026, 9, 18, 9, 26, tzinfo=IST)   # next 5-min bucket
+        await book._oi_swing_exit_check("SIEMENS", "CALL", 100.0, t1)
+        await book._oi_swing_exit_check("SIEMENS", "CALL", 101.0, t2)
+
+        assert calls == ["SIEMENS"]

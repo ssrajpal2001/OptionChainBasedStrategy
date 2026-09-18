@@ -3061,6 +3061,84 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 sym, side, ltp, "oi_swing_v1_entry", (0.0, 0.0),
                 now.strftime("%H:%M:%S"), label="OI-SWING-ENTRY")
 
+    async def _seed_oi_swing_history(self, sym: str) -> None:
+        """2026-09-18, direct user follow-up (real trade: ZYDUSLIFE) -- backfill
+        the OI-swing series from REAL Upstox 1-min history (09:15->now) the
+        instant a position is opened, instead of letting the tracker start
+        cold from the entry tick. Mirrors _seed_vwap_from_upstox_intraday's
+        own real-history-seed pattern in this same file (same eq-key/token
+        resolution for the spot side); the futures-OI side reuses
+        _resolve_futures_key_and_token, same as every other OI fetch in this
+        class. Best-effort throughout: any failure just leaves the tracker
+        to build live from zero (5-min bucket at a time), same behavior as
+        before this fix existed -- never blocks the entry or the exit loop."""
+        try:
+            eq_key = stock_resolve.resolve_eq_instrument_key(sym)
+            resolved = await self._resolve_futures_key_and_token(sym)
+            if not eq_key or resolved is None:
+                return
+            fut_key, fut_token = resolved
+            from data_layer.client_db import ClientDB
+            creds = await asyncio.to_thread(ClientDB().get_feeder_creds_sync, "upstox")
+            eq_token = (creds or {}).get("access_token", "") or fut_token
+            if not eq_token:
+                return
+            from data_layer.historical_candles import fetch_upstox_intraday_1m
+            price_rows = await fetch_upstox_intraday_1m(eq_key, eq_token)
+            oi_rows = await fetch_upstox_intraday_1m(fut_key, fut_token)
+            if not price_rows or not oi_rows:
+                return
+
+            def _minute(r: dict) -> datetime:
+                ts = r["ts"]
+                if isinstance(ts, str):
+                    ts = datetime.fromisoformat(ts)
+                return ts.astimezone(IST)
+
+            oi_by_min: Dict[datetime, float] = {}
+            for r in oi_rows:
+                oi_val = r.get("oi")
+                if oi_val:
+                    oi_by_min[_minute(r).replace(second=0, microsecond=0)] = float(oi_val)
+            if not oi_by_min:
+                return
+
+            # One 5-min bucket per completed window, taking the LAST price/OI
+            # reading within it (rows are oldest-first -- later assignment to
+            # the same bucket key naturally wins) -- exactly what the live
+            # loop's own per-bucket recording would have produced.
+            buckets: Dict[datetime, tuple] = {}
+            for r in price_rows:
+                minute = _minute(r).replace(second=0, microsecond=0)
+                oi_val = oi_by_min.get(minute)
+                if oi_val is None:
+                    continue
+                bkt = oi_swing.floor_to_bucket(_minute(r))
+                buckets[bkt] = (float(r["close"]), oi_val)
+            if not buckets:
+                return
+
+            series = [(bkt, px, oi) for bkt, (px, oi) in sorted(buckets.items())]
+            swing_high: Optional[float] = None
+            swing_low: Optional[float] = None
+            for i in range(3, len(series) + 1):
+                swing_high, swing_low, _confirmed = oi_swing.update_swing_state(
+                    [p[2] for p in series[:i]], swing_high, swing_low)
+            self._oi_swing_series[sym] = series
+            self._oi_swing_high[sym] = swing_high
+            self._oi_swing_low[sym] = swing_low
+            self._oi_swing_last_bucket[sym] = series[-1][0]
+            self._clog.info(
+                "OiOrb[%s/%s]: %s OI-SWING seeded from %d real 5-min bars (09:15->now) -- "
+                "swingH=%s swingL=%s.",
+                self._client_id, self._binding_id, sym, len(series), swing_high, swing_low,
+            )
+        except Exception:
+            self._clog.exception(
+                "OiOrb[%s/%s]: %s OI-swing history seed failed (non-fatal -- tracker "
+                "starts cold, same as before this fix existed).",
+                self._client_id, self._binding_id, sym)
+
     async def _oi_swing_exit_check(self, sym: str, side: str, ltp: float, now: datetime) -> None:
         """entry_exit_mode="oi_swing_v1" EXIT path (2026-09-18, direct user
         spec) -- real 5-min Futures-OI + price series (REST-polled, session-
@@ -3089,10 +3167,24 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         (e.g. _backfill_futures_oi_display) -- a full REST-replay-based
         restore (matching _seed_trap_exit_state's own pattern) was
         deliberately deferred, not attempted, for this first production
-        pass."""
+        pass.
+
+        2026-09-18 real-trade fix (direct user follow-up on the very first
+        live day): ZYDUSLIFE entered at 09:51 and closed at 09:59 (hard
+        risk cap, since removed) without the OI-swing tracker ever
+        confirming a single swing -- it needs 3 bars, but only had time
+        for 2 (09:50, 09:55) before the position closed. The real 09:15-
+        onward history for BOTH the price and the futures OI already
+        existed the whole time (same real Upstox intraday data the VWAP
+        seed / OI-regime 09:15 read already fetch elsewhere in this file)
+        -- there is no reason to make a freshly-entered position start its
+        swing tracker cold. See _seed_oi_swing_history below, now called
+        once per symbol on this method's first invocation."""
         pos = self._positions.get(sym)
         if pos is None or sym in self._eod_closing:
             return
+        if sym not in self._oi_swing_series:
+            await self._seed_oi_swing_history(sym)
         bucket = oi_swing.floor_to_bucket(now)
         last_bucket = self._oi_swing_last_bucket.get(sym)
         if last_bucket is not None and bucket <= last_bucket:
