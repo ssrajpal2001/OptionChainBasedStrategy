@@ -419,11 +419,18 @@ class TestOiSwingExitCheck:
         assert closed == []
 
 
-# ── hard risk cap gated to oi_swing_v1 only (Fix 1) ─────────────────────
+# ── hard risk cap for oi_swing_v1 -- re-enabled as Fix 1, then explicitly
+# turned back OFF the same trading day (2026-09-18) after firing correctly
+# live in paper_route (SIEMENS-equivalent real case: ZYDUSLIFE, -Rs2070,
+# confirmed working exactly as coded) -- direct user instruction "dont use
+# hard stoploss". oi_swing_v1 positions now rely purely on the OI-swing
+# exit + EOD square-off, same as the real 13-day-backtest "no cap" variant
+# (best win rate on that sample, but also its single worst loss -- a real,
+# known tradeoff, not an oversight). ──────────────────────────────────────
 
 class TestHardRiskCapGating:
     @pytest.mark.asyncio
-    async def test_hard_risk_cap_fires_for_oi_swing_v1_position(self, monkeypatch):
+    async def test_hard_risk_cap_does_not_fire_for_oi_swing_v1_position(self, monkeypatch):
         bus = _FakeBus()
         book = _make_book(bus, entry_exit_mode="oi_swing_v1")
         contract = _contract("SIEMENS", 4050, "CE")
@@ -441,22 +448,15 @@ class TestHardRiskCapGating:
         task = asyncio.create_task(book._option_tick_loop())
         book._running = True
         try:
-            # loss = (100-80)*100 = 2000 >= cap (2000*1)
+            # loss = (100-80)*100 = 2000 >= the (now-disabled) cap -- must
+            # NOT close; the position stays open, subject only to the
+            # OI-swing exit / EOD square-off.
             await bus.publish(Topic.OPTION_TICK, OptionTick(
                 symbol="SIEMENS4050CE", underlying="SIEMENS", strike=4050, option_type="CE",
                 expiry=date(2026, 9, 25), ltp=80.0, bid=79.5, ask=80.5, oi=0, change_oi=0,
                 volume=0, iv=0.0, delta=0.0, timestamp=datetime.now(IST),
             ))
-            # Poll instead of a fixed sleep -- _check_hard_risk_cap awaits a
-            # REAL asyncio.to_thread(store.log_signal_event, ...) call before
-            # _emit_close, which can take meaningfully longer than a short
-            # fixed sleep under real thread-pool contention (observed
-            # flaky/slow when this file runs alongside the rest of the
-            # suite) -- wait for the actual outcome, up to a generous cap.
-            for _ in range(50):
-                if closed:
-                    break
-                await asyncio.sleep(0.1)
+            await asyncio.sleep(0.3)
         finally:
             book._running = False
             task.cancel()
@@ -464,7 +464,7 @@ class TestHardRiskCapGating:
                 await task
             except asyncio.CancelledError:
                 pass
-        assert closed == [("SIEMENS", "hard_risk_cap")]
+        assert closed == []
 
     @pytest.mark.asyncio
     async def test_hard_risk_cap_does_not_fire_for_other_mechanics(self, monkeypatch):

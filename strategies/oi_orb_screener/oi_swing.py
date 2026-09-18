@@ -45,17 +45,21 @@ the same 13-day sweep).
    flat print confirms nothing. (Documented, single-comparison-operator
    flip in check_oi_swing_breakout if this default is ever revisited.)
 
-======================= THE THREE PRODUCTION FIXES =======================
+======================= THE PRODUCTION FIXES =======================
 (validated on the same 13-day backtest sweep -- see CLAUDE.md-adjacent
 session notes / the sweep script's own module docstring for the full
-comparison numbers; NOT optional, all three ship together)
+comparison numbers)
 
-  Fix 1 -- hard risk-cap check at (effectively continuous, real option-
-    tick) cadence, fully independent of the 5-min OI-swing loop. Reuses
-    the engine's EXISTING OiOrbScreenerStrategy._check_hard_risk_cap +
-    strategies.core.support_resistance._MAX_RISK_RS_PER_LOT (Rs2000/lot)
-    -- not reimplemented, not redefined. This module has no code for it;
-    engine.py simply re-enables that existing method, gated to this mode.
+  Fix 1 -- hard risk-cap check, REMOVED same day as first shipped
+    (2026-09-18, direct user instruction "dont use hard stoploss" --
+    given after it fired correctly live in paper_route on ZYDUSLIFE,
+    -Rs2070, confirmed working exactly as coded, not a bug). engine.py's
+    _option_tick_loop no longer calls _check_hard_risk_cap for
+    oi_swing_v1 positions at all -- this is the real 13-day-backtest "no
+    cap" variant (best win rate on that sample, 73.7%, but also that
+    sweep's single worst loss, -Rs25,048.75 -- a real, known tradeoff).
+    oi_swing_v1 positions rely purely on the OI-swing exit + EOD
+    square-off. This module never had any code for the cap either way.
   Fix 2 -- ENTRY_WINDOW_END-equivalent hard cutoff: no NEW entry may open
     after 14:30 IST (is_entry_within_cutoff below). The raw backtest had
     NO cutoff at all -- confirmed a real bug (PREMIERENE entered at 15:28

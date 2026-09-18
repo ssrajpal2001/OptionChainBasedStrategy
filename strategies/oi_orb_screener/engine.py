@@ -2849,16 +2849,23 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 # mid-trading-day).
                 # await self._check_hard_risk_cap(tick.underlying, tick.ltp)
                 # await self._update_option_sl_target_and_check(tick.underlying, tick.ltp, tick.timestamp)
-                # 2026-09-18, direct user spec (entry_exit_mode="oi_swing_v1",
-                # Fix 1): re-enable the existing _check_hard_risk_cap method,
-                # gated ONLY to positions opened under this new mode -- every
-                # real option tick is a call here, i.e. effectively continuous/
-                # sub-minute cadence, independent of the OI-swing loop's own
-                # 5-min cadence. Every other position's exit mechanics are
-                # completely unaffected (the two lines above stay disabled).
-                pos = self._positions.get(tick.underlying)
-                if pos is not None and pos.get("sl_mechanic") == _ENTRY_EXIT_MODE_OI_SWING:
-                    await self._check_hard_risk_cap(tick.underlying, tick.ltp)
+                # 2026-09-18, direct user follow-up (same day as shipping the
+                # entry_exit_mode="oi_swing_v1" mode above): the hard risk cap
+                # was re-enabled here as this mode's own Fix 1, then explicitly
+                # turned back off the same trading day after it fired live in
+                # paper_route (ZYDUSLIFE, 09:59:37, -Rs2070 -- confirmed working
+                # exactly as coded, not a bug) -- direct instruction: "dont use
+                # hard stoploss". oi_swing_v1 positions now rely purely on the
+                # OI-swing exit + EOD square-off, no independent risk-cap
+                # backstop. This is the real 13-day-backtest "no cap" variant
+                # (best win rate on that sample, 73.7%, but also that sweep's
+                # single worst loss, -Rs25,048.75) -- a real, known tradeoff,
+                # not an oversight. Every other position's exit mechanics are
+                # completely unaffected (the two disabled lines above are
+                # unrelated to this mode entirely).
+                # pos = self._positions.get(tick.underlying)
+                # if pos is not None and pos.get("sl_mechanic") == _ENTRY_EXIT_MODE_OI_SWING:
+                #     await self._check_hard_risk_cap(tick.underlying, tick.ltp)
 
     async def _check_hard_risk_cap(self, symbol: str, option_ltp: float) -> None:
         """2026-08-26, added alongside the structural SL -- a fresh entry (or a
