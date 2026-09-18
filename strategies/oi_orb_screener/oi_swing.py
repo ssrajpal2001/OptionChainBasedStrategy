@@ -1,19 +1,26 @@
 """
 strategies/oi_orb_screener/oi_swing.py -- pure, unit-tested decision logic
-for the "Future OI-Price Swing Breakout Strategy" entry/exit mode
-(entry_exit_mode="oi_swing_v1" in strategy_params).
+originally built for the "Future OI-Price Swing Breakout Strategy" entry/
+exit mode (entry_exit_mode="oi_swing_v1" in strategy_params).
 
-Ported from this session's own real-data backtest series
+2026-09-18, direct user decision: entry_exit_mode="oi_swing_v1" itself
+(engine.py's _oi_swing_entry_scan/_oi_swing_exit_check/_seed_oi_swing_
+history, and this module's own check_immediate_entry_trigger/is_entry_
+within_cutoff/is_min_hold_satisfied -- Fixes 2/3 below) was removed
+entirely ahead of a brand new replacement entry/exit design. This file is
+KEPT (not deleted) because update_swing_state/check_oi_swing_breakout/
+floor_to_bucket are pure, already-validated building blocks the new
+design's own Section 16 ("OI Swing High/Low on Futures OI") is expected to
+reuse directly -- see CLAUDE.md's OI-ORB Screener section for that plan.
+
+Ported from a real-data backtest series
 (scripts/oi_orb_futures_oi_swing_management_backtest.py +
 scripts/oi_orb_swing_optimization_variants.py, validated across 13 real
 trading days once a real prev-close date-anchoring bug in that backtest
 was found and fixed) -- NOT reimplemented from scratch. This module
 intentionally reuses ONLY the plain, spec-exact 3-point swing rule (no
 gap-amplitude filter, no 5-point lookback) -- those were exploratory
-optimization-sweep variants, never approved for production; production
-ships the mechanic exactly as the user's own spec describes it, plus the
-three specific fixes below (independently validated as net-positive on
-the same 13-day sweep).
+optimization-sweep variants, never approved for production.
 
 ======================= MECHANIC =======================
 
@@ -45,73 +52,24 @@ the same 13-day sweep).
    flat print confirms nothing. (Documented, single-comparison-operator
    flip in check_oi_swing_breakout if this default is ever revisited.)
 
-======================= THE PRODUCTION FIXES =======================
-(validated on the same 13-day backtest sweep -- see CLAUDE.md-adjacent
-session notes / the sweep script's own module docstring for the full
-comparison numbers)
-
-  Fix 1 -- hard risk-cap check, REMOVED same day as first shipped
-    (2026-09-18, direct user instruction "dont use hard stoploss" --
-    given after it fired correctly live in paper_route on ZYDUSLIFE,
-    -Rs2070, confirmed working exactly as coded, not a bug). engine.py's
-    _option_tick_loop no longer calls _check_hard_risk_cap for
-    oi_swing_v1 positions at all -- this is the real 13-day-backtest "no
-    cap" variant (best win rate on that sample, 73.7%, but also that
-    sweep's single worst loss, -Rs25,048.75 -- a real, known tradeoff).
-    oi_swing_v1 positions rely purely on the OI-swing exit + EOD
-    square-off. This module never had any code for the cap either way.
-  Fix 2 -- ENTRY_WINDOW_END-equivalent hard cutoff: no NEW entry may open
-    after 14:30 IST (is_entry_within_cutoff below). The raw backtest had
-    NO cutoff at all -- confirmed a real bug (PREMIERENE entered at 15:28
-    on 2026-09-17, 13 minutes before its own 15:15 EOD square-off).
-  Fix 3 -- 10-minute minimum hold after entry before an "oi_swing_exit"
-    is allowed to fire (is_min_hold_satisfied below). The hard risk cap
-    and EOD square-off are explicitly NOT subject to this minimum -- they
-    can fire at any time, including inside the first 10 minutes.
+======================= REMOVED 2026-09-18 =======================
+The entry mechanic (check_immediate_entry_trigger, the plain 2% price
+trigger) and the two production fixes that gated it end-to-end --
+Fix 2 (is_entry_within_cutoff, a hard 14:30 IST entry cutoff) and Fix 3
+(is_min_hold_satisfied, a 10-minute minimum hold before an "oi_swing_exit"
+could fire) -- were removed along with entry_exit_mode="oi_swing_v1"
+itself. (Fix 1, the hard risk-cap re-enablement, was engine.py-only wiring
+and never had any code in this module either way.) Only the pure OI-swing
+STRUCTURE/breakout functions below survive, kept for reuse by the new
+entry/exit design's own Section 16.
 """
 from __future__ import annotations
 
-from datetime import datetime, time as dtime, timedelta
+from datetime import datetime, timedelta, time as dtime
 from typing import List, Optional, Tuple
 
-PRICE_TRIGGER_PCT_DEFAULT = 2.0
-ENTRY_CUTOFF_DEFAULT = dtime(14, 30)
-MIN_HOLD_MINUTES_DEFAULT = 10
 BUCKET_MINUTES = 5
 SESSION_START = dtime(9, 15)
-
-
-def check_immediate_entry_trigger(pchange: float, min_pct: float = PRICE_TRIGGER_PCT_DEFAULT
-                                   ) -> Optional[str]:
-    """Step 2 -- the ENTRY mechanic, unchanged/unreplaced by anything OI-
-    related. Returns "CALL" if pchange has crossed +min_pct, "PUT" if it
-    has crossed -min_pct, else None (no trigger yet). Mirrors the real
-    backtest's own _find_price_trigger threshold check and screener.
-    side_from_pchange's CALL/PUT convention exactly -- callers evaluate
-    this on every live price update; the first call that returns non-None
-    IS the trigger (the live engine's own "first crossing" semantics,
-    since it re-evaluates on live ticks rather than replaying historical
-    bars)."""
-    if pchange >= min_pct:
-        return "CALL"
-    if pchange <= -min_pct:
-        return "PUT"
-    return None
-
-
-def is_entry_within_cutoff(now: dtime, cutoff: dtime = ENTRY_CUTOFF_DEFAULT) -> bool:
-    """Fix 2. True iff a NEW entry may still open at this wall-clock time."""
-    return now <= cutoff
-
-
-def is_min_hold_satisfied(entry_ts: datetime, now: datetime,
-                           min_hold_minutes: int = MIN_HOLD_MINUTES_DEFAULT) -> bool:
-    """Fix 3. True iff at least min_hold_minutes have elapsed since entry --
-    ONLY gates an "oi_swing_exit" decision; never called for the hard risk
-    cap or EOD square-off paths (those remain unconditional, per spec)."""
-    if entry_ts is None:
-        return True   # no known entry time -- fail open rather than block a real exit forever
-    return now >= entry_ts + timedelta(minutes=min_hold_minutes)
 
 
 def floor_to_bucket(ts: datetime, bucket_minutes: int = BUCKET_MINUTES,

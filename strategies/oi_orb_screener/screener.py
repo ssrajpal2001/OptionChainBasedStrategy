@@ -161,17 +161,6 @@ CONFIG = {
     # winner, entered 12:27, for no net benefit -- 13:30 was confirmed the
     # better line, not just a guess).
     "ENTRY_WINDOW_END": "13:30",
-    # 2026-09-16, direct user follow-up: this shipped opt-in/default-off
-    # (see engine.py's _compute_oi_regime_side docstring); confirmed live via
-    # 4 real trades (ATHERENERG/SOLARINDS/MCX/NESTLEIND, 2026-09-16) that
-    # firing purely off plain pChange sign with no futures-OI check at all
-    # is NOT what the user wants going forward -- direct instruction "it
-    # should be on by default". Flipped True here (the canonical config
-    # dict every book's _screener_cfg copies); engine.py's own inline
-    # `cfg.get("OI_REGIME_GATE_ENABLED", False)` fallback is deliberately
-    # left at False -- that's only a safety default for a cfg dict that
-    # somehow never went through this CONFIG at all, not the real default.
-    "OI_REGIME_GATE_ENABLED": True,
     "SCORE_WEIGHTS": {"price": 0.25, "oi_spurt": 0.25, "rel_strength": 0.25, "volume": 0.25},
     "POLL_SECONDS": 20,
     "MAX_MONITOR_MINUTES": 90,
@@ -914,132 +903,6 @@ def backfill_vwap_from_yahoo(vwap: "VwapState", symbols, cfg=CONFIG) -> None:
         logger.warning("backfill_vwap_from_yahoo: failed entirely: %r", exc)
 
 
-def replay_vwap_retest_from_bars(bars: list, side: str, orb_start: str,
-                                  min_gap_pct: float = 0.15) -> dict:
-    """2026-09-07, direct user spec: "when we started the application and
-    stocks were already there in the scan list it should have called
-    intraday historical data and found if it satisfied the vwap touch
-    concept or not -- if yes, immediately trade should have started."
-
-    Pure, unit-testable replay of the SAME check_vwap_retest_entry() state
-    machine the live engine uses, bar-by-bar, over already-fetched intraday
-    1-min bars -- so a stock that only enters the shortlist well after
-    market open (a restart, or the 12:00-15:00 afternoon rescan) doesn't
-    start its arm/retest state cold at that moment, silently discarding
-    whatever genuine cross-and-retest already happened in the real market
-    before this book ever started watching it (confirmed live: MANAPPURAM
-    sat within a few paise of its own VWAP the entire time since being
-    shortlisted at 09:51, having been shortlisted 26 minutes after the
-    entry window opened, with no way to know if today's real retest had
-    already come and gone in that gap).
-
-    bars: chronologically-ordered dicts with high/low/close/volume (same
-    shape screener already gets from yfinance rows). Maintains its own
-    running typical-price VWAP exactly like VwapState.update() does, so the
-    replayed vwap values match what backfill_vwap_from_yahoo would have
-    seeded, then feeds each bar's CLOSE through check_vwap_retest_entry --
-    the exact same function and threshold the live tick loop uses, just
-    fed historical closes instead of live ticks.
-
-    Returns {"armed": bool, "fired": bool, "fire_ts": str|None,
-    "fire_price": float|None, "final_vwap": float|None, "bars_replayed": int}.
-    "fired" means a genuine retest already completed somewhere in this
-    history -- the caller should treat this exactly like a live fire
-    (immediate entry), not just seed the arm state."""
-    cum_pv = 0.0
-    cum_v = 0.0
-    armed = False
-    fired = False
-    fire_ts: Optional[str] = None
-    fire_price: Optional[float] = None
-    final_vwap: Optional[float] = None
-    bars_replayed = 0
-    for b in bars:
-        ts = b.get("ts")
-        key = ts if isinstance(ts, str) else (ts.strftime("%H:%M") if ts is not None else None)
-        if key is not None and key < orb_start:
-            continue
-        vol = float(b.get("volume", 0) or 0)
-        if vol <= 0:
-            continue
-        high, low, close = float(b["high"]), float(b["low"]), float(b["close"])
-        typical = (high + low + close) / 3.0
-        cum_pv += typical * vol
-        cum_v += vol
-        if cum_v <= 0:
-            continue
-        vwap = cum_pv / cum_v
-        final_vwap = vwap
-        bars_replayed += 1
-        if fired:
-            continue  # keep accumulating vwap for final_vwap, but the fire itself is one-shot
-        armed, fire = check_vwap_retest_entry(side, close, vwap, armed, min_gap_pct)
-        if fire:
-            fired = True
-            fire_ts = key
-            fire_price = close
-    return {
-        "armed": armed, "fired": fired, "fire_ts": fire_ts, "fire_price": fire_price,
-        "final_vwap": final_vwap, "bars_replayed": bars_replayed,
-    }
-
-
-def historical_vwap_retest_check(symbols_sides: dict, cfg=CONFIG) -> dict:
-    """Bulk Yahoo-backed wrapper around replay_vwap_retest_from_bars, one
-    yfinance.download() call for every symbol (mirrors backfill_vwap_from_
-    yahoo/backfill_orb_from_yahoo's own bulk-fetch pattern exactly, so this
-    doesn't add a second per-symbol network round trip on top of those).
-
-    symbols_sides: {symbol: "CALL"|"PUT"} for every symbol to check.
-    Returns {symbol: replay_vwap_retest_from_bars(...) result} -- a symbol
-    missing from the result (or whose value is None) means Yahoo had no
-    usable data for it; caller should treat that exactly like "not fired,
-    not armed" (safe default, same as a cold start) rather than raising."""
-    out: dict = {}
-    if not symbols_sides:
-        return out
-    try:
-        import yfinance as yf
-    except ImportError:
-        logger.warning("historical_vwap_retest_check: yfinance not installed -- "
-                        "no historical retest check possible, arm state starts cold.")
-        return out
-    symbols = list(symbols_sides.keys())
-    try:
-        tickers = [s + ".NS" for s in symbols]
-        df = yf.download(tickers, period="1d", interval="1m", progress=False, group_by="ticker")
-    except Exception as exc:
-        logger.warning("historical_vwap_retest_check: yfinance download failed entirely: %r", exc)
-        return out
-    orb_start = cfg.get("ORB_START", "09:15")
-    for sym, ticker in zip(symbols, tickers):
-        try:
-            sub = df[ticker]
-        except Exception as exc:
-            logger.warning("historical_vwap_retest_check: no data for %s (%s): %r", sym, ticker, exc)
-            continue
-        bars = []
-        for ts, row in sub.iterrows():
-            if any(pd.isna(row.get(c)) for c in ("High", "Low", "Close", "Volume")):
-                continue
-            ts_ist = ts.tz_convert(IST) if ts.tzinfo else ts.tz_localize(IST)
-            bars.append({
-                "ts": ts_ist.strftime("%H:%M"),
-                "high": float(row["High"]), "low": float(row["Low"]),
-                "close": float(row["Close"]), "volume": float(row["Volume"]),
-            })
-        bars.sort(key=lambda b: b["ts"])
-        result = replay_vwap_retest_from_bars(bars, symbols_sides[sym], orb_start)
-        out[sym] = result
-        if result["fired"]:
-            logger.info(
-                "historical_vwap_retest_check: %s %s ALREADY RETESTED at %s (price=%.2f) in "
-                "today's real history -- treat as immediate entry.",
-                sym, symbols_sides[sym], result["fire_ts"], result["fire_price"],
-            )
-    return out
-
-
 def side_from_pchange(pchange: float) -> str:
     """Gainer (pChange > 0) -> CALL candidate; loser -> PUT candidate. Same
     bullish/bearish split build_shortlist() already used to bucket the
@@ -1059,43 +922,6 @@ def side_allowed_by_regime(side: str, regime: Optional[str], regime_filter_on: b
     if side == "CALL":
         return regime == "bullish"
     return True   # PUT tradeable on both bullish and bearish days
-
-
-def check_vwap_retest_entry(side: str, ltp: float, vwap: float, armed: bool,
-                             min_gap_pct: float) -> tuple:
-    """2026-08-27, direct user spec: "wait for the stock to come back to
-    vwap then we enter" -- not an ORB breach.
-
-    2026-08-28 correction, direct user spec: arming is now PURE DIRECTIONAL
-    positioning relative to VWAP -- no minimum-gap threshold. "If we are
-    going long it should [be] above vwap, and vice versa[;] that is [the]
-    criteria for vwap, no threshold required." CALL arms the instant
-    ltp > vwap (any amount); PUT arms the instant ltp < vwap (any amount).
-    `min_gap_pct` is kept as a parameter (still threaded through
-    book_manager.py/engine.py/the dashboard) purely so this isn't an
-    invasive plumbing change during live market hours, but it is no longer
-    read anywhere in this function -- a future cleanup pass can remove the
-    parameter/config knob entirely once there's a safe window to also touch
-    the UI/persistence layer.
-
-    Once armed, entry fires the instant price touches back to VWAP FROM
-    THE ARMED DIRECTION -- CALL: ltp <= vwap (price was above, comes down
-    onto it); PUT: ltp >= vwap (price was below, comes up onto it) -- a
-    simple tick-based touch, no candle-close confirmation.
-
-    Returns (new_armed, fire_entry). Idempotent: once fired, the caller is
-    responsible for marking the (symbol, side) as already-fired so this
-    isn't called again for it same day."""
-    if vwap <= 0:
-        return armed, False
-    if side == "CALL":
-        if not armed:
-            return (ltp > vwap), False
-        return armed, (ltp <= vwap)
-    else:  # PUT
-        if not armed:
-            return (ltp < vwap), False
-        return armed, (ltp >= vwap)
 
 
 def compute_option_premium_sl_arm(bar_close: float, vwap_at_close: float,

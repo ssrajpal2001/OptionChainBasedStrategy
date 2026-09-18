@@ -31,7 +31,6 @@ _DEFAULT_PARAMS = {
     "stock_move_abort_pct": 4.0,
     "top_n_per_side": 5,
     "poll_seconds": 20,
-    "regime_filter_enabled": True,
     # 2026-08-24, direct user request -- TEMPORARY connectivity-test toggle.
     # Default False. See screener.py's own CONFIG["IGNORE_TIME_WINDOWS"]
     # docstring for what this actually does and when to turn it back off.
@@ -122,14 +121,6 @@ _DEFAULT_PARAMS = {
     # per-deployment overridable via strategy_params if the dedicated feeder
     # isn't configured/available and the shared-budget concern applies again.
     "chain_watch_max_stocks": 10,
-    # 2026-08-27, direct user spec ("wait for the stock to come back to vwap
-    # then we enter... this is optional"): replaces the ORB-breach entry
-    # trigger with a VWAP retest, and replaces the S&R (R1/S1/R2/S2) SL with
-    # a VWAP-relative structural stop. All three are fresh, unvalidated
-    # defaults (this strategy still can't be backtested) -- watch real
-    # forward telemetry before trusting them.
-    "vwap_entry_min_gap_pct": 0.15,
-    "vwap_cancel_if_unreached": True,
     "vwap_sl_tf_minutes": 5,
     # 2026-08-27, direct user spec: SL/target now track the OPTION's own
     # premium ("checking for target and SL in stock, change it to the
@@ -137,32 +128,6 @@ _DEFAULT_PARAMS = {
     # rr_multiple is a fixed risk-reward target off the currently-armed
     # SL's own points distance from entry -- fresh, unvalidated default.
     "rr_multiple": 2.0,
-    # 2026-09-02, opt-in alternate entry mode -- direct user spec, based on a
-    # real-data comparison the same day showing the zone/retest wait was
-    # costing genuine moves on fast movers (see engine.py's own
-    # _immediate_check_entry docstring for the full real-incident writeup).
-    # Skips the zone/retest confirmation _trap_check_entry uses and enters
-    # the instant ORB freezes for a shortlisted stock, using a slower 15-min
-    # S1/R1 TSL instead of the 3-min ladder to match the wider risk profile.
-    # Default OFF -- unvalidated beyond one real day, same graduation
-    # discipline as every other feature addition in this codebase.
-    "immediate_entry_enabled": False,
-    # 2026-09-18, direct user spec: opt-in additive entry/exit decision
-    # engine, "Future OI-Price Swing Breakout Strategy" -- see
-    # strategies/oi_orb_screener/oi_swing.py's own module docstring for the
-    # full mechanic. Default "vwap_retest" keeps every currently-deployed
-    # binding's behavior completely unchanged; a deployment opts in by
-    # setting strategy_params["entry_exit_mode"] = "oi_swing_v1" (any other
-    # value, including a typo, falls back to the existing default mechanic
-    # -- see OiOrbScreenerStrategy.__init__'s own validation).
-    "entry_exit_mode": "vwap_retest",
-    # Fix 2 (production, validated via a 13-day real-data backtest sweep):
-    # no NEW oi_swing_v1 entry may open after this wall-clock time.
-    "oi_swing_entry_cutoff": "14:30",
-    # Fix 3 (same sweep): minutes an oi_swing_v1 position must be held
-    # before an "oi_swing_exit" decision is allowed to actually close it --
-    # the hard risk cap and EOD square-off are never subject to this.
-    "oi_swing_min_hold_min": 10,
     # 2026-09-18, direct user spec: standalone "top gainer/loser" data
     # pipeline (verify-only this pass, see screener.poll_top_gainers_
     # losers's own docstring) -- steps 3-4's two dynamic thresholds.
@@ -177,14 +142,13 @@ _FLOAT_KEYS = ("oi_spurt_min_pct", "price_move_min_pct", "stock_move_abort_pct",
                "rejection_retrace_fraction", "strike_otm_pct",
                "oi_wall_dominance_ratio", "distance_to_wall_min_pct",
                "pcr_max_for_call", "pcr_min_for_put", "volume_confirmation_min_ratio",
-               "oi_roc_min_pct", "oi_roc_lookback_sec", "vwap_entry_min_gap_pct",
+               "oi_roc_min_pct", "oi_roc_lookback_sec",
                "afternoon_scan_interval_sec", "rr_multiple",
                "top_gainer_loser_oi_spurt_min_pct", "top_gainer_loser_pchange_max_pct")
 _INT_KEYS = ("top_n_per_side", "poll_seconds", "max_monitor_minutes",
-             "chain_watch_max_stocks", "vwap_sl_tf_minutes", "oi_swing_min_hold_min")
+             "chain_watch_max_stocks", "vwap_sl_tf_minutes")
 _STR_KEYS = ("orb_start", "orb_end", "scan_start", "entry_window_start", "entry_window_end",
-             "afternoon_scan_start", "afternoon_scan_end", "entry_exit_mode",
-             "oi_swing_entry_cutoff")
+             "afternoon_scan_start", "afternoon_scan_end")
 _FILTER_BOOL_KEYS = ("oi_wall_check_enabled", "distance_to_wall_enabled", "pcr_gate_enabled",
                       "volume_confirmation_enabled", "oi_roc_enabled")
 
@@ -228,16 +192,10 @@ class OiOrbScreenerBookManager(StrategyBookManager):
                 cfg[k] = int(params.get(k, _defaults[k]))
             for k in _STR_KEYS:
                 cfg[k] = str(params.get(k, _defaults[k]))
-            cfg["regime_filter_enabled"] = bool(params.get("regime_filter_enabled",
-                                                             _defaults["regime_filter_enabled"]))
             cfg["ignore_time_windows"] = bool(params.get("ignore_time_windows",
                                                            _defaults["ignore_time_windows"]))
-            cfg["vwap_cancel_if_unreached"] = bool(params.get("vwap_cancel_if_unreached",
-                                                                _defaults["vwap_cancel_if_unreached"]))
             cfg["two_session_scan_enabled"] = bool(params.get("two_session_scan_enabled",
                                                                 _defaults["two_session_scan_enabled"]))
-            cfg["immediate_entry_enabled"] = bool(params.get("immediate_entry_enabled",
-                                                                _defaults["immediate_entry_enabled"]))
             for k in _FILTER_BOOL_KEYS:
                 cfg[k] = bool(params.get(k, _defaults[k]))
             cfg["top_gainer_loser_pchange_filter_enabled"] = bool(params.get(
@@ -262,7 +220,6 @@ class OiOrbScreenerBookManager(StrategyBookManager):
             stock_move_abort_pct=value["stock_move_abort_pct"],
             top_n_per_side=value["top_n_per_side"],
             poll_seconds=value["poll_seconds"],
-            regime_filter_enabled=value["regime_filter_enabled"],
             ignore_time_windows=value["ignore_time_windows"],
             nifty_bullish_pct=value["nifty_bullish_pct"],
             nifty_bearish_pct=value["nifty_bearish_pct"],
@@ -292,14 +249,8 @@ class OiOrbScreenerBookManager(StrategyBookManager):
             oi_roc_min_pct=value["oi_roc_min_pct"],
             oi_roc_lookback_sec=value["oi_roc_lookback_sec"],
             chain_watch_max_stocks=value["chain_watch_max_stocks"],
-            vwap_entry_min_gap_pct=value["vwap_entry_min_gap_pct"],
-            vwap_cancel_if_unreached=value["vwap_cancel_if_unreached"],
             vwap_sl_tf_minutes=value["vwap_sl_tf_minutes"],
             rr_multiple=value["rr_multiple"],
-            immediate_entry_enabled=value["immediate_entry_enabled"],
-            entry_exit_mode=value["entry_exit_mode"],
-            oi_swing_entry_cutoff=value["oi_swing_entry_cutoff"],
-            oi_swing_min_hold_min=value["oi_swing_min_hold_min"],
             top_gainer_loser_oi_spurt_min_pct=value["top_gainer_loser_oi_spurt_min_pct"],
             top_gainer_loser_pchange_max_pct=value["top_gainer_loser_pchange_max_pct"],
             top_gainer_loser_pchange_filter_enabled=value["top_gainer_loser_pchange_filter_enabled"],
@@ -307,9 +258,9 @@ class OiOrbScreenerBookManager(StrategyBookManager):
         )
         logger.info(
             "OiOrbScreenerBookManager[%s]: spawned %s/%s (lots=%d oi_spurt>=%.1f%% price_move>=%.1f%% "
-            "top_n=%d regime_filter=%s ignore_time_windows=%s).",
+            "top_n=%d ignore_time_windows=%s).",
             self.STRATEGY_NAME, client_id, binding_id, value["lots"], value["oi_spurt_min_pct"],
-            value["price_move_min_pct"], value["top_n_per_side"], value["regime_filter_enabled"],
+            value["price_move_min_pct"], value["top_n_per_side"],
             value["ignore_time_windows"],
         )
         if value["ignore_time_windows"]:
@@ -336,7 +287,6 @@ class OiOrbScreenerBookManager(StrategyBookManager):
             or book._screener_cfg["STOCK_MOVE_ABORT_PCT"] != value["stock_move_abort_pct"]
             or book._screener_cfg["TOP_N_PER_SIDE"] != value["top_n_per_side"]
             or book._screener_cfg["POLL_SECONDS"] != value["poll_seconds"]
-            or book._screener_cfg["REGIME_FILTER_ENABLED"] != value["regime_filter_enabled"]
             or book._screener_cfg["IGNORE_TIME_WINDOWS"] != value["ignore_time_windows"]
             or book._screener_cfg["NIFTY_BULLISH_PCT"] != value["nifty_bullish_pct"]
             or book._screener_cfg["NIFTY_BEARISH_PCT"] != value["nifty_bearish_pct"]
@@ -357,19 +307,12 @@ class OiOrbScreenerBookManager(StrategyBookManager):
                 "oi_roc_enabled", "oi_roc_min_pct", "oi_roc_lookback_sec",
             ))
             or book._chain_watch_max_stocks != value["chain_watch_max_stocks"]
-            or book._vwap_entry_min_gap_pct != value["vwap_entry_min_gap_pct"]
-            or book._vwap_cancel_if_unreached != value["vwap_cancel_if_unreached"]
             or book._vwap_sl_tf_minutes != value["vwap_sl_tf_minutes"]
             or book._rr_multiple != value["rr_multiple"]
             or book._screener_cfg["TWO_SESSION_SCAN_ENABLED"] != value["two_session_scan_enabled"]
             or book._screener_cfg["AFTERNOON_SCAN_START"] != value["afternoon_scan_start"]
             or book._screener_cfg["AFTERNOON_SCAN_END"] != value["afternoon_scan_end"]
             or book._screener_cfg["AFTERNOON_SCAN_INTERVAL_SEC"] != value["afternoon_scan_interval_sec"]
-            or book._screener_cfg["IMMEDIATE_ENTRY_ENABLED"] != value["immediate_entry_enabled"]
-            or book._entry_exit_mode != (
-                "oi_swing_v1" if value["entry_exit_mode"] == "oi_swing_v1" else "vwap_retest")
-            or book._oi_swing_entry_cutoff.strftime("%H:%M") != value["oi_swing_entry_cutoff"]
-            or book._oi_swing_min_hold_min != value["oi_swing_min_hold_min"]
             or book._screener_cfg["TOP_GAINER_LOSER_OI_SPURT_MIN_PCT"] != value["top_gainer_loser_oi_spurt_min_pct"]
             or book._screener_cfg["TOP_GAINER_LOSER_PCHANGE_MAX_PCT"] != value["top_gainer_loser_pchange_max_pct"]
             or book._screener_cfg["TOP_GAINER_LOSER_PCHANGE_FILTER_ENABLED"] != value["top_gainer_loser_pchange_filter_enabled"]

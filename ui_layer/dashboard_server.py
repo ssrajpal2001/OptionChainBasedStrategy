@@ -325,7 +325,6 @@ try:
         stock_move_abort_pct:      float = 4.0
         top_n_per_side:            int   = 5
         poll_seconds:              int   = 20
-        regime_filter_enabled:     bool  = True
         ignore_time_windows:       bool  = False
         nifty_bullish_pct:         float = 0.3
         nifty_bearish_pct:         float = -0.3
@@ -369,12 +368,6 @@ try:
         # stocks so this can't silently starve another strategy's ticks. Raised
         # to 10 (2026-08-27) now that OI-ORB has its own dedicated upstox2 feeder.
         chain_watch_max_stocks:    int   = 10
-        # 2026-08-27: VWAP retest entry (replaces the old ORB-breach trigger) +
-        # option-premium SL/target (replaces the old S&R R1/S1/R2/S2 tracker,
-        # "checking for target and SL in stock, change it to the option which
-        # we are taking"). All fresh, unvalidated defaults.
-        vwap_entry_min_gap_pct:    float = 0.15
-        vwap_cancel_if_unreached:  bool  = True
         vwap_sl_tf_minutes:        int   = 5
         rr_multiple:               float = 2.0
 

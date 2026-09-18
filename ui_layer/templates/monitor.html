@@ -4433,11 +4433,7 @@ function amoTest() {
                 <input type="checkbox" x-model="oiOrbConfig.top_gainer_loser_pchange_filter_enabled"/>
               </div>
 
-              <div class="col-span-4 sec-label mt-2" style="color:var(--t-amber)">REGIME</div>
-              <div class="flex items-center gap-2">
-                <div class="sec-label mb-1">REGIME FILTER</div>
-                <input type="checkbox" x-model="oiOrbConfig.regime_filter_enabled"/>
-              </div>
+              <div class="col-span-4 sec-label mt-2" style="color:var(--t-amber)">REGIME (informational -- no entry mechanic currently reads this)</div>
               <div><div class="sec-label mb-1">NIFTY BULLISH %</div>
                 <input class="t-input font-mono text-xs" type="number" step="0.05" x-model.number="oiOrbConfig.nifty_bullish_pct"/></div>
               <div><div class="sec-label mb-1">NIFTY BEARISH %</div>
@@ -4471,14 +4467,8 @@ function amoTest() {
               <div class="col-span-4 sec-label mt-2" style="color:var(--t-amber)">ENTRY / CANCEL</div>
               <div><div class="sec-label mb-1">ENTRY WINDOW START</div>
                 <input class="t-input font-mono text-xs" type="text" placeholder="HH:MM" x-model="oiOrbConfig.entry_window_start"/></div>
-              <div><div class="sec-label mb-1">ENTRY WINDOW END (CANCEL IF VWAP NOT HIT)</div>
+              <div><div class="sec-label mb-1">ENTRY WINDOW END</div>
                 <input class="t-input font-mono text-xs" type="text" placeholder="HH:MM" x-model="oiOrbConfig.entry_window_end"/></div>
-              <div class="flex items-center gap-2">
-                <div class="sec-label mb-1">CANCEL IF VWAP UNREACHED</div>
-                <input type="checkbox" x-model="oiOrbConfig.vwap_cancel_if_unreached"/>
-              </div>
-              <div><div class="sec-label mb-1">VWAP ENTRY ARM GAP %</div>
-                <input class="t-input font-mono text-xs" type="number" step="0.05" x-model.number="oiOrbConfig.vwap_entry_min_gap_pct"/></div>
               <div class="flex items-center gap-2">
                 <div class="sec-label mb-1">IGNORE TIME WINDOWS</div>
                 <input type="checkbox" x-model="oiOrbConfig.ignore_time_windows"/>
@@ -7276,7 +7266,7 @@ function amoTest() {
                           // No dedicated advanced-params UI yet -- '{}' (set
                           // below) lets OiOrbScreenerBookManager._parse_params()
                           // fill in its own validated defaults (oi_spurt_min_pct=7,
-                          // price_move_min_pct=2, regime_filter_enabled=true).
+                          // price_move_min_pct=2).
                           // Underlying is always the SCREENER sentinel -- real
                           // stocks are chosen dynamically each day, not here.
                           // 2026-09-06 FROZEN spec: VWAP-retest entry + 15-min
@@ -8553,47 +8543,6 @@ function amoTest() {
                           </template>
                           <div x-show="(_bk.shortlist||[]).length>8" class="mt-1 text-right" style="color:var(--t-dim);font-size:10px"
                                x-text="'+ '+((_bk.shortlist||[]).length-8)+' more'"></div>
-
-                          <!-- 2026-09-16, direct user spec: "show which stocks were scanned in
-                               2% logic and will show that future OI is the issue due to which
-                               it did not passed the step 2" -- these stocks passed the initial
-                               price-move filter into the shortlist but were then removed by the
-                               futures-OI-regime gate; unlike the shortlist above they stay
-                               visible here (with the actual OI numbers + reason) instead of just
-                               vanishing. The moment a stock's regime genuinely passes and a real
-                               VWAP touch fires, it never appears here at all -- it goes straight
-                               from shortlist to the open-positions section above. -->
-                          <template x-if="Object.keys(_bk.oi_regime_blocked||{}).length>0">
-                            <div class="mt-2 pt-1.5" style="border-top:1px solid var(--t-border)">
-                              <div class="mb-1" style="color:var(--t-text);font-weight:600">
-                                Passed 2% move filter, blocked by futures-OI regime
-                                (<span x-text="Object.keys(_bk.oi_regime_blocked||{}).length"></span>)
-                              </div>
-                              <template x-for="row in Object.entries(_bk.oi_regime_blocked||{}).slice(0,8).map(([sym,b])=>({sym,...b}))" :key="row.sym">
-                                <div class="mb-1" style="font-size:10px">
-                                  <div class="flex items-center justify-between">
-                                    <span style="color:var(--t-text);font-weight:600" x-text="row.sym"></span>
-                                    <span style="color:var(--t-text)"
-                                          x-text="row.pchange==null?'':((row.pchange>0?'+':'')+row.pchange.toFixed(2)+'% move')"></span>
-                                    <span :style="row.oi_change_pct==null?'color:var(--t-text)':(row.oi_change_pct>=0?'color:var(--t-amber)':'color:var(--t-red)')"
-                                          :title="row.reason"
-                                          x-text="row.oi_change_pct==null?'no OI data':('OI '+(row.oi_change_pct>=0?'+':'')+row.oi_change_pct.toFixed(2)+'%')"></span>
-                                  </div>
-                                  <!-- 2026-09-16 follow-up, direct user spec: "it should show what
-                                       was 1539 value and 915 value of future OI in this panel" --
-                                       the two FIXED raw points the change% above was computed from. -->
-                                  <div class="flex justify-between" x-show="row.today_0915_oi!=null&&row.yday_1539_oi">
-                                    <span style="color:var(--t-text)">Futures OI 09:15 / yday 15:39</span>
-                                    <span style="color:var(--t-text)"
-                                          x-text="(row.today_0915_oi!=null&&row.yday_1539_oi) ? (Math.round(row.today_0915_oi).toLocaleString()+' / '+Math.round(row.yday_1539_oi).toLocaleString()) : ''"></span>
-                                  </div>
-                                </div>
-                              </template>
-                              <div x-show="Object.keys(_bk.oi_regime_blocked||{}).length>8" class="mt-0.5 text-right"
-                                   style="color:var(--t-dim);font-size:10px"
-                                   x-text="'+ '+(Object.keys(_bk.oi_regime_blocked||{}).length-8)+' more'"></div>
-                            </div>
-                          </template>
                         </div>
                       </template>
                     </div>
