@@ -163,6 +163,11 @@ _DEFAULT_PARAMS = {
     # before an "oi_swing_exit" decision is allowed to actually close it --
     # the hard risk cap and EOD square-off are never subject to this.
     "oi_swing_min_hold_min": 10,
+    # 2026-09-18, direct user spec: standalone "top gainer/loser" data
+    # pipeline (verify-only this pass, see screener.poll_top_gainers_
+    # losers's own docstring) -- steps 3-4's two dynamic thresholds.
+    "top_gainer_loser_oi_spurt_min_pct": 7.0,
+    "top_gainer_loser_pchange_max_pct": 4.0,
 }
 _FLOAT_KEYS = ("oi_spurt_min_pct", "price_move_min_pct", "stock_move_abort_pct",
                "nifty_bullish_pct", "nifty_bearish_pct", "rejection_min_rise_pct",
@@ -170,7 +175,8 @@ _FLOAT_KEYS = ("oi_spurt_min_pct", "price_move_min_pct", "stock_move_abort_pct",
                "oi_wall_dominance_ratio", "distance_to_wall_min_pct",
                "pcr_max_for_call", "pcr_min_for_put", "volume_confirmation_min_ratio",
                "oi_roc_min_pct", "oi_roc_lookback_sec", "vwap_entry_min_gap_pct",
-               "afternoon_scan_interval_sec", "rr_multiple")
+               "afternoon_scan_interval_sec", "rr_multiple",
+               "top_gainer_loser_oi_spurt_min_pct", "top_gainer_loser_pchange_max_pct")
 _INT_KEYS = ("top_n_per_side", "poll_seconds", "max_monitor_minutes",
              "chain_watch_max_stocks", "vwap_sl_tf_minutes", "oi_swing_min_hold_min")
 _STR_KEYS = ("orb_start", "orb_end", "scan_start", "entry_window_start", "entry_window_end",
@@ -288,6 +294,8 @@ class OiOrbScreenerBookManager(StrategyBookManager):
             entry_exit_mode=value["entry_exit_mode"],
             oi_swing_entry_cutoff=value["oi_swing_entry_cutoff"],
             oi_swing_min_hold_min=value["oi_swing_min_hold_min"],
+            top_gainer_loser_oi_spurt_min_pct=value["top_gainer_loser_oi_spurt_min_pct"],
+            top_gainer_loser_pchange_max_pct=value["top_gainer_loser_pchange_max_pct"],
             strategy_name=self.STRATEGY_NAME,
         )
         logger.info(
@@ -355,6 +363,8 @@ class OiOrbScreenerBookManager(StrategyBookManager):
                 "oi_swing_v1" if value["entry_exit_mode"] == "oi_swing_v1" else "vwap_retest")
             or book._oi_swing_entry_cutoff.strftime("%H:%M") != value["oi_swing_entry_cutoff"]
             or book._oi_swing_min_hold_min != value["oi_swing_min_hold_min"]
+            or book._screener_cfg["TOP_GAINER_LOSER_OI_SPURT_MIN_PCT"] != value["top_gainer_loser_oi_spurt_min_pct"]
+            or book._screener_cfg["TOP_GAINER_LOSER_PCHANGE_MAX_PCT"] != value["top_gainer_loser_pchange_max_pct"]
         )
 
     def _log_spawned(self, key: tuple, value: dict) -> None:

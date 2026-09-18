@@ -4423,6 +4423,12 @@ function amoTest() {
               <div><div class="sec-label mb-1">TOP N PER SIDE</div>
                 <input class="t-input font-mono text-xs" type="number" step="1" x-model.number="oiOrbConfig.top_n_per_side"/></div>
 
+              <div class="col-span-4 sec-label mt-2" style="color:var(--t-amber)">TOP GAINER/LOSER PIPELINE (standalone, verify-only -- not wired into entries)</div>
+              <div><div class="sec-label mb-1">OI SPURT MIN % (gainer/loser)</div>
+                <input class="t-input font-mono text-xs" type="number" step="0.1" x-model.number="oiOrbConfig.top_gainer_loser_oi_spurt_min_pct"/></div>
+              <div><div class="sec-label mb-1">PCHANGE MAX % (gainer/loser)</div>
+                <input class="t-input font-mono text-xs" type="number" step="0.1" x-model.number="oiOrbConfig.top_gainer_loser_pchange_max_pct"/></div>
+
               <div class="col-span-4 sec-label mt-2" style="color:var(--t-amber)">REGIME</div>
               <div class="flex items-center gap-2">
                 <div class="sec-label mb-1">REGIME FILTER</div>

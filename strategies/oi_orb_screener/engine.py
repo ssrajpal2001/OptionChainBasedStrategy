@@ -52,6 +52,8 @@ import time as _time
 from datetime import date, datetime, time as dtime, timedelta
 from typing import Dict, List, Optional, Set
 
+import pandas as pd
+
 from config.global_config import IST, Topic
 from data_layer.base_feeder import IndexTick, OptionTick
 from data_layer.instrument_registry import REGISTRY
@@ -372,6 +374,12 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         entry_exit_mode: str = _ENTRY_EXIT_MODE_DEFAULT,
         oi_swing_entry_cutoff: str = "14:30",
         oi_swing_min_hold_min: int = 10,
+        # 2026-09-18, direct user spec: standalone "top gainer/loser" data
+        # pipeline -- see screener.poll_top_gainers_losers's own module
+        # docstring for the full 4-step spec. Verify-only this pass: never
+        # touches self._shortlist_symbols/_positions/any entry decision.
+        top_gainer_loser_oi_spurt_min_pct: float = 7.0,
+        top_gainer_loser_pchange_max_pct: float = 4.0,
         strategy_name: str = "oi_orb_screener",
     ) -> None:
         super().__init__(bus, cfg, _UNDERLYING_SENTINEL, client_id, binding_id)
@@ -410,6 +418,15 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._screener_cfg["AFTERNOON_SCAN_INTERVAL_SEC"] = afternoon_scan_interval_sec
         self._screener_cfg["IMMEDIATE_ENTRY_ENABLED"] = immediate_entry_enabled
         self._screener_cfg["RR_MULTIPLE"] = rr_multiple
+        self._screener_cfg["TOP_GAINER_LOSER_OI_SPURT_MIN_PCT"] = top_gainer_loser_oi_spurt_min_pct
+        self._screener_cfg["TOP_GAINER_LOSER_PCHANGE_MAX_PCT"] = top_gainer_loser_pchange_max_pct
+
+        # ── standalone top gainer/loser pipeline (2026-09-18, direct user
+        # spec) -- verify-only, never read by any entry/exit/trading
+        # decision. See _top_gainer_loser_loop/_do_top_gainer_loser_poll. ──
+        self._top_gainer_loser_last_poll_ts: float = 0.0
+        self._top_gainer_loser_all: list = []          # last poll's full 2*N candidates
+        self._top_gainer_loser_qualifying: list = []   # last poll's qualifying subset
 
         # ── entry_exit_mode="oi_swing_v1" (2026-09-18, direct user spec) ──
         self._entry_exit_mode = (
@@ -758,6 +775,9 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._oi_swing_high = {}
         self._oi_swing_low = {}
         self._oi_swing_last_bucket = {}
+        self._top_gainer_loser_last_poll_ts = 0.0
+        self._top_gainer_loser_all = []
+        self._top_gainer_loser_qualifying = []
         self._trap_1m_acc = {}
         self._trap_3m_acc = {}
         self._trap_zones = {}
@@ -828,6 +848,8 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             self._rank_tracking_loop(), name=f"oiorb_rank_{self._client_id}_{self._binding_id}"))
         self._tasks.append(asyncio.create_task(
             self._oi_spurt_history_loop(), name=f"oiorb_spurthist_{self._client_id}_{self._binding_id}"))
+        self._tasks.append(asyncio.create_task(
+            self._top_gainer_loser_loop(), name=f"oiorb_gainerloser_{self._client_id}_{self._binding_id}"))
         self._tasks.append(asyncio.create_task(
             self._spot_feed_retry_loop(), name=f"oiorb_spotretry_{self._client_id}_{self._binding_id}"))
         self._clog.info("OiOrb[%s/%s]: started.", self._client_id, self._binding_id)
@@ -1443,6 +1465,84 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             self._client_id, self._binding_id, now.strftime("%H:%M:%S"), len(rows),
             ", ".join(f"{r['symbol']}(#{int(r['rank'])},{r['oi_spurt_pct']:.1f}%)"
                       for _, r in ranked.iterrows()),
+        )
+
+    async def _top_gainer_loser_loop(self) -> None:
+        """2026-09-18, direct user spec: standalone "top gainer/loser" data
+        pipeline. Deliberately SEPARATE from _oi_spurt_history_loop/
+        _rank_tracking_loop/build_shortlist above -- never reads or writes
+        self._shortlist_symbols/_rejected/_positions, only ever calls
+        screener.poll_top_gainers_losers (pure) + store.record_top_gainer_
+        loser_poll (logging). This pass is verify-only: its own qualifying
+        list (self._top_gainer_loser_qualifying) is not consumed by any
+        entry/exit/trading decision anywhere in this file.
+
+        Same polling-loop shape as _oi_spurt_history_loop (restore-ready
+        gate, enabled flag, session window, fixed poll interval) -- see
+        that method's own docstring for why each piece is there; ported
+        here unchanged rather than reinvented."""
+        while self._running:
+            if not self._restore_from_db_ready:
+                await asyncio.sleep(1)
+                continue
+            now = datetime.now(IST)
+            cfg = self._screener_cfg
+            if not cfg.get("TOP_GAINER_LOSER_ENABLED", True):
+                await asyncio.sleep(60)
+                continue
+            win_start = cfg.get("TOP_GAINER_LOSER_START", "09:15")
+            win_end = cfg.get("TOP_GAINER_LOSER_END", "15:30")
+            now_key = now.strftime("%H:%M")
+            if not (win_start <= now_key < win_end) or cfg.get("IGNORE_TIME_WINDOWS"):
+                await asyncio.sleep(30)
+                continue
+            now_ts = now.timestamp()
+            interval = float(cfg.get("TOP_GAINER_LOSER_POLL_SEC", 60.0) or 60.0)
+            if now_ts - self._top_gainer_loser_last_poll_ts < interval:
+                await asyncio.sleep(5)
+                continue
+            self._top_gainer_loser_last_poll_ts = now_ts
+            try:
+                if self._nse is None:
+                    self._nse = await asyncio.to_thread(screener.NSESession)
+                await self._do_top_gainer_loser_poll(now, cfg)
+            except Exception:
+                self._clog.warning(
+                    "OiOrb[%s/%s]: top gainer/loser poll failed (non-fatal, will retry next "
+                    "interval).", self._client_id, self._binding_id, exc_info=True)
+            await asyncio.sleep(5)
+
+    async def _do_top_gainer_loser_poll(self, now: datetime, cfg: dict) -> None:
+        """One purely-observational poll cycle -- split out for direct unit
+        testing, same shape as _do_oi_spurt_history_poll/_do_rank_poll."""
+        candidates, qualifying = await asyncio.to_thread(screener.poll_top_gainers_losers, self._nse, cfg)
+        if candidates is None or candidates.empty:
+            return
+
+        qualifying_symbols = set(qualifying["symbol"]) if not qualifying.empty else set()
+        poll_ts = now.isoformat(timespec="seconds")
+        rows = []
+        for _, r in candidates.iterrows():
+            oi_spurt = r.get("oi_spurt_pct")
+            rows.append({
+                "symbol": r["symbol"], "rank_type": r["rank_type"], "rank": int(r["rank"]),
+                "price_change_pct": float(r["pChange"]) if pd.notna(r.get("pChange")) else None,
+                "oi_spurt_pct": float(oi_spurt) if pd.notna(oi_spurt) else None,
+                "qualified": r["symbol"] in qualifying_symbols,
+            })
+        await asyncio.to_thread(store.record_top_gainer_loser_poll, self._client_id, self._binding_id,
+                                 poll_ts, rows)
+
+        self._top_gainer_loser_all = rows
+        self._top_gainer_loser_qualifying = [r for r in rows if r["qualified"]]
+        self._clog.info(
+            "OiOrb[%s/%s]: TOP GAINER/LOSER POLL @%s: %d candidates, %d qualifying: %s",
+            self._client_id, self._binding_id, now.strftime("%H:%M:%S"), len(rows),
+            len(self._top_gainer_loser_qualifying),
+            ", ".join(f"{r['symbol']}({r['rank_type']}#{r['rank']},px={r['price_change_pct']:+.2f}%,"
+                      f"oi={r['oi_spurt_pct']:.1f}%)" if r["oi_spurt_pct"] is not None
+                      else f"{r['symbol']}({r['rank_type']}#{r['rank']},px={r['price_change_pct']:+.2f}%,oi=n/a)"
+                      for r in self._top_gainer_loser_qualifying) or "(none)",
         )
 
     async def _run_today_pipeline(self) -> None:
@@ -5090,4 +5190,12 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             # self._shortlist_symbols, so the UI can show WHY it didn't
             # proceed instead of it just vanishing.
             "oi_regime_blocked": self._oi_regime_blocked,
+            # 2026-09-18, direct user spec: standalone top gainer/loser data
+            # pipeline's own last-poll snapshot -- verify-only, purely for
+            # visibility/manual cross-check against real NSE numbers; never
+            # consumed by any entry/exit decision anywhere in this file.
+            "top_gainer_loser": {
+                "all": self._top_gainer_loser_all,
+                "qualifying": self._top_gainer_loser_qualifying,
+            },
         }

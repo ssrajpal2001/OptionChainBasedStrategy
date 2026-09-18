@@ -208,6 +208,34 @@ CREATE TABLE IF NOT EXISTS futures_oi_history (
 );
 CREATE INDEX IF NOT EXISTS idx_futures_oi_history_day
     ON futures_oi_history(client_id, binding_id, trade_date, symbol, poll_ts);
+
+-- 2026-09-18, direct user spec: standalone "top gainer/loser" data
+-- pipeline (strategies/oi_orb_screener/screener.py's poll_top_gainers_
+-- losers, engine.py's _top_gainer_loser_loop) -- full audit trail, one row
+-- per (poll, symbol), for ALL 2*TOP_GAINER_LOSER_N gainer/loser candidates
+-- every poll cycle, whether or not each one passed the OI-spurt/pChange
+-- thresholds into the qualifying list -- same "log everything now, verify
+-- against real NSE numbers by hand" precedent as oi_spurt_history/
+-- futures_oi_history above. Deliberately a SEPARATE table (not a reuse of
+-- oi_spurt_history) since this pipeline's own candidate set (gainer/loser
+-- ranked) and thresholds are independent of that one's (OI-spurt ranked).
+CREATE TABLE IF NOT EXISTS top_gainer_loser_history (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_id         TEXT NOT NULL,
+    binding_id        TEXT NOT NULL,
+    trade_date        TEXT NOT NULL,
+    poll_ts           TEXT NOT NULL,
+    symbol            TEXT NOT NULL,
+    rank_type         TEXT NOT NULL,
+    rank              INTEGER NOT NULL,
+    price_change_pct  REAL,
+    oi_spurt_pct      REAL,
+    qualified         INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_top_gainer_loser_history_day
+    ON top_gainer_loser_history(client_id, binding_id, trade_date, poll_ts);
+CREATE INDEX IF NOT EXISTS idx_top_gainer_loser_history_symbol
+    ON top_gainer_loser_history(symbol, trade_date);
 """
 
 _initialized = False
@@ -429,6 +457,32 @@ def record_oi_spurt_history(client_id: str, binding_id: str, poll_ts: str, rows:
         con.commit()
     except Exception as exc:
         logger.error("oi_orb store.record_oi_spurt_history failed: %s", exc)
+    finally:
+        con.close()
+
+
+def record_top_gainer_loser_poll(client_id: str, binding_id: str, poll_ts: str, rows: List[dict],
+                                  trade_date: Optional[str] = None) -> None:
+    """rows: [{"symbol", "rank_type", "rank", "price_change_pct",
+    "oi_spurt_pct", "qualified"}, ...] -- the full 2*TOP_GAINER_LOSER_N
+    candidate set for one poll cycle (see screener.poll_top_gainers_
+    losers), whether or not each row actually qualified."""
+    init_db()
+    td = trade_date or _today()
+    con = sqlite3.connect(_DB_PATH)
+    try:
+        for r in rows:
+            con.execute(
+                """INSERT INTO top_gainer_loser_history
+                       (client_id, binding_id, trade_date, poll_ts, symbol, rank_type, rank,
+                        price_change_pct, oi_spurt_pct, qualified)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                (client_id, binding_id, td, poll_ts, r["symbol"], r["rank_type"], int(r["rank"]),
+                 r.get("price_change_pct"), r.get("oi_spurt_pct"), 1 if r.get("qualified") else 0),
+            )
+        con.commit()
+    except Exception as exc:
+        logger.error("oi_orb store.record_top_gainer_loser_poll failed: %s", exc)
     finally:
         con.close()
 

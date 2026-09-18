@@ -107,6 +107,23 @@ CONFIG = {
     "OI_SPURT_HISTORY_END": "15:30",
     "OI_SPURT_HISTORY_POLL_SEC": 60.0,
     "OI_SPURT_HISTORY_TOP_N": 20,
+    # 2026-09-18, direct user spec: standalone "top gainer/loser" data
+    # pipeline (see poll_top_gainers_losers's own docstring for the full
+    # 4-step spec) -- deliberately SEPARATE from OI_SPURT_HISTORY_* above
+    # and from build_shortlist's own OI_SPURT_MIN_PCT/PRICE_MOVE_MIN_PCT --
+    # a standalone, verify-only data pipeline, not wired into any trading
+    # decision. TOP_GAINER_LOSER_N=10 -> top 10 gainers + top 10 losers by
+    # real pChange (20 candidates total). The two threshold defaults below
+    # are dynamic/admin-configurable per deployment via strategy_params
+    # (book_manager.py's TOP_GAINER_LOSER_* keys), same pattern as every
+    # other tunable in this file.
+    "TOP_GAINER_LOSER_ENABLED": True,
+    "TOP_GAINER_LOSER_START": "09:15",
+    "TOP_GAINER_LOSER_END": "15:30",
+    "TOP_GAINER_LOSER_POLL_SEC": 60.0,
+    "TOP_GAINER_LOSER_N": 10,
+    "TOP_GAINER_LOSER_OI_SPURT_MIN_PCT": 7.0,
+    "TOP_GAINER_LOSER_PCHANGE_MAX_PCT": 4.0,
     # 2026-09-07, direct user spec, REVERSES the 2026-08-27 spec below:
     # "understand stocks which got scanned at 9.25 will be considered for
     # complete day, no need to scan fresh stocks after 9.25am." Default
@@ -507,6 +524,92 @@ def poll_oi_rank(nse: "NSESession", cfg=CONFIG, top_n: Optional[int] = None) -> 
     if top_n is None:
         top_n = int(cfg.get("RANK_TOP_N", 10) or 10)
     return merged.head(int(top_n))
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 2026-09-18, direct user spec: standalone "top gainer/loser" data
+# pipeline -- 4 steps, explicitly a SEPARATE, parallel pipeline from
+# build_shortlist/poll_oi_rank above, verify-only for this pass (not wired
+# into any entry/exit/trading decision). See engine.py's
+# _top_gainer_loser_loop for the live poll loop that drives this, and
+# store.py's top_gainer_loser_history table for the full audit trail.
+#
+#   Step 1 -- current top-N gainers + top-N losers by real pChange, derived
+#     directly from fetch_fno_price_universe's own already-fetched F&O
+#     price universe (build_shortlist/poll_oi_rank's same source) -- a
+#     sort is sufficient, no separate NSE gainers/losers endpoint exists
+#     or is needed.
+#   Step 2 -- real Options OI-spurt % for those 20, via fetch_oi_spurts_nse
+#     (the EXACT SAME NSE OI-spurt source build_shortlist already uses --
+#     not a second fetcher).
+#   Step 3 -- filter to oi_spurt_pct > TOP_GAINER_LOSER_OI_SPURT_MIN_PCT
+#     (default 7.0, dynamic/admin-configurable).
+#   Step 4 -- filter to |pChange| < TOP_GAINER_LOSER_PCHANGE_MAX_PCT
+#     (default 4.0, dynamic/admin-configurable) -- a genuine UPPER bound,
+#     excluding a stock whose move has ALREADY gotten too large, the
+#     opposite direction from every other price-move filter in this file.
+# ═══════════════════════════════════════════════════════════════════════
+
+def fetch_top_gainers_losers(universe: pd.DataFrame, top_n: int = 10) -> pd.DataFrame:
+    """Step 1. universe is fetch_fno_price_universe's own real DataFrame
+    (symbol/pChange/lastPrice/...). Returns the top_n biggest real
+    gainers + top_n biggest real losers by pChange, each row tagged
+    rank_type ("gainer"/"loser") and rank (1 = biggest move within its
+    own type) -- up to 2*top_n rows total (fewer if the universe itself
+    has fewer than top_n rows, or a stock is genuinely flat on both
+    sides -- not expected in practice but handled without erroring)."""
+    cols = list(universe.columns) if not universe.empty else ["symbol", "pChange"]
+    if universe.empty or "pChange" not in universe.columns:
+        return pd.DataFrame(columns=cols + ["rank_type", "rank"])
+    df = universe.dropna(subset=["pChange"]).copy()
+    gainers = df.sort_values("pChange", ascending=False).head(top_n).reset_index(drop=True)
+    gainers["rank_type"] = "gainer"
+    gainers["rank"] = gainers.index + 1
+    losers = df.sort_values("pChange", ascending=True).head(top_n).reset_index(drop=True)
+    losers["rank_type"] = "loser"
+    losers["rank"] = losers.index + 1
+    return pd.concat([gainers, losers], ignore_index=True)
+
+
+def filter_top_gainer_loser_candidates(candidates_with_oi: pd.DataFrame, oi_spurt_min_pct: float,
+                                        pchange_max_pct: float) -> pd.DataFrame:
+    """Steps 3-4, pure -- candidates_with_oi must already carry an
+    oi_spurt_pct column (see poll_top_gainers_losers, which does the real
+    NSE merge before calling this; unit tests can build this DataFrame by
+    hand). A candidate with no OI-spurt match at all (NaN, i.e. it wasn't
+    in today's real OI-Spurts list) never qualifies -- NaN comparisons are
+    always False, so it's excluded the same as a genuine sub-threshold
+    reading, no special-case needed."""
+    if candidates_with_oi.empty:
+        return candidates_with_oi
+    return candidates_with_oi[
+        (candidates_with_oi["oi_spurt_pct"] > oi_spurt_min_pct)
+        & (candidates_with_oi["pChange"].abs() < pchange_max_pct)
+    ].copy()
+
+
+def poll_top_gainers_losers(nse: "NSESession", cfg=CONFIG) -> tuple:
+    """One full real poll cycle of the 4-step pipeline. Returns
+    (candidates, qualifying):
+      candidates -- ALL 2*top_n gainer/loser rows, each with oi_spurt_pct
+        attached where a real match existed (NaN otherwise) -- the full
+        audit-trail record (see store.record_top_gainer_loser_poll).
+      qualifying -- the subset that actually passed both thresholds (steps
+        3-4) -- the live "currently qualifying" list.
+    Pure/synchronous, same shape as poll_oi_rank/build_shortlist --
+    callers wrap with asyncio.to_thread() per this codebase's blocking-I/O
+    rule."""
+    top_n = int(cfg.get("TOP_GAINER_LOSER_N", 10) or 10)
+    universe = fetch_fno_price_universe(nse)
+    oi_spurts = fetch_oi_spurts_nse(nse)
+    candidates = fetch_top_gainers_losers(universe, top_n)
+    if candidates.empty:
+        return candidates, candidates
+    merged = candidates.merge(oi_spurts, on="symbol", how="left")
+    oi_spurt_min = float(cfg.get("TOP_GAINER_LOSER_OI_SPURT_MIN_PCT", 7.0))
+    pchange_max = float(cfg.get("TOP_GAINER_LOSER_PCHANGE_MAX_PCT", 4.0))
+    qualifying = filter_top_gainer_loser_candidates(merged, oi_spurt_min, pchange_max)
+    return merged, qualifying
 
 
 class MinuteBars:
