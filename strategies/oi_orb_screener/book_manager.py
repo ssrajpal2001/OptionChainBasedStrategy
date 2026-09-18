@@ -168,6 +168,9 @@ _DEFAULT_PARAMS = {
     # losers's own docstring) -- steps 3-4's two dynamic thresholds.
     "top_gainer_loser_oi_spurt_min_pct": 7.0,
     "top_gainer_loser_pchange_max_pct": 4.0,
+    # 2026-09-18, direct user follow-up: "DISABLE THIS AS OFF NOW" -- Step 4
+    # starts OFF; Step 3 (OI-spurt floor) alone decides qualification.
+    "top_gainer_loser_pchange_filter_enabled": False,
 }
 _FLOAT_KEYS = ("oi_spurt_min_pct", "price_move_min_pct", "stock_move_abort_pct",
                "nifty_bullish_pct", "nifty_bearish_pct", "rejection_min_rise_pct",
@@ -237,6 +240,9 @@ class OiOrbScreenerBookManager(StrategyBookManager):
                                                                 _defaults["immediate_entry_enabled"]))
             for k in _FILTER_BOOL_KEYS:
                 cfg[k] = bool(params.get(k, _defaults[k]))
+            cfg["top_gainer_loser_pchange_filter_enabled"] = bool(params.get(
+                "top_gainer_loser_pchange_filter_enabled",
+                _defaults["top_gainer_loser_pchange_filter_enabled"]))
             # Key on the sentinel underlying so this fits the base class's
             # generic (client_id, binding_id, underlying) Key shape without
             # a real per-stock underlying -- the screener itself decides
@@ -296,6 +302,7 @@ class OiOrbScreenerBookManager(StrategyBookManager):
             oi_swing_min_hold_min=value["oi_swing_min_hold_min"],
             top_gainer_loser_oi_spurt_min_pct=value["top_gainer_loser_oi_spurt_min_pct"],
             top_gainer_loser_pchange_max_pct=value["top_gainer_loser_pchange_max_pct"],
+            top_gainer_loser_pchange_filter_enabled=value["top_gainer_loser_pchange_filter_enabled"],
             strategy_name=self.STRATEGY_NAME,
         )
         logger.info(
@@ -365,6 +372,7 @@ class OiOrbScreenerBookManager(StrategyBookManager):
             or book._oi_swing_min_hold_min != value["oi_swing_min_hold_min"]
             or book._screener_cfg["TOP_GAINER_LOSER_OI_SPURT_MIN_PCT"] != value["top_gainer_loser_oi_spurt_min_pct"]
             or book._screener_cfg["TOP_GAINER_LOSER_PCHANGE_MAX_PCT"] != value["top_gainer_loser_pchange_max_pct"]
+            or book._screener_cfg["TOP_GAINER_LOSER_PCHANGE_FILTER_ENABLED"] != value["top_gainer_loser_pchange_filter_enabled"]
         )
 
     def _log_spawned(self, key: tuple, value: dict) -> None:

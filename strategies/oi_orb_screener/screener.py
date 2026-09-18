@@ -124,6 +124,10 @@ CONFIG = {
     "TOP_GAINER_LOSER_N": 10,
     "TOP_GAINER_LOSER_OI_SPURT_MIN_PCT": 7.0,
     "TOP_GAINER_LOSER_PCHANGE_MAX_PCT": 4.0,
+    # 2026-09-18, direct user follow-up: "DISABLE THIS AS OFF NOW" -- Step 4
+    # (the pChange upper-bound) starts OFF; Step 3 (OI-spurt floor) alone
+    # decides qualification until this is explicitly re-enabled.
+    "TOP_GAINER_LOSER_PCHANGE_FILTER_ENABLED": False,
     # 2026-09-07, direct user spec, REVERSES the 2026-08-27 spec below:
     # "understand stocks which got scanned at 9.25 will be considered for
     # complete day, no need to scan fresh stocks after 9.25am." Default
@@ -572,20 +576,28 @@ def fetch_top_gainers_losers(universe: pd.DataFrame, top_n: int = 10) -> pd.Data
 
 
 def filter_top_gainer_loser_candidates(candidates_with_oi: pd.DataFrame, oi_spurt_min_pct: float,
-                                        pchange_max_pct: float) -> pd.DataFrame:
+                                        pchange_max_pct: float, pchange_filter_enabled: bool = True,
+                                        ) -> pd.DataFrame:
     """Steps 3-4, pure -- candidates_with_oi must already carry an
     oi_spurt_pct column (see poll_top_gainers_losers, which does the real
     NSE merge before calling this; unit tests can build this DataFrame by
     hand). A candidate with no OI-spurt match at all (NaN, i.e. it wasn't
     in today's real OI-Spurts list) never qualifies -- NaN comparisons are
     always False, so it's excluded the same as a genuine sub-threshold
-    reading, no special-case needed."""
+    reading, no special-case needed.
+
+    2026-09-18, direct user follow-up: Step 4 (the pchange_max_pct upper
+    bound) disabled by default -- "DISABLE THIS AS OFF NOW". Step 3 (the
+    OI-spurt floor) always applies; pchange_filter_enabled=False (the
+    default) skips Step 4 entirely rather than pass some very-large
+    pchange_max_pct as a workaround, so a symbol with a genuinely huge
+    move is never silently excluded by an implicit ceiling."""
     if candidates_with_oi.empty:
         return candidates_with_oi
-    return candidates_with_oi[
-        (candidates_with_oi["oi_spurt_pct"] > oi_spurt_min_pct)
-        & (candidates_with_oi["pChange"].abs() < pchange_max_pct)
-    ].copy()
+    mask = candidates_with_oi["oi_spurt_pct"] > oi_spurt_min_pct
+    if pchange_filter_enabled:
+        mask &= candidates_with_oi["pChange"].abs() < pchange_max_pct
+    return candidates_with_oi[mask].copy()
 
 
 def poll_top_gainers_losers(nse: "NSESession", cfg=CONFIG) -> tuple:
@@ -594,8 +606,9 @@ def poll_top_gainers_losers(nse: "NSESession", cfg=CONFIG) -> tuple:
       candidates -- ALL 2*top_n gainer/loser rows, each with oi_spurt_pct
         attached where a real match existed (NaN otherwise) -- the full
         audit-trail record (see store.record_top_gainer_loser_poll).
-      qualifying -- the subset that actually passed both thresholds (steps
-        3-4) -- the live "currently qualifying" list.
+      qualifying -- the subset that actually passed the active thresholds
+        (Step 3 always, Step 4 only if enabled) -- the live "currently
+        qualifying" list.
     Pure/synchronous, same shape as poll_oi_rank/build_shortlist --
     callers wrap with asyncio.to_thread() per this codebase's blocking-I/O
     rule."""
@@ -608,7 +621,9 @@ def poll_top_gainers_losers(nse: "NSESession", cfg=CONFIG) -> tuple:
     merged = candidates.merge(oi_spurts, on="symbol", how="left")
     oi_spurt_min = float(cfg.get("TOP_GAINER_LOSER_OI_SPURT_MIN_PCT", 7.0))
     pchange_max = float(cfg.get("TOP_GAINER_LOSER_PCHANGE_MAX_PCT", 4.0))
-    qualifying = filter_top_gainer_loser_candidates(merged, oi_spurt_min, pchange_max)
+    pchange_filter_enabled = bool(cfg.get("TOP_GAINER_LOSER_PCHANGE_FILTER_ENABLED", False))
+    qualifying = filter_top_gainer_loser_candidates(
+        merged, oi_spurt_min, pchange_max, pchange_filter_enabled)
     return merged, qualifying
 
 

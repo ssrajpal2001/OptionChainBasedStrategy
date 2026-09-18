@@ -380,6 +380,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         # touches self._shortlist_symbols/_positions/any entry decision.
         top_gainer_loser_oi_spurt_min_pct: float = 7.0,
         top_gainer_loser_pchange_max_pct: float = 4.0,
+        top_gainer_loser_pchange_filter_enabled: bool = False,
         strategy_name: str = "oi_orb_screener",
     ) -> None:
         super().__init__(bus, cfg, _UNDERLYING_SENTINEL, client_id, binding_id)
@@ -420,6 +421,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._screener_cfg["RR_MULTIPLE"] = rr_multiple
         self._screener_cfg["TOP_GAINER_LOSER_OI_SPURT_MIN_PCT"] = top_gainer_loser_oi_spurt_min_pct
         self._screener_cfg["TOP_GAINER_LOSER_PCHANGE_MAX_PCT"] = top_gainer_loser_pchange_max_pct
+        self._screener_cfg["TOP_GAINER_LOSER_PCHANGE_FILTER_ENABLED"] = top_gainer_loser_pchange_filter_enabled
 
         # ── standalone top gainer/loser pipeline (2026-09-18, direct user
         # spec) -- verify-only, never read by any entry/exit/trading

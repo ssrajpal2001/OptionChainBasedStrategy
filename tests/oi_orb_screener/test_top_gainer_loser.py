@@ -152,8 +152,12 @@ class TestPollTopGainersLosers:
         monkeypatch.setattr(screener, "fetch_fno_price_universe", lambda nse: universe)
         monkeypatch.setattr(screener, "fetch_oi_spurts_nse", lambda nse: oi_spurts)
 
+        # 2026-09-18 direct user follow-up: Step 4 (pChange upper bound)
+        # now defaults OFF ("DISABLE THIS AS OFF NOW") -- this test explicitly
+        # opts back in since it's specifically verifying Step 4's own logic.
         cfg = _cfg(TOP_GAINER_LOSER_N=2, TOP_GAINER_LOSER_OI_SPURT_MIN_PCT=7.0,
-                   TOP_GAINER_LOSER_PCHANGE_MAX_PCT=4.0)
+                   TOP_GAINER_LOSER_PCHANGE_MAX_PCT=4.0,
+                   TOP_GAINER_LOSER_PCHANGE_FILTER_ENABLED=True)
         candidates, qualifying = screener.poll_top_gainers_losers(nse=None, cfg=cfg)
 
         assert len(candidates) == 4   # top-2 gainers + top-2 losers
@@ -161,6 +165,26 @@ class TestPollTopGainersLosers:
         # A: oi=9>7, |pChange|=3<4 -> qualifies. B: oi=3, fails. C: oi=8>7,
         # |pChange|=3.5<4 -> qualifies. D: oi=20>7 but |pChange|=8 NOT <4 -> fails.
         assert set(qualifying["symbol"]) == {"A", "C"}
+
+    def test_pchange_filter_disabled_by_default_step3_alone_decides(self, monkeypatch):
+        """Direct user follow-up, same day: with the Step 4 filter left at
+        its new default (disabled), D qualifies purely on Step 3 (OI-spurt
+        > 7%) despite its huge -8% move -- exactly the "disable this as off
+        now" behavior just requested, verified end-to-end."""
+        universe = pd.DataFrame([
+            {"symbol": "A", "pChange": 3.0}, {"symbol": "B", "pChange": 2.5},
+            {"symbol": "C", "pChange": -3.5}, {"symbol": "D", "pChange": -8.0},
+        ])
+        oi_spurts = pd.DataFrame({"symbol": ["A", "B", "C", "D"],
+                                   "oi_spurt_pct": [9.0, 3.0, 8.0, 20.0]})
+        monkeypatch.setattr(screener, "fetch_fno_price_universe", lambda nse: universe)
+        monkeypatch.setattr(screener, "fetch_oi_spurts_nse", lambda nse: oi_spurts)
+
+        cfg = _cfg(TOP_GAINER_LOSER_N=2, TOP_GAINER_LOSER_OI_SPURT_MIN_PCT=7.0,
+                   TOP_GAINER_LOSER_PCHANGE_MAX_PCT=4.0)   # filter_enabled left at default (False)
+        _candidates, qualifying = screener.poll_top_gainers_losers(nse=None, cfg=cfg)
+
+        assert set(qualifying["symbol"]) == {"A", "C", "D"}
 
     def test_empty_universe_returns_empty_both(self, monkeypatch):
         monkeypatch.setattr(screener, "fetch_fno_price_universe", lambda nse: pd.DataFrame())
@@ -244,7 +268,11 @@ class TestDoTopGainerLoserPoll:
         monkeypatch.setattr(screener, "fetch_oi_spurts_nse", lambda nse: oi_spurts)
 
         now = datetime(2026, 9, 18, 9, 20, tzinfo=IST)
-        await book._do_top_gainer_loser_poll(now, dict(screener.CONFIG, TOP_GAINER_LOSER_N=2))
+        # 2026-09-18 follow-up: Step 4 defaults OFF now -- opt in explicitly
+        # since this test is specifically checking Step 4 excludes D.
+        await book._do_top_gainer_loser_poll(
+            now, dict(screener.CONFIG, TOP_GAINER_LOSER_N=2,
+                      TOP_GAINER_LOSER_PCHANGE_FILTER_ENABLED=True))
 
         assert len(book._top_gainer_loser_all) == 4   # top-2 gainers + top-2 losers
         assert {r["symbol"] for r in book._top_gainer_loser_qualifying} == {"A"}
