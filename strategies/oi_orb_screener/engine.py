@@ -63,6 +63,7 @@ from strategies.core.support_resistance import (
     _MAX_RISK_RS_PER_LOT as _SR_MAX_RISK_RS_PER_LOT,
 )
 from strategies.oi_orb_screener import filters as oi_filters
+from strategies.oi_orb_screener import oi_swing
 from strategies.oi_orb_screener import screener
 from strategies.oi_orb_screener import stock_resolve
 from strategies.oi_orb_screener import store
@@ -192,6 +193,16 @@ _OI_REGIME_DECREASE_MAX_PCT_DEFAULT = -5.0
 # throttle-sensitive -- rate-limit the re-check, same philosophy as every
 # other throttled poll in this file.
 _TRAP_GATE_RECHECK_MIN_SEC = 30.0
+
+# 2026-09-18, direct user spec: "Future OI-Price Swing Breakout Strategy",
+# an opt-in additive entry_exit_mode ("oi_swing_v1") -- see
+# strategies/oi_orb_screener/oi_swing.py's own module docstring for the
+# full mechanic + the three production fixes. Default remains the existing
+# VWAP-retest/regime-gate mechanic for every currently-deployed binding;
+# nothing here changes unless a deployment's own strategy_params sets
+# entry_exit_mode="oi_swing_v1" explicitly.
+_ENTRY_EXIT_MODE_DEFAULT = "vwap_retest"
+_ENTRY_EXIT_MODE_OI_SWING = "oi_swing_v1"
 
 
 def _make_strategy_logger(client_id: str, binding_id: str) -> logging.Logger:
@@ -354,6 +365,13 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         # premium (its own VWAP, its own bars), not the underlying stock's
         # spot price -- see screener.compute_option_premium_sl_arm/_target.
         rr_multiple: float = 2.0,
+        # 2026-09-18, direct user spec: opt-in additive entry/exit decision
+        # engine -- see oi_swing.py's own module docstring + the three
+        # constants below. Any value other than _ENTRY_EXIT_MODE_OI_SWING
+        # keeps the existing default mechanic completely unchanged.
+        entry_exit_mode: str = _ENTRY_EXIT_MODE_DEFAULT,
+        oi_swing_entry_cutoff: str = "14:30",
+        oi_swing_min_hold_min: int = 10,
         strategy_name: str = "oi_orb_screener",
     ) -> None:
         super().__init__(bus, cfg, _UNDERLYING_SENTINEL, client_id, binding_id)
@@ -392,6 +410,28 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._screener_cfg["AFTERNOON_SCAN_INTERVAL_SEC"] = afternoon_scan_interval_sec
         self._screener_cfg["IMMEDIATE_ENTRY_ENABLED"] = immediate_entry_enabled
         self._screener_cfg["RR_MULTIPLE"] = rr_multiple
+
+        # ── entry_exit_mode="oi_swing_v1" (2026-09-18, direct user spec) ──
+        self._entry_exit_mode = (
+            entry_exit_mode if entry_exit_mode == _ENTRY_EXIT_MODE_OI_SWING
+            else _ENTRY_EXIT_MODE_DEFAULT
+        )
+        try:
+            _h, _m = str(oi_swing_entry_cutoff or "14:30").split(":")
+            self._oi_swing_entry_cutoff = dtime(int(_h), int(_m))
+        except Exception:
+            self._oi_swing_entry_cutoff = oi_swing.ENTRY_CUTOFF_DEFAULT
+        self._oi_swing_min_hold_min = max(0, int(oi_swing_min_hold_min))
+        # Per-symbol state: real-time 5-min (bucket_ts, price, oi) series
+        # built from live REST polls (see _oi_swing_exit_check), the
+        # latest CONFIRMED swing high/low ratchet, and the last bucket a
+        # point was already recorded for (so a poll cycle landing inside
+        # an already-recorded bucket is a cheap no-op, not a duplicate
+        # point / duplicate REST call).
+        self._oi_swing_series: Dict[str, list] = {}
+        self._oi_swing_high: Dict[str, Optional[float]] = {}
+        self._oi_swing_low: Dict[str, Optional[float]] = {}
+        self._oi_swing_last_bucket: Dict[str, datetime] = {}
 
         # ── 5 additive filters: config + one dedicated log file each ────
         self._filters_cfg = {
@@ -714,6 +754,10 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._oi_history_last_poll_ts = 0.0
         self._vwap = screener.VwapState()
         self._vwap_armed = {}
+        self._oi_swing_series = {}
+        self._oi_swing_high = {}
+        self._oi_swing_low = {}
+        self._oi_swing_last_bucket = {}
         self._trap_1m_acc = {}
         self._trap_3m_acc = {}
         self._trap_zones = {}
@@ -845,14 +889,37 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                     "will fire for it) until manually reconciled.",
                     self._client_id, self._binding_id, r["symbol"], r["option_type"], r["strike"])
                 continue
+            # 2026-09-18 CRITICAL FIX, found while adding entry_exit_mode=
+            # "oi_swing_v1": this used to hardcode "sl_mechanic": "vwap" for
+            # EVERY restored position regardless of what it was actually
+            # entered under -- the comment above it claimed "keep it on the
+            # mechanic it was actually entered under," but the code never
+            # did that; a restored "trap"/"immediate_15m" position was
+            # silently switched onto the old VWAP-close SL after ANY
+            # restart. r["entry_reason"] (persisted by store.open_position,
+            # set from pending["reason"] in _on_fill) already carries
+            # exactly what's needed to reconstruct the real mechanic --
+            # same mapping _on_fill's own BUY branch uses, just read back
+            # from the DB instead of the live pending-fill context. This
+            # also fixes restore for a genuine oi_swing_v1 position (which
+            # otherwise would have been silently downgraded onto the wrong
+            # exit mechanic after any mid-session restart -- exactly the
+            # kind of real-money-relevant restart bug this new mode's own
+            # review explicitly asked to check for).
+            entry_reason = r.get("entry_reason") or ""
+            sl_mechanic = (
+                _ENTRY_EXIT_MODE_OI_SWING if entry_reason == "oi_swing_v1_entry"
+                else "immediate_15m" if entry_reason == "immediate_orb_entry"
+                else "vwap" if entry_reason == "vwap_retest"
+                else "trap" if entry_reason
+                else "vwap"   # unknown/blank reason (e.g. a pre-existing row from
+                               # before entry_reason was ever recorded) -- degrade
+                               # to the same safe default this code always used.
+            )
             self._positions[r["symbol"]] = {
                 "contract": contract, "qty": r["qty"], "entry_price": r["entry_price"],
                 "paper_mode": bool(r["paper_mode"]), "opened_at": datetime.fromisoformat(r["entry_ts"]),
-                # 2026-08-31: a restored position predates the trap+TSL mechanic --
-                # keep it on the old option-premium-VWAP SL it was actually entered
-                # under, never retroactively switch an already-open position's risk
-                # model. New entries (see _on_fill's BUY branch) get "trap" instead.
-                "sl_mechanic": "vwap",
+                "sl_mechanic": sl_mechanic,
             }
             self._ensure_option_feed(r["symbol"], contract)
             self._ensure_spot_feed(r["symbol"])
@@ -1727,6 +1794,17 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 # silently running the wrong exit mechanic for the rest of
                 # the day).
                 side = self._side_from_option_type(pos["contract"].option_type)
+                # 2026-09-18, direct user spec: a position opened under
+                # entry_exit_mode="oi_swing_v1" uses its OWN exit decision
+                # engine entirely -- never the VWAP-close SL / trap-TSL
+                # mechanics below (those stay exactly as-is for every other
+                # position). Tagged on the position itself (sl_mechanic),
+                # not the book's current self._entry_exit_mode, so a
+                # restored position keeps using the mechanic it was
+                # actually opened under.
+                if pos.get("sl_mechanic") == _ENTRY_EXIT_MODE_OI_SWING:
+                    await self._oi_swing_exit_check(sym, side, ltp, now)
+                    continue
                 await self._vwap_close_sl_check(sym, side, ltp, now)
                 if sym in self._eod_closing:
                     continue
@@ -1744,6 +1822,22 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                     await self._trap_update_tsl_and_check_exit(sym, side, ltp, now)
                 else:
                     await self._immediate_update_tsl_and_check_exit(sym, side, ltp, now)
+
+            # 2026-09-18, direct user spec: entry_exit_mode="oi_swing_v1"
+            # replaces the ENTIRE entry-evaluation block below (VWAP-retest/
+            # regime-gate/trap-target-touched-gate/immediate-ORB) with the
+            # plain immediate 2% price trigger -- no NIFTY regime dependency,
+            # no additive filters, no trap-target gate. See
+            # _oi_swing_entry_scan's own docstring.
+            if self._entry_exit_mode == _ENTRY_EXIT_MODE_OI_SWING:
+                await self._oi_swing_entry_scan(live, now, now_key)
+                if (not cfg.get("IGNORE_TIME_WINDOWS") and not self._positions
+                        and now.time() > self._squareoff_time):
+                    # Past EOD, flat -- nothing left for this loop to do today
+                    # (mirrors the existing mode's own end-of-day break below).
+                    break
+                await asyncio.sleep(cfg["POLL_SECONDS"])
+                continue
 
             entry_window_open = cfg.get("IGNORE_TIME_WINDOWS") or (
                 cfg["ENTRY_WINDOW_START"] <= now_key < cfg["ENTRY_WINDOW_END"])
@@ -2755,6 +2849,16 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 # mid-trading-day).
                 # await self._check_hard_risk_cap(tick.underlying, tick.ltp)
                 # await self._update_option_sl_target_and_check(tick.underlying, tick.ltp, tick.timestamp)
+                # 2026-09-18, direct user spec (entry_exit_mode="oi_swing_v1",
+                # Fix 1): re-enable the existing _check_hard_risk_cap method,
+                # gated ONLY to positions opened under this new mode -- every
+                # real option tick is a call here, i.e. effectively continuous/
+                # sub-minute cadence, independent of the OI-swing loop's own
+                # 5-min cadence. Every other position's exit mechanics are
+                # completely unaffected (the two lines above stay disabled).
+                pos = self._positions.get(tick.underlying)
+                if pos is not None and pos.get("sl_mechanic") == _ENTRY_EXIT_MODE_OI_SWING:
+                    await self._check_hard_risk_cap(tick.underlying, tick.ltp)
 
     async def _check_hard_risk_cap(self, symbol: str, option_ltp: float) -> None:
         """2026-08-26, added alongside the structural SL -- a fresh entry (or a
@@ -2909,6 +3013,147 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         new_armed, fire = screener.check_vwap_retest_entry(side, ltp, vwap, armed, 0.15)
         self._vwap_armed[sym] = new_armed
         return fire
+
+    async def _oi_swing_entry_scan(self, live, now: datetime, now_key: str) -> None:
+        """entry_exit_mode="oi_swing_v1" ENTRY path (2026-09-18, direct user
+        spec) -- immediate 2.0% price trigger vs real yesterday close, no
+        VWAP-retest wait, no OI-regime gate, no trap-target-touched gate,
+        no NIFTY regime dependency at all. Side locked from the trigger's
+        own sign the instant it fires (oi_swing.check_immediate_entry_
+        trigger, mirrors screener.side_from_pchange's CALL/PUT convention).
+
+        Fix 2 (production, validated via the 13-day backtest sweep): no NEW
+        entry may open after self._oi_swing_entry_cutoff (default 14:30) --
+        the raw backtest had no cutoff at all, confirmed a real bug
+        (PREMIERENE entered 15:28 on 2026-09-17, 13 minutes before its own
+        15:15 EOD square-off)."""
+        if not oi_swing.is_entry_within_cutoff(now.time(), self._oi_swing_entry_cutoff):
+            return
+        for sym in list(self._shortlist_symbols):
+            if sym in self._positions or sym in self._pending_contracts:
+                continue
+            prev_close = self._prev_close_map.get(sym)
+            if not prev_close:
+                continue
+            ltp = self._live_price(sym, live)
+            if ltp is None:
+                continue
+            pchange = (ltp - prev_close) / prev_close * 100.0
+            side = oi_swing.check_immediate_entry_trigger(pchange)
+            if side is None:
+                continue
+            if (sym, side) in self._already_fired or (sym, side) in self._rejected:
+                continue
+            self._already_fired.add((sym, side))
+            self._clog.info(
+                "OiOrb[%s/%s]: %s OI-SWING-V1 2%% TRIGGER: pchange=%+.2f%% ltp=%.2f prev_close=%.2f "
+                "-> side=%s -- entering immediately (no VWAP/OI-regime gate).",
+                self._client_id, self._binding_id, sym, pchange, ltp, prev_close, side,
+            )
+            await self._emit_vwap_signal(
+                sym, side, ltp, "oi_swing_v1_entry", (0.0, 0.0),
+                now.strftime("%H:%M:%S"), label="OI-SWING-ENTRY")
+
+    async def _oi_swing_exit_check(self, sym: str, side: str, ltp: float, now: datetime) -> None:
+        """entry_exit_mode="oi_swing_v1" EXIT path (2026-09-18, direct user
+        spec) -- real 5-min Futures-OI + price series (REST-polled, session-
+        anchored to 09:15), 3-point-immediate-neighbor swing confirmation,
+        breakout/breakdown-vs-price-direction HOLD/EXIT matrix. See
+        strategies/oi_orb_screener/oi_swing.py's own module docstring for
+        the full mechanic and the two fixes this method applies (the third,
+        the hard risk-cap cadence fix, lives in _option_tick_loop instead --
+        this method only ever produces the "oi_swing_exit" reason, never
+        the risk-cap one).
+
+        RESTART/DEGRADE-SAFELY NOTE (explicit judgment call, flagged for
+        review): the real-time 5-min OI/price series + swing ratchet are
+        NOT persisted to store.py. A restart mid-session resumes this
+        symbol's tracker from a genuinely empty series -- the position
+        itself is unaffected (restored normally via _restore_from_db,
+        including its real opened_at for the min-hold check below), it
+        simply needs ~3 fresh live 5-min bars (about 10-15 minutes) after
+        the restart before the OI-swing exit can arm again. During that
+        window the position is NOT unprotected: the hard risk-cap
+        (independent, tick-driven, re-armed automatically from pos[
+        "entry_price"]/pos["qty"] with no separate state to lose) and EOD
+        square-off both continue to apply exactly as before the restart.
+        This mirrors the same "best-effort, never block, degrade safely"
+        discipline every other REST-polled seed in this file already uses
+        (e.g. _backfill_futures_oi_display) -- a full REST-replay-based
+        restore (matching _seed_trap_exit_state's own pattern) was
+        deliberately deferred, not attempted, for this first production
+        pass."""
+        pos = self._positions.get(sym)
+        if pos is None or sym in self._eod_closing:
+            return
+        bucket = oi_swing.floor_to_bucket(now)
+        last_bucket = self._oi_swing_last_bucket.get(sym)
+        if last_bucket is not None and bucket <= last_bucket:
+            return   # still inside the same 5-min bucket -- nothing new to record yet
+        resolved = await self._resolve_futures_key_and_token(sym)
+        if resolved is None:
+            return   # best-effort (no futures key/token this cycle) -- try again next cycle
+        fut_key, token = resolved
+        from data_layer.historical_candles import fetch_upstox_v3_quote
+        try:
+            quote = await fetch_upstox_v3_quote(fut_key, token)
+        except Exception:
+            self._clog.exception(
+                "OiOrb[%s/%s]: %s OI-swing v3-quote fetch failed (recovered, try again next cycle).",
+                self._client_id, self._binding_id, sym)
+            return
+        oi_now = (quote or {}).get("oi")
+        if not oi_now or float(oi_now) <= 0:
+            return
+        self._oi_swing_last_bucket[sym] = bucket
+        series = self._oi_swing_series.setdefault(sym, [])
+        series.append((bucket, ltp, float(oi_now)))
+        swing_high = self._oi_swing_high.get(sym)
+        swing_low = self._oi_swing_low.get(sym)
+        new_high, new_low, confirmed = oi_swing.update_swing_state(
+            [p[2] for p in series], swing_high, swing_low)
+        self._oi_swing_high[sym] = new_high
+        self._oi_swing_low[sym] = new_low
+        if confirmed:
+            self._clog.info(
+                "OiOrb[%s/%s]: %s OI-SWING %s CONFIRMED @ %s: %.0f",
+                self._client_id, self._binding_id, sym, confirmed, bucket.strftime("%H:%M"),
+                new_high if confirmed == "HIGH" else new_low,
+            )
+        if len(series) < 2:
+            return
+        price_prev, price_cur = series[-2][1], series[-1][1]
+        broke, decision = oi_swing.check_oi_swing_breakout(
+            side, series[-1][2], new_high, new_low, price_prev, price_cur)
+        if not broke:
+            return
+        detail = (f"oi={series[-1][2]:.0f} swingH={new_high} swingL={new_low} "
+                  f"price {price_prev:.2f}->{price_cur:.2f} decision={decision}")
+        if decision != "EXIT":
+            self._clog.info("OiOrb[%s/%s]: %s OI-SWING BREAKOUT -- HOLD (%s)",
+                             self._client_id, self._binding_id, sym, detail)
+            return
+        # Fix 3 (production, validated via the 13-day backtest sweep): a
+        # genuine "oi_swing_exit" decision is still suppressed inside the
+        # minimum hold window since entry -- the hard risk cap and EOD
+        # square-off are explicitly NOT subject to this and remain fully
+        # active throughout.
+        entry_ts = pos.get("opened_at")
+        if not oi_swing.is_min_hold_satisfied(entry_ts, now, self._oi_swing_min_hold_min):
+            self._clog.info(
+                "OiOrb[%s/%s]: %s OI-SWING EXIT suppressed -- inside the %d-min minimum hold "
+                "window since entry (%s). %s",
+                self._client_id, self._binding_id, sym, self._oi_swing_min_hold_min,
+                entry_ts.strftime("%H:%M:%S") if entry_ts else "unknown", detail,
+            )
+            return
+        self._eod_closing.add(sym)
+        self._clog.info("OiOrb[%s/%s]: %s OI-SWING EXIT -- %s",
+                         self._client_id, self._binding_id, sym, detail)
+        await asyncio.to_thread(
+            store.log_signal_event, self._client_id, self._binding_id, sym,
+            "oi_swing_exit_triggered", side=side, detail=detail)
+        await self._emit_close(sym, pos, "oi_swing_exit", detail=detail)
 
     def _trap_check_entry(self, sym: str, side: str, ltp: float, ts: datetime) -> bool:
         """Bear-trap (side="CALL")/bull-trap (side="PUT") zone detection ->
@@ -4417,7 +4662,8 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 # is used instead of the 3-min trap ladder. pending["reason"]
                 # carries which entry path actually fired (set by whichever
                 # signal-fire site created this fill).
-                "sl_mechanic": ("immediate_15m" if pending.get("reason") == "immediate_orb_entry"
+                "sl_mechanic": (_ENTRY_EXIT_MODE_OI_SWING if pending.get("reason") == "oi_swing_v1_entry"
+                                else "immediate_15m" if pending.get("reason") == "immediate_orb_entry"
                                 else "vwap" if pending.get("reason") == "vwap_retest"
                                 else "trap"),
             }
@@ -4432,6 +4678,15 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             self._live_target.pop(symbol, None)
             self._live_option_atp.pop(symbol, None)
             self._option_adverse_lows[symbol] = []
+            # 2026-09-18, direct user spec: a same-day re-entry on this
+            # symbol under entry_exit_mode="oi_swing_v1" must not inherit a
+            # stale OI-swing series/ratchet from an earlier trade today --
+            # fresh position, fresh swing tracking, same discipline as
+            # every other per-entry state reset in this block.
+            self._oi_swing_series.pop(symbol, None)
+            self._oi_swing_high.pop(symbol, None)
+            self._oi_swing_low.pop(symbol, None)
+            self._oi_swing_last_bucket.pop(symbol, None)
             self._ensure_spot_feed(symbol)
             # 2026-09-08, direct user spec: trap-exit state (multiday zones,
             # touch/ladder progress, intraday zone accumulator) must not
@@ -4668,6 +4923,18 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 "sl_reentry_used": (sym, side) in self._sl_reentry_used,
                 "sl_mechanic": p.get("sl_mechanic"),
                 "futures_oi": futures_oi,
+                # 2026-09-18, direct user spec: entry_exit_mode="oi_swing_v1"
+                # own live state -- the latest CONFIRMED swing high/low, how
+                # many real 5-min bars have been recorded so far today, and
+                # whether the position is still inside its own minimum-hold
+                # window (see oi_swing.py's own module docstring).
+                "oi_swing": ({
+                    "swing_high": self._oi_swing_high.get(sym),
+                    "swing_low": self._oi_swing_low.get(sym),
+                    "bars_recorded": len(self._oi_swing_series.get(sym, [])),
+                    "min_hold_satisfied": oi_swing.is_min_hold_satisfied(
+                        opened_at, datetime.now(IST), self._oi_swing_min_hold_min),
+                } if p.get("sl_mechanic") == _ENTRY_EXIT_MODE_OI_SWING else None),
             }
         # 2026-09-07, direct user spec: "when stocks are scanned the ui should
         # show how far is ltp from vwap as we have already subscribed to all

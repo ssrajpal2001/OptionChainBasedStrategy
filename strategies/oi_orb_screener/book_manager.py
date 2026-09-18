@@ -147,6 +147,22 @@ _DEFAULT_PARAMS = {
     # Default OFF -- unvalidated beyond one real day, same graduation
     # discipline as every other feature addition in this codebase.
     "immediate_entry_enabled": False,
+    # 2026-09-18, direct user spec: opt-in additive entry/exit decision
+    # engine, "Future OI-Price Swing Breakout Strategy" -- see
+    # strategies/oi_orb_screener/oi_swing.py's own module docstring for the
+    # full mechanic. Default "vwap_retest" keeps every currently-deployed
+    # binding's behavior completely unchanged; a deployment opts in by
+    # setting strategy_params["entry_exit_mode"] = "oi_swing_v1" (any other
+    # value, including a typo, falls back to the existing default mechanic
+    # -- see OiOrbScreenerStrategy.__init__'s own validation).
+    "entry_exit_mode": "vwap_retest",
+    # Fix 2 (production, validated via a 13-day real-data backtest sweep):
+    # no NEW oi_swing_v1 entry may open after this wall-clock time.
+    "oi_swing_entry_cutoff": "14:30",
+    # Fix 3 (same sweep): minutes an oi_swing_v1 position must be held
+    # before an "oi_swing_exit" decision is allowed to actually close it --
+    # the hard risk cap and EOD square-off are never subject to this.
+    "oi_swing_min_hold_min": 10,
 }
 _FLOAT_KEYS = ("oi_spurt_min_pct", "price_move_min_pct", "stock_move_abort_pct",
                "nifty_bullish_pct", "nifty_bearish_pct", "rejection_min_rise_pct",
@@ -156,9 +172,10 @@ _FLOAT_KEYS = ("oi_spurt_min_pct", "price_move_min_pct", "stock_move_abort_pct",
                "oi_roc_min_pct", "oi_roc_lookback_sec", "vwap_entry_min_gap_pct",
                "afternoon_scan_interval_sec", "rr_multiple")
 _INT_KEYS = ("top_n_per_side", "poll_seconds", "max_monitor_minutes",
-             "chain_watch_max_stocks", "vwap_sl_tf_minutes")
+             "chain_watch_max_stocks", "vwap_sl_tf_minutes", "oi_swing_min_hold_min")
 _STR_KEYS = ("orb_start", "orb_end", "scan_start", "entry_window_start", "entry_window_end",
-             "afternoon_scan_start", "afternoon_scan_end")
+             "afternoon_scan_start", "afternoon_scan_end", "entry_exit_mode",
+             "oi_swing_entry_cutoff")
 _FILTER_BOOL_KEYS = ("oi_wall_check_enabled", "distance_to_wall_enabled", "pcr_gate_enabled",
                       "volume_confirmation_enabled", "oi_roc_enabled")
 
@@ -268,6 +285,9 @@ class OiOrbScreenerBookManager(StrategyBookManager):
             vwap_sl_tf_minutes=value["vwap_sl_tf_minutes"],
             rr_multiple=value["rr_multiple"],
             immediate_entry_enabled=value["immediate_entry_enabled"],
+            entry_exit_mode=value["entry_exit_mode"],
+            oi_swing_entry_cutoff=value["oi_swing_entry_cutoff"],
+            oi_swing_min_hold_min=value["oi_swing_min_hold_min"],
             strategy_name=self.STRATEGY_NAME,
         )
         logger.info(
@@ -331,6 +351,10 @@ class OiOrbScreenerBookManager(StrategyBookManager):
             or book._screener_cfg["AFTERNOON_SCAN_END"] != value["afternoon_scan_end"]
             or book._screener_cfg["AFTERNOON_SCAN_INTERVAL_SEC"] != value["afternoon_scan_interval_sec"]
             or book._screener_cfg["IMMEDIATE_ENTRY_ENABLED"] != value["immediate_entry_enabled"]
+            or book._entry_exit_mode != (
+                "oi_swing_v1" if value["entry_exit_mode"] == "oi_swing_v1" else "vwap_retest")
+            or book._oi_swing_entry_cutoff.strftime("%H:%M") != value["oi_swing_entry_cutoff"]
+            or book._oi_swing_min_hold_min != value["oi_swing_min_hold_min"]
         )
 
     def _log_spawned(self, key: tuple, value: dict) -> None:
