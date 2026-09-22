@@ -47,6 +47,7 @@ the position-persistence half of this.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time as _time
 from datetime import date, datetime, time as dtime, timedelta
@@ -65,6 +66,7 @@ from strategies.core.support_resistance import (
     _MAX_RISK_RS_PER_LOT as _SR_MAX_RISK_RS_PER_LOT,
 )
 from strategies.oi_orb_screener import filters as oi_filters
+from strategies.oi_orb_screener import option_native
 from strategies.oi_orb_screener import screener
 from strategies.oi_orb_screener import stock_resolve
 from strategies.oi_orb_screener import store
@@ -174,6 +176,10 @@ _POLL_PRICE_STALE_SEC = 90.0
 # position tagged this way simply falls through to the universal
 # _vwap_close_sl_check like any other position).
 _ENTRY_EXIT_MODE_OI_SWING = "oi_swing_v1"
+# 2026-09-22: option-contract-native mechanic's own entry_reason tag (see
+# option_native.py's module docstring) -- distinct string constant so
+# _on_fill/_native_enter/tests all agree on the exact tag.
+_NATIVE_ENTRY_REASON = "option_native_v1_entry"
 
 
 def _make_strategy_logger(client_id: str, binding_id: str) -> logging.Logger:
@@ -329,6 +335,24 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         top_gainer_loser_oi_spurt_min_pct: float = 7.0,
         top_gainer_loser_pchange_max_pct: float = 4.0,
         top_gainer_loser_pchange_filter_enabled: bool = False,
+        # 2026-09-22, direct user spec: option-contract-native entry/exit
+        # mechanic layered on top of the existing shortlist (see
+        # strategies/oi_orb_screener/option_native.py's own module
+        # docstring for the full 4-layer design). Additive, opt-in --
+        # default False everywhere (book_manager.py's _DEFAULT_PARAMS).
+        # When enabled, this mechanic's own Layer 4 exit fully REPLACES the
+        # universal 20-min VWAP-close SL for any position IT opens
+        # (confirmed with the user) -- EOD square-off is unchanged and
+        # still applies regardless of mechanic.
+        option_native_enabled: bool = False,
+        min_score: int = 6,
+        min_score_gap: int = 2,
+        max_spread_pct: float = 1.0,
+        delta_ce_min: float = 0.45,
+        delta_ce_max: float = 0.65,
+        delta_pe_min: float = -0.65,
+        delta_pe_max: float = -0.45,
+        option_native_poll_seconds: int = 300,
         strategy_name: str = "oi_orb_screener",
     ) -> None:
         super().__init__(bus, cfg, _UNDERLYING_SENTINEL, client_id, binding_id)
@@ -613,6 +637,41 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         # ── Tick-by-tick VWAP accumulation (2026-09-10, direct user spec) ──
         self._vwap_tick_volume_cum_last: dict = {}
 
+        # ── Option-contract-native entry/exit mechanic (2026-09-22) ─────
+        # See option_native.py's own module docstring for the 4-layer
+        # design this state feeds. Additive/opt-in -- see
+        # self._option_native_enabled below.
+        self._option_native_enabled = bool(option_native_enabled)
+        self._native_min_score = int(min_score)
+        self._native_min_score_gap = int(min_score_gap)
+        self._native_max_spread_pct = float(max_spread_pct)
+        self._native_delta_band = {
+            "CE": (float(delta_ce_min), float(delta_ce_max), 0.55),
+            "PE": (float(delta_pe_min), float(delta_pe_max), -0.55),
+        }
+        self._native_poll_seconds = max(30, int(option_native_poll_seconds))
+        # Layer 1: frozen per symbol once selected (decision 10) --
+        # {"CE": ResolvedContract|None, "PE": ResolvedContract|None}. A key
+        # simply being present (even with both values None) means
+        # selection has already been attempted+frozen for that symbol
+        # today -- never retried, even on failure.
+        self._native_selected: Dict[str, dict] = {}
+        self._native_key_subscribed: Dict[tuple, str] = {}   # (symbol, side) -> upstox_key already subscribed
+        # Layer 2: per (symbol, side) growing 1-min TickBar list + the
+        # currently-forming 1-min bar (plain dict, mutated in place).
+        self._native_1m_bars: Dict[tuple, list] = {}
+        self._native_1m_cur: Dict[tuple, dict] = {}
+        self._native_cum_vol_last: Dict[tuple, float] = {}
+        self._native_feature_bars: Dict[tuple, list] = {}     # (symbol, side) -> list[OptionFeatureBar], completed
+        self._native_last_bucket_ts: Dict[tuple, datetime] = {}
+        self._native_last_score: Dict[tuple, tuple] = {}      # (symbol, side) -> (score, OptionFeatureBar) of latest bar
+        self._native_rest_snapshot: Dict[tuple, dict] = {}    # (symbol, side) -> {"bid","ask","iv","delta"}
+        self._native_last_poll_ts_by_symbol: Dict[str, float] = {}
+        # Own independent VWAP per (symbol, side) contract (decision 11 --
+        # never the broker's raw atp field), keyed "SYMBOL_SIDE".
+        self._native_vwap = screener.VwapState()
+        self._native_positions_side: Dict[str, str] = {}      # symbol -> "CE"/"PE" of the open native position
+
     # ── lifecycle ────────────────────────────────────────────────────────
 
     def reset_session(self) -> None:
@@ -671,6 +730,21 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         # 2026-09-10, direct user spec: tick-by-tick VWAP accumulation --
         # see _spot_tick_loop's own VWAP-update block.
         self._vwap_tick_volume_cum_last = {}
+        # 2026-09-22, option-contract-native mechanic -- fresh every day,
+        # same as every other daily-scoped dict here (Layer 1 selection is
+        # frozen PER DAY, decision 10, not forever).
+        self._native_selected = {}
+        self._native_key_subscribed = {}
+        self._native_1m_bars = {}
+        self._native_1m_cur = {}
+        self._native_cum_vol_last = {}
+        self._native_feature_bars = {}
+        self._native_last_bucket_ts = {}
+        self._native_last_score = {}
+        self._native_rest_snapshot = {}
+        self._native_last_poll_ts_by_symbol = {}
+        self._native_vwap = screener.VwapState()
+        self._native_positions_side = {}
         self._clog.info("OiOrb[%s/%s]: session reset for new trading day.",
                          self._client_id, self._binding_id)
 
@@ -704,6 +778,8 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             self._top_gainer_loser_loop(), name=f"oiorb_gainerloser_{self._client_id}_{self._binding_id}"))
         self._tasks.append(asyncio.create_task(
             self._spot_feed_retry_loop(), name=f"oiorb_spotretry_{self._client_id}_{self._binding_id}"))
+        self._tasks.append(asyncio.create_task(
+            self._option_native_5min_loop(), name=f"oiorb_native_{self._client_id}_{self._binding_id}"))
         self._clog.info("OiOrb[%s/%s]: started.", self._client_id, self._binding_id)
 
     # ── daily pipeline ───────────────────────────────────────────────────
@@ -783,6 +859,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             entry_reason = r.get("entry_reason") or ""
             sl_mechanic = (
                 _ENTRY_EXIT_MODE_OI_SWING if entry_reason == "oi_swing_v1_entry"
+                else "option_native" if entry_reason == _NATIVE_ENTRY_REASON
                 else "immediate_15m" if entry_reason == "immediate_orb_entry"
                 else "vwap" if entry_reason == "vwap_retest"
                 else "trap" if entry_reason
@@ -795,6 +872,14 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 "paper_mode": bool(r["paper_mode"]), "opened_at": datetime.fromisoformat(r["entry_ts"]),
                 "sl_mechanic": sl_mechanic,
             }
+            if sl_mechanic == "option_native":
+                # Freeze Layer 1 selection for this symbol/side on the
+                # restored contract too -- a restart must never re-run
+                # selection (decision 10) or lose track of which side this
+                # position is actually running.
+                self._native_positions_side[r["symbol"]] = contract.option_type
+                self._native_selected.setdefault(r["symbol"], {"CE": None, "PE": None})
+                self._native_selected[r["symbol"]][contract.option_type] = contract
             self._ensure_option_feed(r["symbol"], contract)
             self._ensure_spot_feed(r["symbol"])
             # 2026-09-10, real incident fix: a restored OPEN position's VWAP
@@ -1733,7 +1818,13 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 # position, same as a restored "trap"/"immediate_15m"
                 # position already does once its own specific TSL branch
                 # (further below) no longer matches.
-                await self._vwap_close_sl_check(sym, side, ltp, now)
+                # 2026-09-22, direct user spec + confirmed design decision:
+                # the option-contract-native mechanic's own Layer 4 exit
+                # (_native_process_completed_bar's check_native_exit call)
+                # fully REPLACES the universal 20-min VWAP-close SL for any
+                # position IT opened -- never runs both on the same position.
+                if pos.get("sl_mechanic") != "option_native":
+                    await self._vwap_close_sl_check(sym, side, ltp, now)
                 if sym in self._eod_closing:
                     continue
                 # 2026-09-17: disabled, see the block comment above.
@@ -2393,6 +2484,23 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                     self._clog.exception("OiOrb[%s/%s]: chain tick update failed for %s",
                                           self._client_id, self._binding_id, tick.underlying)
 
+            # 2026-09-22: option-contract-native mechanic feeds its OWN
+            # per-(symbol,side) 5-min bar pipeline off this same tick
+            # stream, independently of whether a traded contract/position
+            # exists yet for this stock -- Layer 2 needs BOTH sides' bars
+            # building continuously from the moment Layer 1 selects them,
+            # long before either one might actually enter. Checked before
+            # the `contract is None: continue` below since a pre-entry
+            # native tick has no pending/open contract at all yet.
+            if self._option_native_enabled:
+                native = self._native_selected.get(tick.underlying)
+                if native:
+                    for side in ("CE", "PE"):
+                        c = native.get(side)
+                        if (c is not None and tick.strike == c.strike
+                                and tick.option_type == c.option_type and tick.expiry == c.expiry):
+                            await self._native_on_tick(tick.underlying, side, tick)
+
             contract = self._pending_contracts.get(tick.underlying) or \
                 (self._positions.get(tick.underlying) or {}).get("contract")
             if contract is None:
@@ -2469,6 +2577,383 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 detail=f"entry={pos['entry_price']:.2f} current={option_ltp:.2f} "
                        f"loss=Rs{loss_rs:.2f} cap=Rs{cap_rs:.2f}")
             await self._emit_close(symbol, pos, "hard_risk_cap")
+
+    # ── Option-contract-native entry/exit mechanic (2026-09-22) ─────────
+    # See strategies/oi_orb_screener/option_native.py's own module
+    # docstring for the full 4-layer design (Layer 1 contract selection /
+    # Layer 2 5-min feature bars / Layer 3 CE-vs-PE scoring / Layer 4
+    # entry-hold-exit) each method below implements.
+
+    def _ensure_native_option_feed(self, symbol: str, side: str,
+                                    contract: "stock_resolve.ResolvedContract") -> None:
+        """Same idempotent subscribe-once discipline as _ensure_option_feed,
+        but keyed per (symbol, side) -- this mechanic needs BOTH CE and PE
+        ticking continuously from the moment they're selected, long before
+        either one might actually enter, unlike every other entry mechanic
+        in this file which only ever tracks one contract per stock at a
+        time."""
+        key = (symbol, side)
+        if not contract.upstox_key or self._native_key_subscribed.get(key) == contract.upstox_key:
+            return
+        gf = getattr(self._bus, "_oiorb_feeder", None) or getattr(self._bus, "_global_feeder", None)
+        if gf is None or not hasattr(gf, "subscribe_tokens"):
+            self._clog.warning("OiOrb[%s/%s]: no live GlobalFeeder available -- cannot subscribe "
+                                "option_native %s %s.", self._client_id, self._binding_id, symbol, side)
+            return
+        asyncio.create_task(gf.subscribe_tokens([contract.upstox_key]))
+        self._native_key_subscribed[key] = contract.upstox_key
+        self._clog.info("OiOrb[%s/%s]: option_native subscribed %s %s%d (%s).",
+                         self._client_id, self._binding_id, symbol, side, contract.strike,
+                         contract.upstox_key)
+
+    def _native_entry_window_open(self) -> bool:
+        cfg = self._screener_cfg
+        if cfg.get("IGNORE_TIME_WINDOWS"):
+            return True
+        now_key = datetime.now(IST).strftime("%H:%M")
+        return cfg["ENTRY_WINDOW_START"] <= now_key < cfg["ENTRY_WINDOW_END"]
+
+    async def _native_select_contracts(self, symbol: str) -> None:
+        """Layer 1 -- runs ONCE per symbol per day, the first time this
+        mechanic notices a shortlisted stock it hasn't selected for yet
+        (decision 10: frozen after, never re-selected/switched for the
+        rest of the trading day regardless of whether a trade has actually
+        fired). The dict key being PRESENT (even with both sides None)
+        marks selection as already attempted -- a REST/registry failure
+        must never cause an endless retry loop."""
+        if symbol in self._native_selected:
+            return
+        self._native_selected[symbol] = {"CE": None, "PE": None}
+
+        if not REGISTRY.is_loaded(symbol):
+            await asyncio.to_thread(REGISTRY.load_sync, symbol)
+        expiry = REGISTRY.get_active_expiry(symbol)
+        if expiry is None:
+            self._clog.warning("OiOrb[%s/%s]: option_native -- no active expiry for %s, skipping selection.",
+                                self._client_id, self._binding_id, symbol)
+            return
+
+        eq_key = await asyncio.to_thread(stock_resolve.resolve_eq_instrument_key, symbol)
+        if not eq_key:
+            self._clog.warning("OiOrb[%s/%s]: option_native -- no NSE_EQ instrument key for %s, "
+                                "cannot fetch option chain, skipping selection.",
+                                self._client_id, self._binding_id, symbol)
+            return
+        gf = getattr(self._bus, "_oiorb_feeder", None) or getattr(self._bus, "_global_feeder", None)
+        if gf is None or not hasattr(gf, "fetch_option_chain"):
+            self._clog.warning("OiOrb[%s/%s]: option_native -- no live GlobalFeeder available, "
+                                "cannot fetch option chain for %s.", self._client_id, self._binding_id, symbol)
+            return
+        chain_data = await gf.fetch_option_chain(eq_key, expiry)
+        if not chain_data:
+            self._clog.warning("OiOrb[%s/%s]: option_native -- fetch_option_chain returned nothing "
+                                "for %s, skipping selection.", self._client_id, self._binding_id, symbol)
+            return
+
+        price_change_pct = self._shortlist_pchange.get(symbol)
+        oi_hist = self._oi_history.get(symbol)
+        oi_spurt_pct = oi_hist[-1][1] if oi_hist else None
+        now_ts = datetime.now(IST).isoformat(timespec="seconds")
+        selection_rows: list = []
+
+        for side in ("CE", "PE"):
+            delta_min, delta_max, target_delta = self._native_delta_band[side]
+            candidates = option_native.parse_chain_side_candidates(chain_data, side)
+            in_band = [c for c in candidates
+                       if c.get("delta") is not None and delta_min <= c["delta"] <= delta_max]
+            picked = option_native.select_delta_band_candidate(candidates, delta_min, delta_max, target_delta)
+            if picked is None:
+                selection_rows.append({
+                    "symbol": symbol, "option_type": side, "selected_ts": now_ts,
+                    "expiry": expiry.isoformat(), "target_delta": target_delta,
+                    "candidates_in_band": json.dumps(in_band), "price_change_pct": price_change_pct,
+                    "oi_spurt_pct": oi_spurt_pct, "skipped": True,
+                    "skip_reason": f"no {side} candidate with delta in [{delta_min}, {delta_max}]",
+                })
+                self._clog.info("OiOrb[%s/%s]: option_native -- %s %s skipped (no in-band delta candidate).",
+                                 self._client_id, self._binding_id, symbol, side)
+                continue
+
+            contract = await stock_resolve.resolve_delta_band_contract_async(
+                symbol, expiry, side, delta_min, delta_max, target_delta, chain_data)
+            if contract is None:
+                selection_rows.append({
+                    "symbol": symbol, "option_type": side, "selected_ts": now_ts,
+                    "expiry": expiry.isoformat(), "strike": picked.get("strike"),
+                    "delta": picked.get("delta"), "target_delta": target_delta,
+                    "candidates_in_band": json.dumps(in_band), "price_change_pct": price_change_pct,
+                    "oi_spurt_pct": oi_spurt_pct, "skipped": True,
+                    "skip_reason": "resolve_delta_band_contract failed (no real upstox_key/broker symbol)",
+                })
+                continue
+
+            self._native_selected[symbol][side] = contract
+            self._ensure_native_option_feed(symbol, side, contract)
+            self._native_rest_snapshot[(symbol, side)] = {
+                "bid": picked.get("bid"), "ask": picked.get("ask"),
+                "iv": picked.get("iv"), "delta": picked.get("delta"),
+            }
+            dist = abs(picked["delta"] - target_delta)
+            near_ties = [c for c in in_band
+                         if abs(abs(c["delta"] - target_delta) - dist) <= option_native.DEFAULT_TIE_EPSILON]
+            selection_rows.append({
+                "symbol": symbol, "option_type": side, "selected_ts": now_ts, "expiry": expiry.isoformat(),
+                "strike": contract.strike, "upstox_key": contract.upstox_key,
+                "delta": picked.get("delta"), "iv": picked.get("iv"), "theta": picked.get("theta"),
+                "gamma": picked.get("gamma"), "vega": picked.get("vega"), "ltp": picked.get("ltp"),
+                "bid": picked.get("bid"), "ask": picked.get("ask"), "oi": picked.get("oi"),
+                "prev_oi": picked.get("prev_oi"), "volume": picked.get("volume"),
+                "target_delta": target_delta, "delta_distance": dist,
+                "tie_break_used": len(near_ties) > 1,
+                "candidates_in_band": json.dumps(in_band), "price_change_pct": price_change_pct,
+                "oi_spurt_pct": oi_spurt_pct, "skipped": False,
+            })
+            self._clog.info("OiOrb[%s/%s]: option_native -- selected %s %s%d delta=%.4f (target=%.2f).",
+                             self._client_id, self._binding_id, symbol, side, contract.strike,
+                             picked.get("delta") or 0.0, target_delta)
+
+        await asyncio.to_thread(store.record_option_native_selection, self._client_id, self._binding_id,
+                                 self._today.isoformat() if self._today else None, selection_rows)
+
+    async def _native_refresh_rest_snapshot(self, symbol: str) -> None:
+        """Periodic (option_native_poll_seconds) REST re-poll of bid/ask/iv/
+        delta for both already-SELECTED contracts -- the WS tick stream
+        drives LTP/OI/volume, but does not reliably carry these fields, so
+        they're only ever refreshed here (Layer 2's merge step uses
+        whatever this dict last held at each bucket's own close)."""
+        native = self._native_selected.get(symbol)
+        if not native or (native.get("CE") is None and native.get("PE") is None):
+            return
+        expiry = None
+        for side in ("CE", "PE"):
+            c = native.get(side)
+            if c is not None:
+                expiry = c.expiry
+                break
+        if expiry is None:
+            return
+        eq_key = await asyncio.to_thread(stock_resolve.resolve_eq_instrument_key, symbol)
+        if not eq_key:
+            return
+        gf = getattr(self._bus, "_oiorb_feeder", None) or getattr(self._bus, "_global_feeder", None)
+        if gf is None or not hasattr(gf, "fetch_option_chain"):
+            return
+        try:
+            chain_data = await gf.fetch_option_chain(eq_key, expiry)
+        except Exception:
+            self._clog.exception("OiOrb[%s/%s]: option_native REST snapshot refresh failed for %s.",
+                                  self._client_id, self._binding_id, symbol)
+            return
+        if not chain_data:
+            return
+        for side in ("CE", "PE"):
+            c = native.get(side)
+            if c is None:
+                continue
+            candidates = option_native.parse_chain_side_candidates(chain_data, side)
+            match = next((row for row in candidates if int(round(row["strike"])) == c.strike), None)
+            if match is not None:
+                self._native_rest_snapshot[(symbol, side)] = {
+                    "bid": match.get("bid"), "ask": match.get("ask"),
+                    "iv": match.get("iv"), "delta": match.get("delta"),
+                }
+
+    async def _option_native_5min_loop(self) -> None:
+        """Background loop -- Layer 1 selection for any newly-shortlisted
+        stock + periodic REST snapshot refresh. Layer 2's actual 5-min bar
+        completion is tick-driven (see _native_on_tick, called from
+        _option_tick_loop), not this loop -- this loop only handles the
+        parts that genuinely need to run on a timer rather than on a tick."""
+        while self._running:
+            if not self._option_native_enabled:
+                await asyncio.sleep(5.0)
+                continue
+            try:
+                for sym in list(self._shortlist_symbols):
+                    if sym not in self._native_selected:
+                        await self._native_select_contracts(sym)
+                now_ts = _time.monotonic()
+                for sym in list(self._native_selected.keys()):
+                    last = self._native_last_poll_ts_by_symbol.get(sym, 0.0)
+                    if now_ts - last < self._native_poll_seconds:
+                        continue
+                    self._native_last_poll_ts_by_symbol[sym] = now_ts
+                    await self._native_refresh_rest_snapshot(sym)
+            except Exception:
+                self._clog.exception("OiOrb[%s/%s]: option_native_5min_loop cycle failed (recovered).",
+                                      self._client_id, self._binding_id)
+            await asyncio.sleep(5.0)
+
+    async def _native_on_tick(self, symbol: str, side: str, tick: "OptionTick") -> None:
+        """Layer 2 -- feeds one live OPTION_TICK into this (symbol, side)'s
+        growing 1-min TickBar list + running VWAP, and checks whether a new
+        5-min bucket has just closed."""
+        key = (symbol, side)
+        bucket_ts = tick.timestamp.replace(second=0, microsecond=0)
+
+        last_cum_vol = self._native_cum_vol_last.get(key)
+        vol_delta = 0.0
+        if tick.volume is not None:
+            if last_cum_vol is not None and tick.volume >= last_cum_vol:
+                vol_delta = float(tick.volume) - last_cum_vol
+            self._native_cum_vol_last[key] = float(tick.volume)
+
+        cur = self._native_1m_cur.get(key)
+        if cur is None or cur["ts"] != bucket_ts:
+            if cur is not None:
+                self._native_1m_bars.setdefault(key, []).append(option_native.TickBar(
+                    ts=cur["ts"], open=cur["o"], high=cur["h"], low=cur["l"], close=cur["c"],
+                    volume=cur["vol"], oi=cur["oi"], change_oi=cur["change_oi"]))
+            cur = {"ts": bucket_ts, "o": tick.ltp, "h": tick.ltp, "l": tick.ltp, "c": tick.ltp,
+                   "vol": 0.0, "oi": tick.oi, "change_oi": tick.change_oi}
+            self._native_1m_cur[key] = cur
+        cur["h"] = max(cur["h"], tick.ltp)
+        cur["l"] = min(cur["l"], tick.ltp)
+        cur["c"] = tick.ltp
+        cur["vol"] += vol_delta
+        cur["oi"] = tick.oi
+        cur["change_oi"] = tick.change_oi
+
+        # Own independent VWAP (decision 11), same volume-delta discipline
+        # as everywhere else in this file -- never the broker's raw atp.
+        if vol_delta > 0 and tick.ltp > 0:
+            self._native_vwap.update(f"{symbol}_{side}", tick.ltp, vol_delta)
+
+        bars_1m = self._native_1m_bars.get(key, [])
+        if len(bars_1m) < 2:
+            return
+        contract = (self._native_selected.get(symbol) or {}).get(side)
+        if contract is None:
+            return
+        completed = option_native.bucket_5min_bars(bars_1m, symbol, side, contract.upstox_key)
+        already = self._native_last_bucket_ts.get(key)
+        new_bars = [b for b in completed if already is None or b.bucket_ts > already]
+        for feat in new_bars:
+            self._native_last_bucket_ts[key] = feat.bucket_ts
+            await self._native_process_completed_bar(symbol, side, feat)
+
+    async def _native_process_completed_bar(self, symbol: str, side: str,
+                                             feat: "option_native.OptionFeatureBar") -> None:
+        """Layer 2 merge + Layer 3 score + Layer 4 entry/exit for ONE just-
+        completed 5-min bucket on ONE (symbol, side)."""
+        contract = (self._native_selected.get(symbol) or {}).get(side)
+        if contract is None:
+            return
+        rest = self._native_rest_snapshot.get((symbol, side))
+        vwap_now = self._native_vwap.current(f"{symbol}_{side}")
+        merged = option_native.merge_feature_bar(
+            bucket_ts=feat.bucket_ts, symbol=symbol, option_type=side, upstox_key=contract.upstox_key,
+            ltp_open=feat.ltp_open, ltp_high=feat.ltp_high, ltp_low=feat.ltp_low, ltp_close=feat.ltp_close,
+            volume_5min=feat.volume_5min, oi_close=feat.oi_close, change_oi=feat.change_oi,
+            rest_snapshot=rest, vwap=vwap_now,
+        )
+        prev_bars = self._native_feature_bars.setdefault((symbol, side), [])
+        previous = prev_bars[-1] if prev_bars else None
+        prev_bars.append(merged)
+
+        score, breakdown = option_native.score_option_side(merged, previous, self._native_max_spread_pct)
+        oi_state = option_native.classify_oi_price_reversal(
+            merged.oi_close, previous.oi_close if previous else None,
+            merged.ltp_close, previous.ltp_close if previous else None)
+
+        await asyncio.to_thread(
+            store.record_option_native_feature_bar, self._client_id, self._binding_id,
+            feat.bucket_ts.isoformat(), [{
+                "symbol": symbol, "option_type": side, "upstox_key": contract.upstox_key,
+                "ltp_close": merged.ltp_close, "volume_5min": merged.volume_5min,
+                "change_oi": merged.change_oi, "bid": merged.bid, "ask": merged.ask,
+                "iv": merged.iv, "delta": merged.delta, "vwap": merged.vwap,
+                "score": score, "score_breakdown": json.dumps(breakdown),
+                "oi_price_reversal_state": oi_state,
+            }], trade_date=self._today.isoformat() if self._today else None)
+
+        self._native_last_score[(symbol, side)] = (score, merged)
+
+        pos = self._positions.get(symbol)
+        if (pos is not None and pos.get("sl_mechanic") == "option_native"
+                and self._native_positions_side.get(symbol) == side):
+            if symbol in self._eod_closing:
+                return
+            exit_flag, reason = option_native.check_native_exit(
+                merged, previous, feat.bucket_ts.time(), self._squareoff_time)
+            if exit_flag:
+                self._eod_closing.add(symbol)
+                await self._emit_close(
+                    symbol, pos, f"option_native_{reason}",
+                    detail=f"bucket={feat.bucket_ts.strftime('%H:%M')} ltp={merged.ltp_close:.2f} "
+                           f"vwap={merged.vwap if merged.vwap is not None else '—'}")
+            return
+
+        if symbol in self._positions or symbol in self._pending_contracts:
+            return
+        if not self._native_entry_window_open():
+            return
+
+        native = self._native_selected.get(symbol) or {}
+        ce_entry = native.get("CE")
+        pe_entry = native.get("PE")
+        ce_bar = self._native_last_score.get((symbol, "CE"))
+        pe_bar = self._native_last_score.get((symbol, "PE"))
+        ce_score = ce_bar[0] if (ce_entry is not None and ce_bar is not None) else None
+        pe_score = pe_bar[0] if (pe_entry is not None and pe_bar is not None) else None
+        if ce_score is None and pe_score is None:
+            return
+        winner = option_native.select_winning_side(
+            ce_score, pe_score, self._native_min_score, self._native_min_score_gap)
+        if winner is None:
+            return
+        await self._native_enter(symbol, winner)
+
+    async def _native_enter(self, symbol: str, side: str) -> None:
+        """Layer 4 entry -- reuses the same OiOrbOrderEvent/confirm-then-
+        finalize contract every other entry mechanic in this file uses
+        (execution_bridge/oi_orb_bridge.py is mechanic-agnostic)."""
+        contract = (self._native_selected.get(symbol) or {}).get(side)
+        if contract is None or symbol in self._positions or symbol in self._pending_contracts:
+            return
+
+        lot = await stock_resolve.resolve_lot_async(symbol)
+        if lot <= 0:
+            self._clog.warning("OiOrb[%s/%s]: option_native -- could not resolve lot size for %s, "
+                                "skipping entry.", self._client_id, self._binding_id, symbol)
+            return
+
+        self._live_option_ltp.pop(symbol, None)
+        self._live_option_atp.pop(symbol, None)
+        self._pending_contracts[symbol] = contract
+        self._ensure_option_feed(symbol, contract)
+
+        entry_price = await self._await_first_ltp(symbol, timeout=_ENTRY_LTP_WAIT_TIMEOUT_SEC)
+        if entry_price <= 0:
+            self._clog.warning(
+                "OiOrb[%s/%s]: option_native -- no live option LTP for %s %s%d within %.0fs, "
+                "skipping entry.", self._client_id, self._binding_id, symbol, side, contract.strike,
+                _ENTRY_LTP_WAIT_TIMEOUT_SEC)
+            self._pending_contracts.pop(symbol, None)
+            await asyncio.to_thread(
+                store.log_signal_event, self._client_id, self._binding_id, symbol,
+                "entry_ltp_timeout", side=side, detail=f"{side}{contract.strike} (option_native)")
+            return
+
+        qty = lot * self._lot_multiplier
+        event_id = f"{self._client_id}_{self._binding_id}_{symbol}_{contract.strike}{side}_{int(_time.time())}"
+        self._pending_fills[event_id] = {
+            "symbol": symbol, "contract": contract, "qty": qty,
+            "entry_price": entry_price, "reason": _NATIVE_ENTRY_REASON,
+        }
+        self._native_positions_side[symbol] = side
+
+        order_ev = OiOrbOrderEvent(
+            client_id=self._client_id, binding_id=self._binding_id, action="BUY",
+            underlying=symbol, option_type=side, strike=contract.strike,
+            expiry=contract.expiry, quantity=qty, entry_price=entry_price,
+            reason=_NATIVE_ENTRY_REASON, event_id=event_id, entry_ts=datetime.now(IST),
+            product_type=self._product_type, strategy=self._strategy_name,
+        )
+        self._clog.info("OiOrb[%s/%s]: option_native emitting BUY %s %s%d exp=%s qty=%d @ %.2f event_id=%s",
+                         self._client_id, self._binding_id, symbol, side, contract.strike,
+                         contract.expiry, qty, entry_price, event_id)
+        await self._bus.publish(Topic.OI_ORB_ORDER_REQUEST, order_ev)
 
     async def _spot_tick_loop(self) -> None:
         """2026-08-26, direct user spec: live spot ticks for a stock, ONLY once
@@ -3699,6 +4184,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 # and remains a safe, correct catch-all for whatever the
                 # next entry design ends up tagging fills with.
                 "sl_mechanic": (_ENTRY_EXIT_MODE_OI_SWING if pending.get("reason") == "oi_swing_v1_entry"
+                                else "option_native" if pending.get("reason") == _NATIVE_ENTRY_REASON
                                 else "immediate_15m" if pending.get("reason") == "immediate_orb_entry"
                                 else "vwap" if pending.get("reason") == "vwap_retest"
                                 else "trap"),
@@ -3987,6 +4473,25 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         # elsewhere -- retest_trackers stays present (empty) for frontend
         # backwards-compatibility.
         retest_trackers: dict = {}
+        # 2026-09-22, option-contract-native mechanic -- selected contract +
+        # latest score per side, for any shortlisted stock this mechanic has
+        # run Layer 1 selection on. Empty dict when option_native_enabled
+        # is False (no key is ever populated in that case).
+        option_native_state: dict = {}
+        for sym, sides in self._native_selected.items():
+            side_state = {}
+            for side in ("CE", "PE"):
+                c = sides.get(side)
+                bar = self._native_last_score.get((sym, side))
+                side_state[side] = {
+                    "strike": c.strike if c is not None else None,
+                    "upstox_key": c.upstox_key if c is not None else None,
+                    "skipped": c is None,
+                    "score": bar[0] if bar is not None else None,
+                    "vwap": bar[1].vwap if bar is not None else None,
+                    "ltp_close": bar[1].ltp_close if bar is not None else None,
+                } if (c is not None or bar is not None) else {"skipped": True}
+            option_native_state[sym] = side_state
         return {
             "client_id": self._client_id,
             "binding_id": self._binding_id,
@@ -4007,4 +4512,5 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 "all": self._top_gainer_loser_all,
                 "qualifying": self._top_gainer_loser_qualifying,
             },
+            "option_native": option_native_state,
         }

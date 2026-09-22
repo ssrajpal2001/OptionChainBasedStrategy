@@ -236,6 +236,90 @@ CREATE INDEX IF NOT EXISTS idx_top_gainer_loser_history_day
     ON top_gainer_loser_history(client_id, binding_id, trade_date, poll_ts);
 CREATE INDEX IF NOT EXISTS idx_top_gainer_loser_history_symbol
     ON top_gainer_loser_history(symbol, trade_date);
+
+-- 2026-09-22, option-contract-native entry/exit mechanic (see
+-- strategies/oi_orb_screener/option_native.py's own module docstring for
+-- the full 4-layer design). Direct user instruction: "save all the data
+-- which r required for backtesting... y can save everything in db so we
+-- can fetch the db and do backtest with them twick such as delta range
+-- change, oi spurt per change, pchange or any other value which we feel
+-- can be used for optimisation." Two tables, one per layer this pipeline
+-- has NOT already logged elsewhere:
+--
+-- option_native_feature_history: one row per COMPLETED 5-min bucket per
+-- selected contract (Layer 2/3) -- the full OptionFeatureBar plus its score
+-- and score breakdown, whether or not a position was open on it (so a
+-- future backtest can replay "what score would side X have had at time Y"
+-- for every bar, not just the ones that happened to fire an entry).
+CREATE TABLE IF NOT EXISTS option_native_feature_history (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_id         TEXT NOT NULL,
+    binding_id        TEXT NOT NULL,
+    trade_date        TEXT NOT NULL,
+    bucket_ts         TEXT NOT NULL,
+    symbol            TEXT NOT NULL,
+    option_type       TEXT NOT NULL,
+    upstox_key        TEXT NOT NULL,
+    ltp_close         REAL,
+    volume_5min       REAL,
+    change_oi         REAL,
+    bid               REAL,
+    ask               REAL,
+    iv                REAL,
+    delta             REAL,
+    vwap              REAL,
+    score             INTEGER,
+    score_breakdown   TEXT,             -- JSON of the full 8-condition dict (incl. spread_pct)
+    oi_price_reversal_state TEXT        -- diagnostic 4(+1)-state classification (item 7)
+);
+CREATE INDEX IF NOT EXISTS idx_option_native_feature_history_day
+    ON option_native_feature_history(client_id, binding_id, trade_date, bucket_ts);
+CREATE INDEX IF NOT EXISTS idx_option_native_feature_history_symbol
+    ON option_native_feature_history(symbol, trade_date);
+
+-- option_native_selection: one row per SIDE per stock per day (Layer 1),
+-- written once at selection time -- every raw input that went into (or
+-- blocked) the contract pick, so "what if the delta band/target had been
+-- different" can be re-run purely from the DB without re-fetching live
+-- option-chain history (which isn't retained anywhere else). A row with
+-- skipped=1 records a side that had NO in-band candidate (decision 8) --
+-- kept, not omitted, so a future analysis can see how often each side was
+-- skipped and why, not just the successful picks.
+CREATE TABLE IF NOT EXISTS option_native_selection (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_id           TEXT NOT NULL,
+    binding_id          TEXT NOT NULL,
+    trade_date          TEXT NOT NULL,
+    symbol              TEXT NOT NULL,
+    selected_ts         TEXT NOT NULL,
+    expiry              TEXT NOT NULL,
+    option_type         TEXT NOT NULL,
+    strike              REAL,
+    upstox_key          TEXT,
+    delta               REAL,
+    iv                  REAL,
+    theta               REAL,
+    gamma               REAL,
+    vega                REAL,
+    ltp                 REAL,
+    bid                 REAL,
+    ask                 REAL,
+    oi                  REAL,
+    prev_oi             REAL,
+    volume              REAL,
+    target_delta        REAL,
+    delta_distance       REAL,
+    tie_break_used       INTEGER NOT NULL DEFAULT 0,
+    candidates_in_band  TEXT,           -- JSON list of every in-band candidate considered
+    price_change_pct    REAL,
+    oi_spurt_pct        REAL,
+    skipped             INTEGER NOT NULL DEFAULT 0,
+    skip_reason         TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_option_native_selection_day
+    ON option_native_selection(client_id, binding_id, trade_date);
+CREATE INDEX IF NOT EXISTS idx_option_native_selection_symbol
+    ON option_native_selection(symbol, trade_date);
 """
 
 _initialized = False
@@ -721,6 +805,78 @@ def close_position(client_id: str, binding_id: str, symbol: str, exit_price: flo
         con.commit()
     except Exception as exc:
         logger.error("oi_orb store.close_position failed: %s", exc)
+    finally:
+        con.close()
+
+
+# ── option-contract-native mechanic: feature-bar history + selection audit
+# trail (2026-09-22) -- see the _DDL block above's own comment for why two
+# separate tables, and option_native.py's module docstring for the layer
+# design each one captures. ─────────────────────────────────────────────
+
+def record_option_native_feature_bar(client_id: str, binding_id: str, bucket_ts: str, rows: List[dict],
+                                      trade_date: Optional[str] = None) -> None:
+    """rows: [{"symbol", "option_type", "upstox_key", "ltp_close",
+    "volume_5min", "change_oi", "bid", "ask", "iv", "delta", "vwap",
+    "score", "score_breakdown" (JSON str), "oi_price_reversal_state"}, ...]
+    -- one row per (symbol, side) whose 5-min bucket closed at bucket_ts,
+    not upserted (every bucket close is its own permanent snapshot, same
+    "log everything" shape as top_gainer_loser_history)."""
+    init_db()
+    td = trade_date or _today()
+    con = sqlite3.connect(_DB_PATH)
+    try:
+        for r in rows:
+            con.execute(
+                """INSERT INTO option_native_feature_history
+                       (client_id, binding_id, trade_date, bucket_ts, symbol, option_type,
+                        upstox_key, ltp_close, volume_5min, change_oi, bid, ask, iv, delta,
+                        vwap, score, score_breakdown, oi_price_reversal_state)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (client_id, binding_id, td, bucket_ts, r["symbol"], r["option_type"],
+                 r.get("upstox_key", ""), r.get("ltp_close"), r.get("volume_5min"),
+                 r.get("change_oi"), r.get("bid"), r.get("ask"), r.get("iv"), r.get("delta"),
+                 r.get("vwap"), r.get("score"), r.get("score_breakdown"),
+                 r.get("oi_price_reversal_state")),
+            )
+        con.commit()
+    except Exception as exc:
+        logger.error("oi_orb store.record_option_native_feature_bar failed: %s", exc)
+    finally:
+        con.close()
+
+
+def record_option_native_selection(client_id: str, binding_id: str, trade_date: str,
+                                    rows: List[dict]) -> None:
+    """rows: one dict per SIDE per stock (see the option_native_selection
+    DDL above for the full field list) -- includes rows with skipped=1 for
+    a side with no in-band candidate, per direct user instruction to log
+    every raw input, not just successful picks."""
+    init_db()
+    td = trade_date or _today()
+    con = sqlite3.connect(_DB_PATH)
+    try:
+        for r in rows:
+            con.execute(
+                """INSERT INTO option_native_selection
+                       (client_id, binding_id, trade_date, symbol, selected_ts, expiry,
+                        option_type, strike, upstox_key, delta, iv, theta, gamma, vega,
+                        ltp, bid, ask, oi, prev_oi, volume, target_delta, delta_distance,
+                        tie_break_used, candidates_in_band, price_change_pct, oi_spurt_pct,
+                        skipped, skip_reason)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (client_id, binding_id, td, r["symbol"], r.get("selected_ts") or _now_ts(),
+                 str(r.get("expiry", "")), r["option_type"], r.get("strike"), r.get("upstox_key"),
+                 r.get("delta"), r.get("iv"), r.get("theta"), r.get("gamma"), r.get("vega"),
+                 r.get("ltp"), r.get("bid"), r.get("ask"), r.get("oi"), r.get("prev_oi"),
+                 r.get("volume"), r.get("target_delta"), r.get("delta_distance"),
+                 1 if r.get("tie_break_used") else 0, r.get("candidates_in_band"),
+                 r.get("price_change_pct"), r.get("oi_spurt_pct"),
+                 1 if r.get("skipped") else 0, r.get("skip_reason")),
+            )
+        con.commit()
+    except Exception as exc:
+        logger.error("oi_orb store.record_option_native_selection failed: %s", exc)
     finally:
         con.close()
 

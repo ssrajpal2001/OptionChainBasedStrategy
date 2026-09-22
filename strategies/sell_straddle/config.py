@@ -76,6 +76,7 @@ class SellStraddleConfig:
     itm_pair_gate_enabled: bool
     itm_pair_gate_profit_inr: float
     itm_pair_gate_min_strike_gap: float
+    itm_roll_protection_enabled: bool
 
     day_low_exit_enabled: bool
     day_low_freeze_time: dtime
@@ -226,6 +227,13 @@ def load_sell_straddle_config(
     itm_pair_gate_enabled = bool(ss.get("itm_pair_gate_enabled", True))
     itm_pair_gate_profit_inr = float(ss.get("itm_pair_gate_profit_inr", 500.0))
     itm_pair_gate_min_strike_gap = float(ss.get("itm_pair_gate_min_strike_gap", 100.0))
+    # 2026-09-22, direct user instruction: the 70%-of-booked-profit roll
+    # protection stop (armed by _single_side_roll on EVERY single-side roll
+    # since the 2026-08-27 broadening, not just the ITM pair gate's own roll)
+    # disabled by default -- a real incident on Gurmeet's live book showed the
+    # ORIGINAL, never-rolled leg has no such protection at all while a rolled
+    # leg does, an inconsistency the user wants switched off entirely for now.
+    itm_roll_protection_enabled = bool(ss.get("itm_roll_protection_enabled", False))
 
     # Day-low reversal exit (2026-08-18, user spec): the straddle's combined
     # premium tends to bottom out somewhere in the 09:15-15:00 window then
@@ -315,6 +323,7 @@ def load_sell_straddle_config(
         itm_pair_gate_enabled=itm_pair_gate_enabled,
         itm_pair_gate_profit_inr=itm_pair_gate_profit_inr,
         itm_pair_gate_min_strike_gap=itm_pair_gate_min_strike_gap,
+        itm_roll_protection_enabled=itm_roll_protection_enabled,
         day_low_exit_enabled=day_low_exit_enabled,
         day_low_freeze_time=day_low_freeze_time,
         post1500_exit_enabled=post1500_exit_enabled,
@@ -394,6 +403,7 @@ class ConfigMixin:
         self._itm_pair_gate_enabled = cfg.itm_pair_gate_enabled
         self._itm_pair_gate_profit_inr = cfg.itm_pair_gate_profit_inr
         self._itm_pair_gate_min_strike_gap = cfg.itm_pair_gate_min_strike_gap
+        self._itm_roll_protection_enabled = cfg.itm_roll_protection_enabled
         if not hasattr(self, "_itm_roll_protection") or not isinstance(self._itm_roll_protection, dict):
             # Keyed by side ("CE"/"PE") -- each side's 70%-of-booked-profit budget is
             # tracked independently. A rollover on one side must never wipe out a

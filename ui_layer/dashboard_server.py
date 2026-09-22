@@ -370,6 +370,22 @@ try:
         chain_watch_max_stocks:    int   = 10
         vwap_sl_tf_minutes:        int   = 5
         rr_multiple:               float = 2.0
+        # 2026-09-18: standalone top gainer/loser data pipeline (verify-only).
+        top_gainer_loser_oi_spurt_min_pct: float = 7.0
+        top_gainer_loser_pchange_max_pct: float = 4.0
+        top_gainer_loser_pchange_filter_enabled: bool = False
+        # 2026-09-22: option-contract-native entry/exit mechanic (see
+        # strategies/oi_orb_screener/option_native.py's own module
+        # docstring) -- additive, opt-in, default OFF.
+        option_native_enabled:     bool  = False
+        min_score:                 int   = 6
+        min_score_gap:              int   = 2
+        max_spread_pct:             float = 1.0
+        delta_ce_min:               float = 0.45
+        delta_ce_max:               float = 0.65
+        delta_pe_min:               float = -0.65
+        delta_pe_max:               float = -0.45
+        option_native_poll_seconds: int   = 300
 
     class _ResetPasswordSchema(_PydanticBase):
         token:        str
@@ -6596,7 +6612,13 @@ pm2 save
                         s = self._find_ss_book(c.client_id, d.get("binding_id", ""), u, sname)
                         p = getattr(s, "_position", None) if s else None
                         if p and getattr(p, "status", "open") == "open":
-                            running += float(getattr(p, "unrealized_pnl", 0.0) or 0.0) * _lot(u)
+                            # 2026-09-22 fix, real user-found gap: _lot(u) alone is the raw
+                            # 1-lot exchange size -- this silently under-reported the header's
+                            # Running(Rs) total for any deployment running >1 lot (lot_multiplier
+                            # was never applied here, unlike the real per-tick qty used for actual
+                            # order sizing elsewhere in this file).
+                            _lm = float(d.get("lot_multiplier", 1.0) or 1.0)
+                            running += float(getattr(p, "unrealized_pnl", 0.0) or 0.0) * _lot(u) * _lm
                     # 2026-09-07 fix, real user-found gap: oi_orb_screener's open
                     # positions were never included in the header/global running
                     # total at all (only sell_straddle had a branch here) --

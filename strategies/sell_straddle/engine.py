@@ -27,6 +27,7 @@ from strategies.sell_straddle.config import ConfigMixin
 from strategies.sell_straddle.dataclasses import StraddleLeg, StraddlePosition
 from strategies.sell_straddle.entries import EntryMixin
 from strategies.sell_straddle.exits import ExitMixin
+from strategies.sell_straddle.r1_breach_reentry import R1BreachReentryMixin
 from strategies.sell_straddle.indicators import IndicatorMixin
 from strategies.sell_straddle.rolling import RollingMixin
 
@@ -63,7 +64,8 @@ def pool_strike_set(atm: float, step: float, itm_depth: int, otm_depth: int,
 
 
 class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpdateMixin,
-                           ConfigMixin, IndicatorMixin, EntryMixin, ExitMixin, RollingMixin):
+                           ConfigMixin, IndicatorMixin, EntryMixin, ExitMixin, RollingMixin,
+                           R1BreachReentryMixin):
 
     def __init__(
         self,

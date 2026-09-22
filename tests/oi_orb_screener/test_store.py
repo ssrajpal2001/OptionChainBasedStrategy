@@ -197,3 +197,118 @@ def test_positions_are_scoped_per_client_binding():
     assert c2_rows[0]["entry_price"] == 120.0
 
 
+# ── option_native_feature_history / option_native_selection (2026-09-22) ──
+# See strategies/oi_orb_screener/option_native.py's own module docstring
+# for what each table captures -- these tests just confirm the DB
+# round-trip, same isolated-tmp-db pattern as every other table above.
+
+import json as _json
+import sqlite3 as _sqlite3
+
+
+def test_record_option_native_feature_bar_roundtrip():
+    store.record_option_native_feature_bar("C1", "B1", "2026-09-22T09:25:00", [
+        {"symbol": "TCS", "option_type": "CE", "upstox_key": "NSE_FO|CE2100",
+         "ltp_close": 36.5, "volume_5min": 500.0, "change_oi": 12.0, "bid": 36.2, "ask": 36.8,
+         "iv": 25.1, "delta": 0.57, "vwap": 35.9, "score": 7,
+         "score_breakdown": _json.dumps({"ltp_above_vwap": True}),
+         "oi_price_reversal_state": "long_buildup"},
+    ], trade_date="2026-09-22")
+
+    con = _sqlite3.connect(store._DB_PATH)
+    con.row_factory = _sqlite3.Row
+    row = dict(con.execute(
+        "SELECT * FROM option_native_feature_history WHERE client_id=? AND binding_id=?",
+        ("C1", "B1")).fetchone())
+    con.close()
+    assert row["symbol"] == "TCS"
+    assert row["option_type"] == "CE"
+    assert row["score"] == 7
+    assert row["oi_price_reversal_state"] == "long_buildup"
+    assert _json.loads(row["score_breakdown"]) == {"ltp_above_vwap": True}
+    assert row["delta"] == 0.57
+
+
+def test_record_option_native_feature_bar_not_upserted_each_bucket_is_its_own_row():
+    for i in range(3):
+        store.record_option_native_feature_bar("C1", "B1", f"2026-09-22T09:{25+i*5}:00", [
+            {"symbol": "TCS", "option_type": "CE", "upstox_key": "NSE_FO|CE2100",
+             "ltp_close": 36.0 + i, "volume_5min": 500.0, "change_oi": 1.0},
+        ], trade_date="2026-09-22")
+    con = _sqlite3.connect(store._DB_PATH)
+    n = con.execute(
+        "SELECT COUNT(*) FROM option_native_feature_history WHERE client_id=? AND binding_id=?",
+        ("C1", "B1")).fetchone()[0]
+    con.close()
+    assert n == 3
+
+
+def test_record_option_native_selection_picked_side():
+    store.record_option_native_selection("C1", "B1", "2026-09-22", [
+        {"symbol": "TCS", "option_type": "CE", "expiry": "2026-09-25", "strike": 2100,
+         "upstox_key": "NSE_FO|CE2100", "delta": 0.57, "iv": 25.1, "theta": -1.2, "gamma": 0.002,
+         "vega": 3.1, "ltp": 36.5, "bid": 36.2, "ask": 36.8, "oi": 4500, "prev_oi": 4000,
+         "volume": 1200, "target_delta": 0.55, "delta_distance": 0.02, "tie_break_used": False,
+         "candidates_in_band": _json.dumps([{"strike": 2100, "delta": 0.57}]),
+         "price_change_pct": 2.3, "oi_spurt_pct": 8.5, "skipped": False},
+    ])
+    con = _sqlite3.connect(store._DB_PATH)
+    con.row_factory = _sqlite3.Row
+    row = dict(con.execute(
+        "SELECT * FROM option_native_selection WHERE client_id=? AND binding_id=?",
+        ("C1", "B1")).fetchone())
+    con.close()
+    assert row["strike"] == 2100
+    assert row["skipped"] == 0
+    assert row["tie_break_used"] == 0
+    assert row["delta_distance"] == pytest.approx(0.02)
+    assert _json.loads(row["candidates_in_band"]) == [{"strike": 2100, "delta": 0.57}]
+
+
+def test_record_option_native_selection_skipped_side():
+    store.record_option_native_selection("C1", "B1", "2026-09-22", [
+        {"symbol": "TCS", "option_type": "PE", "expiry": "2026-09-25",
+         "target_delta": -0.55, "candidates_in_band": "[]", "price_change_pct": 2.3,
+         "oi_spurt_pct": 8.5, "skipped": True,
+         "skip_reason": "no PE candidate with delta in [-0.65, -0.45]"},
+    ])
+    con = _sqlite3.connect(store._DB_PATH)
+    con.row_factory = _sqlite3.Row
+    row = dict(con.execute(
+        "SELECT * FROM option_native_selection WHERE client_id=? AND binding_id=? AND option_type='PE'",
+        ("C1", "B1")).fetchone())
+    con.close()
+    assert row["skipped"] == 1
+    assert row["strike"] is None
+    assert "no PE candidate" in row["skip_reason"]
+
+
+def test_record_option_native_selection_tie_break_used_flag():
+    store.record_option_native_selection("C1", "B1", "2026-09-22", [
+        {"symbol": "TCS", "option_type": "CE", "expiry": "2026-09-25", "strike": 2110,
+         "target_delta": 0.55, "tie_break_used": True, "candidates_in_band": "[]", "skipped": False},
+    ])
+    con = _sqlite3.connect(store._DB_PATH)
+    row = con.execute(
+        "SELECT tie_break_used FROM option_native_selection WHERE client_id=? AND binding_id=?",
+        ("C1", "B1")).fetchone()
+    con.close()
+    assert row == (1,)
+
+
+def test_record_option_native_selection_multiple_rows_per_call():
+    store.record_option_native_selection("C1", "B1", "2026-09-22", [
+        {"symbol": "TCS", "option_type": "CE", "expiry": "2026-09-25", "strike": 2100,
+         "target_delta": 0.55, "candidates_in_band": "[]", "skipped": False},
+        {"symbol": "TCS", "option_type": "PE", "expiry": "2026-09-25",
+         "target_delta": -0.55, "candidates_in_band": "[]", "skipped": True,
+         "skip_reason": "none in band"},
+    ])
+    con = _sqlite3.connect(store._DB_PATH)
+    n = con.execute(
+        "SELECT COUNT(*) FROM option_native_selection WHERE client_id=? AND binding_id=?",
+        ("C1", "B1")).fetchone()[0]
+    con.close()
+    assert n == 2
+
+

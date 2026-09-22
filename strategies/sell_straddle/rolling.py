@@ -358,7 +358,14 @@ class RollingMixin:
             if not isinstance(getattr(self, "_itm_roll_protection", None), dict):
                 self._itm_roll_protection = {}
             booked_pnl_rs = self._pnl_rs(float(getattr(close_ev, "realized_pnl", 0.0) or 0.0))
-            if booked_pnl_rs > 0:
+            # 2026-09-22, direct user instruction: disabled by default
+            # (itm_roll_protection_enabled=False) -- a real incident on Gurmeet's
+            # live book showed a rolled-in leg getting a 70% protection budget
+            # while the ORIGINAL never-rolled leg on the same position had none,
+            # an inconsistency the user wants off entirely until revisited.
+            if not getattr(self, "_itm_roll_protection_enabled", False):
+                self._itm_roll_protection.pop(roll_side, None)
+            elif booked_pnl_rs > 0:
                 protect_rs = 0.70 * booked_pnl_rs
                 self._itm_roll_protection[roll_side] = {
                     "protect_rs": protect_rs,

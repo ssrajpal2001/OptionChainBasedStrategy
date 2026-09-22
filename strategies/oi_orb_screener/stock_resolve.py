@@ -329,3 +329,79 @@ def resolve_contract_exact(stock_symbol: str, expiry, strike: int, option_type: 
 async def resolve_contract_exact_async(stock_symbol: str, expiry, strike: int,
                                         option_type: str) -> Optional[ResolvedContract]:
     return await asyncio.to_thread(resolve_contract_exact, stock_symbol, expiry, strike, option_type)
+
+
+def resolve_delta_band_contract(stock_symbol: str, expiry, option_type: str,
+                                 delta_min: float, delta_max: float, target_delta: float,
+                                 chain_data: dict,
+                                 providers: "list[str]" = ("upstox", "zerodha", "fyers", "angelone", "dhan"),
+                                 ) -> Optional[ResolvedContract]:
+    """2026-09-22, option-contract-native entry/exit mechanic (Layer 1
+    contract selection) -- resolves the real, tradable option contract
+    whose live delta is closest to `target_delta` (+0.55 for CE, -0.55 for
+    PE) among every strike on `option_type` that falls within
+    [delta_min, delta_max]. Unlike resolve_contract()/resolve_contract_exact
+    above, the strike here is NOT derived from a raw spot-price offset --
+    it's picked purely from delta, using the full Upstox option-chain
+    response (`chain_data`, the dict GlobalFeeder.fetch_option_chain()
+    already returns via resp.to_dict()) rather than the registry's own
+    (delta-blind) strike list.
+
+    Pure candidate-picking + tie-break logic lives in
+    option_native.select_delta_band_candidate/parse_chain_side_candidates
+    (fully unit-tested in isolation, no I/O) -- this function is only the
+    thin, impure wrapper that (a) parses the real chain response shape into
+    that pure function's candidate-dict input and (b) builds a
+    ResolvedContract the same way resolve_contract() does (broker symbols
+    per provider via REGISTRY, never fabricated).
+
+    Returns None if no candidate falls in [delta_min, delta_max] at all
+    (decision 8 -- caller must skip this side entirely for the day, no
+    band-widening, no substitute rule) or if the picked strike can't
+    resolve a real upstox_key/broker symbol set. Pure/no network of its own
+    -- `chain_data` must already be fetched by the caller (blocking Upstox
+    SDK call happens in GlobalFeeder.fetch_option_chain, already
+    asyncio.to_thread-wrapped there); this function itself does no I/O and
+    is safe to call directly from async code."""
+    from strategies.oi_orb_screener import option_native
+
+    sym = stock_symbol.upper()
+    candidates = option_native.parse_chain_side_candidates(chain_data, option_type)
+    picked = option_native.select_delta_band_candidate(candidates, delta_min, delta_max, target_delta)
+    if picked is None:
+        logger.info("stock_resolve: no %s candidate for %s in delta band [%.2f, %.2f] "
+                     "(target=%.2f) -- skipping this side for today.",
+                     option_type, sym, delta_min, delta_max, target_delta)
+        return None
+
+    if not REGISTRY.is_loaded(sym):
+        REGISTRY.load_sync(sym)
+    if isinstance(expiry, str):
+        expiry = date.fromisoformat(expiry)
+
+    strike = int(round(picked["strike"]))
+    upstox_key = picked.get("upstox_key") or REGISTRY.get_upstox_key(sym, expiry, strike, option_type)
+    if not upstox_key:
+        logger.warning("stock_resolve: resolve_delta_band_contract -- no upstox_key resolved for "
+                        "%s %s%d exp=%s (delta=%.4f).", sym, option_type, strike, expiry,
+                        picked.get("delta") or 0.0)
+        return None
+
+    broker_symbols = {}
+    for provider in providers:
+        try:
+            broker_symbols[provider] = REGISTRY.get_broker_symbol(sym, expiry, strike, option_type, provider)
+        except Exception:
+            broker_symbols[provider] = ""
+
+    return ResolvedContract(
+        underlying=sym, expiry=expiry, strike=strike, option_type=option_type,
+        upstox_key=upstox_key, broker_symbols=broker_symbols,
+    )
+
+
+async def resolve_delta_band_contract_async(stock_symbol: str, expiry, option_type: str,
+                                             delta_min: float, delta_max: float, target_delta: float,
+                                             chain_data: dict) -> Optional[ResolvedContract]:
+    return await asyncio.to_thread(resolve_delta_band_contract, stock_symbol, expiry, option_type,
+                                    delta_min, delta_max, target_delta, chain_data)

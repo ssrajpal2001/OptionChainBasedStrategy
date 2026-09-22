@@ -404,6 +404,15 @@ class ExitMixin:
                 return (f"Post-15:00 R1 exit | {_side} leg (strike={int(_leg.strike)}) breached its own "
                         f"R1, closed independently (armed via {_armed}) → other leg still running solo")
 
+            if reason == "r1_breach_post_roll":
+                _info = getattr(self, "_r1_last_breach_info", None) or {}
+                return (
+                    f"R1 breach (post-roll watch) | {_side} leg (strike={int(_info.get('strike', 0))}) "
+                    f"phase={_info.get('phase', '?')} R1_established={_info.get('r1_established', '?')} "
+                    f"R1={float(_info.get('r1', 0.0) or 0.0):.2f} ltp={float(_info.get('ltp', 0.0) or 0.0):.2f} "
+                    f"→ closed this rolled-in leg early, now scanning for an S1-breach replacement"
+                )
+
             if reason.startswith("manual_squareoff_"):
                 return f"Manual square-off ({reason})"
             if reason == "kill_switch":
@@ -1750,6 +1759,16 @@ class ExitMixin:
             # Either check may have closed the position outright (no roll partner
             # found / no valid recovery strike) -- don't fall through to the
             # remaining checks below using the now-stale `pos` reference.
+            return
+
+        # 2c. R1-BREACH EXIT / S1-BREACH RE-ENTRY on rolled-in legs (2026-09-22,
+        # direct user spec) -- runs on EVERY roll reason (any leg tagged
+        # single_side_roll_*), immediately after the ITM-gate/roll-protection
+        # checks above and before the generic ratio/ltp_decay/TSL/exit_rules/
+        # vwap_rise ladder below. See r1_breach_reentry.py's own module
+        # docstring for the full mechanic.
+        await self._check_r1_breach_and_reentry(now)
+        if not (self._position and self._position.status == "open"):
             return
         pos = self._position  # refresh -- a roll above may have swapped legs/strikes
 

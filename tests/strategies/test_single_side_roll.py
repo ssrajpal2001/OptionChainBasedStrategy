@@ -192,6 +192,11 @@ def test_single_side_roll_arms_70pct_protection_regardless_of_reason():
         bus = EventBus()
         s = SellStraddleStrategy(bus, cfg=GlobalConfig(), underlying="NIFTY")
         s._itm_pair_gate_enabled = False
+        # 2026-09-22, direct user instruction: the 70% roll-protection arming
+        # block is now opt-in (default False) -- explicitly enable it here so
+        # this test still exercises the arming logic itself (that it arms on
+        # ANY roll reason, not just itm_pair_gate) rather than the new default.
+        s._itm_roll_protection_enabled = True
         s._spot = 24400.0
         s._position = StraddlePosition(
             underlying="NIFTY", atm_at_entry=24500, entry_spot=24500,

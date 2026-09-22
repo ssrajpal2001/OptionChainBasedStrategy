@@ -1922,6 +1922,7 @@ document.addEventListener('alpine:init', () => {
         tsl_enabled: true, trail_lock_pct: 20.0, trail_floor_pct: 10.0, trail_basis: 'ltp',
         tsl_scalable:  { enabled: false, basis: 'ltp', base_profit: 3000, base_lock: 1500, step_profit: 1000, step_lock: 500 },
         itm_pair_gate_enabled: true,
+        itm_roll_protection_enabled: false,
         day_low_exit_enabled: false, day_low_freeze_time: '15:00',
         post1500_exit_enabled: true, shadow_vwap_enabled: true,
         ratio_exit:    { enabled: false, threshold: 3.0, max_entry_ratio: 0 },
@@ -1963,6 +1964,7 @@ document.addEventListener('alpine:init', () => {
       if (!ss.ltp_decay)     ss.ltp_decay     = { enabled: false, ltp_exit_min: 20.0 };
       if (!ss.vwap_rise_sl)  ss.vwap_rise_sl  = { enabled: false, tf: 1, threshold: 1.0 };
       if (ss.itm_pair_gate_enabled === undefined) ss.itm_pair_gate_enabled = true;
+      if (ss.itm_roll_protection_enabled === undefined) ss.itm_roll_protection_enabled = false;
       if (ss.day_low_exit_enabled === undefined) ss.day_low_exit_enabled = false;
       if (ss.day_low_freeze_time === undefined) ss.day_low_freeze_time = '15:00';
       if (ss.post1500_exit_enabled === undefined) ss.post1500_exit_enabled = true;
@@ -3001,6 +3003,8 @@ document.addEventListener('alpine:init', () => {
       if (s === 'day_profit_target') return 'Day profit target';
       if (s === 'day_low_reversal_exit') return 'Day-low reversal exit (retest of frozen day-low)';
       if (s === 'post1500_r1_breach') return 'Post-15:00 R1 breach (leg closed independently)';
+      if (s === 'r1_breach_post_roll') return 'R1 breach (rolled-in leg closed early)';
+      if (s === 's1_breach_reentry_post_roll') return 'S1-breach re-entry (post-roll)';
       if (s === 'itm_pair_gate_profit') return 'ITM pair gate (full exit)';
       if (s === 'itm_pair_gate') return 'ITM pair gate (rollover escape)';
       if (s === 'itm_roll_protection_stop') return 'ITM-roll protection SL (70% of booked profit)';
@@ -4559,6 +4563,31 @@ function amoTest() {
               <div class="text-[10px]" style="color:var(--t-muted)">Additive to OI-Spurt% — does not replace it.</div>
             </div>
 
+            <div class="grid grid-cols-4 gap-2 items-end">
+              <div class="col-span-4 sec-label mt-2" style="color:var(--t-amber)">OPTION-CONTRACT-NATIVE MECHANIC (opt-in — replaces the 20-min VWAP-close SL for any position it opens)</div>
+              <div class="flex items-center gap-2">
+                <input type="checkbox" x-model="oiOrbConfig.option_native_enabled"/>
+                <div class="sec-label">ENABLED</div>
+              </div>
+              <div><div class="sec-label mb-1">MIN SCORE (/8)</div>
+                <input class="t-input font-mono text-xs" type="number" step="1" min="0" max="8" x-model.number="oiOrbConfig.min_score"/></div>
+              <div><div class="sec-label mb-1">MIN CE/PE GAP</div>
+                <input class="t-input font-mono text-xs" type="number" step="1" min="0" x-model.number="oiOrbConfig.min_score_gap"/></div>
+              <div><div class="sec-label mb-1">MAX SPREAD %</div>
+                <input class="t-input font-mono text-xs" type="number" step="0.1" x-model.number="oiOrbConfig.max_spread_pct"/></div>
+              <div><div class="sec-label mb-1">CE DELTA MIN</div>
+                <input class="t-input font-mono text-xs" type="number" step="0.01" x-model.number="oiOrbConfig.delta_ce_min"/></div>
+              <div><div class="sec-label mb-1">CE DELTA MAX</div>
+                <input class="t-input font-mono text-xs" type="number" step="0.01" x-model.number="oiOrbConfig.delta_ce_max"/></div>
+              <div><div class="sec-label mb-1">PE DELTA MIN</div>
+                <input class="t-input font-mono text-xs" type="number" step="0.01" x-model.number="oiOrbConfig.delta_pe_min"/></div>
+              <div><div class="sec-label mb-1">PE DELTA MAX</div>
+                <input class="t-input font-mono text-xs" type="number" step="0.01" x-model.number="oiOrbConfig.delta_pe_max"/></div>
+              <div><div class="sec-label mb-1">REST POLL SEC</div>
+                <input class="t-input font-mono text-xs" type="number" step="30" min="30" x-model.number="oiOrbConfig.option_native_poll_seconds"/></div>
+              <div class="col-span-4 text-[10px]" style="color:var(--t-muted)">Target delta is fixed at +0.55 (CE) / -0.55 (PE) — the band above only widens/narrows which strikes are considered.</div>
+            </div>
+
             <div class="flex items-center gap-3">
               <button class="btn-primary" style="max-width:200px" @click="saveOiOrbConfig()" :disabled="oiOrbConfigSaving">
                 <span x-show="!oiOrbConfigSaving">Save Config</span>
@@ -4923,6 +4952,22 @@ function amoTest() {
                   </label>
                 </div>
                 <p class="font-mono text-xs" style="color:var(--t-muted)">After any rollover: if CE &amp; PE are both ITM and cumulative P&amp;L &gt; 0 → close both, re-enter fresh. If cumulative ≤ 0 → watch each eval cycle until profit arrives, then close + re-enter.</p>
+              </div>
+
+              <!-- ITM Roll Protection (70% budget) -->
+              <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
+                <div class="flex items-center justify-between mb-1">
+                  <span class="font-display font-bold text-xs" style="color:var(--t-amber)">ITM ROLL PROTECTION (70% BUDGET)
+                    <span style="color:var(--t-muted);font-weight:400"> — arms a stop on a freshly-rolled leg worth 70% of the profit just booked by that roll</span>
+                  </span>
+                  <label class="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" x-model="indexConfig[adminSelectedIndex].sell_straddle.itm_roll_protection_enabled" class="accent-yellow-400">
+                    <span class="font-mono text-xs"
+                          x-text="indexConfig[adminSelectedIndex].sell_straddle.itm_roll_protection_enabled?'ON':'OFF'"
+                          :style="`color:${indexConfig[adminSelectedIndex].sell_straddle.itm_roll_protection_enabled?'var(--t-amber)':'var(--t-muted)'}`"></span>
+                  </label>
+                </div>
+                <p class="font-mono text-xs" style="color:var(--t-muted)">Applies to EVERY single-side roll (ltp_decay/ratio/vwap_rise/exit_rules/scalable_tsl/ITM pair gate), not just the ITM pair gate. Default OFF (2026-09-22) — the never-rolled leg on the same position gets no equivalent protection, an inconsistency under review.</p>
               </div>
 
               <!-- Day-Low Reversal Exit -->

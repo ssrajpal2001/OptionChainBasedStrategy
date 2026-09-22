@@ -136,6 +136,26 @@ _DEFAULT_PARAMS = {
     # 2026-09-18, direct user follow-up: "DISABLE THIS AS OFF NOW" -- Step 4
     # starts OFF; Step 3 (OI-spurt floor) alone decides qualification.
     "top_gainer_loser_pchange_filter_enabled": False,
+    # 2026-09-22, direct user spec: option-contract-native entry/exit
+    # mechanic (see strategies/oi_orb_screener/option_native.py's own
+    # module docstring for the full 4-layer design, and the approved plan
+    # at C:\Users\SERVER\.claude\plans\immutable-popping-sphinx.md for the
+    # 14 frozen decisions these defaults encode). Additive/opt-in --
+    # default OFF, same discipline as every other tunable/filter in this
+    # package. When enabled, this mechanic's own Layer 4 exit fully
+    # REPLACES the universal 20-min VWAP-close SL for any position it
+    # opens; the existing shortlist pipeline (top-gainer/loser, OI-Spurt)
+    # is completely unchanged and still decides WHICH stocks this mechanic
+    # ever gets to look at.
+    "option_native_enabled": False,
+    "min_score": 6,                 # decision 2 -- minimum 8-point score to trade
+    "min_score_gap": 2,             # decision 3 -- CE-vs-PE winning margin, both required together
+    "max_spread_pct": 1.0,          # decision 5 -- (ask-bid)/mid*100 "tight spread" score threshold
+    "delta_ce_min": 0.45,
+    "delta_ce_max": 0.65,
+    "delta_pe_min": -0.65,
+    "delta_pe_max": -0.45,
+    "option_native_poll_seconds": 300,   # REST option-chain re-poll cadence for bid/ask/iv/delta
 }
 _FLOAT_KEYS = ("oi_spurt_min_pct", "price_move_min_pct", "stock_move_abort_pct",
                "nifty_bullish_pct", "nifty_bearish_pct", "rejection_min_rise_pct",
@@ -144,9 +164,11 @@ _FLOAT_KEYS = ("oi_spurt_min_pct", "price_move_min_pct", "stock_move_abort_pct",
                "pcr_max_for_call", "pcr_min_for_put", "volume_confirmation_min_ratio",
                "oi_roc_min_pct", "oi_roc_lookback_sec",
                "afternoon_scan_interval_sec", "rr_multiple",
-               "top_gainer_loser_oi_spurt_min_pct", "top_gainer_loser_pchange_max_pct")
+               "top_gainer_loser_oi_spurt_min_pct", "top_gainer_loser_pchange_max_pct",
+               "max_spread_pct", "delta_ce_min", "delta_ce_max", "delta_pe_min", "delta_pe_max")
 _INT_KEYS = ("top_n_per_side", "poll_seconds", "max_monitor_minutes",
-             "chain_watch_max_stocks", "vwap_sl_tf_minutes")
+             "chain_watch_max_stocks", "vwap_sl_tf_minutes",
+             "min_score", "min_score_gap", "option_native_poll_seconds")
 _STR_KEYS = ("orb_start", "orb_end", "scan_start", "entry_window_start", "entry_window_end",
              "afternoon_scan_start", "afternoon_scan_end")
 _FILTER_BOOL_KEYS = ("oi_wall_check_enabled", "distance_to_wall_enabled", "pcr_gate_enabled",
@@ -201,6 +223,8 @@ class OiOrbScreenerBookManager(StrategyBookManager):
             cfg["top_gainer_loser_pchange_filter_enabled"] = bool(params.get(
                 "top_gainer_loser_pchange_filter_enabled",
                 _defaults["top_gainer_loser_pchange_filter_enabled"]))
+            cfg["option_native_enabled"] = bool(params.get(
+                "option_native_enabled", _defaults["option_native_enabled"]))
             # Key on the sentinel underlying so this fits the base class's
             # generic (client_id, binding_id, underlying) Key shape without
             # a real per-stock underlying -- the screener itself decides
@@ -254,6 +278,15 @@ class OiOrbScreenerBookManager(StrategyBookManager):
             top_gainer_loser_oi_spurt_min_pct=value["top_gainer_loser_oi_spurt_min_pct"],
             top_gainer_loser_pchange_max_pct=value["top_gainer_loser_pchange_max_pct"],
             top_gainer_loser_pchange_filter_enabled=value["top_gainer_loser_pchange_filter_enabled"],
+            option_native_enabled=value["option_native_enabled"],
+            min_score=value["min_score"],
+            min_score_gap=value["min_score_gap"],
+            max_spread_pct=value["max_spread_pct"],
+            delta_ce_min=value["delta_ce_min"],
+            delta_ce_max=value["delta_ce_max"],
+            delta_pe_min=value["delta_pe_min"],
+            delta_pe_max=value["delta_pe_max"],
+            option_native_poll_seconds=value["option_native_poll_seconds"],
             strategy_name=self.STRATEGY_NAME,
         )
         logger.info(
@@ -316,6 +349,15 @@ class OiOrbScreenerBookManager(StrategyBookManager):
             or book._screener_cfg["TOP_GAINER_LOSER_OI_SPURT_MIN_PCT"] != value["top_gainer_loser_oi_spurt_min_pct"]
             or book._screener_cfg["TOP_GAINER_LOSER_PCHANGE_MAX_PCT"] != value["top_gainer_loser_pchange_max_pct"]
             or book._screener_cfg["TOP_GAINER_LOSER_PCHANGE_FILTER_ENABLED"] != value["top_gainer_loser_pchange_filter_enabled"]
+            or book._option_native_enabled != value["option_native_enabled"]
+            or book._native_min_score != value["min_score"]
+            or book._native_min_score_gap != value["min_score_gap"]
+            or book._native_max_spread_pct != value["max_spread_pct"]
+            or book._native_delta_band["CE"][0] != value["delta_ce_min"]
+            or book._native_delta_band["CE"][1] != value["delta_ce_max"]
+            or book._native_delta_band["PE"][0] != value["delta_pe_min"]
+            or book._native_delta_band["PE"][1] != value["delta_pe_max"]
+            or book._native_poll_seconds != value["option_native_poll_seconds"]
         )
 
     def _log_spawned(self, key: tuple, value: dict) -> None:
