@@ -3003,6 +3003,55 @@ class DashboardServer:
                                         }
                             except Exception:
                                 pass
+                            # 2026-09-23, direct user spec: surface the R1-breach-watch /
+                            # S1-breach-re-entry state (r1_breach_reentry.py) live on the
+                            # dashboard, not just in the log file -- shows the level (R1/S1)
+                            # against the current tick LTP for whichever leg is being checked.
+                            try:
+                                _r1w = getattr(strat, "_r1_watch", None) or {}
+                                _r1p = getattr(strat, "_r1_pending", None)
+                                _r1s1_info: dict = {}
+                                for _side, _entry in _r1w.items():
+                                    try:
+                                        _sr_state = _entry["calc"].get_calculated_sr_state(_entry["inst_key"])
+                                        _r1lvl = (_sr_state.get("sr_levels") or {}).get("R1") or {}
+                                        _leg = pos.ce_leg if (pos and _side == "CE") else (pos.pe_leg if pos else None)
+                                        _ltp_now = float(getattr(_leg, "ltp", 0.0) or 0.0) if _leg else 0.0
+                                        _r1s1_info[_side] = {
+                                            "mode": "watching_r1_breach",
+                                            "strike": _entry.get("strike"),
+                                            "r1": round(float(_r1lvl.get("high", 0.0) or 0.0), 2),
+                                            "ltp": round(_ltp_now, 2),
+                                            "phase": _sr_state.get("current_phase"),
+                                            "r1_established": _sr_state.get("r1_established"),
+                                        }
+                                    except Exception:
+                                        pass
+                                if _r1p:
+                                    try:
+                                        _calc = _r1p.get("calc")
+                                        _sr_state = _calc.get_calculated_sr_state(_r1p["inst_key"]) if _calc else {}
+                                        _s1lvl = (_sr_state.get("sr_levels") or {}).get("S1") or {}
+                                        _cand_strike = _r1p.get("candidate_strike")
+                                        _cand_ltp = 0.0
+                                        if _cand_strike:
+                                            _k = (int(_cand_strike), _r1p["side"])
+                                            _cand_ltp = float((getattr(strat, "_strike_prem", {}) or {})
+                                                               .get(_k, {}).get("ltp", 0.0) or 0.0)
+                                        _r1s1_info[_r1p["side"]] = {
+                                            "mode": "waiting_s1_breach_reentry",
+                                            "candidate_strike": _cand_strike,
+                                            "s1": round(float(_s1lvl.get("low", 0.0) or 0.0), 2),
+                                            "ltp": round(_cand_ltp, 2),
+                                            "phase": _sr_state.get("current_phase"),
+                                            "s1_established": _sr_state.get("s1_established"),
+                                        }
+                                    except Exception:
+                                        pass
+                                if _r1s1_info:
+                                    straddle_info["r1s1_watch"] = _r1s1_info
+                            except Exception:
+                                pass
                             if pos and getattr(pos, "status", "open") == "open":
                                 _spot   = float(getattr(strat, "_spot", 0.0) or 0.0)
                                 _entryC = float(pos.ce_leg.entry_price + pos.pe_leg.entry_price)
