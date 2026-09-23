@@ -1168,8 +1168,15 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             # basis) -- it was never polled during the morning session, so it has
             # no bar history of its own yet, unlike session-1 stocks.
             try:
-                await asyncio.to_thread(screener.backfill_orb_from_yahoo, self._bars, [sym], cfg)
-                await asyncio.to_thread(screener.backfill_vwap_from_yahoo, self._vwap, [sym], cfg)
+                # 2026-09-23 fix (same real incident as _reconcile_shortlist_from_db's
+                # own fix): yf.download() has no timeout of its own and can hang for a
+                # long time under Yahoo rate-limiting (confirmed live, HTTP 429).
+                await asyncio.wait_for(
+                    asyncio.to_thread(screener.backfill_orb_from_yahoo, self._bars, [sym], cfg),
+                    timeout=15.0)
+                await asyncio.wait_for(
+                    asyncio.to_thread(screener.backfill_vwap_from_yahoo, self._vwap, [sym], cfg),
+                    timeout=15.0)
             except Exception:
                 self._clog.exception("OiOrb[%s/%s]: afternoon-scan backfill failed for %s "
                                       "(non-fatal, VWAP will start cold from now).",
@@ -1628,11 +1635,27 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                                           "(chain-dependent filters will report unavailable for it).",
                                           self._client_id, self._binding_id, sym)
 
-            await asyncio.to_thread(screener.backfill_orb_from_yahoo, self._bars, self._shortlist_symbols, cfg)
-            # 2026-08-27: VWAP is now the entry trigger (see below) AND the SL reference --
-            # backfilled the same way ORB/SMA already are, real 09:15-start basis instead of
-            # starting cold from whatever time live polling first begins.
-            await asyncio.to_thread(screener.backfill_vwap_from_yahoo, self._vwap, self._shortlist_symbols, cfg)
+            # 2026-09-23 fix, real incident: yf.download() has no timeout of its own
+            # and can hang for a long time under Yahoo rate-limiting (confirmed live,
+            # HTTP 429 from this box) -- this is the MAIN daily shortlist pipeline, so
+            # an unbounded hang here would silently freeze the whole day's trading, not
+            # just a restart-recovery path. Best-effort: a timeout here degrades to
+            # "ORB/VWAP start from live-polled bars only," never blocks the pipeline.
+            try:
+                await asyncio.wait_for(
+                    asyncio.to_thread(screener.backfill_orb_from_yahoo, self._bars, self._shortlist_symbols, cfg),
+                    timeout=20.0)
+                # 2026-08-27: VWAP is now the entry trigger (see below) AND the SL reference --
+                # backfilled the same way ORB/SMA already are, real 09:15-start basis instead of
+                # starting cold from whatever time live polling first begins.
+                await asyncio.wait_for(
+                    asyncio.to_thread(screener.backfill_vwap_from_yahoo, self._vwap, self._shortlist_symbols, cfg),
+                    timeout=20.0)
+            except Exception:
+                self._clog.exception(
+                    "OiOrb[%s/%s]: main-pipeline Yahoo ORB/VWAP backfill failed/timed out "
+                    "(non-fatal, ORB/VWAP will build from live-polled bars only).",
+                    self._client_id, self._binding_id)
             # 2026-09-07: the historical-retest check itself is deferred until AFTER
             # the regime freeze block below (self._regime is still None here) -- see
             # that block's own call to _apply_historical_vwap_retest. Firing before
@@ -1937,7 +1960,25 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 "pChange=%+.2f%% oi_spurt=%s.",
                 self._client_id, self._binding_id, sym, pchange, r.get("oi_spurt_pct"))
             try:
-                await asyncio.to_thread(screener.backfill_orb_from_yahoo, self._bars, [sym], cfg)
+                # 2026-09-23 CRITICAL FIX, real incident: yf.download() has no
+                # timeout of its own, and yfinance's internal cookie/crumb
+                # retry logic can hang for a very long time (not infinite, but
+                # long enough to look like one) when Yahoo rate-limits this
+                # box (confirmed live: HTTP 429 from query1.finance.yahoo.com
+                # for this exact IP). That hang sat inside a background thread
+                # (asyncio.to_thread), so the event loop itself stayed "idle"
+                # the whole time -- _restore_from_db_ready never got set,
+                # silently starving every one of this book's poll loops
+                # (top-gainer/loser, rank-tracking, OI-spurt-history) for the
+                # rest of the session, with zero exception ever logged. A hard
+                # wall-clock bound here means a slow/rate-limited Yahoo can
+                # never again freeze the whole restart-recovery chain -- this
+                # step degrades to "ORB starts without the Yahoo backfill,
+                # live-polled bars only" exactly as its own docstring already
+                # promises for every other failure mode.
+                await asyncio.wait_for(
+                    asyncio.to_thread(screener.backfill_orb_from_yahoo, self._bars, [sym], cfg),
+                    timeout=15.0)
                 # 2026-09-10, direct user spec: restart recovery re-seeds VWAP from
                 # real Upstox intraday history (not Yahoo) -- same real-bar,
                 # HLC3-weighted, REPLACE-semantics seed used when a symbol first
@@ -1946,7 +1987,9 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 # get historic data and from there start computing tick by tick" --
                 # tick-by-tick accumulation resumes naturally in _spot_tick_loop the
                 # moment ticks start arriving again after this seed completes.
-                await self._seed_vwap_from_upstox_intraday(sym)
+                # Same hard-timeout discipline as the Yahoo call above -- never
+                # let a single symbol's REST call block the whole restore chain.
+                await asyncio.wait_for(self._seed_vwap_from_upstox_intraday(sym), timeout=15.0)
             except Exception:
                 self._clog.exception(
                     "OiOrb[%s/%s]: %s restart-recovery ORB/VWAP backfill failed (non-fatal, "
