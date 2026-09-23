@@ -3045,6 +3045,10 @@ class DashboardServer:
                                             "ltp": round(_cand_ltp, 2),
                                             "phase": _sr_state.get("current_phase"),
                                             "s1_established": _sr_state.get("s1_established"),
+                                            # 2026-09-23, direct user spec: surface the partner
+                                            # search itself (against the kept leg) while no
+                                            # candidate has passed yet, instead of a dead blank.
+                                            "search": _r1p.get("last_search_summary"),
                                         }
                                     except Exception:
                                         pass

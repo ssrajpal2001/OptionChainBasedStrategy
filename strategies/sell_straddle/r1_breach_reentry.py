@@ -288,18 +288,35 @@ class R1BreachReentryMixin:
             passed, reason = _eval_rules(rules, ind)
             return passed, reason, ind
 
+        # 2026-09-23, direct user spec (UI visibility gap): the search trace was
+        # previously thrown away (trace=[]) the instant this call returned --
+        # while no candidate passes, the dashboard's own "waiting_s1_breach_
+        # reentry" panel had nothing to show beyond a bare "(none yet)", even
+        # though the search itself was genuinely running every 15s and finding
+        # real (if rejected) candidates. Captured onto `pending` so
+        # dashboard_server.py can surface it instead of a dead blank.
+        _trace: list = []
         partner = select_rollover_partner_directional(
             self._strike_prem, roll_side=side, kept_strike=keep_strike, kept_ltp=keep_ltp,
             closing_strike=pending.get("_last_closed_strike") or keep_strike,
             spot=(self._atm_ref if self._atm_ref > 0 else self._spot),
             real_step=real_step, min_gap_pts=_ROLLOVER_MIN_GAP_PTS, rule_pass=_rule_pass,
             max_itm_steps=max_itm, max_search_steps=max(1, offset * 2),
-            trace=[], itm_cap_step_pts=_ROLLOVER_STRIKE_STEP,
+            trace=_trace, itm_cap_step_pts=_ROLLOVER_STRIKE_STEP,
         )
+        _end_evt = next((e for e in reversed(_trace) if e.get("event") == "select_partner_for_end"), None)
+        pending["last_search_summary"] = {
+            "checked": (_end_evt or {}).get("candidates_total"),
+            "reject_counts": (_end_evt or {}).get("reject_counts"),
+            "direction_used": (_end_evt or {}).get("direction_used"),
+            "kept_side": keep_side, "kept_strike": keep_strike, "kept_ltp": round(keep_ltp, 2),
+        }
         if not partner:
             self._clog.info(
                 "SellStraddle[%s]: S1-BREACH RE-ENTRY WAIT (%s side empty) -- no partner "
-                "currently passes re-entry rules; still watching.", self._underlying, side,
+                "currently passes re-entry rules (checked=%s reject_counts=%s); still watching.",
+                self._underlying, side,
+                pending["last_search_summary"]["checked"], pending["last_search_summary"]["reject_counts"],
             )
             return
 

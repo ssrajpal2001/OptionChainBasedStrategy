@@ -1687,14 +1687,21 @@ class ExitMixin:
             total_day_pct = total_day_pts / _day_denom * 100
 
             if self._day_profit_target_pct > 0 and total_day_pct >= self._day_profit_target_pct:
-                logger.info(
-                    "SellStraddle[%s]: DAY PROFIT TARGET [%s] — day=%.1f%% (≥%.1f%%) | "
-                    "closed=%.2f running=%.2f credit=%.2f prem(sold=%.2f cur=%.2f)",
-                    self._underlying, _basis_lbl, total_day_pct, self._day_profit_target_pct,
-                    self._session_realized_pnl_pts, pnl, _day_denom,
-                    pos.net_credit, pos.current_value,
-                )
-                if not self._defer_exit("day_profit_target", now):
+                # 2026-09-23 fix (log-noise pass, same class as VWAP RISE): this
+                # used to log unconditionally on EVERY tick from first-true until
+                # the defer boundary -- gate it the same way, once on first
+                # detection, once on execution.
+                _was_pending = getattr(self, "_exit_pending_reason", None) == "day_profit_target"
+                _execute_now = self._defer_exit("day_profit_target", now)
+                if _execute_now or not _was_pending:
+                    logger.info(
+                        "SellStraddle[%s]: DAY PROFIT TARGET [%s] — day=%.1f%% (≥%.1f%%) | "
+                        "closed=%.2f running=%.2f credit=%.2f prem(sold=%.2f cur=%.2f)",
+                        self._underlying, _basis_lbl, total_day_pct, self._day_profit_target_pct,
+                        self._session_realized_pnl_pts, pnl, _day_denom,
+                        pos.net_credit, pos.current_value,
+                    )
+                if not _execute_now:
                     return
                 self._stop_for_day = True
                 await self._close_position_and_hedge("day_profit_target")
@@ -1702,14 +1709,17 @@ class ExitMixin:
                 return
 
             if self._day_loss_sl_pct > 0 and total_day_pct <= -self._day_loss_sl_pct:
-                logger.info(
-                    "SellStraddle[%s]: DAY LOSS SL [%s] — day=%.1f%% (≤-%.1f%%) | "
-                    "closed=%.2f running=%.2f credit=%.2f prem(sold=%.2f cur=%.2f)",
-                    self._underlying, _basis_lbl, total_day_pct, self._day_loss_sl_pct,
-                    self._session_realized_pnl_pts, pnl, _day_denom,
-                    pos.net_credit, pos.current_value,
-                )
-                if not self._defer_exit("day_loss_sl", now):
+                _was_pending = getattr(self, "_exit_pending_reason", None) == "day_loss_sl"
+                _execute_now = self._defer_exit("day_loss_sl", now)
+                if _execute_now or not _was_pending:
+                    logger.info(
+                        "SellStraddle[%s]: DAY LOSS SL [%s] — day=%.1f%% (≤-%.1f%%) | "
+                        "closed=%.2f running=%.2f credit=%.2f prem(sold=%.2f cur=%.2f)",
+                        self._underlying, _basis_lbl, total_day_pct, self._day_loss_sl_pct,
+                        self._session_realized_pnl_pts, pnl, _day_denom,
+                        pos.net_credit, pos.current_value,
+                    )
+                if not _execute_now:
                     return
                 # 2026-09-11, direct user spec: a day-loss-SL breach now tries to
                 # ACTIVATE THE HEDGE (both sold legs stay open, protective legs
@@ -1879,14 +1889,17 @@ class ExitMixin:
             if (self._day_low_exit_enabled and not self._post1500_exit_enabled
                     and self._session_min_straddle_frozen is not None
                     and _cv <= self._session_min_straddle_frozen):
-                self._clog.info(
-                    "SellStraddle[%s]: DAY-LOW REVERSAL EXIT — CE%d/PE%d rate=%.2f "
-                    "reached its frozen low=%.2f (frozen @ %s) — closing full "
-                    "position, stopping for the day.",
-                    self._underlying, _pair_id[0], _pair_id[1], _cv,
-                    self._session_min_straddle_frozen, self._day_low_freeze_time.strftime("%H:%M"),
-                )
-                if not self._defer_exit("day_low_reversal", now):
+                _was_pending = getattr(self, "_exit_pending_reason", None) == "day_low_reversal"
+                _execute_now = self._defer_exit("day_low_reversal", now)
+                if _execute_now or not _was_pending:
+                    self._clog.info(
+                        "SellStraddle[%s]: DAY-LOW REVERSAL EXIT — CE%d/PE%d rate=%.2f "
+                        "reached its frozen low=%.2f (frozen @ %s) — closing full "
+                        "position, stopping for the day.",
+                        self._underlying, _pair_id[0], _pair_id[1], _cv,
+                        self._session_min_straddle_frozen, self._day_low_freeze_time.strftime("%H:%M"),
+                    )
+                if not _execute_now:
                     return
                 self._stop_for_day = True
                 await self._close_position_and_hedge("day_low_reversal_exit")
@@ -1922,9 +1935,21 @@ class ExitMixin:
         if self._ltp_decay_enabled:
             _min_ltp = min(pos.ce_leg.ltp, pos.pe_leg.ltp)
             if 0 < _min_ltp < self._ltp_exit_min and self._position and self._position.status == "open":
-                self._clog.info("SellStraddle[%s]: LTP DECAY min_ltp=%.2f < %.2f — single-side roll",
-                            self._underlying, _min_ltp, self._ltp_exit_min)
-                if not self._defer_exit("ltp_decay", now):
+                # 2026-09-23 fix (log-noise pass): dedupe per running pair, same
+                # pattern as vwap_rise -- a failed roll (no partner) would
+                # otherwise re-log this line every defer-tf boundary for as long
+                # as the pair stays under the decay threshold. The roll attempt
+                # itself (_single_side_roll, its own throttled ROLLOVER STARTED
+                # log) still runs every cycle unchanged.
+                _pair_id = (int(pos.ce_leg.strike), int(pos.pe_leg.strike))
+                _was_pending = getattr(self, "_exit_pending_reason", None) == "ltp_decay"
+                _execute_now = self._defer_exit("ltp_decay", now)
+                _already_alerted = getattr(self, "_ltp_decay_alert_pair", None) == _pair_id
+                if (_execute_now or not _was_pending) and not _already_alerted:
+                    self._clog.info("SellStraddle[%s]: LTP DECAY min_ltp=%.2f < %.2f — single-side roll",
+                                self._underlying, _min_ltp, self._ltp_exit_min)
+                    self._ltp_decay_alert_pair = _pair_id
+                if not _execute_now:
                     return
                 await self._single_side_roll(now, "ltp_decay")
                 return
@@ -1933,9 +1958,15 @@ class ExitMixin:
         if pos.ce_leg.ltp > 0 and pos.pe_leg.ltp > 0:
             ratio = max(pos.ce_leg.ltp, pos.pe_leg.ltp) / min(pos.ce_leg.ltp, pos.pe_leg.ltp)
             if ratio >= self._ratio_threshold:
-                self._clog.info("SellStraddle[%s]: RATIO EXIT ratio=%.2fx — single-side roll",
-                            self._underlying, ratio)
-                if not self._defer_exit("ratio_exit", now):
+                _pair_id = (int(pos.ce_leg.strike), int(pos.pe_leg.strike))
+                _was_pending = getattr(self, "_exit_pending_reason", None) == "ratio_exit"
+                _execute_now = self._defer_exit("ratio_exit", now)
+                _already_alerted = getattr(self, "_ratio_exit_alert_pair", None) == _pair_id
+                if (_execute_now or not _was_pending) and not _already_alerted:
+                    self._clog.info("SellStraddle[%s]: RATIO EXIT ratio=%.2fx — single-side roll",
+                                self._underlying, ratio)
+                    self._ratio_exit_alert_pair = _pair_id
+                if not _execute_now:
                     return
                 await self._single_side_roll(now, "ratio_exit")
                 return
@@ -1952,11 +1983,18 @@ class ExitMixin:
                     _tsl_pnl = _etv - pos.current_time_value(self._spot)
             _tsl_pnl = self._combined_pnl_pts(pos, _tsl_pnl)
             if self._check_scalable_tsl(pos, _tsl_pnl):
-                logger.info("SellStraddle[%s]: SCALABLE TSL (%s) — locked=%s%.4f pnl=%s%.4f → FULL EXIT",
-                            self._underlying, self._tsl_basis,
-                            self._ccy_symbol, pos.tsl_high_lock_rs,
-                            self._ccy_symbol, self._pnl_rs(_tsl_pnl))
-                if not self._defer_exit("scalable_tsl", now):
+                # 2026-09-23 fix (log-noise pass): _check_scalable_tsl is
+                # level-triggered (True on every tick the running profit sits
+                # below the locked level, not just on the crossing tick), so
+                # this used to log on every tick until the defer boundary.
+                _was_pending = getattr(self, "_exit_pending_reason", None) == "scalable_tsl"
+                _execute_now = self._defer_exit("scalable_tsl", now)
+                if _execute_now or not _was_pending:
+                    logger.info("SellStraddle[%s]: SCALABLE TSL (%s) — locked=%s%.4f pnl=%s%.4f → FULL EXIT",
+                                self._underlying, self._tsl_basis,
+                                self._ccy_symbol, pos.tsl_high_lock_rs,
+                                self._ccy_symbol, self._pnl_rs(_tsl_pnl))
+                if not _execute_now:
                     return
                 await self._close_position_and_hedge("scalable_tsl")
                 return

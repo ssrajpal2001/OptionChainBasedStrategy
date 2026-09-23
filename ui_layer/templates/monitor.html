@@ -9419,16 +9419,30 @@ function amoTest() {
                             </div>
                           </template>
                           <template x-if="s.mode==='waiting_s1_breach_reentry'">
-                            <div class="flex items-center justify-between">
-                              <span style="color:var(--t-cyan);font-weight:700">
-                                🔍 <span x-text="side"></span> side empty — scanning candidate
-                                <span x-text="s.candidate_strike || '(none yet)'"></span>
-                                <span x-show="s.s1_established===false" style="color:var(--t-amber)"> (S1 not established)</span>
-                                <span x-show="s.phase==='S1_TRACKING'" style="color:var(--t-amber)"> (S1_TRACKING)</span>
-                              </span>
-                              <span :style="s.candidate_strike && s.ltp < s.s1 ? 'color:var(--t-green);font-weight:700' : 'color:var(--t-muted)'">
-                                LTP <span x-text="s.ltp"></span> vs S1 <span x-text="s.s1"></span>
-                              </span>
+                            <div>
+                              <div class="flex items-center justify-between">
+                                <span style="color:var(--t-cyan);font-weight:700">
+                                  🔍 <span x-text="side"></span> side empty — scanning candidate
+                                  <span x-text="s.candidate_strike || '(none yet)'"></span>
+                                  <span x-show="s.s1_established===false" style="color:var(--t-amber)"> (S1 not established)</span>
+                                  <span x-show="s.phase==='S1_TRACKING'" style="color:var(--t-amber)"> (S1_TRACKING)</span>
+                                </span>
+                                <span x-show="s.candidate_strike" :style="s.ltp < s.s1 ? 'color:var(--t-green);font-weight:700' : 'color:var(--t-muted)'">
+                                  LTP <span x-text="s.ltp"></span> vs S1 <span x-text="s.s1"></span>
+                                </span>
+                              </div>
+                              <!-- No candidate passing yet -- show the search itself against the
+                                   kept leg (2026-09-23, direct user spec) instead of a dead blank. -->
+                              <div x-show="!s.candidate_strike && s.search" style="color:var(--t-muted)" class="mt-0.5">
+                                pairing vs kept <span x-text="s.search && s.search.kept_side"></span><span x-text="s.search && s.search.kept_strike"></span>
+                                @<span x-text="s.search && s.search.kept_ltp"></span> —
+                                checked <span x-text="s.search && s.search.checked"></span> candidates
+                                (<span x-show="s.search && s.search.direction_used" x-text="s.search && s.search.direction_used"></span>),
+                                blocked:
+                                <template x-for="k in Object.keys((s.search && s.search.reject_counts) || {}).filter(k => (s.search.reject_counts[k]||0) > 0)" :key="k">
+                                  <span class="mr-1" x-text="k + '=' + s.search.reject_counts[k]"></span>
+                                </template>
+                              </div>
                             </div>
                           </template>
                         </div>
