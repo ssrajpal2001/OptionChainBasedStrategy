@@ -448,6 +448,11 @@ class ConfigMixin:
             self._shadow_vwap = {}         # (strike, side) -> {"cum_pv":, "cum_v":, "last":}
         if not hasattr(self, "_shadow_vwap_seeding"):
             self._shadow_vwap_seeding = set()   # (strike, side) keys with a REST seed task in flight
+        if not hasattr(self, "_shadow_vwap_rest_seeded"):
+            # 2026-09-23 CRITICAL FIX: (strike, side) keys whose one-shot REST
+            # seed has finished at least once THIS process -- see engine.py's
+            # _eng_atp computation for the real incident this closes.
+            self._shadow_vwap_rest_seeded = set()
         if not hasattr(self, "_day_low_tracked_pair"):
             self._day_low_tracked_pair = None
         if not hasattr(self, "_day_low_computing"):

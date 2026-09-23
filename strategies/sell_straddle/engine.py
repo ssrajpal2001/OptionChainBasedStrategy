@@ -1266,6 +1266,11 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         self._post1500_bar_acc = {}
         self._shadow_vwap = {}
         self._shadow_vwap_seeding = set()
+        # 2026-09-23 CRITICAL FIX, real live incident (calculative-vwap_source
+        # binding, restart at 13:42:15): side -> whether the ONE-SHOT REST
+        # seed for this key has finished at least once THIS process (success
+        # or failure) -- see _eng_atp's own computation below for why.
+        self._shadow_vwap_rest_seeded = set()
         self._prem_closes.clear()
         self._prem_volumes.clear()
         self._chart_series.clear()
@@ -1953,6 +1958,11 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                                 side, int(strike), exc)
         finally:
             self._shadow_vwap_seeding.discard(key)
+            # 2026-09-23 CRITICAL FIX, real live incident: marks this key
+            # "ready to trust" regardless of outcome (success, crypto skip,
+            # no token, no data, exception) -- see _eng_atp's own computation
+            # for the real bug this closes.
+            self._shadow_vwap_rest_seeded.add(key)
 
     async def _option_loop(self) -> None:
         from data_layer.base_feeder import OptionTick
@@ -2051,10 +2061,37 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                     if self._vwap_source == "calculative":
                         _sv = self._shadow_vwap.get(_k, {})
                         _cum_v = _sv.get("cum_v", 0.0)
-                        # Warm-up guard: no volume accumulated yet for this strike/side
-                        # -- fall back to broker ATP rather than feed the pool engine a
-                        # bogus 0 (which it would otherwise treat as "no update").
-                        _eng_atp = (_sv["cum_pv"] / _cum_v) if _cum_v > 0 else \
+                        # 2026-09-23 CRITICAL FIX, real live incident: the old
+                        # guard only protected cum_v==0 (the literal first
+                        # tick ever) -- but self._shadow_vwap is reset EMPTY
+                        # on every process restart, and the REST seed that
+                        # restores the real day's history is an async
+                        # background task (_seed_shadow_vwap_from_rest),
+                        # not synchronous. In the window between "first live
+                        # tick after restart" and "REST seed lands"
+                        # (confirmed live: ~1-2 real seconds), cum_v was
+                        # already >0 (from just 1-2 live ticks' own volume
+                        # delta) so the OLD guard trusted it -- but cum_pv/
+                        # cum_v at that point is essentially just the most
+                        # recent tick's own raw LTP, not a real intraday
+                        # VWAP. Confirmed live: a restart at 13:42:15 produced
+                        # curr_vwap=177.67 on the very first post-restart
+                        # read (vs. ~191 the whole session before AND right
+                        # after, once the seed landed) -- that single bad
+                        # reading became session_min_vwap, and the NEXT
+                        # (correct, ~191.58) reading looked like a spurious
+                        # 7.83% "rise", firing an unwanted vwap_rise roll one
+                        # second after restart. Now also requires the
+                        # one-shot REST seed to have genuinely finished at
+                        # least once THIS process (_shadow_vwap_rest_seeded,
+                        # set in _seed_shadow_vwap_from_rest's own finally
+                        # block, success or failure) before trusting cum_pv/
+                        # cum_v -- falls back to broker ATP (same as a
+                        # non-calculative binding) until then, exactly the
+                        # same safe fallback the old guard already used for
+                        # the cum_v==0 case.
+                        _rest_ready = _k in self._shadow_vwap_rest_seeded
+                        _eng_atp = (_sv["cum_pv"] / _cum_v) if (_cum_v > 0 and _rest_ready) else \
                             float(self._strike_prem[_k].get("atp", 0.0) or 0.0)
                     else:
                         _eng_atp = float(self._strike_prem[_k].get("atp", 0.0) or 0.0)

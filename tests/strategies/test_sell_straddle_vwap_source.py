@@ -29,6 +29,12 @@ def _tick(strike, side, ltp, atp, volume, ts) -> OptionTick:
     )
 
 
+async def _no_op_async(*a, **k) -> None:
+    """Stand-in for _seed_shadow_vwap_from_rest -- avoids real DB/network I/O
+    inside a unit test; never marks a key seeded on its own."""
+    return None
+
+
 def _strategy(vwap_source: str = "broker_atp") -> SellStraddleStrategy:
     s = SellStraddleStrategy(EventBus(), cfg=GlobalConfig(), underlying="NIFTY")
     s._running = True
@@ -103,8 +109,15 @@ async def test_calculative_mode_feeds_pool_engine_the_cumulative_vwap_not_broker
     """calculative mode: the pool engine must receive cum(ltp*volume_delta)/
     cum(volume_delta) -- the same formula _update_shadow_vwap already uses
     for its log-only comparison -- NOT the broker's atp field, even though
-    the broker atp is still present on every tick."""
+    the broker atp is still present on every tick.
+
+    2026-09-23: pre-seeds _shadow_vwap_rest_seeded directly (bypassing the
+    real async REST-seed task, same as this file's other tests mock out
+    background REST calls) so this test isolates the cum_pv/cum_v MATH from
+    the separate warmup-gate behavior covered by the test below it."""
     s = _strategy(vwap_source="calculative")
+    s._seed_shadow_vwap_from_rest = _no_op_async  # no real network/DB I/O in a unit test
+    s._shadow_vwap_rest_seeded.add((24000, "CE"))
     ts = datetime(2026, 9, 3, 10, 0, tzinfo=IST)
     ts2 = datetime(2026, 9, 3, 10, 0, 30, tzinfo=IST)
     await _drive_option_loop(s, [
@@ -119,6 +132,34 @@ async def test_calculative_mode_feeds_pool_engine_the_cumulative_vwap_not_broker
 
 
 @pytest.mark.asyncio
+async def test_calculative_mode_falls_back_to_broker_atp_before_rest_seed_completes():
+    """2026-09-23 CRITICAL FIX, real live incident: confirmed live on a
+    restart -- the very first tick(s) after a restart have cum_v>0 (a
+    couple of live ticks' own tiny volume delta) but the async REST seed
+    that restores the real day's history hasn't landed yet. Trusting
+    cum_pv/cum_v at that point produced a wildly wrong "VWAP" (essentially
+    just the latest tick's own raw LTP), which corrupted session_min_vwap
+    and fired a spurious vwap_rise roll one second after restart. Same tick
+    sequence as the test above (which WOULD compute vwap=110.0 from live
+    ticks alone) but WITHOUT the key in _shadow_vwap_rest_seeded -- must
+    still fall back to the broker's own atp (95.0), exactly like the
+    pre-existing cum_v==0 warmup case."""
+    s = _strategy(vwap_source="calculative")
+    s._seed_shadow_vwap_from_rest = _no_op_async  # real REST-seed never completes in this test
+    ts = datetime(2026, 9, 3, 10, 0, tzinfo=IST)
+    ts2 = datetime(2026, 9, 3, 10, 0, 30, tzinfo=IST)
+    await _drive_option_loop(s, [
+        _tick(24000, "CE", ltp=100.0, atp=95.0, volume=1000, ts=ts),
+        _tick(24000, "CE", ltp=110.0, atp=95.0, volume=1500, ts=ts2),
+    ])
+    _, atp = s._pool_engine._latest[(24000, "CE")]
+    assert atp == 95.0, (
+        "REST seed has not completed yet -- must fall back to broker atp, "
+        "not trust a cum_pv/cum_v built from only 1-2 live ticks"
+    )
+
+
+@pytest.mark.asyncio
 async def test_calculative_mode_falls_back_to_broker_atp_during_warmup():
     """Before any volume delta has accumulated for a strike/side (the very
     first tick, or a tick with no volume advance), calculative mode must
@@ -126,6 +167,7 @@ async def test_calculative_mode_falls_back_to_broker_atp_during_warmup():
     -- a 0 would otherwise be silently treated by PoolIndicatorEngine's own
     keep-last-good logic as 'no update'."""
     s = _strategy(vwap_source="calculative")
+    s._seed_shadow_vwap_from_rest = _no_op_async  # avoid real DB/network I/O in a unit test
     ts = datetime(2026, 9, 3, 10, 0, tzinfo=IST)
     await _drive_option_loop(s, [
         _tick(24000, "CE", ltp=100.0, atp=95.0, volume=1000, ts=ts),
