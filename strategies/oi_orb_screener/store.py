@@ -260,6 +260,9 @@ CREATE TABLE IF NOT EXISTS option_native_feature_history (
     symbol            TEXT NOT NULL,
     option_type       TEXT NOT NULL,
     upstox_key        TEXT NOT NULL,
+    ltp_open          REAL,             -- 2026-09-23 addition: full OHLC, not close-only --
+    ltp_high          REAL,             -- needed to backtest the frozen exit spec's own
+    ltp_low           REAL,             -- "LTP breaks the previous bar's low" condition
     ltp_close         REAL,
     volume_5min       REAL,
     change_oi         REAL,
@@ -816,9 +819,10 @@ def close_position(client_id: str, binding_id: str, symbol: str, exit_price: flo
 
 def record_option_native_feature_bar(client_id: str, binding_id: str, bucket_ts: str, rows: List[dict],
                                       trade_date: Optional[str] = None) -> None:
-    """rows: [{"symbol", "option_type", "upstox_key", "ltp_close",
-    "volume_5min", "change_oi", "bid", "ask", "iv", "delta", "vwap",
-    "score", "score_breakdown" (JSON str), "oi_price_reversal_state"}, ...]
+    """rows: [{"symbol", "option_type", "upstox_key", "ltp_open", "ltp_high",
+    "ltp_low", "ltp_close", "volume_5min", "change_oi", "bid", "ask", "iv",
+    "delta", "vwap", "score", "score_breakdown" (JSON str),
+    "oi_price_reversal_state"}, ...]
     -- one row per (symbol, side) whose 5-min bucket closed at bucket_ts,
     not upserted (every bucket close is its own permanent snapshot, same
     "log everything" shape as top_gainer_loser_history)."""
@@ -830,11 +834,13 @@ def record_option_native_feature_bar(client_id: str, binding_id: str, bucket_ts:
             con.execute(
                 """INSERT INTO option_native_feature_history
                        (client_id, binding_id, trade_date, bucket_ts, symbol, option_type,
-                        upstox_key, ltp_close, volume_5min, change_oi, bid, ask, iv, delta,
-                        vwap, score, score_breakdown, oi_price_reversal_state)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        upstox_key, ltp_open, ltp_high, ltp_low, ltp_close, volume_5min,
+                        change_oi, bid, ask, iv, delta, vwap, score, score_breakdown,
+                        oi_price_reversal_state)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (client_id, binding_id, td, bucket_ts, r["symbol"], r["option_type"],
-                 r.get("upstox_key", ""), r.get("ltp_close"), r.get("volume_5min"),
+                 r.get("upstox_key", ""), r.get("ltp_open"), r.get("ltp_high"),
+                 r.get("ltp_low"), r.get("ltp_close"), r.get("volume_5min"),
                  r.get("change_oi"), r.get("bid"), r.get("ask"), r.get("iv"), r.get("delta"),
                  r.get("vwap"), r.get("score"), r.get("score_breakdown"),
                  r.get("oi_price_reversal_state")),

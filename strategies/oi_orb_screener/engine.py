@@ -2903,6 +2903,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             store.record_option_native_feature_bar, self._client_id, self._binding_id,
             feat.bucket_ts.isoformat(), [{
                 "symbol": symbol, "option_type": side, "upstox_key": contract.upstox_key,
+                "ltp_open": merged.ltp_open, "ltp_high": merged.ltp_high, "ltp_low": merged.ltp_low,
                 "ltp_close": merged.ltp_close, "volume_5min": merged.volume_5min,
                 "change_oi": merged.change_oi, "bid": merged.bid, "ask": merged.ask,
                 "iv": merged.iv, "delta": merged.delta, "vwap": merged.vwap,
