@@ -1935,7 +1935,15 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                 return
             st["cum_pv"] += cum_pv
             st["cum_v"] += cum_v
-            self._clog.info(
+            # 2026-09-23, direct user spec: this accumulator is dual-purpose --
+            # for a "calculative" vwap_source binding (e.g. sell_straddle_calc_vwap)
+            # it IS the real, decision-driving VWAP, so the seed is worth an INFO
+            # line. For a binding only running this for the broker-ATP comparison
+            # (shadow_vwap_enabled=True, vwap_source stays "broker") it's pure
+            # diagnostic -- demoted to DEBUG so it doesn't clutter the per-binding
+            # log with ~80 lines every time the pool re-subscribes (e.g. a restart).
+            _seed_log = self._clog.info if self._vwap_source == "calculative" else self._clog.debug
+            _seed_log(
                 "SHADOW_VWAP REST-SEED %s%d — %d bars, seed_vwap=%.2f (cum_v=%d) merged in "
                 "(now cum_pv=%.2f cum_v=%.2f).",
                 side, int(strike), len(bars), cum_pv / cum_v, cum_v, st["cum_pv"], st["cum_v"],
@@ -1984,14 +1992,23 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                             "FUTURES_ATM spot=%.2f futures=%.2f mean=%.2f -> ATM=%d%s",
                             self._spot, self._futures_spot, _atm_src, _atm, _fut_note,
                         )
-                    if self._shadow_vwap_enabled and _atm > 0:
+                    # 2026-09-23, direct user spec: this line exists purely to
+                    # compare self-computed VWAP against the BROKER's own ATP --
+                    # meaningless (and per direct feedback, unwanted) for a
+                    # "calculative" vwap_source binding, which by design doesn't
+                    # use broker ATP for anything. Skipped entirely in that case;
+                    # demoted to DEBUG for a plain broker-VWAP binding that only
+                    # has shadow_vwap_enabled on for occasional audit purposes,
+                    # so it no longer clutters the per-binding INFO log every 60s.
+                    if (self._shadow_vwap_enabled and _atm > 0
+                            and self._vwap_source != "calculative"):
                         _ce_shadow = self._shadow_vwap.get((_atm, "CE"), {})
                         _pe_shadow = self._shadow_vwap.get((_atm, "PE"), {})
                         _ce_sv = (_ce_shadow.get("cum_pv", 0.0) / _ce_shadow.get("cum_v", 0.0)
                                   if _ce_shadow.get("cum_v", 0.0) > 0 else 0.0)
                         _pe_sv = (_pe_shadow.get("cum_pv", 0.0) / _pe_shadow.get("cum_v", 0.0)
                                   if _pe_shadow.get("cum_v", 0.0) > 0 else 0.0)
-                        self._clog.info(
+                        self._clog.debug(
                             "SHADOW_VWAP (log-only, never used for decisions) ATM=%d | "
                             "CE atp=%.2f self=%.2f (Δ%.2f) | PE atp=%.2f self=%.2f (Δ%.2f)",
                             _atm, self._ce_atp, _ce_sv, (self._ce_atp - _ce_sv) if _ce_sv else 0.0,
