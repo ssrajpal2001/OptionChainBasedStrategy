@@ -12,8 +12,11 @@ structure-based exit instead of waiting on the generic exit ladder.
 Mechanic (direct user spec, confirmed across several rounds of clarification):
 1. TICK-BY-TICK: once a rolled-in leg's running P&L goes negative, arm a
    fresh SupportResistanceCalculator for that leg's own strike -- seeded
-   (not blank) from REAL intraday 1-min history (09:15-to-now, REST-fetched)
-   so R1/S1 reflect the strike's genuine structure since market open.
+   (not blank) from REAL intraday history (09:15-to-now, REST-fetched as
+   1-min bars, aggregated into 5-min MARKET-ANCHORED bars -- 2026-09-23
+   correction, see _R1S1_BAR_MINUTES's own comment; originally built and
+   documented here as 1-min, which was NOT the intended timeframe) so R1/S1
+   reflect the strike's genuine 5-min structure since market open.
 2. R1 BREACH (checked every tick against the seeded/updated state) = TRUE
    when EITHER: R1 is not yet established, OR the current phase is literally
    R1_TRACKING (a fresh "R2 breaches R1" transition always lands the phase
@@ -87,11 +90,23 @@ class R1BreachReentryMixin:
             # sees the leg as already being closed and skips.
             self._r1_closing = {"CE": False, "PE": False}
 
+    # 2026-09-23, direct user spec (real live incident review, "PE side breached
+    # R1 -- check using token that the 5 min R1 high was genuinely breached"):
+    # this mechanic was built and originally documented as 1-min bars (see the
+    # module's own opening docstring, pre-this-fix) -- the user's actual intent
+    # was 5-min R1/S1, confirmed directly. Both the REST seed and the live tick
+    # accumulator below now bucket into 5-min MARKET-ANCHORED bars (09:15, 09:20,
+    # ... -- not midnight-aligned, same convention as OI-ORB's own
+    # to_n_min_bars_market_anchored, chosen for the same reason: a midnight-
+    # aligned first bucket would only hold a partial ~5min of real data before
+    # market open, distorting the earliest read).
+    _R1S1_BAR_MINUTES = 5
+
     async def _seed_r1s1_calc(self, strike: int, side: str, inst_key: str):
-        """REST-fetch today's 1-min history for (strike, side) up to now and
-        replay it into a fresh SupportResistanceCalculator -- see this
-        module's own docstring for why (real structure since 09:15, not a
-        blank start)."""
+        """REST-fetch today's 1-min history for (strike, side), aggregate into
+        5-min market-anchored bars, and replay into a fresh
+        SupportResistanceCalculator -- see this module's own docstring for why
+        (real structure since 09:15, not a blank start)."""
         from strategies.core.support_resistance import SupportResistanceCalculator
         calc = SupportResistanceCalculator()
         try:
@@ -100,6 +115,8 @@ class R1BreachReentryMixin:
             from data_layer.historical_candles import fetch_upstox_intraday_1m
             from data_layer.instrument_registry import REGISTRY
             from data_layer.client_db import ClientDB
+            from strategies.core.trap_zone_utils import Bar as _Bar
+            from strategies.core.candle_indicators import to_n_min_bars_market_anchored
             import asyncio as _aio
             creds = await _aio.to_thread(ClientDB().get_feeder_creds_sync, "upstox")
             token = (creds or {}).get("access_token", "")
@@ -111,42 +128,61 @@ class R1BreachReentryMixin:
             ikey = REGISTRY.get_broker_symbol(self._underlying, exp, int(strike), side, "upstox")
             if not ikey:
                 return calc
-            bars = await fetch_upstox_intraday_1m(ikey, token)
-            if not bars:
+            bars_1m = await fetch_upstox_intraday_1m(ikey, token)
+            if not bars_1m:
                 return calc
+            _bars = [
+                _Bar(ts=datetime.fromisoformat(b["ts"]), open=float(b.get("open", b["high"])),
+                     high=float(b["high"]), low=float(b["low"]), close=float(b.get("close", b["high"])))
+                for b in bars_1m
+            ]
+            _bars_5m = to_n_min_bars_market_anchored(_bars, self._R1S1_BAR_MINUTES)
             candles = [
-                {"timestamp": datetime.fromisoformat(b["ts"]), "high": float(b["high"]),
-                 "low": float(b["low"]), "duration": 1}
-                for b in bars
+                {"timestamp": b.ts, "high": b.high, "low": b.low, "duration": self._R1S1_BAR_MINUTES}
+                for b in _bars_5m
             ]
             calc.reset_and_process_sequence(inst_key, candles)
             _st = calc.get_calculated_sr_state(inst_key)
             self._clog.info(
-                "SellStraddle[%s]: R1/S1 SEEDED %s%d from %d real 1-min bars -- "
-                "phase=%s r1_established=%s s1_established=%s",
-                self._underlying, side, int(strike), len(candles),
-                _st.get("current_phase"), _st.get("r1_established"), _st.get("s1_established"),
+                "SellStraddle[%s]: R1/S1 SEEDED %s%d from %d real 1-min bars "
+                "(%d real %d-min bars) -- phase=%s r1_established=%s s1_established=%s",
+                self._underlying, side, int(strike), len(bars_1m), len(candles),
+                self._R1S1_BAR_MINUTES, _st.get("current_phase"),
+                _st.get("r1_established"), _st.get("s1_established"),
             )
         except Exception as exc:
             self._clog.warning("SellStraddle[%s]: R1/S1 seed failed for %s%d: %s",
                                 self._underlying, side, int(strike), exc)
         return calc
 
+    def _r1_bucket_start(self, now: datetime) -> datetime:
+        """Current 5-min market-anchored bucket start for `now` (09:15, 09:20,
+        ... boundaries) -- same anchoring as to_n_min_bars_market_anchored, kept
+        as a live running-tick equivalent since we bucket incrementally here
+        rather than resampling a whole stored series."""
+        anchor_mins = 9 * 60 + 15
+        mins = now.hour * 60 + now.minute
+        bucket_idx = (mins - anchor_mins) // self._R1S1_BAR_MINUTES
+        start_mins = anchor_mins + bucket_idx * self._R1S1_BAR_MINUTES
+        return now.replace(hour=start_mins // 60, minute=start_mins % 60, second=0, microsecond=0)
+
     def _r1_feed_bar(self, entry: dict, ltp: float, now: datetime) -> None:
-        """Feed a live tick into a 1-min bar accumulator; process a completed
-        candle into the tracked SupportResistanceCalculator on bar close."""
+        """Feed a live tick into a 5-min (market-anchored) bar accumulator;
+        process a completed candle into the tracked SupportResistanceCalculator
+        on bar close."""
         if ltp <= 0:
             return
-        minute = now.replace(second=0, microsecond=0)
+        bucket = self._r1_bucket_start(now)
         acc = entry.get("bar_acc")
         if acc is None:
-            entry["bar_acc"] = {"minute": minute, "h": ltp, "l": ltp}
-        elif minute != acc["minute"]:
+            entry["bar_acc"] = {"minute": bucket, "h": ltp, "l": ltp}
+        elif bucket != acc["minute"]:
             entry["calc"].process_straddle_candle(
                 entry["inst_key"],
-                {"timestamp": acc["minute"], "high": acc["h"], "low": acc["l"], "duration": 1},
+                {"timestamp": acc["minute"], "high": acc["h"], "low": acc["l"],
+                 "duration": self._R1S1_BAR_MINUTES},
             )
-            entry["bar_acc"] = {"minute": minute, "h": ltp, "l": ltp}
+            entry["bar_acc"] = {"minute": bucket, "h": ltp, "l": ltp}
         else:
             acc["h"] = max(acc["h"], ltp)
             acc["l"] = min(acc["l"], ltp)

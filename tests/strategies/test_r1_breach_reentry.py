@@ -222,3 +222,55 @@ def test_open_leg_does_not_reset_position_open_time():
     # The LEG's own open_time still updates -- that's correct and used for
     # per-leg display/tracking, unrelated to the position-level bug above.
     assert s._position.pe_leg.open_time == datetime(2026, 9, 23, 12, 59, 30)
+
+
+def test_r1_bucket_start_aligns_to_5min_market_anchored_boundaries():
+    """2026-09-23, direct user spec: R1/S1 must run on 5-min bars, anchored
+    to market open (09:15), not clock/midnight-aligned -- e.g. 09:19:59
+    still belongs to the [09:15,09:20) bucket, not [09:15,09:20) rounded to
+    a clock-aligned [09:15,09:20) that would coincidentally match here, but
+    09:12:00 (before the first real bucket even opens) must NOT round up to
+    09:15 -- it belongs to the bucket starting at 09:10 (anchor - 5), same
+    market-anchored arithmetic to_n_min_bars_market_anchored itself uses."""
+    s = _strategy()
+    cases = [
+        (datetime(2026, 9, 23, 9, 15, 0), datetime(2026, 9, 23, 9, 15, 0)),
+        (datetime(2026, 9, 23, 9, 17, 30), datetime(2026, 9, 23, 9, 15, 0)),
+        (datetime(2026, 9, 23, 9, 19, 59), datetime(2026, 9, 23, 9, 15, 0)),
+        (datetime(2026, 9, 23, 9, 20, 0), datetime(2026, 9, 23, 9, 20, 0)),
+        (datetime(2026, 9, 23, 10, 3, 22), datetime(2026, 9, 23, 10, 0, 0)),
+        (datetime(2026, 9, 23, 13, 12, 0), datetime(2026, 9, 23, 13, 10, 0)),
+    ]
+    for now, expected in cases:
+        assert s._r1_bucket_start(now) == expected, f"now={now}"
+
+
+def test_r1_feed_bar_only_processes_candle_on_5min_boundary_change():
+    """Ticks within the same 5-min bucket must accumulate (high/low widen,
+    no process_straddle_candle call); a tick in the NEXT bucket must flush
+    the completed bucket as one 5-min candle (duration=5) before starting a
+    new accumulator."""
+    calls = []
+
+    class _SpyCalc:
+        def process_straddle_candle(self, inst_key, candle):
+            calls.append((inst_key, dict(candle)))
+
+    s = _strategy()
+    entry = {"calc": _SpyCalc(), "inst_key": "NIFTY_PE_23300_TEST", "bar_acc": None}
+
+    s._r1_feed_bar(entry, 100.0, datetime(2026, 9, 23, 10, 1, 0))
+    s._r1_feed_bar(entry, 105.0, datetime(2026, 9, 23, 10, 2, 30))   # same bucket [10:00,10:05)
+    s._r1_feed_bar(entry, 95.0, datetime(2026, 9, 23, 10, 4, 59))    # same bucket, new low
+    assert calls == [], "must not flush mid-bucket"
+    assert entry["bar_acc"] == {"minute": datetime(2026, 9, 23, 10, 0, 0), "h": 105.0, "l": 95.0}
+
+    s._r1_feed_bar(entry, 110.0, datetime(2026, 9, 23, 10, 5, 1))    # next bucket [10:05,10:10)
+    assert len(calls) == 1
+    inst_key, candle = calls[0]
+    assert inst_key == "NIFTY_PE_23300_TEST"
+    assert candle == {
+        "timestamp": datetime(2026, 9, 23, 10, 0, 0), "high": 105.0, "low": 95.0, "duration": 5,
+    }
+    # New bucket's accumulator started fresh with the flushing tick.
+    assert entry["bar_acc"] == {"minute": datetime(2026, 9, 23, 10, 5, 0), "h": 110.0, "l": 110.0}
