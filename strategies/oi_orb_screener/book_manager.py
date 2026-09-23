@@ -115,12 +115,18 @@ _DEFAULT_PARAMS = {
     # (run_system.py's `bus._oiorb_feeder`, separate WS connection from every
     # other strategy) -- a real live trade (KOTAKBANK) proved the old cap=2
     # directly starved the OI-wall/distance-to-wall/PCR filters of real data
-    # for any stock outside the top-2 rank. Raised to 10 (covers a full
-    # top_n_per_side=5-per-side shortlist) now that watching more stocks no
-    # longer risks starving a different strategy's shared feed. Still
-    # per-deployment overridable via strategy_params if the dedicated feeder
-    # isn't configured/available and the shared-budget concern applies again.
-    "chain_watch_max_stocks": 10,
+    # for any stock outside the top-2 rank. 2026-09-23 CORRECTION, real
+    # production incident: the prior "10" default's own reasoning ("watching
+    # more stocks no longer risks starving a different strategy's shared
+    # feed, now that OI-ORB has its own dedicated connection") was wrong in
+    # practice -- the DEDICATED connection itself overflowed (confirmed live,
+    # "101 symbols subscribed -- EXCEEDS the ~50/connection WS limit") at 5
+    # shortlisted stocks x depth=2's 10 contracts/stock = 50, right at the
+    # limit with zero margin. Lowered to 4 (40 symbols, real headroom),
+    # direct user instruction -- every shortlisted stock still gets full
+    # option_native scoring/selection persisted regardless of this cap; it
+    # only limits the separate (currently dead-filter-only) wide chain watch.
+    "chain_watch_max_stocks": 4,
     "vwap_sl_tf_minutes": 5,
     # 2026-08-27, direct user spec: SL/target now track the OPTION's own
     # premium ("checking for target and SL in stock, change it to the
