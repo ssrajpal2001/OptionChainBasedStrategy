@@ -42,3 +42,42 @@ def test_log_file_created():
             assert any("ss_FILE" in f for f in files)
         finally:
             cleanup_handler(lg.name)
+
+
+def test_debug_calls_are_not_written_to_the_file_by_default():
+    """2026-09-23 CRITICAL FIX, real live incident: the file handler had no
+    level of its own, so every .debug(...) call was ALWAYS written to the
+    file at full volume regardless of the logger's own DEBUG level -- a
+    "downgrade to DEBUG" fix produced zero visible change in the real log.
+    The file handler must now genuinely drop DEBUG-level records."""
+    with tempfile.TemporaryDirectory() as d:
+        lg = make_strategy_logger("ss_DEBUGFILTER_20260613", log_dir=d)
+        try:
+            lg.debug("this debug line must NOT reach the file")
+            lg.info("this info line MUST reach the file")
+            for h in lg.handlers:
+                h.flush()
+            path = os.path.join(d, "ss_DEBUGFILTER_20260613.log")
+            with open(path) as f:
+                content = f.read()
+            assert "this info line MUST reach the file" in content
+            assert "this debug line must NOT reach the file" not in content
+        finally:
+            cleanup_handler(lg.name)
+
+
+def test_file_level_can_be_lowered_explicitly():
+    """A caller that genuinely needs full DEBUG detail in the file can still
+    opt in via file_level=logging.DEBUG."""
+    with tempfile.TemporaryDirectory() as d:
+        lg = make_strategy_logger("ss_DEBUGOPTIN_20260613", log_dir=d, file_level=logging.DEBUG)
+        try:
+            lg.debug("this debug line SHOULD reach the file")
+            for h in lg.handlers:
+                h.flush()
+            path = os.path.join(d, "ss_DEBUGOPTIN_20260613.log")
+            with open(path) as f:
+                content = f.read()
+            assert "this debug line SHOULD reach the file" in content
+        finally:
+            cleanup_handler(lg.name)
