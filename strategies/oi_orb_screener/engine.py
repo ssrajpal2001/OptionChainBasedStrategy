@@ -2759,6 +2759,15 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 "bid": picked.get("bid"), "ask": picked.get("ask"),
                 "iv": picked.get("iv"), "delta": picked.get("delta"),
             }
+            # 2026-09-23, direct user spec: "it should have started showing
+            # when we start mid day ... fetch stocks filtered from db ...
+            # get intraday historical data ... this way it will be armed and
+            # we can see data immediately" -- backfill LTP/volume/OI (bid/
+            # ask/delta/IV are already real, seeded synchronously just
+            # above) from real REST history so score/breakdown populate
+            # right away instead of waiting for a fresh live 5-min bucket.
+            # Fire-and-forget: never blocks selection on a REST call.
+            asyncio.create_task(self._seed_native_bars_from_history(symbol, side, contract))
             dist = abs(picked["delta"] - target_delta)
             near_ties = [c for c in in_band
                          if abs(abs(c["delta"] - target_delta) - dist) <= option_native.DEFAULT_TIE_EPSILON]
@@ -2780,6 +2789,87 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
 
         await asyncio.to_thread(store.record_option_native_selection, self._client_id, self._binding_id,
                                  self._today.isoformat() if self._today else None, selection_rows)
+
+    async def _seed_native_bars_from_history(self, symbol: str, side: str,
+                                              contract: "stock_resolve.ResolvedContract") -> None:
+        """2026-09-23, direct user spec: on ANY fresh Layer 1 selection
+        (first-ever pick of the day, or a mid-day restart re-picking the
+        same/a new contract), REST-fetch this contract's real today-so-far
+        1-min intraday history and replay it through the exact same
+        bucket-build -> merge -> score pipeline the live tick path uses
+        (historical=True -- see _native_process_completed_bar's own guard),
+        so the dashboard's score/8-condition breakdown shows real data
+        immediately instead of waiting for a fresh live 5-min bucket to
+        close from a cold start. Real bid/ask/delta/IV are already seeded
+        synchronously at selection time (this function's own caller, just
+        above) -- this only backfills the LTP/volume/OI side, which is what
+        the live tick stream would otherwise have to rebuild from zero.
+
+        Also seeds this contract's own VWAP (self._native_vwap) from the
+        SAME real bars, using each 1-min candle's own (already per-candle,
+        not cumulative) volume as the delta -- this is today's own real
+        data being replayed, not a different day's, so it does NOT repeat
+        the 2026-08-19 "Seed VWAP Contamination" mistake (that incident was
+        specifically about bleeding PRIOR-DAY data across the session
+        boundary; VWAP here still resets fresh at 09:15 same as always,
+        this just fills in what already happened earlier TODAY).
+
+        Best-effort throughout: no Upstox token, no data, a network error,
+        or an already-populated bar list (e.g. a same-strike re-selection)
+        all just mean this contract starts/stays exactly as it would have
+        without this seed -- never blocks Layer 1 selection on a REST call."""
+        key = (symbol, side)
+        if self._native_1m_bars.get(key):
+            return  # already has bars (e.g. same contract re-selected) -- don't reseed over live data
+        try:
+            from data_layer.historical_candles import fetch_upstox_intraday_1m
+            from data_layer.client_db import ClientDB
+            if not contract.upstox_key:
+                return
+            creds = await asyncio.to_thread(ClientDB().get_feeder_creds_sync, "upstox")
+            token = (creds or {}).get("access_token", "")
+            if not token:
+                return
+            bars = await fetch_upstox_intraday_1m(contract.upstox_key, token)
+        except Exception:
+            self._clog.exception(
+                "OiOrb[%s/%s]: option_native history seed failed for %s%s%d "
+                "(non-fatal, starts cold from now).", self._client_id, self._binding_id,
+                symbol, side, contract.strike)
+            return
+        if not bars:
+            return
+        # Re-check under the same race the caller's fire-and-forget task can
+        # hit: a live tick may have already started building real bars for
+        # this exact contract while this REST call was in flight.
+        if self._native_1m_bars.get(key):
+            return
+        tick_bars: list = []
+        for b in bars:
+            try:
+                ts = datetime.fromisoformat(b["ts"]).replace(second=0, microsecond=0)
+                vol = float(b.get("volume") or 0.0)
+                tick_bars.append(option_native.TickBar(
+                    ts=ts, open=float(b["open"]), high=float(b["high"]),
+                    low=float(b["low"]), close=float(b["close"]), volume=vol,
+                    oi=float(b["oi"]) if b.get("oi") else None, change_oi=None,
+                ))
+                if vol > 0:
+                    self._native_vwap.update(f"{symbol}_{side}", float(b["close"]), vol)
+            except Exception:
+                continue
+        if not tick_bars:
+            return
+        self._native_1m_bars[key] = tick_bars
+        completed = option_native.bucket_5min_bars(tick_bars, symbol, side, contract.upstox_key)
+        for feat in completed:
+            self._native_last_bucket_ts[key] = feat.bucket_ts
+            await self._native_process_completed_bar(symbol, side, feat, historical=True)
+        self._clog.info(
+            "OiOrb[%s/%s]: option_native -- seeded %s%s%d from %d real 1-min bars "
+            "(%d completed 5-min buckets, armed immediately).",
+            self._client_id, self._binding_id, symbol, side, contract.strike,
+            len(tick_bars), len(completed))
 
     async def _native_refresh_rest_snapshot(self, symbol: str) -> None:
         """Periodic (option_native_poll_seconds) REST re-poll of bid/ask/iv/
@@ -2899,9 +2989,13 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             await self._native_process_completed_bar(symbol, side, feat)
 
     async def _native_process_completed_bar(self, symbol: str, side: str,
-                                             feat: "option_native.OptionFeatureBar") -> None:
+                                             feat: "option_native.OptionFeatureBar",
+                                             historical: bool = False) -> None:
         """Layer 2 merge + Layer 3 score + Layer 4 entry/exit for ONE just-
-        completed 5-min bucket on ONE (symbol, side)."""
+        completed 5-min bucket on ONE (symbol, side). `historical=True`
+        (set only by _seed_native_bars_from_history's mid-day-restart
+        replay) populates score/breakdown state but skips exit/entry
+        checks entirely -- see that flag's own check below."""
         contract = (self._native_selected.get(symbol) or {}).get(side)
         if contract is None:
             return
@@ -2935,6 +3029,16 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             }], trade_date=self._today.isoformat() if self._today else None)
 
         self._native_last_score[(symbol, side)] = (score, merged, breakdown)
+
+        # 2026-09-23, direct user spec: mid-day-restart history replay
+        # (_seed_native_bars_from_history) reuses this exact same merge/
+        # score/persist pipeline so the dashboard shows real data
+        # immediately instead of starting cold -- but a replayed HISTORICAL
+        # bucket must never check exit/entry (same "populate state, never
+        # trade" discipline this codebase already uses for every other
+        # warmup replay, e.g. D1Trap's _warming_up flag).
+        if historical:
+            return
 
         pos = self._positions.get(symbol)
         if (pos is not None and pos.get("sl_mechanic") == "option_native"
