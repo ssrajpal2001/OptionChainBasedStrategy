@@ -1497,6 +1497,24 @@ class ExitMixin:
         # traded blind on a frozen/unknown leg price.
         if self._post_restore_warmup:
             _both_fresh = self._ce_ltp_fresh and self._pe_ltp_fresh
+            # 2026-09-23, direct user spec ("when we start in middle of the
+            # day... all indicators should be warmed up"): "fresh LTP has
+            # arrived" alone doesn't mean every indicator is actually ready --
+            # confirmed live, a calculative vwap_source binding's own VWAP
+            # accumulator (self._shadow_vwap) has NO persistence at all and
+            # is rebuilt by a separate async REST fetch (see engine.py's
+            # _eng_atp computation, fixed 2026-09-23 to fall back safely to
+            # broker ATP mid-seed). That per-tick fallback already prevents a
+            # bad VALUE from being trusted; this is the belt-and-suspenders
+            # layer on the SEQUENCING side the user asked for -- exits stay
+            # held a little longer after a restart specifically for a
+            # calculative binding, until its own VWAP source has genuinely
+            # finished warming up, not just until a price has ticked.
+            if _both_fresh and self._vwap_source == "calculative":
+                _ce_key = (int(pos.ce_leg.strike), "CE")
+                _pe_key = (int(pos.pe_leg.strike), "PE")
+                _both_fresh = (_ce_key in self._shadow_vwap_rest_seeded
+                                and _pe_key in self._shadow_vwap_rest_seeded)
             _elapsed = _t.monotonic() - self._post_restore_at
             if _both_fresh:
                 self._post_restore_warmup = False

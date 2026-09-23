@@ -64,6 +64,30 @@ def test_exits_armed_immediately_when_both_fresh():
     assert s._position is not None and s._position.status == "open"
 
 
+def test_calculative_binding_stays_held_until_shadow_vwap_seeded_even_with_fresh_ltp():
+    """2026-09-23, direct user spec: "fresh LTP has arrived" alone isn't
+    enough for a calculative vwap_source binding -- its own VWAP source
+    (self._shadow_vwap) has no persistence and needs its async REST seed to
+    land first (see the same-day _eng_atp fix). Both legs' LTP ticking must
+    NOT be enough to arm exits on its own here."""
+    s = _restored_strategy(EventBus(), elapsed_sec=2.0, ce_fresh=True, pe_fresh=True)
+    s._vwap_source = "calculative"
+    # Neither leg's key is in _shadow_vwap_rest_seeded yet.
+    asyncio.run(s._check_exits())
+    assert s._post_restore_warmup is True, "must stay held -- shadow VWAP not seeded yet"
+    s._check_itm_pair_gate.assert_not_awaited()
+
+
+def test_calculative_binding_arms_once_both_legs_shadow_vwap_seeded():
+    s = _restored_strategy(EventBus(), elapsed_sec=2.0, ce_fresh=True, pe_fresh=True)
+    s._vwap_source = "calculative"
+    s._shadow_vwap_rest_seeded.add((23900, "CE"))
+    s._shadow_vwap_rest_seeded.add((24100, "PE"))
+    asyncio.run(s._check_exits())
+    assert s._post_restore_warmup is False
+    s._check_itm_pair_gate.assert_awaited()
+
+
 def test_old_20s_ceiling_no_longer_releases_a_still_stale_leg():
     """The exact 2026-08-05 shape: CE still not fresh at 20s (would have
     fired under the original 20s ceiling) -- must now stay held, well under
