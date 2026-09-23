@@ -8558,7 +8558,8 @@ function amoTest() {
                           <template x-if="(_bk.shortlist||[]).length===0">
                             <div class="text-center py-1" style="color:var(--t-dim)">No shortlist yet — scanning</div>
                           </template>
-                          <template x-for="row in (_bk.shortlist||[]).slice(0,8).map(s => ({sym: s, pc: (_bk.shortlist_pchange||{})[s], vw: _liveVwapDist(s, (_bk.shortlist_vwap||{})[s]), rt: (_bk.retest_trackers||{})[s], foi: ((_bk.shortlist_vwap||{})[s]||{}).futures_oi}))" :key="row.sym">
+                          <template x-for="row in (_bk.shortlist||[]).slice(0,8).map(s => ({sym: s, pc: (_bk.shortlist_pchange||{})[s], native: (_bk.option_native||{})[s], foi: ((_bk.shortlist_vwap||{})[s]||{}).futures_oi}))" :key="row.sym">
+                            <div class="mb-2 pb-1" style="border-bottom:1px solid var(--t-border)">
                             <div class="flex items-center justify-between mb-1">
                               <span class="px-1.5 py-0.5 rounded font-bold"
                                     :style="row.pc>0?'background:rgba(16,185,129,0.15);color:var(--t-green)':'background:rgba(239,68,68,0.15);color:var(--t-red)'"
@@ -8566,17 +8567,37 @@ function amoTest() {
                               <span style="color:var(--t-text)" x-text="row.sym"></span>
                               <span style="color:var(--t-muted)"
                                     x-text="(_bk.orb_frozen && _bk.orb_frozen[row.sym]) ? ('ORB '+fmt(_bk.orb_frozen[row.sym][1])+'–'+fmt(_bk.orb_frozen[row.sym][0])) : 'ORB pending'"></span>
-                              <span :style="!row.vw||row.vw.vwap_dist==null?'color:var(--t-dim)':(row.vw.vwap_dist>=0?'color:var(--t-green)':'color:var(--t-red)')"
-                                    :title="row.vw&&row.vw.vwap!=null?('LTP '+fmt(row.vw.ltp)+' vs VWAP '+fmt(row.vw.vwap)):'VWAP not warm yet'"
-                                    x-text="!row.vw||row.vw.vwap_dist==null?'VWAP —':((row.vw.vwap_dist>=0?'+':'')+row.vw.vwap_dist.toFixed(2)+' ('+(row.vw.vwap_dist_pct>=0?'+':'')+row.vw.vwap_dist_pct.toFixed(2)+'%) vs VWAP')"></span>
-                              <!-- 2026-09-09: rolling arm-then-retest tracker state -- "armed" means
-                                   price crossed to this side of VWAP and is waiting for the retest
-                                   touch within the rolling 15-candle window before it expires. -->
-                              <span class="px-1 py-0.5 rounded" style="font-size:10px"
-                                    :style="row.rt&&row.rt.armed?'background:rgba(6,182,212,0.15);color:var(--t-cyan)':'color:var(--t-dim)'"
-                                    :title="row.rt&&row.rt.armed_at?('armed at '+row.rt.armed_at.slice(11,19)):''"
-                                    x-text="row.rt&&row.rt.armed?('ARMED '+row.rt.armed_side):'not armed'"></span>
                             </div>
+                            <!-- 2026-09-23, direct user spec: real entry-logic data, per side --
+                                 each side's OWN option-contract VWAP (never the stock's spot VWAP,
+                                 which drove nothing since the mechanic that used it was removed) --
+                                 plus the live 8-point score and the full condition breakdown, so
+                                 "what exactly happened" is visible on the dashboard, not just in
+                                 the log file. -->
+                            <template x-for="side in ['CE','PE']" :key="row.sym+side">
+                              <div x-show="row.native && row.native[side] && !row.native[side].skipped" class="mb-1" style="font-size:10px">
+                                <div class="flex items-center justify-between">
+                                  <span :style="side==='CE'?'color:var(--t-green)':'color:var(--t-red)'" class="font-bold"
+                                        x-text="side+' '+(row.native&&row.native[side]?row.native[side].strike:'')"></span>
+                                  <span :style="row.native&&row.native[side]&&row.native[side].vwap!=null&&row.native[side].ltp_close!=null
+                                                ? (row.native[side].ltp_close>=row.native[side].vwap?'color:var(--t-green)':'color:var(--t-red)')
+                                                : 'color:var(--t-dim)'"
+                                        x-text="row.native&&row.native[side]&&row.native[side].vwap!=null
+                                                ? ('LTP '+fmt(row.native[side].ltp_close)+' vs VWAP '+fmt(row.native[side].vwap))
+                                                : 'warming up'"></span>
+                                  <span class="px-1 py-0.5 rounded font-bold"
+                                        :style="row.native&&row.native[side]&&row.native[side].score>=6?'background:rgba(6,182,212,0.15);color:var(--t-cyan)':'color:var(--t-dim)'"
+                                        x-text="row.native&&row.native[side]&&row.native[side].score!=null?('score '+row.native[side].score+'/8'):'score —'"></span>
+                                </div>
+                                <div class="flex flex-wrap gap-1 mt-0.5" x-show="row.native && row.native[side] && row.native[side].score_breakdown">
+                                  <template x-for="cond in ['ltp_above_vwap','ltp_rising','volume_rising','oi_rising','bid_rising','tight_spread','delta_in_band','iv_supportive']" :key="cond">
+                                    <span class="px-1 rounded" style="font-size:9px"
+                                          :style="(row.native&&row.native[side]&&row.native[side].score_breakdown&&row.native[side].score_breakdown[cond])?'background:rgba(16,185,129,0.15);color:var(--t-green)':'background:rgba(239,68,68,0.08);color:var(--t-dim)'"
+                                          x-text="((row.native&&row.native[side]&&row.native[side].score_breakdown&&row.native[side].score_breakdown[cond])?'✓ ':'✗ ')+cond.replaceAll('_',' ')"></span>
+                                  </template>
+                                </div>
+                              </div>
+                            </template>
                             <!-- 2026-09-16, direct user spec, REVISED: the gate compares TWO
                                  FIXED points -- today's own 09:15 OI vs yesterday's own 15:39
                                  OI -- not a repeatedly-polled live value. Both shown plainly. -->
@@ -8584,6 +8605,7 @@ function amoTest() {
                               <span style="color:var(--t-muted)">Futures OI 09:15 / yday 15:39</span>
                               <span :style="(row.foi&&row.foi.oi_change_pct>=0)?'color:var(--t-green)':'color:var(--t-red)'"
                                     x-text="row.foi ? (Math.round(row.foi.today_0915_oi).toLocaleString()+' / '+Math.round(row.foi.yday_1539_oi).toLocaleString()+' ('+(row.foi.oi_change_pct>=0?'+':'')+row.foi.oi_change_pct.toFixed(2)+'%)') : ''"></span>
+                            </div>
                             </div>
                           </template>
                           <div x-show="(_bk.shortlist||[]).length>8" class="mt-1 text-right" style="color:var(--t-dim);font-size:10px"

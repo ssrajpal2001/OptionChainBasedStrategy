@@ -664,7 +664,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._native_cum_vol_last: Dict[tuple, float] = {}
         self._native_feature_bars: Dict[tuple, list] = {}     # (symbol, side) -> list[OptionFeatureBar], completed
         self._native_last_bucket_ts: Dict[tuple, datetime] = {}
-        self._native_last_score: Dict[tuple, tuple] = {}      # (symbol, side) -> (score, OptionFeatureBar) of latest bar
+        self._native_last_score: Dict[tuple, tuple] = {}      # (symbol, side) -> (score, OptionFeatureBar, breakdown_dict) of latest bar
         self._native_rest_snapshot: Dict[tuple, dict] = {}    # (symbol, side) -> {"bid","ask","iv","delta"}
         self._native_last_poll_ts_by_symbol: Dict[str, float] = {}
         # Own independent VWAP per (symbol, side) contract (decision 11 --
@@ -2934,7 +2934,7 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 "oi_price_reversal_state": oi_state,
             }], trade_date=self._today.isoformat() if self._today else None)
 
-        self._native_last_score[(symbol, side)] = (score, merged)
+        self._native_last_score[(symbol, side)] = (score, merged, breakdown)
 
         pos = self._positions.get(symbol)
         if (pos is not None and pos.get("sl_mechanic") == "option_native"
@@ -4521,17 +4521,19 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         # trusts (tick-primary, poll-fallback already resolved), so reading
         # it here instead keeps this panel consistent with what the log
         # already shows, rather than re-deriving a stricter, tick-only value.
+        # 2026-09-23, direct user instruction: the ltp/vwap/vwap_dist fields
+        # this dict used to carry were the STOCK's own spot-price VWAP (the
+        # dead VWAP-retest entry mechanic's own display, removed 2026-09-22 --
+        # confirmed zero live callers) -- misleading on the dashboard since it
+        # visually implied VWAP was still driving entries. The real entry
+        # logic's own per-CONTRACT VWAP (CE and PE, each independent) now
+        # shows via option_native_state below instead. futures_oi is
+        # unrelated to VWAP and kept as-is.
         shortlist_vwap = {}
         for sym in self._shortlist_symbols:
-            ltp = self._last_known_price.get(sym)
-            vwap = self._vwap.current(sym)
-            dist = round(ltp - vwap, 2) if (ltp is not None and vwap) else None
-            dist_pct = round((ltp - vwap) / vwap * 100.0, 2) if (ltp is not None and vwap) else None
             _t0915 = self._today_0915_oi.get(sym)
             _y1539 = self._prev_day_last_tick_oi.get(sym)
             shortlist_vwap[sym] = {
-                "ltp": ltp, "vwap": round(vwap, 2) if vwap is not None else None,
-                "vwap_dist": dist, "vwap_dist_pct": dist_pct,
                 "futures_oi": ({"today_0915_oi": _t0915, "yday_1539_oi": _y1539,
                                 "oi_change_pct": round((_t0915 - _y1539) / _y1539 * 100.0, 2)}
                                if (_t0915 is not None and _y1539) else None),
@@ -4557,6 +4559,13 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                     "score": bar[0] if bar is not None else None,
                     "vwap": bar[1].vwap if bar is not None else None,
                     "ltp_close": bar[1].ltp_close if bar is not None else None,
+                    # 2026-09-23, direct user spec: surface the full 8-condition
+                    # breakdown so the dashboard shows exactly which of the 8
+                    # equally-weighted score conditions are true/false right now,
+                    # not just the final number -- same dict already persisted to
+                    # option_native_feature_history.score_breakdown, read back
+                    # from the in-memory tuple rather than re-queried from the DB.
+                    "score_breakdown": bar[2] if (bar is not None and len(bar) > 2) else None,
                 } if (c is not None or bar is not None) else {"skipped": True}
             option_native_state[sym] = side_state
         return {
