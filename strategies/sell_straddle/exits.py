@@ -2023,25 +2023,32 @@ class ExitMixin:
                         _ce_pnl = float(pos.ce_leg.entry_price) - float(getattr(pos.ce_leg, "ltp", 0.0) or 0.0)
                         _pe_pnl = float(pos.pe_leg.entry_price) - float(getattr(pos.pe_leg, "ltp", 0.0) or 0.0)
                         _less_burning = "CE" if _ce_pnl >= _pe_pnl else "PE"
-                        # 2026-08-25 fix (user request, after reviewing a real log): the condition
-                        # can stay continuously true for the whole ~55s a 1-min defer window is
-                        # open (VWAP sitting >=threshold above its session low across many ticks),
-                        # and this used to log unconditionally on EVERY tick -- hundreds of
-                        # near-identical lines a fraction of a second apart, for a roll that only
-                        # ever actually executes once at the boundary. _defer_exit already tracks
-                        # this exact transition internally (_exit_pending_reason); reuse it here so
-                        # this line logs at most twice per cycle -- once on first detection, once
-                        # when it actually executes -- matching how many times a roll genuinely
-                        # happens, not how many ticks the condition was true for.
+                        # 2026-08-25 fix: throttled to at most twice per defer cycle (once on
+                        # first detection, once on execution) instead of once per tick.
+                        # 2026-09-23 fix (user request -- real log showed this still repeating
+                        # every defer-tf boundary, e.g. every 1-2 min, for as long as the rise
+                        # condition stayed true -- sometimes the whole session -- bloating the
+                        # log file with duplicate info that rolling.py's own "ROLLOVER STARTED"
+                        # line (which DOES need to log every retry attempt, and does so on its
+                        # own throttle) already covers. This line now logs at most ONCE per
+                        # rise "episode" -- suppressed on every later boundary for the same
+                        # session_min_vwap low, and only re-armed once a roll actually succeeds
+                        # (rolling.py resets session_min_vwap=inf, which yields a new low value
+                        # and a new episode) or the rise condition drops back below threshold.
+                        # The actual roll attempt (_single_side_roll, and its own per-retry
+                        # ROLLOVER STARTED / partner-search-trace logging) still runs every
+                        # cycle unchanged -- only this outer diagnostic line is de-duplicated.
                         _was_pending = getattr(self, "_exit_pending_reason", None) == "vwap_rise"
                         _execute_now = self._defer_exit("vwap_rise", now)
-                        if _execute_now or not _was_pending:
+                        _already_alerted = getattr(self, "_vwap_rise_alert_low", None) == pos.session_min_vwap
+                        if (_execute_now or not _was_pending) and not _already_alerted:
                             self._clog.info(
                                 "SellStraddle[%s]: VWAP RISE — rise=%.2f%% curr=%.2f low=%.2f → "
                                 "single-side roll (CE pnl=%.2f PE pnl=%.2f)",
                                 self._underlying, rise_pct, curr_vwap, pos.session_min_vwap,
                                 _ce_pnl, _pe_pnl,
                             )
+                            self._vwap_rise_alert_low = pos.session_min_vwap
                         if not _execute_now:
                             return
                         await self._single_side_roll(now, "vwap_rise_roll")
