@@ -170,16 +170,52 @@ def test_directional_accepts_first_candidate_that_clears_min_gap():
     assert res == (21900, 140.0)
 
 
-def test_directional_never_searches_away_from_spot():
-    # A CE roll only ever searches DOWN (toward spot) from the closing strike --
-    # a cheaper, gap-clearing candidate sitting ABOVE (farther OTM) must never
-    # be considered even though it would otherwise pass every filter.
-    cache = _cache({(22500, "PE"): 150.0, (22100, "CE"): 10.0})  # above closing_strike, wrong direction
+def test_directional_falls_back_to_away_from_spot_when_toward_spot_finds_nothing():
+    # 2026-09-23, direct user spec, real live incident: the toward-spot-only
+    # direction used to give up entirely here, even though a real, valid,
+    # gap-clearing candidate sits on the OTHER side (farther OTM) -- confirmed
+    # live, a kept leg repeatedly found "no valid partner" while the pool
+    # diagnostic dump in the SAME log line showed several real, fresh, cheap
+    # candidates just past the closing strike in the away-from-spot direction.
+    # Now the fallback finds it: nothing toward spot (22100/CE has no quote in
+    # this cache at all within reach), so the search tries the opposite
+    # direction and finds CE22100 -- gap-clearing, premium (10.0) well below
+    # the kept leg's 150.0.
+    cache = _cache({(22500, "PE"): 150.0, (22100, "CE"): 10.0})  # above closing_strike, fallback direction
     res = select_rollover_partner_directional(
         cache, roll_side="CE", kept_strike=22500, kept_ltp=150.0, closing_strike=22000,
         spot=21980, real_step=50, min_gap_pts=100, rule_pass=lambda cs, ps: True,
     )
-    assert res is None
+    assert res == (22100, 10.0)
+
+
+def test_directional_toward_spot_still_wins_over_fallback_when_both_have_candidates():
+    # The 2026-09-23 fallback must never override the existing 2026-08-27
+    # "prefer toward-spot" design when the primary direction genuinely has a
+    # valid candidate -- CE21950 (toward spot, gap 50<100 skipped), CE21900
+    # (toward spot, gap 100, real candidate) must win over CE22100 (away from
+    # spot, also a real candidate, but the fallback must never even run once
+    # the primary direction already succeeded).
+    cache = _cache({(22500, "PE"): 150.0, (21900, "CE"): 80.0, (22100, "CE"): 10.0})
+    res = select_rollover_partner_directional(
+        cache, roll_side="CE", kept_strike=22500, kept_ltp=150.0, closing_strike=22000,
+        spot=21980, real_step=50, min_gap_pts=100, rule_pass=lambda cs, ps: True,
+    )
+    assert res == (21900, 80.0)
+
+
+def test_directional_fallback_picks_closest_to_kept_not_first_found():
+    # Unlike the primary (first-that-passes) search, the fallback must pick
+    # the BEST match (closest to, but not above, kept_ltp) across the whole
+    # away-from-spot range, not just the first one encountered -- CE22100
+    # (ltp=10.0, far from kept 150.0) is found first walking outward, but
+    # CE22300 (ltp=140.0, much closer to 150.0) must win instead.
+    cache = _cache({(22500, "PE"): 150.0, (22100, "CE"): 10.0, (22300, "CE"): 140.0})
+    res = select_rollover_partner_directional(
+        cache, roll_side="CE", kept_strike=22500, kept_ltp=150.0, closing_strike=22000,
+        spot=21980, real_step=50, min_gap_pts=100, rule_pass=lambda cs, ps: True,
+    )
+    assert res == (22300, 140.0)
 
 
 def test_directional_put_side_searches_upward_toward_spot():

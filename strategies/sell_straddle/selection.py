@@ -416,6 +416,30 @@ def select_rollover_partner_directional(
     original 500pt reach at max_itm_steps=5 started getting rejected at
     250pts once this was wrongly conflated with the 50pt candidate grid).
 
+    2026-09-23 EXTENSION, direct user spec, after a real live incident (Gurmeet's
+    book: kept PE23350 @97.35, closing CE23500, every toward-spot candidate from
+    23450 down to 22800 rejected -- 11 on ltp_above_kept, since going MORE ITM
+    only ever makes CE premium go UP, never down, so that whole direction was
+    structurally guaranteed to fail. The pool diagnostic dump in the SAME log
+    line showed CE23550/23600/23650/23700 all real, fresh, and comfortably below
+    97.35 -- genuinely valid partners sitting on the OTHER side of closing_strike,
+    which the toward-spot-only design never even looks at). User's own framing:
+    "we will check other side which should be below [kept_ltp] but near to that
+    price" -- i.e. the closest-from-below match, not just the first found.
+
+    FALLBACK (only runs if the toward-spot search above finds nothing): search
+    the OPPOSITE direction -- further OTM than closing_strike, away from spot --
+    using the exact same filter chain (quote/ITM-cap/ltp_le_kept/rule_pass), but
+    unlike the primary search's "first that passes wins", this scans the WHOLE
+    range and picks the candidate with the SMALLEST |ltp - kept_ltp| (closest to,
+    but never above, kept_ltp) -- _evaluate_roll_candidate already computes
+    exactly this as diag["score"] for every passing candidate, previously just
+    never used by this function since the old primary-only design stopped at
+    the first hit. The primary toward-spot direction is tried FIRST and still
+    wins outright if it finds anything -- this fallback only ever fires when it
+    doesn't, so the 2026-08-27 "moving toward the market price" preference for
+    the common case is unchanged.
+
     Returns (strike, ltp) or None (caller falls back to "keep original pair")."""
     direction = -1 if roll_side == "CE" else 1
     if trace is not None:
@@ -454,7 +478,7 @@ def select_rollover_partner_directional(
                 trace.append({
                     "event": "select_partner_for_end", "best_strike": strike,
                     "best_ltp": diag["ltp"], "reject_counts": reject_counts,
-                    "candidates_total": checked,
+                    "candidates_total": checked, "direction_used": "toward_spot",
                 })
             return (strike, diag["ltp"])
         _reason_key = diag["reject_reason"].split(" ", 1)[0].split("(", 1)[0].strip()
@@ -462,10 +486,59 @@ def select_rollover_partner_directional(
         if trace is not None:
             trace.append(diag)
 
+    # Fallback: toward-spot direction found nothing -- try the opposite
+    # (further-OTM) direction, best-match (closest to kept_ltp from below)
+    # instead of first-found, since this is the less-natural direction.
+    fb_reject_counts = {
+        "no_quote_in_pool": 0, "too_itm": 0, "min_gap_violation": 0,
+        "ltp_above_kept": 0, "rule_fail": 0,
+    }
+    fb_checked = 0
+    best: Optional[Tuple[int, float]] = None
+    best_score: Optional[float] = None
+    for i in range(1, max_search_steps + 1):
+        strike = int(closing_strike - direction * real_step * i)
+        gap = abs(strike - closing_strike)
+        if gap < min_gap_pts:
+            fb_reject_counts["min_gap_violation"] += 1
+            if trace is not None:
+                trace.append({
+                    "event": "candidate", "roll_side": roll_side, "strike": strike,
+                    "reject_reason": f"min_gap_violation ({gap:.0f} < {min_gap_pts:.0f})",
+                    "search_direction": "away_from_spot_fallback",
+                })
+            continue
+        fb_checked += 1
+        diag = _evaluate_roll_candidate(
+            strike_prem, roll_side, strike, kept_strike, kept_ltp, spot, itm_cap_step_pts,
+            0.0, 0.0, max_itm_steps, True, rule_pass, "closest_to_kept",
+        )
+        diag["search_direction"] = "away_from_spot_fallback"
+        if trace is not None:
+            trace.append(diag)
+        if diag["reject_reason"] is None:
+            if best is None or diag["score"] < best_score:
+                best = (strike, diag["ltp"])
+                best_score = diag["score"]
+        else:
+            _reason_key = diag["reject_reason"].split(" ", 1)[0].split("(", 1)[0].strip()
+            fb_reject_counts[_reason_key if _reason_key in fb_reject_counts else "rule_fail"] += 1
+
+    if best is not None:
+        if trace is not None:
+            trace.append({
+                "event": "select_partner_for_end", "best_strike": best[0],
+                "best_ltp": best[1], "reject_counts": fb_reject_counts,
+                "candidates_total": checked + fb_checked, "direction_used": "away_from_spot_fallback",
+            })
+        return best
+
     if trace is not None:
+        _combined = {k: reject_counts.get(k, 0) + fb_reject_counts.get(k, 0) for k in reject_counts}
         trace.append({
             "event": "select_partner_for_end", "best_strike": None, "best_ltp": None,
-            "reject_counts": reject_counts, "candidates_total": checked,
+            "reject_counts": _combined, "candidates_total": checked + fb_checked,
+            "direction_used": "none (both directions exhausted)",
         })
     return None
 
