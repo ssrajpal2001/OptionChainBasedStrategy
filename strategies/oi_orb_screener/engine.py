@@ -1639,7 +1639,13 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             # dedicated OI-ORB WS connection past 100 symbols at the old
             # depth=4 (see _ensure_chain_subscription's own docstring for the
             # full incident) -- narrowed to depth=2 there rather than
-            # disabled, per direct user instruction.
+            # disabled, per direct user instruction. Same-day follow-up:
+            # release any stock that has since fallen OUT of watch_list
+            # before (re-)subscribing the current ranked set, so a shortlist
+            # with real rank churn can't accumulate stale chain subscriptions
+            # on top of the fixed depth=2 footprint -- see
+            # _sync_chain_watch_list's own docstring.
+            await self._sync_chain_watch_list(watch_list)
             for sym in watch_list:
                 try:
                     row = sl_indexed.loc[sym] if sym in sl_indexed.index else None
@@ -2475,6 +2481,46 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._clog.info("OiOrb[%s/%s]: chain tracking started for %s (ATM=%.2f depth=%d, %d contracts).",
                          self._client_id, self._binding_id, stock_symbol,
                          mat.snapshot().atm_strike, depth, len(keys))
+
+    async def _sync_chain_watch_list(self, watch_list: list) -> None:
+        """2026-09-23, direct user spec (real live incident, "unsubscribe
+        stale chain-watch when a stock drops out of top-4"): chain-watch
+        subscriptions were purely additive -- _ensure_chain_subscription is
+        idempotent per stock (never re-subscribes one already in
+        self._stock_chains) but nothing ever RELEASED a stock's ~10 chain
+        symbols once it fell out of the ranked top chain_watch_max_stocks,
+        so a shortlist with real rank churn over the day could accumulate
+        chain-watch subscriptions well beyond the intended fixed ~40-symbol
+        footprint (chain_watch_max_stocks=4 x ~10 symbols/stock at the
+        current depth=2), silently eating further into the same ~50/
+        connection WS budget the 2026-09-23 depth=4->2 fix was already
+        trying to protect (see _ensure_chain_subscription's own docstring
+        for that same-day incident). Called BEFORE _ensure_chain_subscription
+        is invoked for the new watch_list on every rescan -- diffs the
+        CURRENTLY chain-watched stocks against the new ranked list and
+        unsubscribes/drops tracking for anything no longer in it, so
+        chain-watch usage stays capped at chain_watch_max_stocks stocks at
+        all times, never accumulating stale entries from stocks that have
+        since fallen in rank."""
+        stale = [sym for sym in self._stock_chains if sym not in watch_list]
+        if not stale:
+            return
+        gf = getattr(self._bus, "_oiorb_feeder", None) or getattr(self._bus, "_global_feeder", None)
+        for sym in stale:
+            keys = self._chain_subscribed.pop(sym, [])
+            self._stock_chains.pop(sym, None)
+            if keys and gf is not None and hasattr(gf, "unsubscribe_tokens"):
+                try:
+                    await gf.unsubscribe_tokens(keys)
+                except Exception:
+                    self._clog.exception(
+                        "OiOrb[%s/%s]: chain unsubscribe failed for %s (stale keys may keep "
+                        "consuming WS budget until the next reconnect).",
+                        self._client_id, self._binding_id, sym)
+            self._clog.info(
+                "OiOrb[%s/%s]: chain tracking dropped for %s (%d symbols unsubscribed) -- "
+                "no longer in the top %d ranked shortlist.",
+                self._client_id, self._binding_id, sym, len(keys), self._chain_watch_max_stocks)
 
     def _maybe_log_heartbeat(self, heartbeat_parts: list) -> None:
         """2026-08-27, direct user spec: real observation was "only one log is

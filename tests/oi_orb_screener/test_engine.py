@@ -41,10 +41,14 @@ def _isolated_store_db(tmp_path, monkeypatch):
 class _FakeGlobalFeeder:
     def __init__(self) -> None:
         self.subscribed_tokens: list = []
+        self.unsubscribed_tokens: list = []
         self.subscribed_equity: list = []   # [(fyers_sym, underlying), ...]
 
     async def subscribe_tokens(self, tokens):
         self.subscribed_tokens.extend(tokens)
+
+    async def unsubscribe_tokens(self, tokens):
+        self.unsubscribed_tokens.extend(tokens)
 
     def subscribe_fno_equity(self, fyers_sym, underlying):
         self.subscribed_equity.append((fyers_sym, underlying))
@@ -3115,3 +3119,42 @@ async def test_backfill_futures_oi_display_failure_is_non_fatal(monkeypatch):
     assert "TESTSTOCK" not in book._today_0915_oi
 
 
+
+
+@pytest.mark.asyncio
+async def test_sync_chain_watch_list_unsubscribes_stock_that_falls_out_of_top_n():
+    """2026-09-23, direct user spec (real live incident): chain-watch
+    subscriptions used to be purely additive -- a stock that fell out of the
+    ranked top chain_watch_max_stocks kept its ~10 chain symbols subscribed
+    forever, silently eating into the shared ~50/connection WS budget.
+    _sync_chain_watch_list must unsubscribe and drop tracking for any stock
+    no longer in the new watch_list, leaving stocks still in it untouched."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._stock_chains = {"OLDSTOCK": object(), "KEPTSTOCK": object()}
+    book._chain_subscribed = {
+        "OLDSTOCK": ["NSE_FO|1", "NSE_FO|2"],
+        "KEPTSTOCK": ["NSE_FO|3", "NSE_FO|4"],
+    }
+
+    await book._sync_chain_watch_list(["KEPTSTOCK", "NEWSTOCK"])
+
+    assert "OLDSTOCK" not in book._stock_chains
+    assert "OLDSTOCK" not in book._chain_subscribed
+    assert sorted(bus._global_feeder.unsubscribed_tokens) == ["NSE_FO|1", "NSE_FO|2"]
+    # Still-ranked stock is untouched -- not re-subscribed, not unsubscribed.
+    assert "KEPTSTOCK" in book._stock_chains
+    assert book._chain_subscribed["KEPTSTOCK"] == ["NSE_FO|3", "NSE_FO|4"]
+
+
+@pytest.mark.asyncio
+async def test_sync_chain_watch_list_noop_when_nothing_fell_out():
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._stock_chains = {"KEPTSTOCK": object()}
+    book._chain_subscribed = {"KEPTSTOCK": ["NSE_FO|3"]}
+
+    await book._sync_chain_watch_list(["KEPTSTOCK", "NEWSTOCK"])
+
+    assert bus._global_feeder.unsubscribed_tokens == []
+    assert "KEPTSTOCK" in book._stock_chains
