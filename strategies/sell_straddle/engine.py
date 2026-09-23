@@ -1935,15 +1935,15 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                 return
             st["cum_pv"] += cum_pv
             st["cum_v"] += cum_v
-            # 2026-09-23, direct user spec: this accumulator is dual-purpose --
-            # for a "calculative" vwap_source binding (e.g. sell_straddle_calc_vwap)
-            # it IS the real, decision-driving VWAP, so the seed is worth an INFO
-            # line. For a binding only running this for the broker-ATP comparison
-            # (shadow_vwap_enabled=True, vwap_source stays "broker") it's pure
-            # diagnostic -- demoted to DEBUG so it doesn't clutter the per-binding
-            # log with ~80 lines every time the pool re-subscribes (e.g. a restart).
-            _seed_log = self._clog.info if self._vwap_source == "calculative" else self._clog.debug
-            _seed_log(
+            # 2026-09-23: originally kept at INFO for a "calculative" vwap_source
+            # binding (e.g. sell_straddle_calc_vwap) on the reasoning that this
+            # accumulator IS the real, decision-driving VWAP there, not just a
+            # broker-ATP diagnostic -- direct user follow-up overrode that: the
+            # ~85-line per-strike burst every restart/pool-resubscribe is noise
+            # regardless of WHY the accumulator exists, same as any other
+            # binding. Always DEBUG now; still recoverable by enabling DEBUG
+            # logging if the real seed values ever need auditing again.
+            self._clog.debug(
                 "SHADOW_VWAP REST-SEED %s%d — %d bars, seed_vwap=%.2f (cum_v=%d) merged in "
                 "(now cum_pv=%.2f cum_v=%.2f).",
                 side, int(strike), len(bars), cum_pv / cum_v, cum_v, st["cum_pv"], st["cum_v"],
