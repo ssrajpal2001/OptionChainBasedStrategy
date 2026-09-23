@@ -1202,15 +1202,28 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             if h is not None:
                 self._orb_frozen[sym] = (h, l)
                 new_orb_levels.append((sym, h, l))
-            # Chain subscription for the 5 additive filters, same shared-WS-budget
-            # cap as the morning batch -- only if there's still room.
-            if len(self._shortlist_symbols) <= self._chain_watch_max_stocks:
-                try:
-                    spot = float(row["lastPrice"]) if "lastPrice" in shortlist.columns else 0.0
-                    await self._ensure_chain_subscription(sym, spot)
-                except Exception:
-                    self._clog.exception("OiOrb[%s/%s]: afternoon-scan chain subscription failed "
-                                          "for %s.", self._client_id, self._binding_id, sym)
+            # 2026-09-23 CRITICAL FIX, real production incident: this wide
+            # ATM+/-4-depth chain subscription (~18 contracts/stock) exists
+            # ONLY to feed the 5 additive filters (oi_wall/distance_to_wall/
+            # pcr/volume_confirmation/oi_roc) via _evaluate_additive_filters --
+            # confirmed dead code, zero live callers, since the old VWAP-retest
+            # entry mechanic that used to call it was removed 2026-09-22. With
+            # 5 shortlisted stocks x 18 contracts, this alone pushed the
+            # dedicated OI-ORB WS connection to 90-101 symbols, well past the
+            # documented ~50/connection limit -- confirmed live via real
+            # "EXCEEDS the ~50/connection WS limit" warnings (up to 101
+            # symbols) starting 10:08, and directly traced to 3 real missed
+            # option_native entries (ATHERENERG CE1480/BANDHANBNK PE190/
+            # MOTILALOFS CE1040 all hit "no live option LTP within 20s") plus
+            # RADICO PE's ltp_close frozen at a stale 300.0 for 15+ minutes --
+            # all on this same over-subscribed connection. Disabled entirely
+            # (not just capped tighter) since the filters it fed do nothing;
+            # frees real WS budget for the option-native mechanic's actual
+            # trade-relevant contract subscriptions. The WATCH line's own
+            # "OI=+x%" display is unaffected -- confirmed it reads
+            # self._oi_history, populated by a separate REST poll
+            # (fetch_oi_spurts_nse), not this WS chain subscription.
+            pass
 
         await asyncio.to_thread(store.record_shortlist, self._client_id, self._binding_id, new_rows)
         for sym, h, l in new_orb_levels:
@@ -1625,15 +1638,15 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                     self._client_id, self._binding_id, self._chain_watch_max_stocks, watch_list,
                     [s for s in self._shortlist_symbols if s not in watch_list],
                 )
-            for sym in watch_list:
-                try:
-                    row = sl_indexed.loc[sym] if sym in sl_indexed.index else None
-                    spot = float(row["lastPrice"]) if row is not None and "lastPrice" in shortlist.columns else 0.0
-                    await self._ensure_chain_subscription(sym, spot)
-                except Exception:
-                    self._clog.exception("OiOrb[%s/%s]: chain subscription setup failed for %s "
-                                          "(chain-dependent filters will report unavailable for it).",
-                                          self._client_id, self._binding_id, sym)
+            # 2026-09-23 CRITICAL FIX, real production incident: disabled --
+            # see the matching disable + full incident writeup at this same
+            # call site's sibling in the afternoon-scan onboarding block
+            # above. This is the MAIN daily pipeline's version of the same
+            # dead-filter-only wide chain subscription; confirmed live this
+            # exact loop pushed the dedicated OI-ORB WS connection past 100
+            # symbols (well over the ~50/connection limit already documented
+            # in the comment this replaces) and directly caused 3 real missed
+            # option_native entries plus a frozen/stale tick on RADICO PE.
 
             # 2026-09-23 fix, real incident: yf.download() has no timeout of its own
             # and can hang for a long time under Yahoo rate-limiting (confirmed live,
