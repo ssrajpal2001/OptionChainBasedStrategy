@@ -204,18 +204,24 @@ def test_directional_toward_spot_still_wins_over_fallback_when_both_have_candida
     assert res == (21900, 80.0)
 
 
-def test_directional_fallback_picks_closest_to_kept_not_first_found():
-    # Unlike the primary (first-that-passes) search, the fallback must pick
-    # the BEST match (closest to, but not above, kept_ltp) across the whole
-    # away-from-spot range, not just the first one encountered -- CE22100
-    # (ltp=10.0, far from kept 150.0) is found first walking outward, but
-    # CE22300 (ltp=140.0, much closer to 150.0) must win instead.
-    cache = _cache({(22500, "PE"): 150.0, (22100, "CE"): 10.0, (22300, "CE"): 140.0})
+def test_directional_fallback_picks_smallest_sufficient_upgrade_over_closing():
+    # 2026-09-23, direct user spec: the premium gate compares against the
+    # CLOSING leg's own LTP now (must be STRICTLY GREATER), not the kept
+    # leg's. Unlike the primary (first-that-passes) search, the fallback
+    # must pick the BEST match -- the SMALLEST sufficient upgrade over
+    # closing_ltp -- across the whole away-from-spot range, not just the
+    # first one encountered. Closing CE22000 @50.0: CE22100 (ltp=60.0,
+    # excess=10) is found first walking outward, but must win over CE22300
+    # (ltp=140.0, excess=90) since it's the smaller necessary upgrade.
+    cache = _cache({
+        (22500, "PE"): 150.0, (22000, "CE"): 50.0,
+        (22100, "CE"): 60.0, (22300, "CE"): 140.0,
+    })
     res = select_rollover_partner_directional(
         cache, roll_side="CE", kept_strike=22500, kept_ltp=150.0, closing_strike=22000,
         spot=21980, real_step=50, min_gap_pts=100, rule_pass=lambda cs, ps: True,
     )
-    assert res == (22300, 140.0)
+    assert res == (22100, 60.0)
 
 
 def test_directional_put_side_searches_upward_toward_spot():
@@ -229,15 +235,30 @@ def test_directional_put_side_searches_upward_toward_spot():
     assert res == (22100, 145.0)
 
 
-def test_directional_enforces_premium_le_kept_leg():
-    # 21900 clears the gap but is pricier than the kept leg (150) -- rejected;
-    # no candidate within reach passes, so the roll finds no partner.
-    cache = _cache({(22500, "PE"): 150.0, (21900, "CE"): 160.0})
+def test_directional_enforces_premium_greater_than_closing_leg():
+    # 2026-09-23, direct user spec: the new leg's LTP must be STRICTLY
+    # GREATER than the CLOSING leg's own LTP (a genuine premium upgrade over
+    # the leg being abandoned), not merely <= the kept leg's. Closing
+    # CE22000 @150.0: 21900 clears the min-gap but is CHEAPER (140 <= 150)
+    # -- rejected; no candidate within reach passes, so the roll finds no
+    # partner.
+    cache = _cache({(22500, "PE"): 150.0, (22000, "CE"): 150.0, (21900, "CE"): 140.0})
     res = select_rollover_partner_directional(
         cache, roll_side="CE", kept_strike=22500, kept_ltp=150.0, closing_strike=22000,
         spot=21980, real_step=50, min_gap_pts=100, rule_pass=lambda cs, ps: True,
     )
     assert res is None
+
+
+def test_directional_accepts_premium_strictly_greater_than_closing_leg():
+    # Mirror of the rejection test above -- 21900 (170.0) IS a genuine upgrade
+    # over the closing leg's 150.0, so it must be accepted.
+    cache = _cache({(22500, "PE"): 150.0, (22000, "CE"): 150.0, (21900, "CE"): 170.0})
+    res = select_rollover_partner_directional(
+        cache, roll_side="CE", kept_strike=22500, kept_ltp=150.0, closing_strike=22000,
+        spot=21980, real_step=50, min_gap_pts=100, rule_pass=lambda cs, ps: True,
+    )
+    assert res == (21900, 170.0)
 
 
 def test_directional_none_when_nothing_within_max_search_steps():

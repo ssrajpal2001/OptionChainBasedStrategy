@@ -115,8 +115,8 @@ def _strikes_near_spot(
 
 def _evaluate_roll_candidate(strike_prem, roll_side, strike, kept_strike, kept_ltp,
                               spot, step, ltp_target, theta_target, max_itm_steps,
-                              ltp_le_kept, rule_pass, metric):
-    """One candidate's full filter chain (quote → ITM cap → ltp_le_kept → rule_pass →
+                              ltp_le_kept, rule_pass, metric, min_ltp_exclusive=None):
+    """One candidate's full filter chain (quote → ITM cap → premium gate → rule_pass →
     score), factored out of select_partner_for so both the original flat scan and the
     2026-08-26 anchor-ring scan share EXACTLY the same checks. Returns a populated diag
     dict; diag["reject_reason"] is None iff the candidate passed everything
@@ -125,10 +125,22 @@ def _evaluate_roll_candidate(strike_prem, roll_side, strike, kept_strike, kept_l
     2026-08-27, direct user spec: the dual ltp_target/theta_target floor (still applied
     at fresh BEGINNING/re-entry via leg_passes_dual_floor elsewhere in this module) is
     deliberately NOT applied here anymore -- during a rollover the only requirement is
-    ltp_above_kept (never roll into a richer leg than the one being kept); a candidate
-    strike being "too cheap" for a fresh entry's own quality bar is not a reason to
-    reject it as a rollover partner. `ltp_target`/`theta_target` are still accepted as
-    parameters (unused here now) purely so callers/traces don't need touching."""
+    the premium gate below; a candidate strike being "too cheap" for a fresh entry's
+    own quality bar is not a reason to reject it as a rollover partner. `ltp_target`/
+    `theta_target` are still accepted as parameters (unused here now) purely so
+    callers/traces don't need touching.
+
+    Premium gate — two mutually exclusive modes, selected by the caller:
+    - `ltp_le_kept=True` (select_partner_for / the ITM-roll-protection pool search,
+      unchanged): candidate premium must be <= the KEPT/running leg's own LTP.
+    - `min_ltp_exclusive=<value>` (2026-09-23, direct user spec, used by
+      select_rollover_partner_directional -- the MAIN rollover path): candidate
+      premium must be STRICTLY GREATER than `min_ltp_exclusive` (the CLOSING leg's
+      own LTP) -- the new leg must be a genuine premium upgrade over the leg just
+      being closed, not merely cheaper than whatever the other leg happens to be
+      running at. Checked in the same slot as the old kept-based gate (after the
+      ITM cap, before the more expensive rule_pass evaluation) so a candidate that
+      fails on price is never charged the cost of a rule evaluation."""
     v = strike_prem.get((strike, roll_side))
     diag = {
         "event": "candidate", "roll_side": roll_side, "strike": int(strike),
@@ -153,13 +165,20 @@ def _evaluate_roll_candidate(strike_prem, roll_side, strike, kept_strike, kept_l
         diag["itm_pass"] = True
     else:
         diag["itm_pass"] = True
+    if min_ltp_exclusive is not None:
+        if ltp <= float(min_ltp_exclusive):
+            diag["ltp_le_kept_pass"] = False
+            diag["reject_reason"] = f"ltp_not_above_closing ({ltp:.2f} <= {float(min_ltp_exclusive):.2f})"
+            return diag
+        diag["ltp_le_kept_pass"] = True
     # Optional: require partner premium <= kept leg premium. Disabled by default for rollover
     # so the bot can choose the closest premium regardless of direction.
-    if ltp_le_kept and kept_ltp and ltp > float(kept_ltp):
+    elif ltp_le_kept and kept_ltp and ltp > float(kept_ltp):
         diag["ltp_le_kept_pass"] = False
         diag["reject_reason"] = f"ltp_above_kept ({ltp:.2f} > {float(kept_ltp):.2f})"
         return diag
-    diag["ltp_le_kept_pass"] = True
+    else:
+        diag["ltp_le_kept_pass"] = True
     ce_s, pe_s = (int(kept_strike), int(strike)) if roll_side == "PE" else (int(strike), int(kept_strike))
     try:
         _rp = rule_pass(ce_s, pe_s)
@@ -398,9 +417,18 @@ def select_rollover_partner_directional(
       match would otherwise be -- e.g. a strike only 50pts away is skipped even
       if its premium is a perfect match; the search keeps going outward until it
       finds one that clears the gap.
-    - Premium condition: candidate's LTP must be <= kept_ltp (the LOSING/kept
-      leg's own live LTP) -- enforced via _evaluate_roll_candidate's ltp_le_kept
-      check (always on here, not optional, per direct spec).
+    - Premium condition (2026-09-23, direct user spec -- SUPERSEDES the original
+      "<= kept_ltp" rule described below in the 2026-08-27/2026-09-23 history):
+      candidate's LTP must be STRICTLY GREATER than `closing_ltp` (the CLOSING
+      leg's own live LTP, read from `strike_prem[(closing_strike, roll_side)]` --
+      accurate because this search always runs BEFORE the closing leg is actually
+      closed). Direct user framing: "the new leg which will be searched... LTP of
+      new leg should be greater then the closing leg" -- the new leg must be a
+      genuine premium UPGRADE over the leg just being abandoned, not merely
+      cheaper than whatever the OTHER (kept) leg happens to be running at. This
+      is the whole economic point of rolling a decayed leg in a premium-selling
+      strategy: collect MORE theta than the leg you're giving up, not settle for
+      an equally-or-less-rich replacement.
     - Selection: the FIRST candidate (smallest distance that still clears
       min_gap_pts) that passes quote-availability + ITM cap + the premium
       condition + rule_pass wins -- this is a "keep searching until you find A
@@ -416,43 +444,42 @@ def select_rollover_partner_directional(
     original 500pt reach at max_itm_steps=5 started getting rejected at
     250pts once this was wrongly conflated with the 50pt candidate grid).
 
-    2026-09-23 EXTENSION, direct user spec, after a real live incident (Gurmeet's
-    book: kept PE23350 @97.35, closing CE23500, every toward-spot candidate from
-    23450 down to 22800 rejected -- 11 on ltp_above_kept, since going MORE ITM
-    only ever makes CE premium go UP, never down, so that whole direction was
-    structurally guaranteed to fail. The pool diagnostic dump in the SAME log
-    line showed CE23550/23600/23650/23700 all real, fresh, and comfortably below
-    97.35 -- genuinely valid partners sitting on the OTHER side of closing_strike,
-    which the toward-spot-only design never even looks at). User's own framing:
-    "we will check other side which should be below [kept_ltp] but near to that
-    price" -- i.e. the closest-from-below match, not just the first found.
+    2026-09-23 EXTENSION (partially superseded by the premium-gate change above,
+    kept for the min-gap/directional-search history), after a real live incident
+    (Gurmeet's book: kept PE23350 @97.35, closing CE23500, every toward-spot
+    candidate from 23450 down to 22800 rejected -- 11 on the old ltp_above_kept
+    gate, since going MORE ITM only ever makes CE premium go UP, never down, so
+    that whole direction was structurally guaranteed to fail under the OLD gate.
+    The pool diagnostic dump in the SAME log line showed CE23550/23600/23650/
+    23700 all real, fresh partners sitting on the OTHER side of closing_strike,
+    which the toward-spot-only design never even looks at.
 
     FALLBACK (only runs if the toward-spot search above finds nothing): search
     the OPPOSITE direction -- further OTM than closing_strike, away from spot --
-    using the exact same filter chain (quote/ITM-cap/ltp_le_kept/rule_pass), but
+    using the exact same filter chain (quote/ITM-cap/premium-gate/rule_pass), but
     unlike the primary search's "first that passes wins", this scans the WHOLE
-    range and picks the candidate with the SMALLEST |ltp - kept_ltp| (closest to,
-    but never above, kept_ltp) -- _evaluate_roll_candidate already computes
-    exactly this as diag["score"] for every passing candidate, previously just
-    never used by this function since the old primary-only design stopped at
-    the first hit. The primary toward-spot direction is tried FIRST and still
+    range and picks the candidate with the SMALLEST (ltp - closing_ltp) -- i.e.
+    the smallest sufficient premium upgrade over the closing leg, not the first
+    or the largest. The primary toward-spot direction is tried FIRST and still
     wins outright if it finds anything -- this fallback only ever fires when it
     doesn't, so the 2026-08-27 "moving toward the market price" preference for
     the common case is unchanged.
 
     Returns (strike, ltp) or None (caller falls back to "keep original pair")."""
     direction = -1 if roll_side == "CE" else 1
+    closing_ltp = float((strike_prem.get((int(closing_strike), roll_side)) or {}).get("ltp", 0.0) or 0.0)
     if trace is not None:
         trace.append({
             "event": "select_partner_for_start", "roll_side": roll_side,
             "kept_strike": int(kept_strike), "kept_ltp": float(kept_ltp or 0.0),
-            "closing_strike": int(closing_strike), "spot": float(spot or 0.0),
+            "closing_strike": int(closing_strike), "closing_ltp": closing_ltp,
+            "spot": float(spot or 0.0),
             "real_step": float(real_step or 0.0), "min_gap_pts": float(min_gap_pts or 0.0),
             "direction": "toward_spot", "max_search_steps": int(max_search_steps),
         })
     reject_counts = {
         "no_quote_in_pool": 0, "too_itm": 0, "min_gap_violation": 0,
-        "ltp_above_kept": 0, "rule_fail": 0,
+        "ltp_not_above_closing": 0, "rule_fail": 0,
     }
     checked = 0
     for i in range(1, max_search_steps + 1):
@@ -469,7 +496,8 @@ def select_rollover_partner_directional(
         checked += 1
         diag = _evaluate_roll_candidate(
             strike_prem, roll_side, strike, kept_strike, kept_ltp, spot, itm_cap_step_pts,
-            0.0, 0.0, max_itm_steps, True, rule_pass, "closest_to_kept",
+            0.0, 0.0, max_itm_steps, False, rule_pass, "closest_to_kept",
+            min_ltp_exclusive=closing_ltp,
         )
         if diag["reject_reason"] is None:
             diag["selected"] = True
@@ -487,11 +515,12 @@ def select_rollover_partner_directional(
             trace.append(diag)
 
     # Fallback: toward-spot direction found nothing -- try the opposite
-    # (further-OTM) direction, best-match (closest to kept_ltp from below)
-    # instead of first-found, since this is the less-natural direction.
+    # (further-OTM) direction, best-match (smallest sufficient premium upgrade
+    # over closing_ltp) instead of first-found, since this is the less-natural
+    # direction.
     fb_reject_counts = {
         "no_quote_in_pool": 0, "too_itm": 0, "min_gap_violation": 0,
-        "ltp_above_kept": 0, "rule_fail": 0,
+        "ltp_not_above_closing": 0, "rule_fail": 0,
     }
     fb_checked = 0
     best: Optional[Tuple[int, float]] = None
@@ -511,15 +540,17 @@ def select_rollover_partner_directional(
         fb_checked += 1
         diag = _evaluate_roll_candidate(
             strike_prem, roll_side, strike, kept_strike, kept_ltp, spot, itm_cap_step_pts,
-            0.0, 0.0, max_itm_steps, True, rule_pass, "closest_to_kept",
+            0.0, 0.0, max_itm_steps, False, rule_pass, "closest_to_kept",
+            min_ltp_exclusive=closing_ltp,
         )
         diag["search_direction"] = "away_from_spot_fallback"
         if trace is not None:
             trace.append(diag)
         if diag["reject_reason"] is None:
-            if best is None or diag["score"] < best_score:
+            _score = diag["ltp"] - closing_ltp  # always > 0 here (gate already enforced it)
+            if best is None or _score < best_score:
                 best = (strike, diag["ltp"])
-                best_score = diag["score"]
+                best_score = _score
         else:
             _reason_key = diag["reject_reason"].split(" ", 1)[0].split("(", 1)[0].strip()
             fb_reject_counts[_reason_key if _reason_key in fb_reject_counts else "rule_fail"] += 1
