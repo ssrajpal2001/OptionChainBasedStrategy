@@ -1202,28 +1202,25 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             if h is not None:
                 self._orb_frozen[sym] = (h, l)
                 new_orb_levels.append((sym, h, l))
-            # 2026-09-23 CRITICAL FIX, real production incident: this wide
-            # ATM+/-4-depth chain subscription (~18 contracts/stock) exists
-            # ONLY to feed the 5 additive filters (oi_wall/distance_to_wall/
-            # pcr/volume_confirmation/oi_roc) via _evaluate_additive_filters --
-            # confirmed dead code, zero live callers, since the old VWAP-retest
-            # entry mechanic that used to call it was removed 2026-09-22. With
-            # 5 shortlisted stocks x 18 contracts, this alone pushed the
-            # dedicated OI-ORB WS connection to 90-101 symbols, well past the
-            # documented ~50/connection limit -- confirmed live via real
-            # "EXCEEDS the ~50/connection WS limit" warnings (up to 101
-            # symbols) starting 10:08, and directly traced to 3 real missed
-            # option_native entries (ATHERENERG CE1480/BANDHANBNK PE190/
-            # MOTILALOFS CE1040 all hit "no live option LTP within 20s") plus
-            # RADICO PE's ltp_close frozen at a stale 300.0 for 15+ minutes --
-            # all on this same over-subscribed connection. Disabled entirely
-            # (not just capped tighter) since the filters it fed do nothing;
-            # frees real WS budget for the option-native mechanic's actual
-            # trade-relevant contract subscriptions. The WATCH line's own
-            # "OI=+x%" display is unaffected -- confirmed it reads
-            # self._oi_history, populated by a separate REST poll
-            # (fetch_oi_spurts_nse), not this WS chain subscription.
-            pass
+            # 2026-09-23 real production incident (see _ensure_chain_
+            # subscription's own docstring for the fix): this chain
+            # subscription -- feeding the 5 additive filters (oi_wall/
+            # distance_to_wall/pcr/volume_confirmation/oi_roc), which are
+            # confirmed dead code with zero live callers since the old
+            # VWAP-retest entry mechanic was removed 2026-09-22 -- pushed
+            # the dedicated OI-ORB WS connection past 100 symbols (~50/
+            # connection limit) at the old depth=4 (18 contracts/stock),
+            # directly causing 3 real missed option_native entries plus a
+            # frozen tick on RADICO PE. Direct user instruction: narrow to
+            # depth=2 (10 contracts/stock) rather than disable outright --
+            # see _ensure_chain_subscription's own depth=2 hardcode.
+            if len(self._shortlist_symbols) <= self._chain_watch_max_stocks:
+                try:
+                    spot = float(row["lastPrice"]) if "lastPrice" in shortlist.columns else 0.0
+                    await self._ensure_chain_subscription(sym, spot)
+                except Exception:
+                    self._clog.exception("OiOrb[%s/%s]: afternoon-scan chain subscription failed "
+                                          "for %s.", self._client_id, self._binding_id, sym)
 
         await asyncio.to_thread(store.record_shortlist, self._client_id, self._binding_id, new_rows)
         for sym, h, l in new_orb_levels:
@@ -1638,15 +1635,20 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                     self._client_id, self._binding_id, self._chain_watch_max_stocks, watch_list,
                     [s for s in self._shortlist_symbols if s not in watch_list],
                 )
-            # 2026-09-23 CRITICAL FIX, real production incident: disabled --
-            # see the matching disable + full incident writeup at this same
-            # call site's sibling in the afternoon-scan onboarding block
-            # above. This is the MAIN daily pipeline's version of the same
-            # dead-filter-only wide chain subscription; confirmed live this
-            # exact loop pushed the dedicated OI-ORB WS connection past 100
-            # symbols (well over the ~50/connection limit already documented
-            # in the comment this replaces) and directly caused 3 real missed
-            # option_native entries plus a frozen/stale tick on RADICO PE.
+            # 2026-09-23 real production incident: this exact loop pushed the
+            # dedicated OI-ORB WS connection past 100 symbols at the old
+            # depth=4 (see _ensure_chain_subscription's own docstring for the
+            # full incident) -- narrowed to depth=2 there rather than
+            # disabled, per direct user instruction.
+            for sym in watch_list:
+                try:
+                    row = sl_indexed.loc[sym] if sym in sl_indexed.index else None
+                    spot = float(row["lastPrice"]) if row is not None and "lastPrice" in shortlist.columns else 0.0
+                    await self._ensure_chain_subscription(sym, spot)
+                except Exception:
+                    self._clog.exception("OiOrb[%s/%s]: chain subscription setup failed for %s "
+                                          "(chain-dependent filters will report unavailable for it).",
+                                          self._client_id, self._binding_id, sym)
 
             # 2026-09-23 fix, real incident: yf.download() has no timeout of its own
             # and can hang for a long time under Yahoo rate-limiting (confirmed live,
@@ -2439,7 +2441,15 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             self._clog.warning("OiOrb[%s/%s]: no active expiry for %s -- chain tracking unavailable.",
                                 self._client_id, self._binding_id, stock_symbol)
             return
-        depth = int(getattr(self._cfg, "chain_depth", 4) or 4)
+        # 2026-09-23, direct user instruction after the WS-overflow incident
+        # (see the two call sites' own incident writeup): narrowed from the
+        # old default depth=4 (18 contracts/stock) to depth=2 (10 contracts/
+        # stock) -- keeps the chain subscription alive (user's explicit
+        # preference over fully disabling it) while cutting per-stock WS
+        # usage by ~45%, hardcoded here rather than trusting the shared
+        # self._cfg.chain_depth default so this call site can't silently
+        # widen again if that global default ever changes elsewhere.
+        depth = 2
         mat = _build_stock_chain(stock_symbol, spot, expiry, depth)
         if mat is None:
             return
