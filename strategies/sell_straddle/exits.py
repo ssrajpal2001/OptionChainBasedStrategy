@@ -2627,7 +2627,22 @@ class ExitMixin:
         leg.close_time = None
         pos.net_credit = pos.ce_leg.entry_price + pos.pe_leg.entry_price
         pos.tsl_high_lock_rs = 0.0
-        pos.open_time = now
+        # 2026-09-23 CRITICAL FIX, real live incident: this used to also do
+        # `pos.open_time = now` on every single-leg roll -- but pos.open_time
+        # means "when this POSITION/cycle began" (set once, at genuine entry,
+        # in entries.py), and dashboard_server.py's Booked-P&L filter uses it
+        # as the cycle-start boundary, only counting trade_history rows with
+        # ts >= pos.open_time (its own comment: "a same-cycle roll/re-entry's
+        # own closed leg still has a close ts strictly after this position's
+        # own open_time, so it correctly stays included" -- an invariant THIS
+        # line broke). Resetting it here moved the cycle-start goalpost to the
+        # roll's own timestamp, which is AFTER the close record this same roll
+        # just wrote a moment earlier -- silently excluding the leg's own
+        # just-booked P&L from Booked P&L display every single roll. Confirmed
+        # live: a real rollover completed (PE leg closed+reopened, R1-watch
+        # correctly armed on the new leg) yet Booked P&L showed +Rs0. Only
+        # leg.open_time (used for per-leg display/tracking) should update on
+        # a roll -- the position's own open_time is untouched here now.
         # 2026-09-06, direct user follow-up (indicator-freshness audit): a roll
         # used to leave two stale gaps the ENTRY path already avoided --
         # (1) self._ind's RSI/ROC/SLOPE/VWAP keys only get conditionally

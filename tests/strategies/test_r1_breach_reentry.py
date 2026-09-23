@@ -190,3 +190,35 @@ def test_open_leg_clears_leg_closed_and_r1_closing_guard():
 
     assert s._position.pe_leg_closed is False
     assert s._r1_closing["PE"] is False
+
+
+def test_open_leg_does_not_reset_position_open_time():
+    """2026-09-23 CRITICAL FIX, real live incident: _open_leg() used to also
+    reset pos.open_time to `now` on every single-leg roll. Dashboard's
+    Booked-P&L filter (dashboard_server.py) treats pos.open_time as the
+    "cycle start" and only counts trade_history rows with ts >= that value --
+    resetting it to the roll's own timestamp moved the boundary PAST the
+    close record that same roll had just written moments earlier, silently
+    excluding the just-booked P&L from the Booked P&L display every roll.
+    Confirmed live: a real rollover completed (leg closed+reopened, R1-watch
+    armed on the new leg) yet Booked P&L showed +Rs0. Only leg.open_time
+    (per-leg display/tracking) should update -- the position's own
+    open_time must be set once at genuine entry and never touched by a roll."""
+    s = _strategy()
+    s._position = _position()
+    _original_open_time = datetime(2026, 9, 23, 13, 0, 18)
+    s._position.open_time = _original_open_time
+    s._seed_exec_legs = AsyncMock()
+    s._emit_order = AsyncMock()
+
+    asyncio.run(s._open_leg(
+        "PE", 23300, 55.80, datetime(2026, 9, 23, 12, 59, 30), "single_side_roll_vwap_rise_roll",
+    ))
+
+    assert s._position.open_time == _original_open_time, (
+        "a single-leg roll must not reset the whole position's open_time -- "
+        "that breaks the dashboard's Booked-P&L cycle-start filter"
+    )
+    # The LEG's own open_time still updates -- that's correct and used for
+    # per-leg display/tracking, unrelated to the position-level bug above.
+    assert s._position.pe_leg.open_time == datetime(2026, 9, 23, 12, 59, 30)

@@ -221,16 +221,37 @@ class RollingMixin:
             itm_cap_step_pts=_ROLLOVER_STRIKE_STEP,
         )
 
-        # Always dump the full partner-search trace so it is obvious which
-        # candidates were checked, which filters blocked them, and which passed.
-        _trace_dump = _format_partner_trace(_partner_trace)
-        _pool_diag = self._pool_warmth_diag(roll_side, candidate_count=max(1, offset * 2))
-        self._clog.info(
-            "SellStraddle[%s]: ROLLOVER %s partner-search trace for running %s%d @%.2f "
-            "(CE pnl=%.2f PE pnl=%.2f):\n%s\npool_warmth=%s",
-            self._underlying, reason, keep_side, keep_strike, keep_ltp, ce_pnl, pe_pnl,
-            _trace_dump, _pool_diag,
-        )
+        # 2026-09-23 fix (log-noise pass): this used to dump the full ~20-30
+        # line candidate-by-candidate trace on EVERY 60s retry attempt (already
+        # throttled to 60s, but a stuck position -- same blocker every cycle --
+        # could keep dumping the identical trace for hours, per direct user
+        # report of a live log repeating the exact same reject_counts every
+        # minute). The one-line "no valid partner" summary below still fires on
+        # EVERY attempt (that's the genuine "rollover checking should be
+        # logged" signal) -- only the expensive full dump is now deduped: it
+        # fires when the candidate actually passed, when the reject-count
+        # signature genuinely changed since the last dump (a real change in
+        # market conditions), or at least once every 5 minutes as a heartbeat
+        # so a human watching the log never loses the detailed picture for long.
+        _end_evt = next((t for t in _partner_trace if t.get("event") == "select_partner_for_end"), {})
+        _sig = (roll_side, keep_strike, tuple(sorted((_end_evt.get("reject_counts") or {}).items())))
+        _sig_map = getattr(self, "_last_roll_trace_sig", None) or {}
+        _ts_map = getattr(self, "_last_roll_trace_dump_ts", None) or {}
+        _prev_ts = _ts_map.get(reason)
+        _heartbeat_due = (_prev_ts is None) or ((now - _prev_ts).total_seconds() >= 300)
+        if partner is not None or _sig != _sig_map.get(reason) or _heartbeat_due:
+            _trace_dump = _format_partner_trace(_partner_trace)
+            _pool_diag = self._pool_warmth_diag(roll_side, candidate_count=max(1, offset * 2))
+            self._clog.info(
+                "SellStraddle[%s]: ROLLOVER %s partner-search trace for running %s%d @%.2f "
+                "(CE pnl=%.2f PE pnl=%.2f):\n%s\npool_warmth=%s",
+                self._underlying, reason, keep_side, keep_strike, keep_ltp, ce_pnl, pe_pnl,
+                _trace_dump, _pool_diag,
+            )
+            _sig_map[reason] = _sig
+            _ts_map[reason] = now
+            self._last_roll_trace_sig = _sig_map
+            self._last_roll_trace_dump_ts = _ts_map
 
         if not partner:
             _summary = _summarize_partner_trace(_partner_trace)
