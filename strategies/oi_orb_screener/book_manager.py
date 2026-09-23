@@ -147,7 +147,11 @@ _DEFAULT_PARAMS = {
     # opens; the existing shortlist pipeline (top-gainer/loser, OI-Spurt)
     # is completely unchanged and still decides WHICH stocks this mechanic
     # ever gets to look at.
-    "option_native_enabled": False,
+    # 2026-09-23, direct user instruction: default flipped to True -- was
+    # additive opt-in (default False) per the original rollout plan; this
+    # now activates for EVERY oi_orb_screener deployment whose own
+    # strategy_params doesn't explicitly override it, not just SA5770.
+    "option_native_enabled": True,
     "min_score": 6,                 # decision 2 -- minimum 8-point score to trade
     "min_score_gap": 2,             # decision 3 -- CE-vs-PE winning margin, both required together
     "max_spread_pct": 1.0,          # decision 5 -- (ask-bid)/mid*100 "tight spread" score threshold
