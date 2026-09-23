@@ -4670,6 +4670,14 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                     # option_native_feature_history.score_breakdown, read back
                     # from the in-memory tuple rather than re-queried from the DB.
                     "score_breakdown": bar[2] if (bar is not None and len(bar) > 2) else None,
+                    # 2026-09-23, direct user spec: a genuinely live field, updated on
+                    # every real tick (the CURRENTLY-forming 1-min bar's own running
+                    # close), shown alongside the fixed-per-5-min-bucket score/vwap
+                    # above -- explicitly NOT waiting for a bucket close, so the
+                    # dashboard shows the raw tick-by-tick price actually moving even
+                    # though the score itself is (by design, per the frozen spec) only
+                    # ever a 5-min-resolution metric.
+                    "live_ltp": self._native_1m_cur.get((sym, side), {}).get("c"),
                 } if (c is not None or bar is not None) else {"skipped": True}
             option_native_state[sym] = side_state
         return {

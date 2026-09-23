@@ -8589,6 +8589,14 @@ function amoTest() {
                                         :style="row.native&&row.native[side]&&row.native[side].score>=6?'background:rgba(6,182,212,0.15);color:var(--t-cyan)':'color:var(--t-dim)'"
                                         x-text="row.native&&row.native[side]&&row.native[side].score!=null?('score '+row.native[side].score+'/8'):'score —'"></span>
                                 </div>
+                                <!-- 2026-09-23, direct user spec: a genuinely LIVE tick value
+                                     (updates every refresh, never waits for the 5-min bucket the
+                                     score above is pinned to) -- shown so the raw price can be
+                                     seen actually moving, distinct from the fixed-cadence score. -->
+                                <div class="flex justify-between" style="color:var(--t-dim);font-size:9px" x-show="row.native && row.native[side] && row.native[side].live_ltp!=null">
+                                  <span>live tick</span>
+                                  <span x-text="'₹'+fmt(row.native[side].live_ltp)"></span>
+                                </div>
                                 <div class="flex flex-wrap gap-1 mt-0.5" x-show="row.native && row.native[side] && row.native[side].score_breakdown">
                                   <template x-for="cond in ['ltp_above_vwap','ltp_rising','volume_rising','oi_rising','bid_rising','tight_spread','delta_in_band','iv_supportive']" :key="cond">
                                     <span class="px-1 rounded" style="font-size:9px"
