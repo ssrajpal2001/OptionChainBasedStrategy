@@ -2572,6 +2572,15 @@ class ExitMixin:
         if not pos:
             return
         leg = pos.ce_leg if side == "CE" else pos.pe_leg
+        # A leg being (re-)opened is by definition no longer "closed" -- clears
+        # ce_leg_closed/pe_leg_closed (set by e.g. the R1-breach-post-roll
+        # single-leg-close path) so current_value/unrealized_pnl resume
+        # counting this leg, and clears the matching R1-watch "closing in
+        # progress" guard so a future re-arm on this same side isn't
+        # permanently blocked by a stale flag from the leg this one replaced.
+        setattr(pos, f"{side.lower()}_leg_closed", False)
+        if hasattr(self, "_r1_closing") and isinstance(getattr(self, "_r1_closing", None), dict):
+            self._r1_closing[side] = False
         leg.strike = strike
         leg.entry_price = ltp
         leg.ltp = ltp

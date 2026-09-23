@@ -72,6 +72,20 @@ class R1BreachReentryMixin:
             # None, or {"side":, "candidate_strike":, "calc":, "inst_key":,
             #           "bar_acc":, "last_check": datetime}
             self._r1_pending = None
+        if not hasattr(self, "_r1_closing") or not isinstance(getattr(self, "_r1_closing", None), dict):
+            # 2026-09-23 CRITICAL FIX, real live incident: side -> bool, "a close
+            # for this side is currently in flight". _tick_loop and
+            # _eod_backstop_loop are two independent asyncio tasks that can both
+            # reach _check_exits() -> _check_r1_breach_and_reentry() for the same
+            # position around the same real moment (same documented race already
+            # fixed once for _post1500_closing -- see config.py's own comment on
+            # that flag, "confirmed live: two ticks 138ms apart ... both fired a
+            # real close -> 2 broker orders for the same leg"). This mechanic
+            # copied post1500's _close_leg() call but not its per-leg concurrency
+            # guard, so the same race reproduced here. Set True BEFORE the
+            # `await self._close_leg(...)` (not after) so a concurrent re-entry
+            # sees the leg as already being closed and skips.
+            self._r1_closing = {"CE": False, "PE": False}
 
     async def _seed_r1s1_calc(self, strike: int, side: str, inst_key: str):
         """REST-fetch today's 1-min history for (strike, side) up to now and
@@ -186,6 +200,17 @@ class R1BreachReentryMixin:
             if not _level_breached(sr_state, "R1", "R1_TRACKING"):
                 continue
 
+            # 2026-09-23 CRITICAL FIX, real live incident: a concurrent
+            # _check_exits() call (tick loop vs EOD backstop loop -- see
+            # _r1_closing's own init comment above) could both observe the
+            # breach true and both call _close_leg() before either finished,
+            # producing a burst of duplicate real closes/orders for the same
+            # leg within the same second. Claim this side synchronously
+            # before the first await, mirroring _post1500_closing.
+            if self._r1_closing.get(side):
+                continue
+            self._r1_closing[side] = True
+
             r1 = (sr_state.get("sr_levels") or {}).get("R1") or {}
             # Stashed for _close_remark (exits.py) to build the real History
             # remark string from -- see the "r1_breach_post_roll" case there.
@@ -205,7 +230,19 @@ class R1BreachReentryMixin:
             if getattr(close_ev, "close_aborted", False):
                 # Close not confirmed -- leave the leg as-is, try again next tick
                 # (same retry discipline as every other exit path in this book).
+                self._r1_closing[side] = False
                 continue
+            # 2026-09-23 CRITICAL FIX, real live incident: this was never set on
+            # a successful close, so current_value/unrealized_pnl kept counting
+            # the "closed" leg and, worse, the very next tick's top-of-loop
+            # `if getattr(pos, leg_closed_attr): continue` guard never tripped --
+            # the loop re-armed a FRESH watch on the SAME still-"open" leg
+            # (still in loss, same stale R1) and re-closed it again, forever,
+            # each time booking another real leg_pnl into session_realized_pnl_pts
+            # and (live) sending another real broker exit order. This is what
+            # produced the observed runaway Booked P&L (₹-197828) and dozens of
+            # duplicate History rows for the same strike within the same minute.
+            setattr(pos, leg_closed_attr, True)
             self._r1_pending = {
                 "side": side, "candidate_strike": None, "calc": None,
                 "inst_key": None, "bar_acc": None, "last_check": None,
