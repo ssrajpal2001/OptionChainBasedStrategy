@@ -6559,7 +6559,13 @@ pm2 save
                 if _legs:
                     rows.append({
                         "date": _ts(_ot) or datetime.now(IST).isoformat(timespec="seconds"),
-                        "strategy": "sell_straddle",
+                        # 2026-09-23 fix, real user-found gap: hardcoded to the literal
+                        # "sell_straddle" regardless of which variant was actually
+                        # running -- a sell_straddle_calc_vwap position's still-open
+                        # History row showed the wrong strategy name (closed-trade
+                        # records via trade_history already used the real `sname`
+                        # correctly; only this synthetic "still open" row didn't).
+                        "strategy": sname,
                         "instrument": str(underlying).upper(),
                         "binding_id": bid,
                         "entry_price": round(sum(l["entry"] for l in _legs), 2),
