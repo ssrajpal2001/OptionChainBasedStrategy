@@ -9419,7 +9419,7 @@ function amoTest() {
                             </div>
                           </template>
                           <template x-if="s.mode==='waiting_s1_breach_reentry'">
-                            <div>
+                            <div x-data="{ get diff(){ return (s.candidate_strike && s.s1) ? (s.ltp - s.s1) : null } }">
                               <div class="flex items-center justify-between">
                                 <span style="color:var(--t-cyan);font-weight:700">
                                   🔍 <span x-text="side"></span> side empty — scanning candidate
@@ -9429,11 +9429,16 @@ function amoTest() {
                                 </span>
                                 <span x-show="s.candidate_strike" :style="s.ltp < s.s1 ? 'color:var(--t-green);font-weight:700' : 'color:var(--t-muted)'">
                                   LTP <span x-text="s.ltp"></span> vs S1 <span x-text="s.s1"></span>
+                                  <span x-show="diff !== null" x-text="'(' + (diff>=0?'+':'') + diff.toFixed(2) + (diff<0?' BREACHED':' pts above S1')+')'"></span>
                                 </span>
                               </div>
-                              <!-- No candidate passing yet -- show the search itself against the
-                                   kept leg (2026-09-23, direct user spec) instead of a dead blank. -->
-                              <div x-show="!s.candidate_strike && s.search" style="color:var(--t-muted)" class="mt-0.5">
+                              <!-- 2026-09-24, direct user spec: the search itself keeps re-running
+                                   every ~15s (may drop/replace the tracked candidate for a better
+                                   one) EVEN WHILE a candidate is already being tracked -- always show
+                                   it, not just while none has passed yet, so it's visible that this
+                                   is a live, continuously-re-evaluated search, not a static pick. -->
+                              <div x-show="s.search" style="color:var(--t-muted)" class="mt-0.5">
+                                <span x-text="s.candidate_strike ? 'still re-checking every cycle for a better/different pair' : 'no partner passing yet'"></span> —
                                 pairing vs kept <span x-text="s.search && s.search.kept_side"></span><span x-text="s.search && s.search.kept_strike"></span>
                                 @<span x-text="s.search && s.search.kept_ltp"></span> —
                                 checked <span x-text="s.search && s.search.checked"></span> candidates
