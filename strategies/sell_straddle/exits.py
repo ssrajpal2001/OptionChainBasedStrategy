@@ -1624,7 +1624,41 @@ class ExitMixin:
         # _check_post1500_r1_exit for the surviving leg's own R1 watch --
         # EOD square-off (already checked above, unconditionally, before this
         # point) remains its only other backstop.
-        if self._post1500_exit_enabled and (pos.ce_leg_closed or pos.pe_leg_closed):
+        #
+        # 2026-09-24 CRITICAL FIX, real live incident (Gurmeet's NIFTY book):
+        # this guard was missing its own time check. _check_post1500_r1_exit
+        # already correctly no-ops before self._POST1500_START (15:00) --
+        # `if now.time() < self._POST1500_START: return` is its very first
+        # real line -- but this CALLER's `return` right after the await fires
+        # regardless of what that function actually did. The 2026-08-31 fix
+        # above implicitly assumed a leg could only ever become
+        # ce_leg_closed/pe_leg_closed independently (position still "open",
+        # one leg gone) via the post-15:00 R1 mechanic itself -- true at the
+        # time it was written. That assumption broke the moment
+        # r1_breach_reentry.py (2026-09-22/23) added a SECOND, EARLIER way to
+        # reach that exact state: a rolled-in leg's R1-breach close, which can
+        # fire at any time of day. Confirmed live: CE23150 closed via
+        # r1_breach_post_roll at 10:55am, and every check below this point --
+        # including _check_r1_breach_and_reentry() itself, section 2c further
+        # down, which is what's supposed to scan for and track a new S1-breach
+        # re-entry candidate on the now-empty CE side -- never ran again for
+        # the rest of the session, because this guard's own `return` fired on
+        # every single tick from 10:55am onward, ~4 hours before 15:00. The
+        # dashboard's S1-candidate panel going silent (frozen exactly at its
+        # last update, 10:55:00) was the visible symptom; the real bug was
+        # this mechanic being completely starved, not a display issue. Fix:
+        # only take this early-return branch once genuinely at/after
+        # self._POST1500_START, matching the function's own internal gate
+        # exactly -- before that, a closed leg correctly falls through to the
+        # rest of the ladder below (ITM-gate/day%/R1-breach-reentry), same as
+        # it would if this guard didn't exist at all. The day-low protection
+        # this guard also provides remains intact for its real post-15:00
+        # window, since day_low_exit_enabled's own freeze (self.
+        # _session_min_straddle_frozen) can never have happened yet this
+        # early anyway -- freeze times are always configured at/after 15:00
+        # in every real deployment (Gurmeet's own is 15:25).
+        if (self._post1500_exit_enabled and (pos.ce_leg_closed or pos.pe_leg_closed)
+                and now.time() >= self._POST1500_START):
             await self._check_post1500_r1_exit(pos, now)
             return
 

@@ -245,6 +245,102 @@ def test_r1_bucket_start_aligns_to_5min_market_anchored_boundaries():
         assert s._r1_bucket_start(now) == expected, f"now={now}"
 
 
+def test_early_leg_close_before_1500_still_reaches_r1_breach_and_reentry():
+    """2026-09-24 CRITICAL FIX, real live incident (Gurmeet's NIFTY book):
+    the post-1500-single-leg-mode guard in _check_exits() (exits.py) was
+    missing its own time check -- _check_post1500_r1_exit itself correctly
+    no-ops before 15:00, but the CALLER's `return` right after the await
+    fired regardless, unconditionally skipping the rest of the exit ladder
+    -- including _check_r1_breach_and_reentry(), which is what scans for
+    and tracks a new S1-breach re-entry candidate on the now-empty side.
+    Confirmed live: CE23150 closed via r1_breach_post_roll at 10:55am, and
+    the S1-candidate scan never ran again for the rest of the session
+    because this guard's own `return` fired on every tick from 10:55am
+    onward -- ~4 hours before 15:00. This test drives the REAL
+    _check_exits() (not just _check_r1_breach_and_reentry directly) with a
+    position that has one leg already closed, well before 15:00, and
+    proves the R1/S1 re-entry mechanic is genuinely reached."""
+    s = _strategy()
+    pos = _position()
+    pos.ce_leg_closed = True
+    s._position = pos
+    s._post1500_exit_enabled = True
+    s._roll_in_progress = False
+    s._eod_decision_in_progress = False
+    s._post_restore_warmup = False
+    s._prehedge_attempted_today = True
+    s._force_exit = dtime(23, 59)
+    s._persist = lambda: None
+    s._persist_session = lambda: None
+    from unittest.mock import AsyncMock as _AM
+    s._publish_exit_audit = _AM()
+    s._check_post1500_r1_exit = _AM()
+    s._check_r1_breach_and_reentry = _AM()
+
+    import strategies.sell_straddle.exits as exits_mod
+    now = datetime(2026, 9, 24, 10, 55, 0, tzinfo=IST)  # well before 15:00
+    _orig = exits_mod.datetime
+
+    class _Fixed(_orig):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+    exits_mod.datetime = _Fixed
+    try:
+        asyncio.run(s._check_exits())
+    finally:
+        exits_mod.datetime = _orig
+
+    # 2c-2 further down the ladder (exits.py ~line 1971) ALSO calls
+    # _check_post1500_r1_exit unconditionally on every tick regardless of
+    # leg-closed state (it self-gates internally on time) -- that's expected,
+    # unrelated to this bug. What actually matters: _check_r1_breach_and_
+    # reentry (2c, EARLIER in the ladder) must have been reached and awaited
+    # -- that's the real fix under test.
+    s._check_r1_breach_and_reentry.assert_awaited_once()
+
+
+def test_late_leg_close_after_1500_still_takes_the_post1500_only_path():
+    """Companion to the fix above: the ORIGINAL 2026-08-31 protection must
+    still hold for its real post-15:00 window -- a leg closed genuinely
+    after 15:00 must still route to _check_post1500_r1_exit ONLY, with
+    _check_r1_breach_and_reentry (and everything else) skipped, exactly as
+    before this fix."""
+    s = _strategy()
+    pos = _position()
+    pos.ce_leg_closed = True
+    s._position = pos
+    s._post1500_exit_enabled = True
+    s._roll_in_progress = False
+    s._eod_decision_in_progress = False
+    s._post_restore_warmup = False
+    s._prehedge_attempted_today = True
+    s._force_exit = dtime(23, 59)
+    s._persist = lambda: None
+    s._persist_session = lambda: None
+    from unittest.mock import AsyncMock as _AM
+    s._publish_exit_audit = _AM()
+    s._check_post1500_r1_exit = _AM()
+    s._check_r1_breach_and_reentry = _AM()
+
+    import strategies.sell_straddle.exits as exits_mod
+    now = datetime(2026, 9, 24, 15, 20, 0, tzinfo=IST)  # genuinely post-1500
+    _orig = exits_mod.datetime
+
+    class _Fixed(_orig):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+    exits_mod.datetime = _Fixed
+    try:
+        asyncio.run(s._check_exits())
+    finally:
+        exits_mod.datetime = _orig
+
+    s._check_post1500_r1_exit.assert_awaited_once()
+    s._check_r1_breach_and_reentry.assert_not_called()
+
+
 def test_level_breached_r1_fires_on_live_ltp_alone():
     """2026-09-24 CORRECTION, direct user instruction ("IF LTP GOES ABOVE R1
     THAT MEANS BREACH"): even when the calculator's own bar-close-driven
