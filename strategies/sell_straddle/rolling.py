@@ -18,6 +18,22 @@ logger = logging.getLogger(__name__)
 # spamming partner searches every tick when a market condition persists.
 _ROLL_RETRY_SECONDS = 60
 
+# 2026-09-24, direct user spec: the hedge-on-failed-rollover hook (see
+# _single_side_roll's own "if not partner" branch) must NOT fire on the
+# first failure -- real incident (NIFTY CE23350/PE23200, 2026-09-24): a
+# hedge fired at 09:18:35 off just 2 consecutive vwap_rise_roll failures
+# within the first 3 minutes of a brand-new position, traced back to the
+# pool engine's own tf=1 SLOPE/VWAP readings still being noisy this early
+# (slope_prev values of -22.85, -20.59, -29.35 vs. the near-zero range they
+# settle to minutes later) -- NOT a genuine "no combination exists" market
+# condition. A clean, rule-passing partner (CE23250) showed up on its own
+# just 4 minutes later once the noise settled, proving the hedge was
+# premature. Requiring _ROLL_FAIL_HEDGE_STREAK consecutive failures (same
+# 60s-apart retry cadence as _ROLL_RETRY_SECONDS already enforces) before
+# concluding "genuinely nothing available" gives early-session noise room
+# to resolve on its own, the way it demonstrably did here.
+_ROLL_FAIL_HEDGE_STREAK = 10
+
 # 2026-08-20 user spec: still used by the ITM-roll-PROTECTION pool search
 # (_check_itm_roll_protection_side, a DIFFERENT mechanic from the main rollover
 # path below -- searching for a fresh pool partner after a protection-budget
@@ -221,6 +237,12 @@ class RollingMixin:
             itm_cap_step_pts=_ROLLOVER_STRIKE_STEP,
         )
 
+        if partner:
+            # A candidate was genuinely found -- the failure streak (see
+            # _ROLL_FAIL_HEDGE_STREAK) no longer applies; a fresh run starts
+            # counting only if a LATER search fails again.
+            self._roll_fail_streak = 0
+
         # 2026-09-23 fix (log-noise pass): this used to dump the full ~20-30
         # line candidate-by-candidate trace on EVERY 60s retry attempt (already
         # throttled to 60s, but a stuck position -- same blocker every cycle --
@@ -260,6 +282,38 @@ class RollingMixin:
                 "SellStraddle[%s]: ROLLOVER %s — no valid partner; keeping original pair. reason: %s",
                 self._underlying, reason, _why_plain,
             )
+            # 2026-09-24, direct user spec ("if during rollover no combination is
+            # found immediately hedge the positions" -- applies to EVERY failed
+            # rollover search, any reason, not just the day-loss-SL fallback
+            # that already reached hedging much later in the day; they all
+            # funnel through this one method). CORRECTION, same day, real
+            # incident: firing on the very FIRST failure hedged a brand-new
+            # position at 09:18:35 off just 2 failed attempts within 3 minutes
+            # of entry -- traced to the pool engine's own indicators still
+            # being noisy that early (huge tf=1 SLOPE swings), not a genuine
+            # lack of a valid partner; a clean candidate passed on its own 4
+            # minutes later. Direct user fix: require _ROLL_FAIL_HEDGE_STREAK
+            # (10) CONSECUTIVE failures -- same 60s-apart cadence
+            # _ROLL_RETRY_SECONDS already enforces, so this is ~10 minutes of
+            # sustained, repeated failure -- before concluding "genuinely
+            # nothing available" and activating the hedge. Skipped for
+            # itm_pair_gate's own rollover attempt (that mechanic already has
+            # its own dedicated close-fallback on a failed roll; mixing the
+            # two would double up) and once already hedged (nothing further
+            # to build). stop_for_day_on_hedge=False, same as the existing
+            # day_loss_sl call site -- direct user spec, "day stop is false,
+            # only true on day profit."
+            self._roll_fail_streak = getattr(self, "_roll_fail_streak", 0) + 1
+            if (reason != "itm_pair_gate_profit_rollover" and not pos.is_hedged_positional
+                    and self._roll_fail_streak >= _ROLL_FAIL_HEDGE_STREAK):
+                _hedged_now = await self._hedge_or_roll_if_eligible(pos, now, stop_for_day_on_hedge=False)
+                if _hedged_now:
+                    self._clog.info(
+                        "SellStraddle[%s]: ROLLOVER %s — no valid partner for %d consecutive "
+                        "attempts, hedge activated instead (position converted to positional carry).",
+                        self._underlying, reason, self._roll_fail_streak,
+                    )
+                    self._roll_fail_streak = 0
             return False
 
         new_strike, new_ltp = partner

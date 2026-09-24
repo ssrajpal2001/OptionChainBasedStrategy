@@ -838,6 +838,10 @@ class EntryMixin:
         # deliberately has no cooldown of its own). A fresh position has
         # nothing in common with whatever the last one was doing -- clear it.
         self._last_roll_attempt = {}
+        # 2026-09-24, same rationale: the hedge-on-failed-rollover streak
+        # counter (rolling.py's _ROLL_FAIL_HEDGE_STREAK) must not carry a
+        # count of failures from the PREVIOUS position into a brand-new one.
+        self._roll_fail_streak = 0
         self._persist()
         asyncio.create_task(self._seed_exec_legs(int(ce_strike), int(pe_strike)))
         self._trades_today += 1

@@ -1,6 +1,6 @@
 import asyncio
 import datetime
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 
 from data_layer.base_feeder import EventBus
 from config.global_config import IST, GlobalConfig
@@ -102,6 +102,173 @@ def test_single_side_roll_no_candidate_keeps_original_pair():
         await s._single_side_roll(datetime.datetime.now(IST), "ltp_decay")
         assert s._position is not None   # no partner → keep original pair
         assert s._position.status == "open"
+    asyncio.run(run())
+
+
+def test_single_side_roll_no_candidate_does_not_hedge_before_streak_threshold():
+    """2026-09-24, direct user fix (real incident: a hedge fired at 09:18:35
+    off just 2 failed vwap_rise_roll attempts within 3 minutes of a brand-new
+    position, traced to the pool engine's own indicators still being noisy
+    that early -- a clean candidate passed on its own 4 minutes later). The
+    hedge-on-failed-rollover hook must NOT fire until
+    _ROLL_FAIL_HEDGE_STREAK (10) CONSECUTIVE failures have accumulated --
+    a single failure (streak starts at 0) must only increment the counter,
+    never call the hedge dispatch."""
+    async def run():
+        bus = EventBus()
+        s = SellStraddleStrategy(bus, cfg=GlobalConfig(), underlying="NIFTY")
+        s._position = StraddlePosition(
+            underlying="NIFTY", atm_at_entry=23500, entry_spot=23500,
+            ce_leg=StraddleLeg("CE", 23500, 80.0, 10.0),
+            pe_leg=StraddleLeg("PE", 23500, 80.0, 70.0),
+            net_credit=160.0, status="open",
+        )
+        s._spot = 23500
+        s._strike_prem = {}  # empty -> no rollover partner found
+        s._hedge_or_roll_if_eligible = AsyncMock(return_value=True)
+
+        rolled = await s._single_side_roll(datetime.datetime.now(IST), "ltp_decay")
+
+        assert rolled is False
+        s._hedge_or_roll_if_eligible.assert_not_awaited()
+        assert s._roll_fail_streak == 1
+    asyncio.run(run())
+
+
+def test_single_side_roll_no_candidate_activates_hedge_at_streak_threshold():
+    """The 10th consecutive failure (streak already at 9 from prior calls)
+    must attempt to activate the hedge via the shared
+    _hedge_or_roll_if_eligible dispatch, with stop_for_day_on_hedge=False
+    (same as the existing day_loss_sl call site), and reset the streak
+    afterward."""
+    async def run():
+        bus = EventBus()
+        s = SellStraddleStrategy(bus, cfg=GlobalConfig(), underlying="NIFTY")
+        s._position = StraddlePosition(
+            underlying="NIFTY", atm_at_entry=23500, entry_spot=23500,
+            ce_leg=StraddleLeg("CE", 23500, 80.0, 10.0),
+            pe_leg=StraddleLeg("PE", 23500, 80.0, 70.0),
+            net_credit=160.0, status="open",
+        )
+        s._spot = 23500
+        s._strike_prem = {}
+        s._roll_fail_streak = 9
+        s._hedge_or_roll_if_eligible = AsyncMock(return_value=True)
+
+        now = datetime.datetime.now(IST)
+        rolled = await s._single_side_roll(now, "ltp_decay")
+
+        assert rolled is False  # no roll happened -- hedge stands in for it
+        s._hedge_or_roll_if_eligible.assert_awaited_once_with(
+            s._position, now, stop_for_day_on_hedge=False,
+        )
+        assert s._roll_fail_streak == 0  # reset after a successful hedge build
+    asyncio.run(run())
+
+
+def test_single_side_roll_no_candidate_skips_hedge_when_already_hedged():
+    """A position already carrying a hedge must not try to build a second
+    one on a later failed roll, even once the streak threshold is reached."""
+    async def run():
+        bus = EventBus()
+        s = SellStraddleStrategy(bus, cfg=GlobalConfig(), underlying="NIFTY")
+        s._position = StraddlePosition(
+            underlying="NIFTY", atm_at_entry=23500, entry_spot=23500,
+            ce_leg=StraddleLeg("CE", 23500, 80.0, 10.0),
+            pe_leg=StraddleLeg("PE", 23500, 80.0, 70.0),
+            net_credit=160.0, status="open",
+        )
+        s._position.is_hedged_positional = True
+        s._spot = 23500
+        s._strike_prem = {}
+        s._roll_fail_streak = 9
+        s._hedge_or_roll_if_eligible = AsyncMock(return_value=True)
+
+        await s._single_side_roll(datetime.datetime.now(IST), "ltp_decay")
+
+        s._hedge_or_roll_if_eligible.assert_not_awaited()
+    asyncio.run(run())
+
+
+def test_single_side_roll_no_candidate_skips_hedge_for_itm_pair_gate_reason():
+    """itm_pair_gate_profit_rollover already has its own dedicated
+    close-fallback on a failed roll -- the new hedge-on-failure hook must
+    not also fire for that specific reason, even at the streak threshold."""
+    async def run():
+        bus = EventBus()
+        s = SellStraddleStrategy(bus, cfg=GlobalConfig(), underlying="NIFTY")
+        s._position = StraddlePosition(
+            underlying="NIFTY", atm_at_entry=23500, entry_spot=23500,
+            ce_leg=StraddleLeg("CE", 23500, 80.0, 10.0),
+            pe_leg=StraddleLeg("PE", 23500, 80.0, 70.0),
+            net_credit=160.0, status="open",
+        )
+        s._spot = 23500
+        s._strike_prem = {}
+        s._roll_fail_streak = 9
+        s._hedge_or_roll_if_eligible = AsyncMock(return_value=True)
+
+        await s._single_side_roll(datetime.datetime.now(IST), "itm_pair_gate_profit_rollover")
+
+        s._hedge_or_roll_if_eligible.assert_not_awaited()
+    asyncio.run(run())
+
+
+def test_single_side_roll_success_resets_the_fail_streak():
+    """A successful roll (partner found) must reset the consecutive-failure
+    streak -- a later, unrelated failure must not inherit a count from
+    before this success."""
+    async def run():
+        bus = EventBus()
+        s = SellStraddleStrategy(bus, cfg=GlobalConfig(), underlying="NIFTY")
+        s._itm_pair_gate_enabled = False
+        s._spot = 24400.0
+        s._position = StraddlePosition(
+            underlying="NIFTY", atm_at_entry=24500, entry_spot=24500,
+            ce_leg=StraddleLeg("CE", 24450, 152.75, 107.0,
+                               open_time=datetime.datetime.now(IST)),
+            pe_leg=StraddleLeg("PE", 24450, 132.05, 162.95,
+                               open_time=datetime.datetime.now(IST)),
+            net_credit=284.8, status="open",
+        )
+        s._roll_fail_streak = 7
+
+        emitted = []
+        orig_emit = s._emit_order
+
+        async def capture_emit(ev):
+            emitted.append(ev)
+            await orig_emit(ev)
+        s._emit_order = capture_emit
+
+        with patch("strategies.sell_straddle.selection.select_rollover_partner_directional",
+                   return_value=(24350, 156.90)):
+            async def deliver_fills():
+                await asyncio.sleep(0.02)
+                close_ev = [o for o in emitted if o.action == "EXIT"][0]
+                s._on_fill(StraddleFillEvent(
+                    action="EXIT", underlying="NIFTY", atm=24500.0,
+                    ce_strike=24450.0, pe_strike=24450.0,
+                    ce_fill=107.0, pe_fill=0.0,
+                    client_id="C", binding_id="B",
+                    event_id=close_ev.event_id, legs=["CE"],
+                ))
+                await asyncio.sleep(0.02)
+                open_ev = [o for o in emitted if o.action == "ENTRY"][0]
+                s._on_fill(StraddleFillEvent(
+                    action="ENTRY", underlying="NIFTY", atm=24500.0,
+                    ce_strike=24350.0, pe_strike=24450.0,
+                    ce_fill=156.90, pe_fill=0.0,
+                    client_id="C", binding_id="B",
+                    event_id=open_ev.event_id, legs=["CE"],
+                ))
+
+            task = asyncio.create_task(deliver_fills())
+            rolled = await s._single_side_roll(datetime.datetime.now(IST), "scalable_tsl")
+            await task
+
+        assert rolled is True
+        assert s._roll_fail_streak == 0
     asyncio.run(run())
 
 
