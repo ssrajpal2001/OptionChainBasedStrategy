@@ -562,6 +562,182 @@ def test_seed_then_live_feed_does_not_silently_drop_the_next_bucket():
     )
 
 
+def _mk_rule_pass_true(s):
+    """Patches _ind_by_tf/eval_rules so every rule_pass call in Part 2
+    succeeds, isolating these tests to the ring-search/premium-gate/give-up/
+    threshold logic under test rather than the generic rule evaluator."""
+    s._ind_by_tf = lambda ce_s, pe_s, rules: {}
+    import strategies.core.rule_evaluator as _re_mod
+    return __import__("unittest.mock", fromlist=["patch"]).patch.object(
+        _re_mod, "eval_rules", lambda rules, ind: (True, "ok"),
+    )
+
+
+def test_part2_enters_immediately_on_first_passing_candidate_no_wait():
+    """2026-09-24 REDESIGN: once a ring-search candidate passes (gap=50,
+    LTP strictly below the just-closed leg's own LTP, rule_pass), Part 2
+    must enter it on the SAME cycle it's found -- no waiting on any further
+    breach/trigger for the new leg itself."""
+    s = _strategy()
+    s._spot = 23120.0  # near the anchor so the ITM-depth cap doesn't reject either ring candidate
+    pos = _position(pe_ltp=90.0)  # PE in profit -> Part 1 leaves it alone
+    pos.ce_leg_closed = True
+    s._position = pos
+    s._r1_pending = {
+        "side": "CE", "candidate_strike": None, "last_check": None,
+        "_last_closed_strike": 23100, "closing_ltp": 195.80,
+        "armed_at": datetime(2026, 9, 24, 11, 22, 18),
+    }
+    # Ring 1 around anchor 23100 (step=50): 23050 (fails, too rich) / 23150 (passes).
+    s._strike_prem = {
+        (23050, "CE"): {"ltp": 999.0},
+        (23150, "CE"): {"ltp": 140.0},
+    }
+    s._persist = lambda: None
+    s._open_leg = AsyncMock()
+    s._close_position = AsyncMock()
+    s._shift_to_next_week_expiry = AsyncMock()
+
+    with _mk_rule_pass_true(s):
+        now = datetime(2026, 9, 24, 11, 22, 33)  # 15s after armed_at -- clears throttle
+        asyncio.run(s._check_r1_breach_and_reentry(now))
+
+    s._open_leg.assert_awaited_once_with("CE", 23150, 140.0, now, "r1_pair_reentry_post_breach")
+    s._close_position.assert_not_awaited()
+    s._shift_to_next_week_expiry.assert_not_awaited()
+    assert s._r1_pending is None
+
+
+def test_part2_gives_up_after_60s_of_no_passing_candidate():
+    """Step 5: 60s of continuous retrying with nothing passing -> close the
+    remaining kept leg and reset (fresh BEGINNING re-fires on the next
+    cycle), rather than watch indefinitely."""
+    s = _strategy()
+    pos = _position(pe_ltp=90.0)
+    pos.ce_leg_closed = True
+    s._position = pos
+    armed_at = datetime(2026, 9, 24, 11, 22, 18)
+    s._r1_pending = {
+        "side": "CE", "candidate_strike": None, "last_check": None,
+        "_last_closed_strike": 23100, "closing_ltp": 195.80, "armed_at": armed_at,
+    }
+    s._strike_prem = {}  # nothing ever passes
+    s._persist = lambda: None
+    s._open_leg = AsyncMock()
+    s._close_position = AsyncMock()
+    s._shift_to_next_week_expiry = AsyncMock()
+
+    with _mk_rule_pass_true(s):
+        now = armed_at + __import__("datetime").timedelta(seconds=61)
+        asyncio.run(s._check_r1_breach_and_reentry(now))
+
+    s._close_position.assert_awaited_once_with("r1_reentry_giveup_no_pair")
+    s._open_leg.assert_not_awaited()
+    s._shift_to_next_week_expiry.assert_not_awaited()
+    assert s._r1_pending is None
+
+
+def test_part2_does_not_give_up_before_60s_elapsed():
+    """Negative case for the give-up timer -- must keep watching, not close,
+    while still inside the 60s window."""
+    s = _strategy()
+    pos = _position(pe_ltp=90.0)
+    pos.ce_leg_closed = True
+    s._position = pos
+    armed_at = datetime(2026, 9, 24, 11, 22, 18)
+    s._r1_pending = {
+        "side": "CE", "candidate_strike": None, "last_check": None,
+        "_last_closed_strike": 23100, "closing_ltp": 195.80, "armed_at": armed_at,
+    }
+    s._strike_prem = {}
+    s._persist = lambda: None
+    s._open_leg = AsyncMock()
+    s._close_position = AsyncMock()
+
+    with _mk_rule_pass_true(s):
+        now = armed_at + __import__("datetime").timedelta(seconds=45)
+        asyncio.run(s._check_r1_breach_and_reentry(now))
+
+    s._close_position.assert_not_awaited()
+    s._open_leg.assert_not_awaited()
+    assert s._r1_pending is not None
+
+
+def test_part2_below_ltp_target_closes_and_shifts_next_week_instead_of_entering():
+    """Step 6: a candidate that passes the ring search but whose LTP is below
+    the ltp_target floor must NOT be entered -- close the remaining kept leg
+    and shift to next week's expiry instead."""
+    s = _strategy()
+    s._spot = 23120.0
+    s._ltp_target = 50.0
+    pos = _position(pe_ltp=90.0)
+    pos.ce_leg_closed = True
+    s._position = pos
+    s._r1_pending = {
+        "side": "CE", "candidate_strike": None, "last_check": None,
+        "_last_closed_strike": 23100, "closing_ltp": 60.0,
+        "armed_at": datetime(2026, 9, 24, 11, 22, 18),
+    }
+    # Passes gap + premium gate (30 < 60) but 30 < ltp_target(50).
+    s._strike_prem = {(23150, "CE"): {"ltp": 30.0}}
+    s._persist = lambda: None
+    s._open_leg = AsyncMock()
+    s._close_position = AsyncMock()
+    s._shift_to_next_week_expiry = AsyncMock()
+
+    with _mk_rule_pass_true(s):
+        now = datetime(2026, 9, 24, 11, 22, 33)
+        asyncio.run(s._check_r1_breach_and_reentry(now))
+
+    s._open_leg.assert_not_awaited()
+    s._close_position.assert_awaited_once_with("r1_reentry_ltp_below_threshold")
+    s._shift_to_next_week_expiry.assert_awaited_once()
+    assert s._r1_pending is None
+
+
+def test_part2_throttle_blocks_retry_within_15_seconds():
+    s = _strategy()
+    s._spot = 23120.0
+    pos = _position(pe_ltp=90.0)
+    pos.ce_leg_closed = True
+    s._position = pos
+    last_check = datetime(2026, 9, 24, 11, 22, 18)
+    s._r1_pending = {
+        "side": "CE", "candidate_strike": None, "last_check": last_check,
+        "_last_closed_strike": 23100, "closing_ltp": 195.80, "armed_at": last_check,
+    }
+    s._strike_prem = {(23150, "CE"): {"ltp": 140.0}}
+    s._persist = lambda: None
+    s._open_leg = AsyncMock()
+
+    with _mk_rule_pass_true(s):
+        now = last_check + __import__("datetime").timedelta(seconds=10)  # < 15s throttle
+        asyncio.run(s._check_r1_breach_and_reentry(now))
+
+    s._open_leg.assert_not_awaited()
+    assert s._r1_pending["last_check"] == last_check, "throttled call must not touch last_check"
+
+
+def test_restart_bootstrap_anchors_on_the_closed_legs_own_surviving_strike():
+    """2026-09-24: the bootstrap path (restart while a leg is already closed)
+    must anchor the ring search on the closed leg's OWN strike (read from
+    the leg object, which survives a close), not None -- a None anchor would
+    leave select_partner_for with nothing to search around."""
+    s = _strategy()
+    pos = _position(pe_ltp=90.0)  # ce_leg.strike defaults to 24000 in _position()
+    pos.ce_leg_closed = True
+    s._position = pos
+    s._r1_pending = None
+    s._persist = lambda: None
+    s._strike_prem = {}
+
+    now = datetime(2026, 9, 24, 10, 56, 0)
+    asyncio.run(s._check_r1_breach_and_reentry(now))
+
+    assert s._r1_pending["_last_closed_strike"] == 24000
+    assert s._r1_pending["closing_ltp"] is None
+
+
 def test_r1_feed_bar_only_processes_candle_on_5min_boundary_change():
     """Ticks within the same 5-min bucket must accumulate (high/low widen,
     no process_straddle_candle call); a tick in the NEXT bucket must flush

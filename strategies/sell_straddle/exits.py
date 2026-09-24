@@ -410,7 +410,24 @@ class ExitMixin:
                     f"R1 breach (post-roll watch) | {_side} leg (strike={int(_info.get('strike', 0))}) "
                     f"phase={_info.get('phase', '?')} R1_established={_info.get('r1_established', '?')} "
                     f"R1={float(_info.get('r1', 0.0) or 0.0):.2f} ltp={float(_info.get('ltp', 0.0) or 0.0):.2f} "
-                    f"→ closed this rolled-in leg early, now scanning for an S1-breach replacement"
+                    f"→ closed this rolled-in leg early, now searching for an immediate replacement pair"
+                )
+
+            if reason == "r1_reentry_giveup_no_pair":
+                _pending = getattr(self, "_r1_pending", None) or {}
+                _summary = _pending.get("last_search_summary") or {}
+                return (
+                    f"R1-reentry give-up | no partner passed within "
+                    f"{float(getattr(self, '_R1_GIVEUP_SECONDS', 60.0)):.0f}s of retrying "
+                    f"(checked={_summary.get('checked')} reject_counts={_summary.get('reject_counts')}) "
+                    f"→ closed remaining leg, resuming fresh BEGINNING entry"
+                )
+
+            if reason == "r1_reentry_ltp_below_threshold":
+                return (
+                    f"R1-reentry candidate below ltp_target floor "
+                    f"(target={self._ltp_target if self._ltp_target > 0 else 50.0:.2f}) "
+                    f"→ closed remaining leg, shifted to next week's expiry"
                 )
 
             if reason.startswith("manual_squareoff_"):

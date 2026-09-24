@@ -3004,7 +3004,10 @@ document.addEventListener('alpine:init', () => {
       if (s === 'day_low_reversal_exit') return 'Day-low reversal exit (retest of frozen day-low)';
       if (s === 'post1500_r1_breach') return 'Post-15:00 R1 breach (leg closed independently)';
       if (s === 'r1_breach_post_roll') return 'R1 breach (rolled-in leg closed early)';
-      if (s === 's1_breach_reentry_post_roll') return 'S1-breach re-entry (post-roll)';
+      if (s === 's1_breach_reentry_post_roll') return 'S1-breach re-entry (post-roll, legacy)';
+      if (s === 'r1_pair_reentry_post_breach') return 'R1-breach re-entry (immediate pair, post-breach)';
+      if (s === 'r1_reentry_giveup_no_pair') return 'R1-breach re-entry gave up (no pair found)';
+      if (s === 'r1_reentry_ltp_below_threshold') return 'R1-breach re-entry below LTP floor (shifted to next week)';
       if (s === 'itm_pair_gate_profit') return 'ITM pair gate (full exit)';
       if (s === 'itm_pair_gate') return 'ITM pair gate (rollover escape)';
       if (s === 'itm_roll_protection_stop') return 'ITM-roll protection SL (70% of booked profit)';
@@ -9418,32 +9421,25 @@ function amoTest() {
                               </span>
                             </div>
                           </template>
-                          <template x-if="s.mode==='waiting_s1_breach_reentry'">
-                            <div x-data="{ get diff(){ return (s.candidate_strike && s.s1) ? (s.ltp - s.s1) : null } }">
+                          <!-- 2026-09-24 REDESIGN: no more S1-breach wait -- the search enters
+                               immediately the moment a candidate passes (both-sides ring search,
+                               50pt gap, LTP strictly below the closed leg's own LTP), so there is
+                               no candidate/S1 to display -- just the live search + give-up clock. -->
+                          <template x-if="s.mode==='searching_r1_reentry'">
+                            <div>
                               <div class="flex items-center justify-between">
                                 <span style="color:var(--t-cyan);font-weight:700">
-                                  🔍 <span x-text="side"></span> side empty — scanning candidate
-                                  <span x-text="s.candidate_strike || '(none yet)'"></span>
-                                  <span x-show="s.s1_established===false" style="color:var(--t-amber)"> (S1 not established)</span>
-                                  <span x-show="s.phase==='S1_TRACKING'" style="color:var(--t-amber)"> (S1_TRACKING)</span>
+                                  🔍 <span x-text="side"></span> side empty — searching ±<span x-text="s.gap_pts"></span>pt rings around <span x-text="s.anchor_strike"></span>
+                                  <span x-show="s.closing_ltp !== null" style="color:var(--t-muted)"> (need LTP &lt; <span x-text="s.closing_ltp"></span>)</span>
                                 </span>
-                                <span x-show="s.candidate_strike" :style="s.ltp < s.s1 ? 'color:var(--t-green);font-weight:700' : 'color:var(--t-muted)'">
-                                  LTP <span x-text="s.ltp"></span> vs S1 <span x-text="s.s1"></span>
-                                  <span x-show="diff !== null" x-text="'(' + (diff>=0?'+':'') + diff.toFixed(2) + (diff<0?' BREACHED':' pts above S1')+')'"></span>
+                                <span style="color:var(--t-amber)">
+                                  give-up in <span x-text="Math.max(0, (s.giveup_secs||60) - (s.elapsed_secs||0))"></span>s
                                 </span>
                               </div>
-                              <!-- 2026-09-24, direct user spec: the search itself keeps re-running
-                                   every ~15s (may drop/replace the tracked candidate for a better
-                                   one) EVEN WHILE a candidate is already being tracked -- always show
-                                   it, not just while none has passed yet, so it's visible that this
-                                   is a live, continuously-re-evaluated search, not a static pick. -->
                               <div x-show="s.search" style="color:var(--t-muted)" class="mt-0.5">
-                                <span x-text="s.candidate_strike ? 'still re-checking every cycle for a better/different pair' : 'no partner passing yet'"></span> —
-                                pairing vs kept <span x-text="s.search && s.search.kept_side"></span><span x-text="s.search && s.search.kept_strike"></span>
+                                no partner passing yet — pairing vs kept <span x-text="s.search && s.search.kept_side"></span><span x-text="s.search && s.search.kept_strike"></span>
                                 @<span x-text="s.search && s.search.kept_ltp"></span> —
-                                checked <span x-text="s.search && s.search.checked"></span> candidates
-                                (<span x-show="s.search && s.search.direction_used" x-text="s.search && s.search.direction_used"></span>),
-                                blocked:
+                                checked <span x-text="s.search && s.search.checked"></span> candidates, blocked:
                                 <template x-for="k in Object.keys((s.search && s.search.reject_counts) || {}).filter(k => (s.search.reject_counts[k]||0) > 0)" :key="k">
                                   <span class="mr-1" x-text="k + '=' + s.search.reject_counts[k]"></span>
                                 </template>

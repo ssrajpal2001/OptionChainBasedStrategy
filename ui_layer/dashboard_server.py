@@ -3029,22 +3029,26 @@ class DashboardServer:
                                         pass
                                 if _r1p:
                                     try:
-                                        _calc = _r1p.get("calc")
-                                        _sr_state = _calc.get_calculated_sr_state(_r1p["inst_key"]) if _calc else {}
-                                        _s1lvl = (_sr_state.get("sr_levels") or {}).get("S1") or {}
-                                        _cand_strike = _r1p.get("candidate_strike")
-                                        _cand_ltp = 0.0
-                                        if _cand_strike:
-                                            _k = (int(_cand_strike), _r1p["side"])
-                                            _cand_ltp = float((getattr(strat, "_strike_prem", {}) or {})
-                                                               .get(_k, {}).get("ltp", 0.0) or 0.0)
+                                        # 2026-09-24 REDESIGN: Part 2 no longer waits on a
+                                        # candidate's own S1 breach (it enters immediately the
+                                        # moment one passes the ring search) -- so there is no
+                                        # persisted candidate_strike/S1 level to show anymore.
+                                        # Surface the search itself (anchor, gap, premium
+                                        # ceiling, give-up countdown) instead.
+                                        _armed_at = _r1p.get("armed_at")
+                                        _elapsed = (
+                                            (datetime.now(_IST) - _armed_at).total_seconds()
+                                            if _armed_at else 0.0
+                                        )
+                                        _giveup = float(getattr(strat, "_R1_GIVEUP_SECONDS", 60.0))
+                                        _closing_ltp = _r1p.get("closing_ltp")
                                         _r1s1_info[_r1p["side"]] = {
-                                            "mode": "waiting_s1_breach_reentry",
-                                            "candidate_strike": _cand_strike,
-                                            "s1": round(float(_s1lvl.get("low", 0.0) or 0.0), 2),
-                                            "ltp": round(_cand_ltp, 2),
-                                            "phase": _sr_state.get("current_phase"),
-                                            "s1_established": _sr_state.get("s1_established"),
+                                            "mode": "searching_r1_reentry",
+                                            "anchor_strike": _r1p.get("_last_closed_strike"),
+                                            "gap_pts": getattr(strat, "_R1_REENTRY_GAP_PTS", 50.0),
+                                            "closing_ltp": round(float(_closing_ltp), 2) if _closing_ltp else None,
+                                            "elapsed_secs": round(_elapsed, 0),
+                                            "giveup_secs": _giveup,
                                             # 2026-09-23, direct user spec: surface the partner
                                             # search itself (against the kept leg) while no
                                             # candidate has passed yet, instead of a dead blank.

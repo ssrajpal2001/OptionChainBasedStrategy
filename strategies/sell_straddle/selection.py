@@ -115,7 +115,8 @@ def _strikes_near_spot(
 
 def _evaluate_roll_candidate(strike_prem, roll_side, strike, kept_strike, kept_ltp,
                               spot, step, ltp_target, theta_target, max_itm_steps,
-                              ltp_le_kept, rule_pass, metric, min_ltp_exclusive=None):
+                              ltp_le_kept, rule_pass, metric, min_ltp_exclusive=None,
+                              max_ltp_exclusive=None):
     """One candidate's full filter chain (quote → ITM cap → premium gate → rule_pass →
     score), factored out of select_partner_for so both the original flat scan and the
     2026-08-26 anchor-ring scan share EXACTLY the same checks. Returns a populated diag
@@ -130,7 +131,7 @@ def _evaluate_roll_candidate(strike_prem, roll_side, strike, kept_strike, kept_l
     `theta_target` are still accepted as parameters (unused here now) purely so
     callers/traces don't need touching.
 
-    Premium gate — two mutually exclusive modes, selected by the caller:
+    Premium gate — three mutually exclusive modes, selected by the caller:
     - `ltp_le_kept=True` (select_partner_for / the ITM-roll-protection pool search,
       unchanged): candidate premium must be <= the KEPT/running leg's own LTP.
     - `min_ltp_exclusive=<value>` (2026-09-23, direct user spec, used by
@@ -140,7 +141,14 @@ def _evaluate_roll_candidate(strike_prem, roll_side, strike, kept_strike, kept_l
       being closed, not merely cheaper than whatever the other leg happens to be
       running at. Checked in the same slot as the old kept-based gate (after the
       ITM cap, before the more expensive rule_pass evaluation) so a candidate that
-      fails on price is never charged the cost of a rule evaluation."""
+      fails on price is never charged the cost of a rule evaluation.
+    - `max_ltp_exclusive=<value>` (2026-09-24, direct user spec, used by the
+      R1-breach re-entry search -- strategies/sell_straddle/r1_breach_reentry.py):
+      the inverse of `min_ltp_exclusive` -- candidate premium must be STRICTLY LESS
+      than `max_ltp_exclusive` (the LTP of the leg that just closed on an R1
+      breach). Direct user framing: after a breach the replacement must be
+      CHEAPER than the leg just abandoned (risk-reducing), the opposite economic
+      direction from the main rollover's "must be richer" rule above."""
     v = strike_prem.get((strike, roll_side))
     diag = {
         "event": "candidate", "roll_side": roll_side, "strike": int(strike),
@@ -169,6 +177,12 @@ def _evaluate_roll_candidate(strike_prem, roll_side, strike, kept_strike, kept_l
         if ltp <= float(min_ltp_exclusive):
             diag["ltp_le_kept_pass"] = False
             diag["reject_reason"] = f"ltp_not_above_closing ({ltp:.2f} <= {float(min_ltp_exclusive):.2f})"
+            return diag
+        diag["ltp_le_kept_pass"] = True
+    elif max_ltp_exclusive is not None:
+        if ltp >= float(max_ltp_exclusive):
+            diag["ltp_le_kept_pass"] = False
+            diag["reject_reason"] = f"ltp_not_below_closing ({ltp:.2f} >= {float(max_ltp_exclusive):.2f})"
             return diag
         diag["ltp_le_kept_pass"] = True
     # Optional: require partner premium <= kept leg premium. Disabled by default for rollover
@@ -210,7 +224,8 @@ def select_partner_for(strike_prem, roll_side, kept_strike, kept_ltp,
                        theta_target: float = 0.0, variable_strikes: bool = False,
                        trace: Optional[list] = None, ltp_le_kept: bool = False,
                        metric: str = "closest_to_kept",
-                       anchor_strike: Optional[int] = None):
+                       anchor_strike: Optional[int] = None,
+                       max_ltp_exclusive: Optional[float] = None):
     """Rollover partner selection — keep the RUNNING leg fixed and pick a strike on
     `roll_side` to re-sell, optionally with premium <= the kept leg's premium (see
     `ltp_le_kept`), and passing rule_pass(ce_strike, pe_strike).
@@ -260,7 +275,7 @@ def select_partner_for(strike_prem, roll_side, kept_strike, kept_ltp,
         return _select_partner_by_ring(
             strike_prem, roll_side, kept_strike, kept_ltp, spot, step, offset,
             ltp_target, rule_pass, max_itm_steps, theta_target, trace, ltp_le_kept,
-            metric, int(anchor_strike),
+            metric, int(anchor_strike), max_ltp_exclusive=max_ltp_exclusive,
         )
 
     if variable_strikes:
@@ -328,7 +343,8 @@ def select_partner_for(strike_prem, roll_side, kept_strike, kept_ltp,
 
 def _select_partner_by_ring(strike_prem, roll_side, kept_strike, kept_ltp,
                              spot, step, offset, ltp_target, rule_pass, max_itm_steps,
-                             theta_target, trace, ltp_le_kept, metric, anchor_strike):
+                             theta_target, trace, ltp_le_kept, metric, anchor_strike,
+                             max_ltp_exclusive=None):
     """Expanding-ring search around anchor_strike (the strike being closed) -- see
     select_partner_for's own docstring for the full rationale. Ring 1 = anchor±step
     (e.g. ±100), ring 2 = anchor±2*step, etc. First ring with >=1 passing candidate
@@ -349,7 +365,7 @@ def _select_partner_by_ring(strike_prem, roll_side, kept_strike, kept_ltp,
 
     reject_counts = {
         "no_quote_in_pool": 0, "too_itm": 0,
-        "ltp_above_kept": 0, "rule_fail": 0, "not_closest": 0,
+        "ltp_above_kept": 0, "ltp_not_below_closing": 0, "rule_fail": 0, "not_closest": 0,
     }
     total_checked = 0
     max_ring = max(1, int(offset))
@@ -361,6 +377,7 @@ def _select_partner_by_ring(strike_prem, roll_side, kept_strike, kept_ltp,
             diag = _evaluate_roll_candidate(
                 strike_prem, roll_side, strike, kept_strike, kept_ltp, spot, step,
                 ltp_target, theta_target, max_itm_steps, ltp_le_kept, rule_pass, metric,
+                max_ltp_exclusive=max_ltp_exclusive,
             )
             ring_diags.append(diag)
         passers = [d for d in ring_diags if d["reject_reason"] is None]
