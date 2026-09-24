@@ -13,12 +13,20 @@ structure-based exit instead of waiting on the generic exit ladder.
 Mechanic, in the user's own step numbering (Steps 1-3 are the ordinary
 SellStraddle beginning-entry + main-rollover flow, unrelated to this file):
 
-STEP 3 -- TICK-BY-TICK: once a rolled-in leg's running P&L goes negative, arm
+STEP 3 -- TICK-BY-TICK: the INSTANT a leg is taken via a single-side roll, arm
 a fresh SupportResistanceCalculator for that leg's own strike -- seeded (not
 blank) from REAL intraday history (09:15-to-now, REST-fetched as 1-min bars,
 aggregated into 5-min MARKET-ANCHORED bars -- 2026-09-23 correction, see
 _R1S1_BAR_MINUTES's own comment) so R1 reflects the strike's genuine 5-min
-structure since market open.
+structure since market open. 2026-09-24 CORRECTION, direct user instruction
+("when new leg is taken immediately check for r1 breach irrespective that leg
+is in profit or in loss"): arming is NO LONGER gated on the leg's running P&L
+being negative -- a freshly rolled-in leg is watched from the very next tick
+regardless of whether it happens to be sitting in profit or loss at that
+moment. Once armed, R1 keeps advancing every completed 5-min bar
+(_r1_feed_bar) and every live tick is checked against it (_level_breached) --
+this runs continuously for as long as the leg stays open, on EVERY roll that
+produces a new leg, every time.
 
 STEP 4 -- R1 BREACH (checked every tick against the seeded/updated state) =
 TRUE when EITHER: R1 is not yet established, OR the current phase is
@@ -184,14 +192,12 @@ class R1BreachReentryMixin:
             if not ikey:
                 return calc
             bars_1m = await fetch_upstox_intraday_1m(ikey, token)
-            if not bars_1m:
-                return calc
             _bars = [
                 _Bar(ts=datetime.fromisoformat(b["ts"]), open=float(b.get("open", b["high"])),
                      high=float(b["high"]), low=float(b["low"]), close=float(b.get("close", b["high"])))
                 for b in bars_1m
-            ]
-            _bars_5m = to_n_min_bars_market_anchored(_bars, self._R1S1_BAR_MINUTES)
+            ] if bars_1m else []
+            _bars_5m = to_n_min_bars_market_anchored(_bars, self._R1S1_BAR_MINUTES) if _bars else []
             # 2026-09-24 CRITICAL FIX, real live incident (Gurmeet's NIFTY book):
             # to_n_min_bars_market_anchored has no concept of "still forming" --
             # if the REST fetch (arm time) lands mid-bucket, its own LAST bar is
@@ -221,6 +227,37 @@ class R1BreachReentryMixin:
                 b for b in _bars_5m
                 if (b.ts + timedelta(minutes=self._R1S1_BAR_MINUTES)) <= _now_ist
             ]
+            # 2026-09-24, direct user spec ("you should have found same day if
+            # available or prev day R1 in 5 min and then check for breach"),
+            # widened after a real backtest replay showed the original
+            # zero-bars-only fallback still left R1 unestablished with just 1
+            # same-day bar (nowhere near enough for the state machine to move
+            # out of INITIAL_TREND_ESTABLISHMENT): the PREVIOUS trading day's
+            # real closed 5-min bars are now ALWAYS prepended before today's
+            # own bars, not just as a last-resort fallback when today has
+            # none at all. This gives the calculator genuine multi-day
+            # continuity from the very first tick of the trading day (same
+            # "prev-day seed + holiday step-back" discipline already
+            # established elsewhere in this codebase for the pool engine's
+            # own RSI/ROC warm-up -- fetch_upstox_1m already implements the
+            # day-by-day holiday/empty step-back itself). A previous day's
+            # own bars are all genuinely closed already -- no "still forming"
+            # filter needed there (unlike today's own fetch, where the arm
+            # moment can land mid-bucket).
+            from data_layer.historical_candles import fetch_upstox_1m
+            _prev_bars_1m = await fetch_upstox_1m(ikey, token)
+            _prev_bars_5m = []
+            if _prev_bars_1m:
+                _prev_bars = [
+                    _Bar(ts=datetime.fromisoformat(b["ts"]), open=float(b.get("open", b["high"])),
+                         high=float(b["high"]), low=float(b["low"]), close=float(b.get("close", b["high"])))
+                    for b in _prev_bars_1m
+                ]
+                _prev_bars_5m = to_n_min_bars_market_anchored(_prev_bars, self._R1S1_BAR_MINUTES)
+            _bars_5m = _prev_bars_5m + _bars_5m
+            bars_1m = _prev_bars_1m + bars_1m
+            if not _bars_5m:
+                return calc
             candles = [
                 {"timestamp": b.ts, "high": b.high, "low": b.low, "duration": self._R1S1_BAR_MINUTES}
                 for b in _bars_5m
@@ -229,10 +266,10 @@ class R1BreachReentryMixin:
             _st = calc.get_calculated_sr_state(inst_key)
             self._clog.info(
                 "SellStraddle[%s]: R1/S1 SEEDED %s%d from %d real 1-min bars "
-                "(%d real %d-min bars) -- phase=%s r1_established=%s s1_established=%s",
+                "(%d real %d-min bars: %d prev-day + %d today) -- phase=%s r1_established=%s s1_established=%s",
                 self._underlying, side, int(strike), len(bars_1m), len(candles),
-                self._R1S1_BAR_MINUTES, _st.get("current_phase"),
-                _st.get("r1_established"), _st.get("s1_established"),
+                self._R1S1_BAR_MINUTES, len(_prev_bars_5m), len(candles) - len(_prev_bars_5m),
+                _st.get("current_phase"), _st.get("r1_established"), _st.get("s1_established"),
             )
         except Exception as exc:
             self._clog.warning("SellStraddle[%s]: R1/S1 seed failed for %s%d: %s",
@@ -293,8 +330,8 @@ class R1BreachReentryMixin:
             watch = self._r1_watch.get(side)
             if watch is not None and watch.get("strike") != strike:
                 # This side rolled again onto a different strike since we last
-                # armed -- drop stale tracker, a fresh arm will pick it up if
-                # the new leg also goes into loss.
+                # armed -- drop stale tracker, a fresh arm will pick up the new
+                # leg immediately below (irrespective of its P&L).
                 self._r1_watch.pop(side, None)
                 watch = None
 
@@ -302,15 +339,19 @@ class R1BreachReentryMixin:
             running_pnl = float(getattr(leg, "entry_price", 0.0) or 0.0) - ltp  # short leg
 
             if watch is None:
-                if running_pnl >= 0:
-                    continue  # not yet in loss -- do not arm
+                # 2026-09-24 CORRECTION, direct user instruction: arm the INSTANT
+                # this leg is seen as rolled-in, irrespective of profit/loss --
+                # no longer gated on running_pnl < 0. The old profit-gate meant a
+                # rolled-in leg sitting flat/in-profit was invisible to this
+                # mechanic until it first dipped negative, silently deferring the
+                # R1 check by however long that took.
                 inst_key = f"{self._underlying}_{side}_{strike}_R1S1_ROLL"
                 calc = await self._seed_r1s1_calc(strike, side, inst_key)
                 self._r1_watch[side] = watch = {
                     "calc": calc, "inst_key": inst_key, "bar_acc": None, "strike": strike,
                 }
                 self._clog.info(
-                    "SellStraddle[%s]: R1-WATCH ARMED on rolled-in %s%d (running loss=%.2f pts) "
+                    "SellStraddle[%s]: R1-WATCH ARMED on rolled-in %s%d (running P&L=%.2f pts) "
                     "-- watching for R1 breach.",
                     self._underlying, side, strike, running_pnl,
                 )

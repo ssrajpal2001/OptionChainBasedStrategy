@@ -66,11 +66,13 @@ def _strategy():
     return s
 
 
-def _position(ce_entry=100.0, ce_ltp=100.0, pe_entry=100.0, pe_ltp=120.0) -> StraddlePosition:
+def _position(ce_entry=100.0, ce_ltp=100.0, pe_entry=100.0, pe_ltp=120.0,
+              ce_open_reason="single_side_roll_vwap_rise_roll",
+              pe_open_reason="single_side_roll_vwap_rise_roll") -> StraddlePosition:
     return StraddlePosition(
         underlying="NIFTY", atm_at_entry=24000, entry_spot=24000,
-        ce_leg=StraddleLeg("CE", 24000, ce_entry, ce_ltp, open_reason="single_side_roll_vwap_rise_roll"),
-        pe_leg=StraddleLeg("PE", 24000, pe_entry, pe_ltp, open_reason="single_side_roll_vwap_rise_roll"),
+        ce_leg=StraddleLeg("CE", 24000, ce_entry, ce_ltp, open_reason=ce_open_reason),
+        pe_leg=StraddleLeg("PE", 24000, pe_entry, pe_ltp, open_reason=pe_open_reason),
         net_credit=ce_entry + pe_entry,
         status="open",
     )
@@ -99,13 +101,15 @@ def _spy_close_leg(s, close_aborted=False, yield_before_finalize=False):
 def test_confirmed_r1_breach_close_sets_leg_closed_flag():
     """Core fix: after a confirmed close, pos.pe_leg_closed must be True."""
     s = _strategy()
-    s._position = _position()
+    # CE untagged (not a rolled-in leg) so only PE is watched -- isolates
+    # this test to the single-leg-breach path it's actually testing.
+    s._position = _position(ce_open_reason="beginning")
     s._seed_r1s1_calc = AsyncMock(return_value=_FakeCalc(r1_established=False))
     calls = _spy_close_leg(s)
     s._persist = lambda: None
 
-    # PE leg in loss (entry=100, ltp=120) -> arms watch -> breach immediately
-    # true (r1_established=False) -> closes in the SAME call.
+    # PE is rolled-in -> arms watch immediately (irrespective of P&L) ->
+    # breach immediately true (r1_established=False) -> closes in the SAME call.
     now = datetime(2026, 9, 23, 12, 27, 35)
     asyncio.run(s._check_r1_breach_and_reentry(now))
 
@@ -117,7 +121,7 @@ def test_second_call_does_not_re_close_already_closed_leg():
     """THE bug: before the fix, a second call (simulating the very next real
     tick) would see pe_leg_closed still False, re-arm, and close again."""
     s = _strategy()
-    s._position = _position()
+    s._position = _position(ce_open_reason="beginning")
     s._seed_r1s1_calc = AsyncMock(return_value=_FakeCalc(r1_established=False))
     calls = _spy_close_leg(s)
     s._persist = lambda: None
@@ -136,7 +140,7 @@ def test_concurrent_calls_only_close_once():
     """_tick_loop and _eod_backstop_loop can both reach this method for the
     same real moment -- the _r1_closing guard must serialize them."""
     s = _strategy()
-    s._position = _position()
+    s._position = _position(ce_open_reason="beginning")
     s._seed_r1s1_calc = AsyncMock(return_value=_FakeCalc(r1_established=False))
     calls = _spy_close_leg(s, yield_before_finalize=True)
     s._persist = lambda: None
@@ -156,7 +160,7 @@ def test_concurrent_calls_only_close_once():
 
 def test_aborted_close_clears_guard_and_allows_retry():
     s = _strategy()
-    s._position = _position()
+    s._position = _position(ce_open_reason="beginning")
     s._seed_r1s1_calc = AsyncMock(return_value=_FakeCalc(r1_established=False))
     calls = _spy_close_leg(s, close_aborted=True)
     s._persist = lambda: None
@@ -169,6 +173,28 @@ def test_aborted_close_clears_guard_and_allows_retry():
 
     asyncio.run(s._check_r1_breach_and_reentry(now))
     assert len(calls) == 2
+
+
+def test_rolled_in_leg_arms_immediately_even_in_profit():
+    """2026-09-24, direct user instruction ("when new leg is taken immediately
+    check for r1 breach irrespective that leg is in profit or in loss"): the
+    old code only armed a rolled-in leg's R1 watch once its running P&L went
+    negative -- a leg sitting flat/in-profit was invisible to this mechanic
+    until it first dipped into loss. Now arming happens on the very first
+    tick after the roll, regardless of P&L sign."""
+    s = _strategy()
+    # PE leg in PROFIT (entry=100, ltp=80) -- old code would never arm this.
+    s._position = _position(ce_open_reason="beginning", pe_entry=100.0, pe_ltp=80.0)
+    s._seed_r1s1_calc = AsyncMock(return_value=_FakeCalc(r1_established=True, phase="S1_TRACKING"))
+    calls = _spy_close_leg(s)
+    s._persist = lambda: None
+
+    now = datetime(2026, 9, 24, 10, 0, 0)
+    asyncio.run(s._check_r1_breach_and_reentry(now))
+
+    assert "PE" in s._r1_watch, "a profitable rolled-in leg must still be armed immediately"
+    s._seed_r1s1_calc.assert_awaited_once()
+    assert calls == [], "no breach yet (established=True, phase!=R1_TRACKING, ltp below R1) -- just armed"
 
 
 def test_open_leg_clears_leg_closed_and_r1_closing_guard():
@@ -257,9 +283,10 @@ def test_pending_bootstraps_from_live_position_after_restart_wipes_it():
     (simulating post-restart), CE is closed, PE is open, position status
     is "open" -- one call must recreate _r1_pending for the CE side."""
     s = _strategy()
-    # pe_ltp=90 (profit, entry=100) so Part 1 leaves the still-open PE leg
-    # alone entirely -- isolates this test to the Part 2 bootstrap only.
-    pos = _position(pe_ltp=90.0)
+    # pe_open_reason="beginning" (not a rolled-in leg) so Part 1 leaves the
+    # still-open PE leg alone entirely -- isolates this test to the Part 2
+    # bootstrap only.
+    pos = _position(pe_ltp=90.0, pe_open_reason="beginning")
     pos.ce_leg_closed = True
     s._position = pos
     s._r1_pending = None
@@ -284,7 +311,7 @@ def test_pending_does_not_bootstrap_when_post1500_was_the_one_that_closed_it():
     bookkeeping (distinct from pos.ce_leg_closed) -- when it shows this
     side was closed by post-1500, the bootstrap must NOT fire."""
     s = _strategy()
-    pos = _position(pe_ltp=90.0)
+    pos = _position(pe_ltp=90.0, pe_open_reason="beginning")
     pos.ce_leg_closed = True
     s._position = pos
     s._r1_pending = None
@@ -485,7 +512,11 @@ def test_seed_excludes_the_still_forming_bucket():
     async def _fake_fetch(ikey, token):
         return rows
 
+    async def _fake_prev_day(ikey, token, max_step_back=7):
+        return []  # no prev-day bars in this test -- today's own bars decide last_candle
+
     with patch("data_layer.historical_candles.fetch_upstox_intraday_1m", _fake_fetch), \
+         patch("data_layer.historical_candles.fetch_upstox_1m", _fake_prev_day), \
          patch("data_layer.client_db.ClientDB.get_feeder_creds_sync",
                lambda self, provider: {"access_token": "dummy"}), \
          patch("data_layer.instrument_registry.REGISTRY.get_active_expiry",
@@ -502,6 +533,115 @@ def test_seed_excludes_the_still_forming_bucket():
         "seed must stop at the last FULLY CLOSED bucket (09:35) -- the still-forming "
         "09:40 bucket must never be fed as a genuine candle"
     )
+
+
+def test_seed_falls_back_to_previous_day_when_today_has_no_closed_bucket_yet():
+    """2026-09-24, direct user spec, confirmed via a real backtest replay as a
+    genuine PRODUCTION gap (not just a backtest artifact): a roll happening
+    minutes after market open has ~0 same-day closed 5-min buckets to seed
+    from, so R1 always read r1_established=False and _level_breached's own
+    "not established counts as a breach" rule tripped almost instantly
+    regardless of real price action. Arms at 09:16:30 -- before even the
+    first [09:15,09:20) bucket has closed -- so fetch_upstox_intraday_1m's
+    own today-only rows produce zero closed buckets; the seed must then fall
+    back to fetch_upstox_1m's PREVIOUS-DAY real full session instead of
+    seeding blank."""
+    s = _strategy()
+    s._position = _position()
+    s._is_crypto = False
+
+    # Today's intraday fetch: only 1 real minute so far (09:15), nowhere near
+    # a closed 5-min bucket by "now"=09:16:30.
+    today_rows = [_mk_1m_row(datetime(2026, 9, 24, 9, 15, tzinfo=IST), 200.0, 190.0)]
+
+    # Previous day's full session: 5 complete 5-min buckets.
+    prev_day_rows = []
+    for i, (h, l) in enumerate([(223.85, 175.50), (186.55, 173.40), (184.95, 175.50),
+                                 (189.00, 179.10), (186.90, 174.30)]):
+        bstart = datetime(2026, 9, 23, 9, 15, tzinfo=IST) + __import__("datetime").timedelta(minutes=5 * i)
+        for m in range(5):
+            prev_day_rows.append(_mk_1m_row(bstart + __import__("datetime").timedelta(minutes=m), h, l))
+
+    async def _fake_intraday(ikey, token):
+        return today_rows
+
+    async def _fake_dated(ikey, token, max_step_back=7):
+        return prev_day_rows
+
+    with patch("data_layer.historical_candles.fetch_upstox_intraday_1m", _fake_intraday), \
+         patch("data_layer.historical_candles.fetch_upstox_1m", _fake_dated), \
+         patch("data_layer.client_db.ClientDB.get_feeder_creds_sync",
+               lambda self, provider: {"access_token": "dummy"}), \
+         patch("data_layer.instrument_registry.REGISTRY.get_active_expiry",
+               lambda *a, **k: datetime(2026, 9, 29).date()), \
+         patch("data_layer.instrument_registry.REGISTRY.get_broker_symbol",
+               lambda *a, **k: "NSE_FO|TEST"), \
+         patch("strategies.sell_straddle.r1_breach_reentry.datetime") as _dt_mock:
+        _dt_mock.now.return_value = datetime(2026, 9, 24, 9, 16, 30, tzinfo=IST)
+        _dt_mock.fromisoformat = datetime.fromisoformat
+        calc = asyncio.run(s._seed_r1s1_calc(23150, "CE", "TEST_KEY"))
+
+    st = calc.get_calculated_sr_state("TEST_KEY")
+    assert st["last_candle"] is not None, "must have seeded real candles from the prev-day fallback"
+    assert st["last_candle"]["timestamp"] == datetime(2026, 9, 23, 9, 35, tzinfo=IST), (
+        "seed must use the previous day's own 5-min buckets when today has none closed yet"
+    )
+
+
+def test_seed_always_prepends_prev_day_before_todays_own_bars():
+    """2026-09-24, widened per direct user follow-up: a real backtest replay
+    showed the original zero-bars-only fallback still left R1 unestablished
+    with just 1 same-day bar (nowhere near enough for the state machine to
+    exit INITIAL_TREND_ESTABLISHMENT). Prev-day bars are now ALWAYS fetched
+    and prepended before today's own closed bars -- not a conditional
+    fallback -- so R1/S1 has genuine multi-day continuity from the first
+    tick of the day. Confirms: prev-day is always called, its bars come
+    first (chronologically earlier), and today's own bars still correctly
+    follow and become the final last_candle once today has real ones too."""
+    s = _strategy()
+    s._position = _position()
+    s._is_crypto = False
+
+    today_rows = []
+    for i, (h, l) in enumerate([(223.85, 175.50), (186.55, 173.40)]):
+        bstart = datetime(2026, 9, 24, 9, 15, tzinfo=IST) + __import__("datetime").timedelta(minutes=5 * i)
+        for m in range(5):
+            today_rows.append(_mk_1m_row(bstart + __import__("datetime").timedelta(minutes=m), h, l))
+
+    prev_day_rows = []
+    for i, (h, l) in enumerate([(200.0, 190.0)]):
+        bstart = datetime(2026, 9, 23, 9, 15, tzinfo=IST) + __import__("datetime").timedelta(minutes=5 * i)
+        for m in range(5):
+            prev_day_rows.append(_mk_1m_row(bstart + __import__("datetime").timedelta(minutes=m), h, l))
+
+    async def _fake_intraday(ikey, token):
+        return today_rows
+
+    prev_day_fetch_called = []
+
+    async def _fake_dated(ikey, token, max_step_back=7):
+        prev_day_fetch_called.append(True)
+        return prev_day_rows
+
+    with patch("data_layer.historical_candles.fetch_upstox_intraday_1m", _fake_intraday), \
+         patch("data_layer.historical_candles.fetch_upstox_1m", _fake_dated), \
+         patch("data_layer.client_db.ClientDB.get_feeder_creds_sync",
+               lambda self, provider: {"access_token": "dummy"}), \
+         patch("data_layer.instrument_registry.REGISTRY.get_active_expiry",
+               lambda *a, **k: datetime(2026, 9, 29).date()), \
+         patch("data_layer.instrument_registry.REGISTRY.get_broker_symbol",
+               lambda *a, **k: "NSE_FO|TEST"), \
+         patch("strategies.sell_straddle.r1_breach_reentry.datetime") as _dt_mock:
+        _dt_mock.now.return_value = datetime(2026, 9, 24, 9, 25, 30, tzinfo=IST)
+        _dt_mock.fromisoformat = datetime.fromisoformat
+        calc = asyncio.run(s._seed_r1s1_calc(23150, "CE", "TEST_KEY"))
+
+    assert prev_day_fetch_called == [True], "prev-day must always be fetched now, not conditionally"
+    st = calc.get_calculated_sr_state("TEST_KEY")
+    # today's own last closed bucket (09:20) must still win as the final
+    # last_candle -- prev-day bars only extend history BACKWARD, never
+    # override today's own genuinely later, real structure.
+    assert st["last_candle"]["timestamp"] == datetime(2026, 9, 24, 9, 20, tzinfo=IST)
 
 
 def test_seed_then_live_feed_does_not_silently_drop_the_next_bucket():
@@ -532,7 +672,11 @@ def test_seed_then_live_feed_does_not_silently_drop_the_next_bucket():
     async def _fake_fetch(ikey, token):
         return rows
 
+    async def _fake_prev_day(ikey, token, max_step_back=7):
+        return []
+
     with patch("data_layer.historical_candles.fetch_upstox_intraday_1m", _fake_fetch), \
+         patch("data_layer.historical_candles.fetch_upstox_1m", _fake_prev_day), \
          patch("data_layer.client_db.ClientDB.get_feeder_creds_sync",
                lambda self, provider: {"access_token": "dummy"}), \
          patch("data_layer.instrument_registry.REGISTRY.get_active_expiry",
@@ -580,7 +724,7 @@ def test_part2_enters_immediately_on_first_passing_candidate_no_wait():
     breach/trigger for the new leg itself."""
     s = _strategy()
     s._spot = 23120.0  # near the anchor so the ITM-depth cap doesn't reject either ring candidate
-    pos = _position(pe_ltp=90.0)  # PE in profit -> Part 1 leaves it alone
+    pos = _position(pe_ltp=90.0, pe_open_reason="beginning")  # PE in profit -> Part 1 leaves it alone
     pos.ce_leg_closed = True
     s._position = pos
     s._r1_pending = {
@@ -613,7 +757,7 @@ def test_part2_gives_up_after_60s_of_no_passing_candidate():
     remaining kept leg and reset (fresh BEGINNING re-fires on the next
     cycle), rather than watch indefinitely."""
     s = _strategy()
-    pos = _position(pe_ltp=90.0)
+    pos = _position(pe_ltp=90.0, pe_open_reason="beginning")
     pos.ce_leg_closed = True
     s._position = pos
     armed_at = datetime(2026, 9, 24, 11, 22, 18)
@@ -641,7 +785,7 @@ def test_part2_does_not_give_up_before_60s_elapsed():
     """Negative case for the give-up timer -- must keep watching, not close,
     while still inside the 60s window."""
     s = _strategy()
-    pos = _position(pe_ltp=90.0)
+    pos = _position(pe_ltp=90.0, pe_open_reason="beginning")
     pos.ce_leg_closed = True
     s._position = pos
     armed_at = datetime(2026, 9, 24, 11, 22, 18)
@@ -670,7 +814,7 @@ def test_part2_below_ltp_target_closes_and_shifts_next_week_instead_of_entering(
     s = _strategy()
     s._spot = 23120.0
     s._ltp_target = 50.0
-    pos = _position(pe_ltp=90.0)
+    pos = _position(pe_ltp=90.0, pe_open_reason="beginning")
     pos.ce_leg_closed = True
     s._position = pos
     s._r1_pending = {
@@ -698,7 +842,7 @@ def test_part2_below_ltp_target_closes_and_shifts_next_week_instead_of_entering(
 def test_part2_throttle_blocks_retry_within_15_seconds():
     s = _strategy()
     s._spot = 23120.0
-    pos = _position(pe_ltp=90.0)
+    pos = _position(pe_ltp=90.0, pe_open_reason="beginning")
     pos.ce_leg_closed = True
     s._position = pos
     last_check = datetime(2026, 9, 24, 11, 22, 18)
@@ -724,7 +868,7 @@ def test_restart_bootstrap_anchors_on_the_closed_legs_own_surviving_strike():
     the leg object, which survives a close), not None -- a None anchor would
     leave select_partner_for with nothing to search around."""
     s = _strategy()
-    pos = _position(pe_ltp=90.0)  # ce_leg.strike defaults to 24000 in _position()
+    pos = _position(pe_ltp=90.0, pe_open_reason="beginning")  # ce_leg.strike defaults to 24000 in _position()
     pos.ce_leg_closed = True
     s._position = pos
     s._r1_pending = None
