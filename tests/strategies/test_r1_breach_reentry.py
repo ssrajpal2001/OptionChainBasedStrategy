@@ -23,9 +23,9 @@ plain `def test_...`), matching test_post1500_r1_exit.py.
 """
 import asyncio
 from datetime import datetime, time as dtime
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
-from config.global_config import GlobalConfig
+from config.global_config import GlobalConfig, IST
 from data_layer.base_feeder import EventBus
 from strategies.sell_straddle import SellStraddleStrategy, StraddlePosition, StraddleLeg
 
@@ -243,6 +243,116 @@ def test_r1_bucket_start_aligns_to_5min_market_anchored_boundaries():
     ]
     for now, expected in cases:
         assert s._r1_bucket_start(now) == expected, f"now={now}"
+
+
+def _mk_1m_row(ts: datetime, high: float, low: float) -> dict:
+    mid = (high + low) / 2
+    return {"ts": ts.isoformat(), "open": mid, "high": high, "low": low, "close": mid}
+
+
+def test_seed_excludes_the_still_forming_bucket():
+    """2026-09-24 CRITICAL FIX, real live incident (Gurmeet's NIFTY book): if
+    the REST fetch lands mid-bucket (arming at 09:43:45, inside the
+    [09:40,09:45) window), the seed must NOT feed that partial bucket as a
+    genuine candle -- only fully-closed ones. Real bars: 09:15-09:35 are five
+    complete 5-min buckets; 09:40-09:43 is only 4 of 5 real minutes (still
+    forming as of "now"=09:43:45). The seeded calculator's last_candle must
+    stop at 09:35, never reach 09:40."""
+    s = _strategy()
+    s._position = _position()
+    s._is_crypto = False
+
+    rows = []
+    for i, (h, l) in enumerate([(223.85, 175.50), (186.55, 173.40), (184.95, 175.50),
+                                 (189.00, 179.10), (186.90, 174.30)]):
+        bstart = datetime(2026, 9, 24, 9, 15, tzinfo=IST) + __import__("datetime").timedelta(minutes=5 * i)
+        for m in range(5):
+            rows.append(_mk_1m_row(bstart + __import__("datetime").timedelta(minutes=m), h, l))
+    # Still-forming 09:40 bucket: only 4 of 5 real minutes by "now".
+    for m in range(4):
+        rows.append(_mk_1m_row(
+            datetime(2026, 9, 24, 9, 40, tzinfo=IST) + __import__("datetime").timedelta(minutes=m),
+            176.35, 166.10,
+        ))
+
+    async def _fake_fetch(ikey, token):
+        return rows
+
+    with patch("data_layer.historical_candles.fetch_upstox_intraday_1m", _fake_fetch), \
+         patch("data_layer.client_db.ClientDB.get_feeder_creds_sync",
+               lambda self, provider: {"access_token": "dummy"}), \
+         patch("data_layer.instrument_registry.REGISTRY.get_active_expiry",
+               lambda *a, **k: datetime(2026, 9, 29).date()), \
+         patch("data_layer.instrument_registry.REGISTRY.get_broker_symbol",
+               lambda *a, **k: "NSE_FO|TEST"), \
+         patch("strategies.sell_straddle.r1_breach_reentry.datetime") as _dt_mock:
+        _dt_mock.now.return_value = datetime(2026, 9, 24, 9, 43, 45, tzinfo=IST)
+        _dt_mock.fromisoformat = datetime.fromisoformat
+        calc = asyncio.run(s._seed_r1s1_calc(23150, "CE", "TEST_KEY"))
+
+    st = calc.get_calculated_sr_state("TEST_KEY")
+    assert st["last_candle"]["timestamp"] == datetime(2026, 9, 24, 9, 35, tzinfo=IST), (
+        "seed must stop at the last FULLY CLOSED bucket (09:35) -- the still-forming "
+        "09:40 bucket must never be fed as a genuine candle"
+    )
+
+
+def test_seed_then_live_feed_does_not_silently_drop_the_next_bucket():
+    """The actual bug: seeding a still-forming bucket sets the calculator's
+    last_candle.timestamp to that SAME bucket the live feed later finalizes,
+    and SupportResistanceCalculator.process_straddle_candle's own duplicate-
+    candle guard (ts == last_candle.timestamp and duration <= last duration)
+    silently drops the live feed's candle for it -- real price data lost,
+    every subsequent R1/S1 transition pushed one bucket late. After the fix,
+    seed stops at 09:35, so the live feed's first finalized bucket (09:40) is
+    never a duplicate and genuinely advances last_candle."""
+    s = _strategy()
+    s._position = _position()
+    s._is_crypto = False
+
+    rows = []
+    for i, (h, l) in enumerate([(223.85, 175.50), (186.55, 173.40), (184.95, 175.50),
+                                 (189.00, 179.10), (186.90, 174.30)]):
+        bstart = datetime(2026, 9, 24, 9, 15, tzinfo=IST) + __import__("datetime").timedelta(minutes=5 * i)
+        for m in range(5):
+            rows.append(_mk_1m_row(bstart + __import__("datetime").timedelta(minutes=m), h, l))
+    for m in range(4):
+        rows.append(_mk_1m_row(
+            datetime(2026, 9, 24, 9, 40, tzinfo=IST) + __import__("datetime").timedelta(minutes=m),
+            176.35, 166.10,
+        ))
+
+    async def _fake_fetch(ikey, token):
+        return rows
+
+    with patch("data_layer.historical_candles.fetch_upstox_intraday_1m", _fake_fetch), \
+         patch("data_layer.client_db.ClientDB.get_feeder_creds_sync",
+               lambda self, provider: {"access_token": "dummy"}), \
+         patch("data_layer.instrument_registry.REGISTRY.get_active_expiry",
+               lambda *a, **k: datetime(2026, 9, 29).date()), \
+         patch("data_layer.instrument_registry.REGISTRY.get_broker_symbol",
+               lambda *a, **k: "NSE_FO|TEST"), \
+         patch("strategies.sell_straddle.r1_breach_reentry.datetime") as _dt_mock:
+        _dt_mock.now.return_value = datetime(2026, 9, 24, 9, 43, 45, tzinfo=IST)
+        _dt_mock.fromisoformat = datetime.fromisoformat
+        calc = asyncio.run(s._seed_r1s1_calc(23150, "CE", "TEST_KEY"))
+
+    entry = {"calc": calc, "inst_key": "TEST_KEY", "bar_acc": None, "strike": 23150}
+    # Live ticks spanning the rest of the (real) 09:40-09:45 bucket, then the
+    # tick that rolls into 09:45 finalizes it -- this must genuinely reach
+    # process_straddle_candle, not get silently dropped.
+    s._r1_feed_bar(entry, 167.00, datetime(2026, 9, 24, 9, 43, 45, tzinfo=IST))
+    s._r1_feed_bar(entry, 176.35, datetime(2026, 9, 24, 9, 44, 30, tzinfo=IST))
+    s._r1_feed_bar(entry, 166.10, datetime(2026, 9, 24, 9, 44, 55, tzinfo=IST))
+    pre_advance_ts = calc.get_calculated_sr_state("TEST_KEY")["last_candle"]["timestamp"]
+    assert pre_advance_ts == datetime(2026, 9, 24, 9, 35, tzinfo=IST)
+
+    s._r1_feed_bar(entry, 170.00, datetime(2026, 9, 24, 9, 45, 5, tzinfo=IST))
+    post_advance_ts = calc.get_calculated_sr_state("TEST_KEY")["last_candle"]["timestamp"]
+    assert post_advance_ts == datetime(2026, 9, 24, 9, 40, tzinfo=IST), (
+        "the live feed's 09:40 candle must genuinely advance last_candle -- "
+        "if this is still 09:35, the candle was silently dropped (the bug)"
+    )
 
 
 def test_r1_feed_bar_only_processes_candle_on_5min_boundary_change():

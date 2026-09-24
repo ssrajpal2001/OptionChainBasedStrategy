@@ -41,7 +41,7 @@ real REST history the next time this mechanic arms/tracks a candidate.
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from config.global_config import IST
 
@@ -137,6 +137,35 @@ class R1BreachReentryMixin:
                 for b in bars_1m
             ]
             _bars_5m = to_n_min_bars_market_anchored(_bars, self._R1S1_BAR_MINUTES)
+            # 2026-09-24 CRITICAL FIX, real live incident (Gurmeet's NIFTY book):
+            # to_n_min_bars_market_anchored has no concept of "still forming" --
+            # if the REST fetch (arm time) lands mid-bucket, its own LAST bar is
+            # only a PARTIAL bucket (e.g. arming at 09:43:45 mid-way through the
+            # [09:40,09:45) window only has ~4 of 5 real minutes), not a genuinely
+            # closed candle. Seeding it anyway sets the calculator's internal
+            # `last_candle.timestamp` to that same bucket boundary. The live feed
+            # (_r1_feed_bar) then starts its OWN fresh accumulator for that exact
+            # same bucket from arm-time onward, and once IT later finalizes and
+            # feeds the (genuinely complete) candle,
+            # SupportResistanceCalculator.process_straddle_candle's own duplicate-
+            # candle guard (`ts == last_candle['timestamp'] and duration <=
+            # last_candle['duration']`) silently DROPS it -- real new price action
+            # discarded, and every subsequent R1/S1 transition pushed one full
+            # bucket late from then on. Confirmed live: R1 stayed frozen at its
+            # seed-time value (189) through several real bucket closes that should
+            # have moved it to 172.3, then 173.7 (a genuine breach) -- reproduced
+            # exactly via a full _check_exits() integration test driving the real
+            # seed + live-feed path together, not just each in isolation. Fix: the
+            # seed must never include the currently-forming bucket -- only bars
+            # already fully closed by wall-clock time. The live feed then owns
+            # that bucket exclusively, starting its own accumulator from whatever
+            # real data has already ticked in (matching how it already behaves for
+            # every bucket after the first).
+            _now_ist = datetime.now(IST)
+            _bars_5m = [
+                b for b in _bars_5m
+                if (b.ts + timedelta(minutes=self._R1S1_BAR_MINUTES)) <= _now_ist
+            ]
             candles = [
                 {"timestamp": b.ts, "high": b.high, "low": b.low, "duration": self._R1S1_BAR_MINUTES}
                 for b in _bars_5m
