@@ -245,6 +245,59 @@ def test_r1_bucket_start_aligns_to_5min_market_anchored_boundaries():
         assert s._r1_bucket_start(now) == expected, f"now={now}"
 
 
+def test_pending_bootstraps_from_live_position_after_restart_wipes_it():
+    """2026-09-24 CRITICAL FIX, real live incident (Gurmeet's NIFTY book),
+    direct user spec ("when we restart it should call rest api historical
+    data and warm up the r1 and s1 as it does for other indicators"):
+    _r1_pending is never persisted (by design). A restart while CE is
+    already closed (awaiting an S1-breach re-entry partner) wiped it to
+    None with no code path left to ever recreate it -- Part 1 (the only
+    other place that sets it) requires a fresh breach on a currently-OPEN
+    leg, and CE has none. This proves the bootstrap: _r1_pending is None
+    (simulating post-restart), CE is closed, PE is open, position status
+    is "open" -- one call must recreate _r1_pending for the CE side."""
+    s = _strategy()
+    # pe_ltp=90 (profit, entry=100) so Part 1 leaves the still-open PE leg
+    # alone entirely -- isolates this test to the Part 2 bootstrap only.
+    pos = _position(pe_ltp=90.0)
+    pos.ce_leg_closed = True
+    s._position = pos
+    s._r1_pending = None
+    s._persist = lambda: None
+    # No candidate will actually be found (strike_prem empty) -- irrelevant
+    # to this test, which only checks that the bootstrap itself fires.
+    s._strike_prem = {}
+
+    now = datetime(2026, 9, 24, 10, 56, 0)
+    asyncio.run(s._check_r1_breach_and_reentry(now))
+
+    assert s._r1_pending is not None
+    assert s._r1_pending["side"] == "CE"
+    assert s._r1_pending["candidate_strike"] is None  # starts clean, re-derives fresh
+
+
+def test_pending_does_not_bootstrap_when_post1500_was_the_one_that_closed_it():
+    """Companion negative case: post-15:00's own single-leg-to-EOD design
+    deliberately wants no replacement search once it closes a leg
+    ("R1 logic will survive and EOD" -- direct user spec, unrelated to this
+    mechanic). _post1500_leg_closed is THAT mechanic's own separate
+    bookkeeping (distinct from pos.ce_leg_closed) -- when it shows this
+    side was closed by post-1500, the bootstrap must NOT fire."""
+    s = _strategy()
+    pos = _position(pe_ltp=90.0)
+    pos.ce_leg_closed = True
+    s._position = pos
+    s._r1_pending = None
+    s._post1500_leg_closed = {"CE": True, "PE": False}
+    s._persist = lambda: None
+    s._strike_prem = {}
+
+    now = datetime(2026, 9, 24, 15, 20, 0)
+    asyncio.run(s._check_r1_breach_and_reentry(now))
+
+    assert s._r1_pending is None
+
+
 def test_early_leg_close_before_1500_still_reaches_r1_breach_and_reentry():
     """2026-09-24 CRITICAL FIX, real live incident (Gurmeet's NIFTY book):
     the post-1500-single-leg-mode guard in _check_exits() (exits.py) was

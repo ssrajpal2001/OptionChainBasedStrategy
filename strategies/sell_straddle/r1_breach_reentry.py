@@ -345,6 +345,47 @@ class R1BreachReentryMixin:
             if not pos or pos.status != "open":
                 return
 
+        # 2026-09-24 CRITICAL FIX, real live incident (Gurmeet's NIFTY book),
+        # direct user spec ("when we restart it should call rest api
+        # historical data and warm up the r1 and s1 as it does for other
+        # indicators"): _r1_pending is never persisted across a restart (by
+        # design -- see this module's own docstring, same graceful-
+        # degradation choice already made for _post1500_calc). Part 1 above
+        # is the ONLY place that creates it, and it requires a FRESH breach
+        # on a currently-OPEN rolled-in leg -- which can never happen again
+        # once that leg has no open position at all. Confirmed live: CE23150
+        # closed via r1_breach_post_roll at 10:55am, a restart at some point
+        # after that wiped _r1_pending, and the S1-breach candidate search
+        # for the empty CE side never resumed for the rest of the session --
+        # not because the search logic is broken (it isn't), but because
+        # nothing ever called it again. Bootstrap it back from the LIVE
+        # position on the first call after a restart, exactly like every
+        # other indicator in this codebase re-warms via REST rather than
+        # being persisted: if exactly one side is closed and the position is
+        # still open, resume the search -- UNLESS post-15:00's own mechanic
+        # was what closed it (_post1500_leg_closed is THAT mechanic's own
+        # separate bookkeeping, distinct from pos.ce_leg_closed/pe_leg_closed
+        # -- its design deliberately wants no re-entry once single-leg,
+        # "R1 logic will survive and EOD" only, never this mechanic's own
+        # replacement search).
+        if self._r1_pending is None:
+            _p1500_closed = getattr(self, "_post1500_leg_closed", None) or {}
+            for _side in ("CE", "PE"):
+                _closed_attr = f"{_side.lower()}_leg_closed"
+                if getattr(pos, _closed_attr, False) and not _p1500_closed.get(_side, False):
+                    self._r1_pending = {
+                        "side": _side, "candidate_strike": None, "calc": None,
+                        "inst_key": None, "bar_acc": None, "last_check": None,
+                        "_last_closed_strike": None,
+                    }
+                    self._clog.info(
+                        "SellStraddle[%s]: S1-BREACH RE-ENTRY — resuming search for %s side "
+                        "(found already-closed on restart, not via post-1500) -- will warm "
+                        "R1/S1 fresh from REST history once a candidate is found.",
+                        self._underlying, _side,
+                    )
+                    break
+
         # ── Part 2: watch for a candidate S1 breach to re-enter the empty side ──
         pending = self._r1_pending
         if not pending:
