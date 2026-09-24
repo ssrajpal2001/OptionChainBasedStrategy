@@ -245,6 +245,64 @@ def test_r1_bucket_start_aligns_to_5min_market_anchored_boundaries():
         assert s._r1_bucket_start(now) == expected, f"now={now}"
 
 
+def test_level_breached_r1_fires_on_live_ltp_alone():
+    """2026-09-24 CORRECTION, direct user instruction ("IF LTP GOES ABOVE R1
+    THAT MEANS BREACH"): even when the calculator's own bar-close-driven
+    phase/established state does NOT yet show a breach (established=True,
+    phase is something other than R1_TRACKING -- i.e. the old check alone
+    returns False), a live LTP already above R1's numeric value must still
+    count as breached immediately."""
+    from strategies.sell_straddle.r1_breach_reentry import _level_breached
+    sr_state = {
+        "sr_levels": {"R1": {"is_established": True, "high": 173.25}},
+        "current_phase": "S1_TRACKING",  # NOT R1_TRACKING -- old check alone = False
+    }
+    assert _level_breached(sr_state, "R1", "R1_TRACKING", ltp=173.25) is False, "at the level, not yet past it"
+    assert _level_breached(sr_state, "R1", "R1_TRACKING", ltp=174.05) is True, "live ltp above R1 -- must breach"
+    assert _level_breached(sr_state, "R1", "R1_TRACKING", ltp=170.00) is False, "still below R1 -- no breach"
+    # No ltp passed at all -- must preserve the exact original bar-close-only behavior.
+    assert _level_breached(sr_state, "R1", "R1_TRACKING") is False
+
+
+def test_level_breached_s1_fires_on_live_ltp_alone():
+    """Symmetric correction for S1 (the re-entry-candidate scan): a live LTP
+    already below S1's numeric value must breach immediately, even while
+    established=True and phase != S1_TRACKING."""
+    from strategies.sell_straddle.r1_breach_reentry import _level_breached
+    sr_state = {
+        "sr_levels": {"S1": {"is_established": True, "low": 140.0}},
+        "current_phase": "R1_TRACKING",  # NOT S1_TRACKING -- old check alone = False
+    }
+    assert _level_breached(sr_state, "S1", "S1_TRACKING", ltp=139.99) is True
+    assert _level_breached(sr_state, "S1", "S1_TRACKING", ltp=140.00) is False
+    assert _level_breached(sr_state, "S1", "S1_TRACKING", ltp=150.00) is False
+    assert _level_breached(sr_state, "S1", "S1_TRACKING") is False
+
+
+def test_r1_breach_fires_from_live_ltp_before_the_bucket_closes():
+    """End-to-end: a rolled-in leg whose LTP has already ticked above R1's
+    current numeric value must close on THIS tick, not wait for the
+    currently-forming 5-min bucket to finish and the calculator's own phase
+    to catch up. Real live incident this corrects: LTP 174.05 vs R1 173.25
+    displayed on the dashboard, CE leg still open."""
+    s = _strategy()
+    s._position = _position(pe_entry=100.0, pe_ltp=174.05)  # PE in loss, ltp already past "R1"
+    # established=True, phase=S1_TRACKING (i.e. NOT R1_TRACKING) -- the OLD
+    # bar-close-only check would return False here and never close the leg.
+    s._seed_r1s1_calc = AsyncMock(return_value=_FakeCalc(r1_established=True, phase="S1_TRACKING"))
+    calls = _spy_close_leg(s)
+    s._persist = lambda: None
+
+    now = datetime(2026, 9, 24, 10, 47, 0)
+    asyncio.run(s._check_r1_breach_and_reentry(now))
+
+    assert calls == [("PE", "r1_breach_post_roll")], (
+        "live LTP already above R1 (100.0 fake level, ltp=174.05) must close immediately, "
+        "not wait for the calculator's own phase to reach R1_TRACKING"
+    )
+    assert s._position.pe_leg_closed is True
+
+
 def _mk_1m_row(ts: datetime, high: float, low: float) -> dict:
     mid = (high + low) / 2
     return {"ts": ts.isoformat(), "open": mid, "high": high, "low": low, "close": mid}

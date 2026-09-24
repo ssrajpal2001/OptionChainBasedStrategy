@@ -52,15 +52,42 @@ logger = logging.getLogger(__name__)
 _R1_CANDIDATE_RETRY_SECONDS = 15
 
 
-def _level_breached(sr_state: dict, level_key: str, tracking_phase: str) -> bool:
+def _level_breached(sr_state: dict, level_key: str, tracking_phase: str,
+                     ltp: float = None) -> bool:
     """Direct user spec: <level> breach is true when it is not established,
     OR the calculator is currently in that level's own TRACKING phase (a
     genuine re-breach transition -- e.g. "R2 breaches R1" -- always lands
-    the phase there, so that case is already covered by this check)."""
+    the phase there, so that case is already covered by this check).
+
+    2026-09-24 CORRECTION, direct user instruction ("IF LTP GOES ABOVE R1
+    THAT MEANS BREACH. REST ALL BREACH ARE ALSO VALID"): the phase/
+    established check above is entirely BAR-CLOSE-based -- the calculator
+    only updates its phase/established flags when a completed 5-min candle
+    is fed in (_r1_feed_bar), so a live tick that has already ticked past
+    the level's own numeric value sits unreported until the current bucket
+    finishes and closes, which can lag the real breach by several minutes.
+    Direct correction: the live LTP crossing the level's number IS the
+    breach, immediately, every tick -- not just when the calculator's own
+    bar-close-driven state machine catches up. Added as an ADDITIONAL
+    ("or") condition, not a replacement -- the existing phase/established
+    check still independently covers bar-close-confirmed transitions (e.g.
+    an R2->R1 promotion) that don't necessarily show up as a simple
+    LTP > level comparison. `ltp=None` (the default) preserves the exact
+    original bar-close-only behavior for any caller that doesn't pass it."""
     sr = sr_state.get("sr_levels", {}) or {}
     lvl = sr.get(level_key)
     established = bool(lvl.get("is_established")) if lvl else False
-    return (not established) or (sr_state.get("current_phase") == tracking_phase)
+    phase_breach = (not established) or (sr_state.get("current_phase") == tracking_phase)
+    if ltp is not None and lvl:
+        if level_key == "R1":
+            level_value = float(lvl.get("high", 0.0) or 0.0)
+            if level_value > 0 and ltp > level_value:
+                return True
+        elif level_key == "S1":
+            level_value = float(lvl.get("low", 0.0) or 0.0)
+            if level_value > 0 and ltp < level_value:
+                return True
+    return phase_breach
 
 
 class R1BreachReentryMixin:
@@ -262,7 +289,7 @@ class R1BreachReentryMixin:
 
             self._r1_feed_bar(watch, ltp, now)
             sr_state = watch["calc"].get_calculated_sr_state(watch["inst_key"])
-            if not _level_breached(sr_state, "R1", "R1_TRACKING"):
+            if not _level_breached(sr_state, "R1", "R1_TRACKING", ltp=ltp):
                 continue
 
             # 2026-09-23 CRITICAL FIX, real live incident: a concurrent
@@ -400,7 +427,7 @@ class R1BreachReentryMixin:
 
         self._r1_feed_bar(pending, new_ltp, now)
         sr_state = pending["calc"].get_calculated_sr_state(pending["inst_key"])
-        if not _level_breached(sr_state, "S1", "S1_TRACKING"):
+        if not _level_breached(sr_state, "S1", "S1_TRACKING", ltp=new_ltp):
             return
 
         # Re-verify the candidate still passes the existing partner rules on
