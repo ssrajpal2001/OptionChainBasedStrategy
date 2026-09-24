@@ -5,8 +5,12 @@ Responsibilities:
   - Hybrid MTM: fly-computed from fills + 30-second broker reconciliation
   - Daily drawdown: (Peak Daily Equity - Current Equity) / Allocated Capital * 100
   - Breach gates vs max_risk_per_trade_pct / max_daily_loss_pct per client
-  - Automated isolated liquidation on breach:
-      halt worker -> market exit orders -> BLOCKED status -> audit log
+    -- 2026-09-25 direct user decision: the automated per-tick breach sweep
+    (_check_all_clients) no longer auto-liquidates on max_daily_loss_pct;
+    risk is the strategy's own responsibility (day_loss_sl_pct, hedge-and-
+    carry, etc.), not a separate account-level override. See
+    _check_all_clients's own docstring for the real incident that prompted
+    this. Manual liquidation (admin kill_all()) still works as before.
   - Slippage tracking per broker provider: P_executed - P_signal (points)
   - risk_summary() dict for /api/admin/risk/summary endpoint
   - kill_all() coroutine for /api/admin/risk/kill_all endpoint
@@ -416,28 +420,31 @@ class RiskManager:
     # ── Risk check ─────────────────────────────────────────────────────────────
 
     async def _check_all_clients(self) -> None:
+        """2026-09-25, direct user spec: NO automated account-level risk gate --
+        "risk depends on strategy risk management itself." Real incident that
+        prompted this: ssrajpal2001's NIFTY sell_straddle_calc_vwap binding
+        deliberately runs with day_loss_sl_pct=0 (no strategy-level loss
+        limit configured), yet this account-level DAILY_LOSS_LIMIT check
+        (client.risk.max_daily_loss_pct=3.0%, independent of and invisible to
+        any strategy's own settings) halted the client anyway -- repeating
+        every _RISK_CHECK_INTERVAL (1s) from 13:40:00 onward on 2026-09-24,
+        since _liquidate_client() only halts new signals/stops the worker, it
+        never actually resolves the underlying loss the check keeps re-firing
+        on. Direct user decision: strategy-level risk config (day_loss_sl_pct,
+        hedge_carry_enabled, etc.) is the ONLY source of truth going forward --
+        this automatic per-tick breach/liquidate sweep is disabled. Still
+        gathers each client's drawdown state (state.update_drawdown()) for
+        risk_summary()'s own admin-dashboard display -- only the automatic
+        liquidation trigger is removed. The admin's own manual kill_all()
+        (a direct, explicit action, not an automated background sweep) is
+        UNCHANGED -- it calls _liquidate_client() directly, never through
+        this method."""
         self._sync_registry()
         for cid, state in list(self._states.items()):
             client = self._registry.get(cid)
             if client is None:
                 continue
             state.update_drawdown()
-
-            daily_loss_pct = (
-                -client._daily_pnl / client.risk.capital * 100.0
-                if client.risk.capital else 0.0
-            )
-            drawdown_limit = client.risk.max_daily_loss_pct
-
-            if daily_loss_pct >= drawdown_limit and not state._liquidating:
-                logger.warning(
-                    "RiskManager: Client %s daily loss %.2f%% >= limit %.2f%% — liquidating.",
-                    cid, daily_loss_pct, drawdown_limit,
-                )
-                await self._liquidate_client(
-                    cid,
-                    reason=f"DAILY_LOSS_LIMIT daily_loss={daily_loss_pct:.2f}%",
-                )
 
     # ── Liquidation ────────────────────────────────────────────────────────────
 
