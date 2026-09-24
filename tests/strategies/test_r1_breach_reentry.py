@@ -455,6 +455,31 @@ def test_level_breached_s1_fires_on_live_ltp_alone():
     assert _level_breached(sr_state, "S1", "S1_TRACKING") is False
 
 
+def test_level_breached_unestablished_alone_no_longer_breaches():
+    """2026-09-24 CORRECTION #2, real incident (NIFTY CE23250, 09:26:50):
+    R1=250.00 was set the previous day and never reached the state machine's
+    own confirmation pattern before that session closed, so it carried
+    forward `is_established=False`. Today gapped down hard enough to flip
+    the phase to S1_TRACKING (breaching the OPPOSITE level), leaving R1's
+    stale unestablished flag untouched -- while the real live premium
+    (~115-151) never came anywhere near the real R1 value (250). The old
+    rule ("not established" alone = breach) fired here; it must not."""
+    from strategies.sell_straddle.r1_breach_reentry import _level_breached
+    sr_state = {
+        "sr_levels": {"R1": {"is_established": False, "high": 250.00}},
+        "current_phase": "S1_TRACKING",  # NOT R1_TRACKING -- a stale flag from an unrelated flip
+    }
+    assert _level_breached(sr_state, "R1", "R1_TRACKING", ltp=151.80) is False, (
+        "unestablished alone, with price nowhere near the real level, must not breach"
+    )
+    assert _level_breached(sr_state, "R1", "R1_TRACKING", ltp=250.01) is True, (
+        "a live LTP that genuinely crosses the real level must still breach"
+    )
+    assert _level_breached(sr_state, "R1", "R1_TRACKING") is False, (
+        "no ltp passed, phase mismatched -- no breach"
+    )
+
+
 def test_r1_breach_fires_from_live_ltp_before_the_bucket_closes():
     """End-to-end: a rolled-in leg whose LTP has already ticked above R1's
     current numeric value must close on THIS tick, not wait for the

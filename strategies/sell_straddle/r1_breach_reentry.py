@@ -29,9 +29,18 @@ this runs continuously for as long as the leg stays open, on EVERY roll that
 produces a new leg, every time.
 
 STEP 4 -- R1 BREACH (checked every tick against the seeded/updated state) =
-TRUE when EITHER: R1 is not yet established, OR the current phase is
-literally R1_TRACKING (a fresh "R2 breaches R1" transition always lands the
-phase there). The instant true, close that leg alone
+TRUE when EITHER: the current phase is literally R1_TRACKING (a fresh "R2
+breaches R1" transition always lands the phase there -- every code path into
+that phase requires the underlying candle to have genuinely crossed R1's own
+value, so this is itself a real price-confirmed signal), OR a live LTP has
+ticked above R1's own numeric value (see _level_breached's own docstring).
+2026-09-24 CORRECTION (real incident, NIFTY CE23250): the original spec also
+treated "R1 not yet established" alone as a breach trigger -- removed, since
+a level can sit unestablished purely because the state machine's own
+confirmation candle never landed before a session closed (nothing to do with
+price actually breaching it), and that stale flag then carries forward
+across an unrelated phase change (see _level_breached's docstring for the
+full traced example). The instant true, close that leg alone
 (exit_reason="r1_breach_post_roll") -- the kept leg keeps running untouched.
 Then, every _R1_CANDIDATE_RETRY_SECONDS, search BOTH sides (ITM and OTM) of
 the just-closed strike in expanding _R1_REENTRY_GAP_PTS rings
@@ -78,30 +87,52 @@ _R1_CANDIDATE_RETRY_SECONDS = 15
 
 def _level_breached(sr_state: dict, level_key: str, tracking_phase: str,
                      ltp: float = None) -> bool:
-    """Direct user spec: <level> breach is true when it is not established,
-    OR the calculator is currently in that level's own TRACKING phase (a
-    genuine re-breach transition -- e.g. "R2 breaches R1" -- always lands
-    the phase there, so that case is already covered by this check).
+    """Breach is true when the calculator is currently in that level's own
+    TRACKING phase (a genuine re-breach transition -- e.g. "R2 breaches R1"
+    -- always lands the phase there; EVERY code path in
+    SupportResistanceCalculator that transitions a phase to <level>_TRACKING
+    requires the underlying candle to have genuinely crossed that level's own
+    numeric value at that moment, so this is itself already a real,
+    price-confirmed signal), OR a live LTP has crossed the level's numeric
+    value (see the 2026-09-24 CORRECTION below).
 
-    2026-09-24 CORRECTION, direct user instruction ("IF LTP GOES ABOVE R1
-    THAT MEANS BREACH. REST ALL BREACH ARE ALSO VALID"): the phase/
-    established check above is entirely BAR-CLOSE-based -- the calculator
-    only updates its phase/established flags when a completed 5-min candle
-    is fed in (_r1_feed_bar), so a live tick that has already ticked past
-    the level's own numeric value sits unreported until the current bucket
-    finishes and closes, which can lag the real breach by several minutes.
-    Direct correction: the live LTP crossing the level's number IS the
-    breach, immediately, every tick -- not just when the calculator's own
-    bar-close-driven state machine catches up. Added as an ADDITIONAL
-    ("or") condition, not a replacement -- the existing phase/established
-    check still independently covers bar-close-confirmed transitions (e.g.
-    an R2->R1 promotion) that don't necessarily show up as a simple
-    LTP > level comparison. `ltp=None` (the default) preserves the exact
-    original bar-close-only behavior for any caller that doesn't pass it."""
+    2026-09-24 CORRECTION #2, real incident + direct user confirmation
+    (NIFTY CE23250, 2026-09-24 09:26:50): the ORIGINAL 2026-09-22 spec also
+    OR'd in "level is not established" as an independent breach trigger.
+    That is WRONG on its own (not just redundant) -- traced against real
+    Upstox 5-min data replayed through this exact class: R1 was set to
+    250.00 the PREVIOUS day (09-23) and never reached the state machine's
+    own single-candle "lower-high AND lower-low vs the immediately
+    preceding candle" confirmation pattern before that session closed, so
+    it carried forward into today still `is_established=False`. Today's
+    session then gapped down hard enough to breach the OPPOSITE level (S1),
+    which flips the phase to S1_TRACKING and leaves R1's stale
+    is_established=False flag completely untouched -- R1 never gets a
+    second chance to confirm. The old rule read that untouched False flag
+    as "breached" even though the real live premium (~115-151) was nowhere
+    near the real R1 value (250) -- a leg was closed and re-entered off a
+    level price never actually approached, let alone crossed. Every genuine
+    transition INTO <level>_TRACKING already resets is_established=False as
+    part of that same transition (see e.g. line ~265 above) -- so checking
+    is_established was never adding real coverage for a fresh breach, only
+    false positives from a STALE flag surviving an unrelated phase change.
+    Removed; `phase == tracking_phase` alone (plus the live-LTP check below)
+    is both necessary and sufficient.
+
+    2026-09-24 CORRECTION #1, direct user instruction ("IF LTP GOES ABOVE R1
+    THAT MEANS BREACH. REST ALL BREACH ARE ALSO VALID"): the phase check
+    above is entirely BAR-CLOSE-based -- the calculator only updates its
+    phase when a completed 5-min candle is fed in (_r1_feed_bar), so a live
+    tick that has already ticked past the level's own numeric value sits
+    unreported until the current bucket finishes and closes, which can lag
+    the real breach by several minutes. Direct correction: the live LTP
+    crossing the level's number IS the breach, immediately, every tick --
+    not just when the calculator's own bar-close-driven state machine
+    catches up. `ltp=None` (the default) preserves bar-close-only behavior
+    for any caller that doesn't pass it."""
     sr = sr_state.get("sr_levels", {}) or {}
     lvl = sr.get(level_key)
-    established = bool(lvl.get("is_established")) if lvl else False
-    phase_breach = (not established) or (sr_state.get("current_phase") == tracking_phase)
+    phase_breach = sr_state.get("current_phase") == tracking_phase
     if ltp is not None and lvl:
         if level_key == "R1":
             level_value = float(lvl.get("high", 0.0) or 0.0)
