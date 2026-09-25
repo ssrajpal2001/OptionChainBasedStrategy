@@ -144,23 +144,39 @@ def classify_oi_bias(
     return BIAS_NONE
 
 
-# ── Step 7: Entry 1, first-1-minute-candle breakout ─────────────────────────
+# ── Step 7: Entry 1, 9:15-9:30 opening-range breakout ───────────────────────
 
 
-def find_entry1_trigger(candle_915: Bar, later_bars: List[Bar], bias: str) -> Optional[Bar]:
-    """Decision 7 (frozen): the reference is the underlying's own FIRST
-    1-minute candle of the day (9:15:00-9:15:59) -- its own high/low, NOT a
-    15-minute opening-range window. Scans later_bars (already chronological,
-    already excluding candle_915 itself) for the first candle whose CLOSE
-    genuinely beyond the reference level -- a wick through it does not
-    count. Returns that triggering Bar, or None if it hasn't happened yet
-    in the given bars."""
+def opening_range_high_low(bars_915_to_930: List[Bar]) -> "tuple[Optional[float], Optional[float]]":
+    """2026-09-25 CORRECTED decision (direct user spec, supersedes the
+    earlier single-9:15-candle version): the reference is the full
+    09:15-09:30 opening range -- the highest high and lowest low across
+    every real 1-minute candle in that window, not just the first one.
+    Returns (None, None) if bars_915_to_930 is empty."""
+    if not bars_915_to_930:
+        return None, None
+    return (max(b.high for b in bars_915_to_930), min(b.low for b in bars_915_to_930))
+
+
+def find_entry1_trigger(or_high: float, or_low: float, later_bars: List[Bar], bias: str) -> Optional[Bar]:
+    """Decision 7 (CORRECTED, 2026-09-25): the reference is the full
+    09:15-09:30 opening range's own high/low (see opening_range_high_low),
+    not a single candle. Scans later_bars for the first candle whose CLOSE
+    genuinely goes beyond the reference level -- a wick through it does not
+    count. Callers must never pass a later_bars entry earlier than 09:30 --
+    the opening range itself isn't finished forming until that point, so
+    an entry evaluated against it before then would be look-ahead bias
+    (same class of real incident already fixed once for the OI-bias timing
+    -- see the backtest driver's own entry_watch_start logic). Returns the
+    triggering Bar, or None if it hasn't happened yet in the given bars."""
     if bias not in (BIAS_BULLISH, BIAS_BEARISH):
         return None
+    if or_high is None or or_low is None:
+        return None
     for bar in later_bars:
-        if bias == BIAS_BULLISH and bar.close > candle_915.high:
+        if bias == BIAS_BULLISH and bar.close > or_high:
             return bar
-        if bias == BIAS_BEARISH and bar.close < candle_915.low:
+        if bias == BIAS_BEARISH and bar.close < or_low:
             return bar
     return None
 

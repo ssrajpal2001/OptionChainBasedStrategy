@@ -106,41 +106,78 @@ def test_classify_oi_bias_unchanged_oi_is_not_a_rise_or_a_fall():
     assert bias == d.BIAS_NONE
 
 
-# ── Step 7: Entry 1 trigger (first 1-min candle, close-through-only) ───────
+# ── Step 7: Entry 1 trigger (09:15-09:30 opening range, close-through-only) ─
 
-def test_find_entry1_trigger_bullish_fires_on_a_genuine_close_above():
-    candle_915 = _bar("2026-09-25T09:15:00", 100, 105, 99, 102)
-    later = [
-        _bar("2026-09-25T09:16:00", 102, 106, 101, 104),   # high 106 > 105 but CLOSE 104 < 105 -- wick only
-        _bar("2026-09-25T09:17:00", 104, 108, 103, 107),   # close 107 > 105 -- genuine trigger
+def _opening_range_bars():
+    """15 real 1-min candles spanning 09:15-09:29 -- the full opening range.
+    Highest high = 108 (09:22), lowest low = 95 (09:27)."""
+    return [
+        _bar("2026-09-25T09:15:00", 100, 103, 98, 101),
+        _bar("2026-09-25T09:16:00", 101, 104, 99, 102),
+        _bar("2026-09-25T09:17:00", 102, 105, 100, 103),
+        _bar("2026-09-25T09:18:00", 103, 106, 101, 104),
+        _bar("2026-09-25T09:19:00", 104, 107, 102, 105),
+        _bar("2026-09-25T09:20:00", 105, 106, 101, 103),
+        _bar("2026-09-25T09:21:00", 103, 105, 100, 102),
+        _bar("2026-09-25T09:22:00", 102, 108, 100, 105),   # sets the range HIGH (108)
+        _bar("2026-09-25T09:23:00", 105, 106, 99, 101),
+        _bar("2026-09-25T09:24:00", 101, 103, 98, 100),
+        _bar("2026-09-25T09:25:00", 100, 102, 97, 99),
+        _bar("2026-09-25T09:26:00", 99, 101, 96, 98),
+        _bar("2026-09-25T09:27:00", 98, 100, 95, 97),       # sets the range LOW (95)
+        _bar("2026-09-25T09:28:00", 97, 99, 96, 98),
+        _bar("2026-09-25T09:29:00", 98, 100, 97, 99),
     ]
-    trigger = d.find_entry1_trigger(candle_915, later, d.BIAS_BULLISH)
-    assert trigger is not None
-    assert trigger.ts == datetime.fromisoformat("2026-09-25T09:17:00")
 
 
-def test_find_entry1_trigger_bearish_fires_on_a_genuine_close_below():
-    candle_915 = _bar("2026-09-25T09:15:00", 100, 105, 99, 101)
+def test_opening_range_high_low_scans_the_full_window():
+    or_high, or_low = d.opening_range_high_low(_opening_range_bars())
+    assert or_high == 108
+    assert or_low == 95
+
+
+def test_opening_range_high_low_empty_bars_returns_none_none():
+    assert d.opening_range_high_low([]) == (None, None)
+
+
+def test_find_entry1_trigger_bullish_fires_on_a_genuine_close_above_the_range_high():
+    or_high, or_low = 108, 95
     later = [
-        _bar("2026-09-25T09:16:00", 101, 102, 97, 100),    # low 97 < 99 but close 100 > 99 -- wick only
-        _bar("2026-09-25T09:17:00", 100, 101, 96, 97),     # close 97 < 99 -- genuine trigger
+        _bar("2026-09-25T09:30:00", 106, 109, 105, 107),   # high 109 > 108 but CLOSE 107 < 108 -- wick only
+        _bar("2026-09-25T09:31:00", 107, 112, 106, 110),   # close 110 > 108 -- genuine trigger
     ]
-    trigger = d.find_entry1_trigger(candle_915, later, d.BIAS_BEARISH)
+    trigger = d.find_entry1_trigger(or_high, or_low, later, d.BIAS_BULLISH)
     assert trigger is not None
-    assert trigger.ts == datetime.fromisoformat("2026-09-25T09:17:00")
+    assert trigger.ts == datetime.fromisoformat("2026-09-25T09:31:00")
+
+
+def test_find_entry1_trigger_bearish_fires_on_a_genuine_close_below_the_range_low():
+    or_high, or_low = 108, 95
+    later = [
+        _bar("2026-09-25T09:30:00", 97, 98, 93, 96),   # low 93 < 95 but close 96 > 95 -- wick only
+        _bar("2026-09-25T09:31:00", 96, 97, 90, 92),   # close 92 < 95 -- genuine trigger
+    ]
+    trigger = d.find_entry1_trigger(or_high, or_low, later, d.BIAS_BEARISH)
+    assert trigger is not None
+    assert trigger.ts == datetime.fromisoformat("2026-09-25T09:31:00")
 
 
 def test_find_entry1_trigger_returns_none_when_it_has_not_fired_yet():
-    candle_915 = _bar("2026-09-25T09:15:00", 100, 105, 99, 102)
-    later = [_bar("2026-09-25T09:16:00", 102, 104, 101, 103)]
-    assert d.find_entry1_trigger(candle_915, later, d.BIAS_BULLISH) is None
+    or_high, or_low = 108, 95
+    later = [_bar("2026-09-25T09:30:00", 100, 104, 99, 101)]
+    assert d.find_entry1_trigger(or_high, or_low, later, d.BIAS_BULLISH) is None
 
 
 def test_find_entry1_trigger_returns_none_for_conflict_or_no_signal():
-    candle_915 = _bar("2026-09-25T09:15:00", 100, 105, 99, 102)
-    later = [_bar("2026-09-25T09:16:00", 102, 200, 101, 150)]
-    assert d.find_entry1_trigger(candle_915, later, d.BIAS_CONFLICT) is None
-    assert d.find_entry1_trigger(candle_915, later, d.BIAS_NONE) is None
+    or_high, or_low = 108, 95
+    later = [_bar("2026-09-25T09:30:00", 102, 200, 101, 150)]
+    assert d.find_entry1_trigger(or_high, or_low, later, d.BIAS_CONFLICT) is None
+    assert d.find_entry1_trigger(or_high, or_low, later, d.BIAS_NONE) is None
+
+
+def test_find_entry1_trigger_returns_none_when_range_is_incomplete():
+    later = [_bar("2026-09-25T09:30:00", 102, 200, 101, 150)]
+    assert d.find_entry1_trigger(None, None, later, d.BIAS_BULLISH) is None
 
 
 # ── Step 8: VWAP retest (1-min candle shape) ────────────────────────────────
