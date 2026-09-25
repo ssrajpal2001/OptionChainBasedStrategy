@@ -1979,6 +1979,45 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             store.load_shortlist_for_today, self._client_id, self._binding_id, td)
         if not shortlist_rows:
             return
+
+        # 2026-09-25 CRITICAL FIX, real incident (found immediately after
+        # deploying the fix above): _option_native_5min_loop runs as a fully
+        # independent background task, NOT gated on _restore_from_db_ready --
+        # it iterates self._shortlist_symbols every cycle and calls
+        # _native_select_contracts for any symbol not yet a key in
+        # self._native_selected. The FIRST version of this fix appended every
+        # symbol to self._shortlist_symbols in one pass, then restored
+        # self._native_selected in a SEPARATE later pass -- leaving a real
+        # await-yield window (the ORB/VWAP backfill calls below) during which
+        # that other loop could see a symbol already shortlisted but not yet
+        # native-selected, and race in a fresh (wrong-strike) selection of its
+        # own. Confirmed live: POLICYBZR got a stray CE1140/PE1180 row
+        # written to option_native_selection during this exact window, even
+        # though the correct CE1240/PE1260 ultimately won in memory (this
+        # restore code sets dict values directly, so it always overwrites a
+        # racing selection back to correct) -- harmless this time, but not
+        # guaranteed. Fixed by resolving ALL native contracts up front, before
+        # a single symbol is added to self._shortlist_symbols, so there is
+        # zero window where a symbol is shortlisted without also already
+        # being native-selected.
+        native_rows = await asyncio.to_thread(
+            store.load_option_native_selection_for_today, self._client_id, self._binding_id, td)
+        native_by_symbol: dict = {}
+        for r in native_rows:
+            sym = r["symbol"]
+            if sym in self._shortlist_symbols:
+                continue
+            try:
+                expiry = date.fromisoformat(r["expiry"])
+            except (TypeError, ValueError):
+                continue
+            contract = await stock_resolve.resolve_contract_exact_async(
+                sym, expiry, int(r["strike"]), r["option_type"])
+            if contract is None:
+                continue
+            native_by_symbol.setdefault(sym, {"CE": None, "PE": None})
+            native_by_symbol[sym][r["option_type"]] = contract
+
         new_syms = []
         for r in shortlist_rows:
             sym = r.get("symbol")
@@ -1988,6 +2027,17 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             self._shortlist_symbols.append(sym)
             self._shortlist_pchange[sym] = pchange
             new_syms.append(sym)
+            if sym in native_by_symbol:
+                # Set together with the shortlist append above, no await in
+                # between -- closes the race window described above.
+                self._native_selected[sym] = native_by_symbol[sym]
+                for side, contract in native_by_symbol[sym].items():
+                    if contract is not None:
+                        self._ensure_option_feed(sym, contract)
+                        self._clog.info(
+                            "OiOrb[%s/%s]: %s %s%d option_native selection restored from DB "
+                            "(restart recovery, frozen -- will not be re-selected).",
+                            self._client_id, self._binding_id, sym, side, contract.strike)
             self._clog.info(
                 "OiOrb[%s/%s]: %s restored from persisted shortlist (restart recovery) -- "
                 "pChange=%+.2f%% oi_spurt=%s.",
@@ -2044,34 +2094,6 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
             self._ensure_spot_feed(sym)
         if not new_syms:
             return
-
-        # Restore each restored symbol's already-frozen option_native Layer 1
-        # selection too, so _native_select_contracts' own guard (decision 10:
-        # "if symbol in self._native_selected: return") correctly no-ops for
-        # it on the next scoring cycle instead of re-selecting a fresh strike
-        # from scratch -- exactly the gap that let POLICYBZR's contracts get
-        # re-picked in the real incident above.
-        native_rows = await asyncio.to_thread(
-            store.load_option_native_selection_for_today, self._client_id, self._binding_id, td)
-        for r in native_rows:
-            sym = r["symbol"]
-            if sym not in new_syms:
-                continue
-            try:
-                expiry = date.fromisoformat(r["expiry"])
-            except (TypeError, ValueError):
-                continue
-            contract = await stock_resolve.resolve_contract_exact_async(
-                sym, expiry, int(r["strike"]), r["option_type"])
-            if contract is None:
-                continue
-            self._native_selected.setdefault(sym, {"CE": None, "PE": None})
-            self._native_selected[sym][r["option_type"]] = contract
-            self._ensure_option_feed(sym, contract)
-            self._clog.info(
-                "OiOrb[%s/%s]: %s %s%d option_native selection restored from DB (restart "
-                "recovery, frozen -- will not be re-selected).",
-                self._client_id, self._binding_id, sym, r["option_type"], contract.strike)
 
         self._clog.info(
             "OiOrb[%s/%s]: restart recovery restored %d stock(s) from persisted shortlist: %s",

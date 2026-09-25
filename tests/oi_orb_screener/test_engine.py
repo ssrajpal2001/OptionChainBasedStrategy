@@ -1659,6 +1659,75 @@ async def test_reconcile_shortlist_never_onboards_a_symbol_missing_from_persiste
 
 
 @pytest.mark.asyncio
+async def test_reconcile_shortlist_closes_race_with_concurrent_native_select_loop(monkeypatch):
+    """2026-09-25, real incident found immediately after deploying the first
+    version of this restore fix: _option_native_5min_loop runs as a fully
+    independent background task (NOT gated on _restore_from_db_ready) and
+    scans self._shortlist_symbols every cycle for any symbol missing from
+    self._native_selected. The first fix appended every symbol to
+    _shortlist_symbols in one pass, then restored _native_selected in a
+    SEPARATE later pass -- during the await-yield gap between those two
+    passes (a real network call resolving each contract), that other loop
+    could see a symbol already shortlisted but not yet native-selected and
+    race in a fresh (wrong-strike) selection of its own. Confirmed live:
+    POLICYBZR got a stray CE1140/PE1180 row written during exactly this
+    window. Simulates the real race directly: runs _restore_from_db()
+    concurrently with the exact scan-and-select snippet
+    _option_native_5min_loop itself uses, forcing a genuine yield inside
+    contract resolution (mirroring the real network-call timing), and
+    asserts _native_select_contracts is never called for the
+    already-persisted symbol."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._today = date(2026, 9, 25)
+
+    store.record_shortlist(
+        _TEST_CLIENT_ID, _TEST_BINDING_ID,
+        [{"symbol": "POLICYBZR", "price_change_pct": 3.31, "oi_spurt_pct": 21.3,
+          "score": None, "side_bias": "bullish"}],
+        trade_date="2026-09-25",
+    )
+    store.record_option_native_selection(
+        _TEST_CLIENT_ID, _TEST_BINDING_ID, "2026-09-25",
+        [{"symbol": "POLICYBZR", "option_type": "CE", "strike": 1240, "expiry": "2026-08-27",
+          "upstox_key": "NSE_FO|POLICYBZR1240CE", "selected_ts": "2026-09-25T09:26:11+05:30"},
+         {"symbol": "POLICYBZR", "option_type": "PE", "strike": 1260, "expiry": "2026-08-27",
+          "upstox_key": "NSE_FO|POLICYBZR1260PE", "selected_ts": "2026-09-25T09:26:11+05:30"}],
+    )
+
+    async def _no_seed(sym):
+        return None
+    monkeypatch.setattr(book, "_seed_vwap_from_upstox_intraday", _no_seed)
+    monkeypatch.setattr(book, "_ensure_spot_feed", lambda sym: None)
+    monkeypatch.setattr(book, "_ensure_option_feed", lambda sym, contract: None)
+
+    async def _resolve_with_real_yield(sym, expiry, strike, opt_type):
+        await asyncio.sleep(0)   # force a genuine yield, like a real network call
+        return _contract(sym, strike, opt_type)
+    monkeypatch.setattr(stock_resolve, "resolve_contract_exact_async", _resolve_with_real_yield)
+
+    select_calls = []
+    async def _spy_select_contracts(sym):
+        select_calls.append(sym)
+        book._native_selected[sym] = {"CE": None, "PE": None}   # what the real method does first
+    monkeypatch.setattr(book, "_native_select_contracts", _spy_select_contracts)
+
+    async def _racing_scan_cycle():
+        # The exact snippet _option_native_5min_loop's own body runs.
+        for _ in range(5):
+            await asyncio.sleep(0)
+            for sym in list(book._shortlist_symbols):
+                if sym not in book._native_selected:
+                    await book._native_select_contracts(sym)
+
+    await asyncio.gather(book._restore_from_db(), _racing_scan_cycle())
+
+    assert "POLICYBZR" not in select_calls
+    assert book._native_selected["POLICYBZR"]["CE"].strike == 1240
+    assert book._native_selected["POLICYBZR"]["PE"].strike == 1260
+
+
+@pytest.mark.asyncio
 async def test_reconcile_shortlist_restores_frozen_option_native_selection_without_reselecting(monkeypatch):
     """2026-09-25, real incident: POLICYBZR's own already-frozen CE1240/
     PE1260 contracts (selected 09:26:11) got RE-SELECTED at a new strike
