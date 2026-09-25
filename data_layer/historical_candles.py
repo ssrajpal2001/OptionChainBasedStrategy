@@ -102,7 +102,13 @@ async def fetch_upstox_1m(instrument_key: str, access_token: str, max_step_back:
                f"{d.isoformat()}/{d.isoformat()}")
         return _parse_candles(_http_get_json(url, access_token))
 
-    d = date.today() - timedelta(days=1)
+    # 2026-09-25 fix: date.today() reads the SERVER's local/system-tz date, not
+    # IST -- on a UTC-clocked EC2 host, during the 00:00-05:30 IST window UTC's
+    # calendar date still lags IST's by one day, so this silently stepped back
+    # one day too far (confirmed live: fetched 2026-09-23 data while asking for
+    # "yesterday" relative to a real 2026-09-25 IST date). Always resolve
+    # "today" from IST wall-clock time regardless of the host's own timezone.
+    d = datetime.now(IST).date() - timedelta(days=1)
     for _ in range(max_step_back):
         rows = await asyncio.to_thread(_get, d)
         if rows:
@@ -214,7 +220,7 @@ async def fetch_upstox_prev_day_last_tick_oi(
     Returns None on any failure (no data for the whole step-back window,
     network error) -- caller degrades safely, same convention as every
     other real-data fetch in this module."""
-    d = date.today() - timedelta(days=1)
+    d = datetime.now(IST).date() - timedelta(days=1)
     for _ in range(max_step_back):
         if d.weekday() < 5:
             rows = await fetch_upstox_range_1m(instrument_key, access_token, d, d)
@@ -234,13 +240,115 @@ async def fetch_upstox_daily(instrument_key: str, access_token: str, lookback_da
     on error/empty."""
     def _get():
         from urllib.parse import quote as _q
-        end = date.today() - timedelta(days=1)
+        end = datetime.now(IST).date() - timedelta(days=1)
         start = end - timedelta(days=lookback_days)
         url = (f"https://api.upstox.com/v2/historical-candle/{_q(instrument_key, safe='')}/day/"
                f"{end.isoformat()}/{start.isoformat()}")
         return _parse_candles(_http_get_json(url, access_token))
 
     return await asyncio.to_thread(_get)
+
+
+async def fetch_upstox_weekly(instrument_key: str, access_token: str,
+                               lookback_weeks: int = 200) -> List[dict]:
+    """2026-09-24, direct user spec (Relative Strength scanner --
+    strategies/relative_strength/): weekly candles (oldest-first) via the
+    same v2 'week' interval endpoint fetch_upstox_daily already uses for
+    'day' -- Upstox's v2 historical-candle API natively supports
+    1minute/30minute/day/week/month, so no aggregation is needed here (see
+    fetch_upstox_hourly's own docstring for why HOURLY is different).
+    lookback_weeks=200 (~4 years) comfortably covers the RS indicator's own
+    default 123-bar lookback with headroom for its trend/SMA warm-up on top.
+    [] on error/empty."""
+    def _get():
+        from urllib.parse import quote as _q
+        end = datetime.now(IST).date() - timedelta(days=1)
+        start = end - timedelta(weeks=lookback_weeks)
+        url = (f"https://api.upstox.com/v2/historical-candle/{_q(instrument_key, safe='')}/week/"
+               f"{end.isoformat()}/{start.isoformat()}")
+        return _parse_candles(_http_get_json(url, access_token))
+
+    return await asyncio.to_thread(_get)
+
+
+async def fetch_upstox_hourly(instrument_key: str, access_token: str,
+                               lookback_days: int = 85) -> List[dict]:
+    """2026-09-24, direct user spec (Relative Strength scanner): hourly
+    candles (oldest-first) via Upstox's V3 historical-candle API
+    (/v3/historical-candle/{key}/hours/1/{to}/{from}) -- the v2 endpoint
+    every other fetcher in this module uses does NOT support an hourly
+    interval at all (only 1minute/30minute/day/week/month), so this is a
+    genuinely different endpoint, not a v2 URL with a different interval
+    string.
+
+    lookback_days=85, CONFIRMED against the real live endpoint (not a
+    guess): Upstox's V3 'hours' unit rejects any request wider than
+    somewhere between 90 and 95 calendar days with a real 400
+    ("UDAPI1148 Invalid date range") -- confirmed by direct probing (90d
+    -> HTTP 200 with 434 real candles for NSE_INDEX|Nifty Pharma; 95d ->
+    HTTP 400). An earlier version of this function defaulted to 400 days
+    (guessing the v2 daily-candle margin logic would carry over) and it
+    failed on every single real call. 85 stays safely under the confirmed
+    ~90-day ceiling while still giving ~400+ real hourly candles -- far
+    more than the RS indicator's own 123-bar lookback (+ ~50-bar trend/SMA
+    warm-up) needs. Response shape is the same candles-array-of-arrays
+    Upstox uses everywhere else -- reuses _parse_candles unchanged. [] on
+    error/empty (including a request that still exceeds the real ceiling
+    if lookback_days is overridden too high by a caller)."""
+    def _get():
+        from urllib.parse import quote as _q
+        end = datetime.now(IST).date() - timedelta(days=1)
+        start = end - timedelta(days=lookback_days)
+        url = (f"https://api.upstox.com/v3/historical-candle/{_q(instrument_key, safe='')}/"
+               f"hours/1/{end.isoformat()}/{start.isoformat()}")
+        return _parse_candles(_http_get_json(url, access_token))
+
+    return await asyncio.to_thread(_get)
+
+
+_HOURLY_CHUNK_DAYS = 85  # same confirmed-safe margin as fetch_upstox_hourly's own default
+_HOURLY_CHUNK_INTER_DELAY_SEC = 0.35  # same pacing constant as fetch_upstox_range_1m
+
+
+async def fetch_upstox_hourly_range(
+    instrument_key: str, access_token: str, start: date, end: date,
+) -> List[dict]:
+    """2026-09-24, direct user spec (RS sign-crossover backtest -- needs 2
+    years of real hourly history, far beyond fetch_upstox_hourly's own
+    single-call ~90-day ceiling): walks [start, end] in
+    _HOURLY_CHUNK_DAYS-wide windows, one real V3 'hours' call per window,
+    merged and de-duplicated (adjacent windows' boundary days can overlap
+    by one candle) and sorted oldest-first. Same inter-call pacing
+    discipline as fetch_upstox_range_1m (a real, confirmed rate-limit
+    incident elsewhere in this module) -- a 2-year backtest fires MANY of
+    these across many symbols, so an unpaced burst would very likely trip
+    the same IP-level throttle. [] if the whole range yields nothing."""
+    def _get_chunk(chunk_start: date, chunk_end: date) -> List[dict]:
+        from urllib.parse import quote as _q
+        url = (f"https://api.upstox.com/v3/historical-candle/{_q(instrument_key, safe='')}/"
+               f"hours/1/{chunk_end.isoformat()}/{chunk_start.isoformat()}")
+        try:
+            return _parse_candles(_http_get_json(url, access_token))
+        except Exception as exc:
+            logger.debug("fetch_upstox_hourly_range chunk %s-%s: %s", chunk_start, chunk_end, exc)
+            return []
+
+    def _get_all() -> List[dict]:
+        rows: List[dict] = []
+        chunk_start = start
+        first = True
+        while chunk_start <= end:
+            chunk_end = min(chunk_start + timedelta(days=_HOURLY_CHUNK_DAYS), end)
+            if not first:
+                time.sleep(_HOURLY_CHUNK_INTER_DELAY_SEC)
+            first = False
+            rows.extend(_get_chunk(chunk_start, chunk_end))
+            chunk_start = chunk_end + timedelta(days=1)
+        return rows
+
+    rows = await asyncio.to_thread(_get_all)
+    dedup = {r["ts"]: r for r in rows}
+    return sorted(dedup.values(), key=lambda r: r["ts"])
 
 
 async def fetch_upstox_v3_quote(instrument_key: str, access_token: str) -> Optional[dict]:
@@ -316,7 +424,7 @@ async def fetch_fyers_intraday_1m(symbol: str, client_id: str, access_token: str
         return []
 
     try:
-        today = date.today().isoformat()
+        today = datetime.now(IST).date().isoformat()
         fyers = fyersModel.FyersModel(
             client_id=client_id,
             token=access_token,
@@ -355,7 +463,7 @@ async def fetch_upstox_warm_1m(instrument_key: str, access_token: str, min_bars:
     # Skip cache when tests monkeypatch _http_get_json; otherwise share results
     # across strategy books for the same instrument on the same day.
     use_cache = _http_get_json is _ORIGINAL_HTTP_GET_JSON
-    cache_key = (instrument_key, date.today())
+    cache_key = (instrument_key, datetime.now(IST).date())
     if use_cache:
         cached, cached_at = _WARM_CACHE.get(cache_key, (None, 0.0))
         if cached is not None and (time.monotonic() - cached_at) < _WARM_CACHE_TTL_SECONDS:

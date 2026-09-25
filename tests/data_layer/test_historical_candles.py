@@ -115,12 +115,12 @@ def _candles_with_oi(rows):
 def test_returns_last_bars_oi_from_the_most_recent_weekday(monkeypatch):
     import datetime as _dt
 
-    class _FixedDate(_dt.date):
+    class _FixedDateTime(_dt.datetime):
         @classmethod
-        def today(cls):
-            return _dt.date(2026, 9, 16)  # a real Wednesday
+        def now(cls, tz=None):
+            return _dt.datetime(2026, 9, 16, 12, 0, tzinfo=tz)  # a real Wednesday
 
-    monkeypatch.setattr(hc, "date", _FixedDate)
+    monkeypatch.setattr(hc, "datetime", _FixedDateTime)
 
     def fake_http(url, token):
         assert "2026-09-15" in url
@@ -138,12 +138,12 @@ def test_returns_last_bars_oi_from_the_most_recent_weekday(monkeypatch):
 def test_steps_back_over_a_weekend(monkeypatch):
     import datetime as _dt
 
-    class _FixedDate(_dt.date):
+    class _FixedDateTime(_dt.datetime):
         @classmethod
-        def today(cls):
-            return _dt.date(2026, 9, 14)  # a Monday -> yesterday is Sunday
+        def now(cls, tz=None):
+            return _dt.datetime(2026, 9, 14, 12, 0, tzinfo=tz)  # a Monday -> yesterday is Sunday
 
-    monkeypatch.setattr(hc, "date", _FixedDate)
+    monkeypatch.setattr(hc, "datetime", _FixedDateTime)
 
     calls = []
     def fake_http(url, token):
@@ -163,12 +163,12 @@ def test_steps_back_over_a_weekend(monkeypatch):
 def test_returns_none_when_no_data_within_step_back_window(monkeypatch):
     import datetime as _dt
 
-    class _FixedDate(_dt.date):
+    class _FixedDateTime(_dt.datetime):
         @classmethod
-        def today(cls):
-            return _dt.date(2026, 9, 16)
+        def now(cls, tz=None):
+            return _dt.datetime(2026, 9, 16, 12, 0, tzinfo=tz)
 
-    monkeypatch.setattr(hc, "date", _FixedDate)
+    monkeypatch.setattr(hc, "datetime", _FixedDateTime)
     monkeypatch.setattr(hc, "_http_get_json", lambda url, token: {"data": {"candles": []}})
 
     oi = asyncio.run(hc.fetch_upstox_prev_day_last_tick_oi("NSE_FO|68786", "TOKEN", max_step_back=3))
