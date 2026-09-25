@@ -498,7 +498,20 @@ def select_rollover_partner_directional(
         "no_quote_in_pool": 0, "too_itm": 0, "min_gap_violation": 0,
         "ltp_not_above_closing": 0, "rule_fail": 0,
     }
+    # 2026-09-25, direct user spec ("most balanced pair" = lowest
+    # |kept-candidate|/(kept+candidate) score, applied consistently to
+    # rollover and BEGINNING/RE-ENTRY -- see the matching change in
+    # select_balanced_pair_at above): the primary toward-spot direction used
+    # to return the FIRST candidate that cleared every gate ("keep searching
+    # until you find A valid one"). It now scans the WHOLE toward-spot range
+    # and returns whichever passing candidate has the lowest balanced-score
+    # against the KEPT leg's own LTP -- every hard gate below (quote
+    # availability, ITM cap, min-gap, and the 2026-09-23 "candidate LTP must
+    # be strictly greater than the closing leg's own LTP" economic rule) is
+    # completely unchanged; only which PASSING candidate wins changes.
     checked = 0
+    best: Optional[Tuple[int, float]] = None
+    best_score: Optional[float] = None
     for i in range(1, max_search_steps + 1):
         strike = int(closing_strike + direction * real_step * i)
         gap = abs(strike - closing_strike)
@@ -516,25 +529,33 @@ def select_rollover_partner_directional(
             0.0, 0.0, max_itm_steps, False, rule_pass, "closest_to_kept",
             min_ltp_exclusive=closing_ltp,
         )
-        if diag["reject_reason"] is None:
-            diag["selected"] = True
-            if trace is not None:
-                trace.append(diag)
-                trace.append({
-                    "event": "select_partner_for_end", "best_strike": strike,
-                    "best_ltp": diag["ltp"], "reject_counts": reject_counts,
-                    "candidates_total": checked, "direction_used": "toward_spot",
-                })
-            return (strike, diag["ltp"])
-        _reason_key = diag["reject_reason"].split(" ", 1)[0].split("(", 1)[0].strip()
-        reject_counts[_reason_key if _reason_key in reject_counts else "rule_fail"] += 1
         if trace is not None:
             trace.append(diag)
+        if diag["reject_reason"] is None:
+            _denom = kept_ltp + diag["ltp"]
+            _score = abs(kept_ltp - diag["ltp"]) / _denom if _denom > 0 else 999.0
+            if best is None or _score < best_score:
+                best = (strike, diag["ltp"])
+                best_score = _score
+        else:
+            _reason_key = diag["reject_reason"].split(" ", 1)[0].split("(", 1)[0].strip()
+            reject_counts[_reason_key if _reason_key in reject_counts else "rule_fail"] += 1
+
+    if best is not None:
+        if trace is not None:
+            trace.append({
+                "event": "select_partner_for_end", "best_strike": best[0],
+                "best_ltp": best[1], "reject_counts": reject_counts,
+                "candidates_total": checked, "direction_used": "toward_spot",
+            })
+        return best
 
     # Fallback: toward-spot direction found nothing -- try the opposite
-    # (further-OTM) direction, best-match (smallest sufficient premium upgrade
-    # over closing_ltp) instead of first-found, since this is the less-natural
-    # direction.
+    # (further-OTM) direction, best-match instead of first-found, since this
+    # is the less-natural direction. 2026-09-25, direct user spec: now uses
+    # the SAME balanced score (lowest |kept-candidate|/(kept+candidate)) as
+    # the primary direction above, instead of its own separate
+    # smallest-premium-upgrade-over-closing_ltp metric, for consistency.
     fb_reject_counts = {
         "no_quote_in_pool": 0, "too_itm": 0, "min_gap_violation": 0,
         "ltp_not_above_closing": 0, "rule_fail": 0,
@@ -564,7 +585,8 @@ def select_rollover_partner_directional(
         if trace is not None:
             trace.append(diag)
         if diag["reject_reason"] is None:
-            _score = diag["ltp"] - closing_ltp  # always > 0 here (gate already enforced it)
+            _denom = kept_ltp + diag["ltp"]
+            _score = abs(kept_ltp - diag["ltp"]) / _denom if _denom > 0 else 999.0
             if best is None or _score < best_score:
                 best = (strike, diag["ltp"])
                 best_score = _score
@@ -839,43 +861,56 @@ def select_balanced_pair_at(
         # anchor_strike == atm, so this line is a no-op for RE-ENTRY.
         partner_strikes = [int(anchor_strike + i * step) for i in range(-offset, offset + 1)]
 
-    best = None  # (ltp, strike)
+    # 2026-09-25, direct user spec ("most balanced pair" = lowest
+    # |CE-PE|/(CE+PE) score, applied consistently to BEGINNING/RE-ENTRY and
+    # rollover -- see the matching change in select_rollover_partner_
+    # directional below): the old ceiling comparison (candidate LTP <=
+    # anchor_tv * balance_ratio, "richest candidate under the cutoff wins")
+    # is REPLACED by a genuine best-of-window score comparison -- among
+    # every candidate that still passes the floor and the rule-builder
+    # gate, pick the one whose premium is closest to the anchor's (lowest
+    # |anchor_ltp-candidate_ltp|/(anchor_ltp+candidate_ltp)), not merely the
+    # richest one under a cutoff. `balance_ratio` is kept as a parameter for
+    # backward compatibility with existing callers/config but is no longer
+    # applied as a filter.
+    best = None  # (score, ltp, strike)
     for s in partner_strikes:
         leg = strike_prem.get((s, partner_side))
         if not leg:
             continue
         ltp = leg.get("ltp", 0.0)
+        if ltp <= 0:
+            continue
         _ok_floor = leg_passes_dual_floor(partner_side, s, ltp, spot, ltp_target, theta_target)
-        _ok_balance = ltp <= anchor_tv * balance_ratio
         # Build the combined pair for the optional rule gate.
         if anchor_side == "CE":
             cs, ps = anchor_strike, s
         else:
             cs, ps = s, anchor_strike
         _ok_rule = rule_pass(cs, ps) if rule_pass is not None else True
-        _ok = _ok_floor and _ok_balance and _ok_rule
+        _ok = _ok_floor and _ok_rule
+        _denom = anchor_ltp + ltp
+        _score = abs(anchor_ltp - ltp) / _denom if _denom > 0 else 999.0
         if trace is not None:
             _tv = strip_intrinsic(ltp, partner_side, s, spot) if ltp > 0 else 0.0
             if not _ok_floor:
                 _why = "floor"
-            elif not _ok_balance:
-                _why = "balance"
             elif not _ok_rule:
                 _why = "rule"
             else:
-                _why = "OK"
+                _why = f"OK score={_score:.4f}"
             trace.append(
                 f"  cand {partner_side}{s} ltp={ltp:.2f} tv={_tv:.2f} {_why}"
             )
         if _ok:
-            if best is None or ltp > best[0]:
-                best = (ltp, s)
+            if best is None or _score < best[0]:
+                best = (_score, ltp, s)
     if best is None:
         if trace is not None:
             trace.append("NO-PARTNER")
         return None
 
-    partner_ltp, partner_strike = best
+    _, partner_ltp, partner_strike = best
     if anchor_side == "CE":
         ce, pe = anchor_strike, partner_strike
         result = (anchor_strike, partner_strike, anchor_ltp, partner_ltp)

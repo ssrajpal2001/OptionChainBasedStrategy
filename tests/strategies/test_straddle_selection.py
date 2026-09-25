@@ -70,10 +70,16 @@ def test_select_balanced_anchor_below_target_returns_none():
     assert select_balanced_pair(cache, spot=100, step=5, offset=4, ltp_target=30.0) is None
 
 
-def test_select_balanced_no_partner_below_anchor_returns_none():
-    # All partner candidates >= anchor LTP → no strictly-lower partner.
+def test_select_balanced_picks_closest_score_even_if_partner_pricier_than_anchor():
+    # 2026-09-25, direct user spec: selection is now the lowest
+    # |anchor-candidate|/(anchor+candidate) score, not "partner LTP must be
+    # <= anchor's own LTP/TV". A partner pricier than the anchor is no
+    # longer rejected outright -- PE100=80 is the closest match to CE100's
+    # anchor LTP=50 among the two quoted candidates (PE100 score=0.2308 vs
+    # PE105 score=0.2857), so it wins even though 80 > 50.
     cache = _cache({(100, "CE"): 50.0, (100, "PE"): 80.0, (105, "PE"): 90.0})
-    assert select_balanced_pair(cache, spot=100, step=5, offset=4, ltp_target=30.0) is None
+    res = select_balanced_pair(cache, spot=100, step=5, offset=4, ltp_target=30.0)
+    assert res == (100, 100, 50.0, 80.0)
 
 
 def test_select_balanced_missing_atm_returns_none():
@@ -147,20 +153,24 @@ def test_scan_pool_rule_rejection_excludes_pair():
 
 def test_select_balanced_pair_reentry_prefers_atm_not_far_itm():
     """Re-entry must use the same balanced-pair logic as beginning: anchor at ATM
-    lower-TIME-VALUE side, partner raw LTP <= anchor time value.  It must NOT sell
-    two deep-ITM strikes just because their LTPs are similar (the old scan_pool bug)."""
+    lower-TIME-VALUE side, partner = lowest |anchor-candidate|/(anchor+candidate)
+    score (2026-09-25, direct user spec -- replaces the old "partner LTP <=
+    anchor time value, highest-under-ceiling wins" rule). It must still NOT sell
+    two deep-ITM strikes just because their LTPs are similar (the old scan_pool
+    bug) -- the score naturally keeps deep-ITM strikes far from the anchor's own
+    LTP, so they lose to a near-ATM candidate even with no explicit ceiling."""
     # Spot = 6900, ATM=6900, step=100, offset=4.
-    # ATM: CE=216 (TV=216), PE=198 (TV=198).  Lower TV = PE → anchor PE6900, anchor_tv=198.
-    # Partner must be CE with raw LTP <= 198.
-    # CE7000=176 is the highest CE <= 198 and is one strike OTM (near ATM).
-    # Deep-ITM CE6500=464 and CE6600=392 pass the floor but must NOT be selected.
+    # ATM: CE=216 (TV=216), PE=198 (TV=198).  Lower TV = PE → anchor PE6900, anchor_ltp=198.
+    # Scores vs anchor_ltp=198: CE6900=216 -> 0.0435 (lowest); CE7000=176 -> 0.0588;
+    # CE6800=265 -> 0.1447; CE7100=144 -> 0.1579; ...; CE6500=464 -> 0.4018 (deep ITM,
+    # far from the anchor score-wise, correctly NOT selected).
     cache = _cache({
         (6900, "CE"): 216.0, (6900, "PE"): 198.0,
         (6800, "CE"): 265.0, (6800, "PE"): 149.0,
         (6700, "CE"): 324.0, (6700, "PE"): 107.0,
         (6600, "CE"): 392.0, (6600, "PE"): 75.0,
         (6500, "CE"): 464.0, (6500, "PE"): 52.0,
-        (7000, "CE"): 176.0, (7000, "PE"): 257.0,  # CE7000 <= 198 → selected
+        (7000, "CE"): 176.0, (7000, "PE"): 257.0,
         (7100, "CE"): 144.0, (7100, "PE"): 324.0,
         (7200, "CE"): 118.0, (7200, "PE"): 398.0,
         (7300, "CE"): 97.0,  (7300, "PE"): 469.0,
@@ -169,7 +179,8 @@ def test_select_balanced_pair_reentry_prefers_atm_not_far_itm():
     assert res is not None
     ce_strike, pe_strike, ce_ltp, pe_ltp = res
     assert pe_strike == 6900 and pe_ltp == 198.0  # anchor (lower TV)
-    assert ce_strike == 7000 and ce_ltp == 176.0  # highest CE <= anchor_tv=198, near ATM
+    assert ce_strike == 6900 and ce_ltp == 216.0  # lowest score vs anchor_ltp=198
+    assert ce_strike not in (6500, 6600)  # deep-ITM strikes still correctly rejected
 
 
 def test_select_balanced_pair_rule_pass_filters_partner():
@@ -178,13 +189,16 @@ def test_select_balanced_pair_rule_pass_filters_partner():
         (100, "CE"): 60.0, (100, "PE"): 80.0,
         (105, "PE"): 55.0, (110, "PE"): 40.0,
     })
-    # Default: PE105 is highest below 60 and passes floor.
+    # 2026-09-25, direct user spec: lowest |anchor-candidate|/(anchor+candidate)
+    # score wins (anchor_ltp=60). PE100 score=0.1429, PE105 score=0.0435
+    # (lowest), PE110 score=0.2 -> PE105 selected by default.
     res = select_balanced_pair(cache, spot=100, step=5, offset=4, ltp_target=30.0)
     assert res[1] == 105
 
-    # With rule_pass that rejects PE105, PE110 should be selected.
+    # With rule_pass that rejects PE105, the next-lowest score among the
+    # remaining candidates wins: PE100 (0.1429) beats PE110 (0.2).
     res2 = select_balanced_pair(
         cache, spot=100, step=5, offset=4, ltp_target=30.0,
         rule_pass=lambda cs, ps: ps != 105,
     )
-    assert res2[1] == 110 and res2[3] == 40.0
+    assert res2[1] == 100 and res2[3] == 80.0

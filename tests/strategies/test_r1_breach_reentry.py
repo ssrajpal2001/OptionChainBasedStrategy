@@ -345,6 +345,11 @@ def test_early_leg_close_before_1500_still_reaches_r1_breach_and_reentry():
     pos.ce_leg_closed = True
     s._position = pos
     s._post1500_exit_enabled = True
+    # 2026-09-25: mechanic gated off by default now (r1_breach_reentry_enabled).
+    # This test is specifically about the OTHER guard (post1500's unconditional
+    # return) not blocking the call -- opt it in explicitly so that's what's
+    # actually being exercised.
+    s._r1_breach_reentry_enabled = True
     s._roll_in_progress = False
     s._eod_decision_in_progress = False
     s._post_restore_warmup = False

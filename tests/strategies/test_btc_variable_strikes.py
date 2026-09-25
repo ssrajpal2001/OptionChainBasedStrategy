@@ -67,18 +67,21 @@ class TestSelectBalancedPairVariable:
             (100200, "PE"): 350,  # TV ~350
             (100500, "PE"): 600,  # TV ~450 (ITM by 350)
         })
-        # ATM = 100200. CE TV=400, PE TV=350. PE lower TV -> anchor PE100200, anchor_tv=350.
-        # Partner on CE must have ltp <= 350 and pass dual floor.
-        # CE100000 ltp=500 > 350 no. CE100200 ltp=400 > 350 no. CE100500 ltp=250 <= 350 yes.
+        # ATM = 100200. CE TV=400, PE TV=350. PE lower TV -> anchor PE100200, anchor_ltp=350.
+        # 2026-09-25, direct user spec: lowest |anchor-candidate|/(anchor+candidate)
+        # score wins, not "candidate <= anchor". Scores vs anchor_ltp=350:
+        # CE100000=500 -> 0.1765, CE100200=400 -> 0.0667 (lowest), CE100500=250 -> 0.1667.
+        # CE100200 wins -- the same strike as the anchor, a plain ATM-both-legs pair.
         res = select_balanced_pair(
             sp, spot=100150, step=200, offset=6, ltp_target=20,
             theta_target=10, variable_strikes=True,
         )
-        assert res == (100500, 100200, 250.0, 350.0)
+        assert res == (100200, 100200, 400.0, 350.0)
 
     def test_no_partner_without_variable_flag_uses_fixed_step(self):
-        # Same data, but fixed-step logic rounds spot to 100000 and scans 100000±i*200.
-        # It will not find the 100500 wing if offset is small, demonstrating the gap issue.
+        # Same data, but fixed-step logic rounds spot to nearest 200 -> atm=100200
+        # (round(100150/200)*200), and with offset=1 scans only {100000,100200,100400}
+        # for the partner -- 100400 has no quote, so only 100000/100200 are candidates.
         sp = _sp({
             (100000, "CE"): 500,
             (100200, "CE"): 400,
@@ -91,8 +94,10 @@ class TestSelectBalancedPairVariable:
             sp, spot=100150, step=200, offset=1, ltp_target=20,
             theta_target=10, variable_strikes=False,
         )
-        # Fixed step atm=100000, partner scan {99800,100000,100200}. No CE <= 300.
-        assert res is None
+        # anchor = PE100200@350 (lower TV). 2026-09-25, direct user spec: lowest
+        # score wins. CE100000=500 -> score 0.1765; CE100200=400 -> score 0.0667
+        # (lowest) -> CE100200/PE100200 selected (same strike, plain ATM pair).
+        assert res == (100200, 100200, 400.0, 350.0)
 
 
 class TestSelectPartnerForVariable:

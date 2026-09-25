@@ -1846,9 +1846,16 @@ class ExitMixin:
         # checks above and before the generic ratio/ltp_decay/TSL/exit_rules/
         # vwap_rise ladder below. See r1_breach_reentry.py's own module
         # docstring for the full mechanic.
-        await self._check_r1_breach_and_reentry(now)
-        if not (self._position and self._position.status == "open"):
-            return
+        # DISABLED 2026-09-25, direct user instruction: the main rollover
+        # partner search alone should govern a rolled-in leg -- no separate
+        # early R1-breach exit/replacement watch on top of it. Gated behind
+        # r1_breach_reentry_enabled (config.py, default False) rather than
+        # deleted outright, so it can be re-enabled per-deployment without a
+        # further code change if ever revisited.
+        if getattr(self, "_r1_breach_reentry_enabled", False):
+            await self._check_r1_breach_and_reentry(now)
+            if not (self._position and self._position.status == "open"):
+                return
         pos = self._position  # refresh -- a roll above may have swapped legs/strikes
 
         # 2c. DAY-LOW REVERSAL EXIT (2026-08-18/19, user spec; ONE-TIME REST

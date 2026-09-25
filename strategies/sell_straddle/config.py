@@ -89,6 +89,8 @@ class SellStraddleConfig:
 
     hedge_carry_enabled: bool
 
+    r1_breach_reentry_enabled: bool
+
 
 def _apply_client_overrides(
     cfg: SellStraddleConfig,
@@ -287,6 +289,16 @@ def load_sell_straddle_config(
     # binding to actually survive the broker's own overnight square-off.
     hedge_carry_enabled = bool(ss.get("hedge_carry_enabled", False))
 
+    # R1-breach watch + immediate replacement search on rolled-in legs
+    # (2026-09-22/23/24, direct user spec -- see r1_breach_reentry.py's own
+    # module docstring for the full mechanic). Disabled 2026-09-25, direct
+    # user instruction: the main rollover partner search (select_rollover_
+    # partner_directional) is the only mechanic that should govern a rolled-in
+    # leg -- no separate R1-breach early-exit/replacement watch on top of it.
+    # Opt-in flag so it can be re-enabled per-deployment without another code
+    # change if ever revisited; default OFF for every deployment now.
+    r1_breach_reentry_enabled = bool(ss.get("r1_breach_reentry_enabled", False))
+
     config = SellStraddleConfig(
         entry_start=entry_start,
         entry_cutoff=entry_cutoff,
@@ -331,6 +343,7 @@ def load_sell_straddle_config(
         vwap_source=vwap_source,
         same_day_expiry_enabled=same_day_expiry_enabled,
         hedge_carry_enabled=hedge_carry_enabled,
+        r1_breach_reentry_enabled=r1_breach_reentry_enabled,
     )
 
     # Apply per-client risk overrides if a client_id is provided.
@@ -399,6 +412,8 @@ class ConfigMixin:
         self._ltp_exit_min = cfg.ltp_exit_min
 
         self._exit_rules = cfg.exit_rules
+
+        self._r1_breach_reentry_enabled = cfg.r1_breach_reentry_enabled
 
         self._itm_pair_gate_enabled = cfg.itm_pair_gate_enabled
         self._itm_pair_gate_profit_inr = cfg.itm_pair_gate_profit_inr
