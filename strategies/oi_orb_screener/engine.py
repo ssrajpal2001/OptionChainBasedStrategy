@@ -2186,10 +2186,19 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._ensure_option_feed(sig.symbol, contract)
 
         entry_price = await self._await_first_ltp(sig.symbol, timeout=_ENTRY_LTP_WAIT_TIMEOUT_SEC)
+        used_rest_fallback = False
+        if entry_price <= 0:
+            # 2026-09-25 fix: same real incident/root-cause as _native_enter's own
+            # REST fallback (see its docstring) -- a single-stock F&O option can
+            # go well past this wait window between real trades, so fall back to
+            # a REST quote before giving up on the entry entirely.
+            entry_price = await self._native_rest_ltp_fallback(contract.upstox_key)
+            used_rest_fallback = entry_price > 0
         if entry_price <= 0:
             self._clog.warning(
-                "OiOrb[%s/%s]: no live option LTP for %s %s%d within %.0fs -- skipping entry "
-                "(feed may still warm up; will retry on the next fired signal, if any).",
+                "OiOrb[%s/%s]: no live option LTP for %s %s%d within %.0fs (REST fallback also "
+                "failed) -- skipping entry (feed may still warm up; will retry on the next fired "
+                "signal, if any).",
                 self._client_id, self._binding_id, sig.symbol, opt_type, contract.strike,
                 _ENTRY_LTP_WAIT_TIMEOUT_SEC,
             )
@@ -2201,6 +2210,11 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 detail=f"{opt_type}{contract.strike}", trigger_price=sig.trigger_price,
                 orb_high=sig.orb_high, orb_low=sig.orb_low)
             return
+        if used_rest_fallback:
+            self._clog.info(
+                "OiOrb[%s/%s]: entering %s %s%d at REST-quote fallback price %.2f "
+                "(no WS tick within %.0fs).", self._client_id, self._binding_id,
+                sig.symbol, opt_type, contract.strike, entry_price, _ENTRY_LTP_WAIT_TIMEOUT_SEC)
 
         qty = lot * self._lot_multiplier
         event_id = f"{self._client_id}_{self._binding_id}_{sig.symbol}_{contract.strike}{opt_type}_{int(_time.time())}"
@@ -2283,6 +2297,34 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 return ltp
             await asyncio.sleep(0.2)
         return 0.0
+
+    async def _native_rest_ltp_fallback(self, upstox_key: str) -> float:
+        """2026-09-25, real incident fix: last resort when no WS tick has
+        arrived for an option_native entry within _ENTRY_LTP_WAIT_TIMEOUT_SEC
+        -- a single REST quote call (fetch_upstox_v3_quote's own 'last_price',
+        the same endpoint this file already uses for live OI) so a real but
+        infrequently-traded contract still gets priced instead of the entry
+        being skipped outright. Best-effort: no token, a network error, or an
+        empty/zero last_price all just mean the caller's own timeout-skip path
+        still applies -- never raises."""
+        if not upstox_key:
+            return 0.0
+        try:
+            from data_layer.client_db import ClientDB
+            from data_layer.historical_candles import fetch_upstox_v3_quote
+            creds = await asyncio.to_thread(ClientDB().get_feeder_creds_sync, "upstox")
+            token = (creds or {}).get("access_token", "")
+            if not token:
+                return 0.0
+            quote = await fetch_upstox_v3_quote(upstox_key, token)
+            if not quote:
+                return 0.0
+            return float(quote.get("last_price") or 0.0)
+        except Exception:
+            self._clog.exception(
+                "OiOrb[%s/%s]: option_native REST LTP fallback failed for %s.",
+                self._client_id, self._binding_id, upstox_key)
+            return 0.0
 
     def _ensure_option_feed(self, stock_symbol: str, contract: "stock_resolve.ResolvedContract") -> None:
         """Subscribe the live feed to this contract BEFORE the order is
@@ -3141,16 +3183,37 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
         self._ensure_option_feed(symbol, contract)
 
         entry_price = await self._await_first_ltp(symbol, timeout=_ENTRY_LTP_WAIT_TIMEOUT_SEC)
+        used_rest_fallback = False
+        if entry_price <= 0:
+            # 2026-09-25 fix: a real, confirmed recurring incident -- POLICYBZR
+            # PE1260 hit this exact timeout TWICE today, 30 minutes apart, the
+            # second time long after the WS subscribe had already gone through
+            # (no repeat "subscribed" log line), which rules out "subscription
+            # hadn't propagated yet" as the cause. A single-stock F&O option
+            # simply doesn't trade often enough to guarantee a fresh WS tick
+            # inside any short wait window -- waiting longer wouldn't have
+            # helped either time. Fall back to a real REST quote
+            # (fetch_upstox_v3_quote's own 'last_price', same endpoint already
+            # used elsewhere in this file for live OI) before giving up
+            # entirely, so a genuinely-traded-but-infrequent contract still
+            # gets a real fillable price instead of silently skipping.
+            entry_price = await self._native_rest_ltp_fallback(contract.upstox_key)
+            used_rest_fallback = entry_price > 0
         if entry_price <= 0:
             self._clog.warning(
-                "OiOrb[%s/%s]: option_native -- no live option LTP for %s %s%d within %.0fs, "
-                "skipping entry.", self._client_id, self._binding_id, symbol, side, contract.strike,
-                _ENTRY_LTP_WAIT_TIMEOUT_SEC)
+                "OiOrb[%s/%s]: option_native -- no live option LTP for %s %s%d within %.0fs "
+                "(REST fallback also failed), skipping entry.", self._client_id, self._binding_id,
+                symbol, side, contract.strike, _ENTRY_LTP_WAIT_TIMEOUT_SEC)
             self._pending_contracts.pop(symbol, None)
             await asyncio.to_thread(
                 store.log_signal_event, self._client_id, self._binding_id, symbol,
                 "entry_ltp_timeout", side=side, detail=f"{side}{contract.strike} (option_native)")
             return
+        if used_rest_fallback:
+            self._clog.info(
+                "OiOrb[%s/%s]: option_native -- entering %s %s%d at REST-quote fallback "
+                "price %.2f (no WS tick within %.0fs).", self._client_id, self._binding_id,
+                symbol, side, contract.strike, entry_price, _ENTRY_LTP_WAIT_TIMEOUT_SEC)
 
         qty = lot * self._lot_multiplier
         event_id = f"{self._client_id}_{self._binding_id}_{symbol}_{contract.strike}{side}_{int(_time.time())}"

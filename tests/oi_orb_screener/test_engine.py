@@ -20,6 +20,7 @@ import pytest
 
 from config.global_config import IST, Topic
 from data_layer.base_feeder import IndexTick, OptionTick
+from strategies.oi_orb_screener import engine as engine_module
 from strategies.oi_orb_screener import screener, stock_resolve, store
 from strategies.oi_orb_screener.engine import OiOrbScreenerStrategy
 from strategies.oi_orb_screener.events import OiOrbFillEvent
@@ -202,6 +203,58 @@ async def test_handle_signal_on_different_strike_does_not_reuse_stale_ltp(monkey
             await opt_tick_task
         except asyncio.CancelledError:
             pass
+
+
+@pytest.mark.asyncio
+async def test_native_enter_falls_back_to_rest_quote_when_no_ws_tick_arrives(monkeypatch):
+    """2026-09-25, real incident: POLICYBZR PE1260 hit 'no live option LTP
+    within 20s, skipping entry' TWICE in one real live session, 30 minutes
+    apart -- the second time long after the WS subscribe had already gone
+    through, ruling out subscription-propagation delay. A single-stock F&O
+    option can go well past any short wait window between real trades, so
+    _native_enter now falls back to a REST quote (fetch_upstox_v3_quote's
+    'last_price') before giving up. This drives entry_price_ltp -> the WS
+    wait timing out -> the REST fallback returning a real price -> the entry
+    proceeding anyway."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    monkeypatch.setattr(engine_module, "_ENTRY_LTP_WAIT_TIMEOUT_SEC", 0.05)
+
+    contract = _contract("POLICYBZR", 1260, "PE")
+    book._native_selected["POLICYBZR"] = {"PE": contract}
+    monkeypatch.setattr(stock_resolve, "resolve_lot_async", _async_return(300))
+    monkeypatch.setattr(book, "_native_rest_ltp_fallback", _async_return(103.05))
+
+    await book._native_enter("POLICYBZR", "PE")
+
+    buy_events = [e for t, e in bus.published if t == Topic.OI_ORB_ORDER_REQUEST]
+    assert len(buy_events) == 1
+    assert buy_events[0].action == "BUY"
+    assert buy_events[0].underlying == "POLICYBZR"
+    assert buy_events[0].option_type == "PE"
+    assert buy_events[0].entry_price == 103.05   # the REST fallback price, not a WS tick
+    assert buy_events[0].quantity == 300
+
+
+@pytest.mark.asyncio
+async def test_native_enter_skips_entry_when_both_ws_and_rest_fail(monkeypatch):
+    """Same scenario as above, but the REST fallback also fails (network
+    error, no token, or a genuinely zero last_price) -- must still skip the
+    entry cleanly, same as before this fix, not raise or half-enter."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    monkeypatch.setattr(engine_module, "_ENTRY_LTP_WAIT_TIMEOUT_SEC", 0.05)
+
+    contract = _contract("POLICYBZR", 1260, "PE")
+    book._native_selected["POLICYBZR"] = {"PE": contract}
+    monkeypatch.setattr(stock_resolve, "resolve_lot_async", _async_return(300))
+    monkeypatch.setattr(book, "_native_rest_ltp_fallback", _async_return(0.0))
+
+    await book._native_enter("POLICYBZR", "PE")
+
+    buy_events = [e for t, e in bus.published if t == Topic.OI_ORB_ORDER_REQUEST]
+    assert len(buy_events) == 0
+    assert "POLICYBZR" not in book._pending_contracts
 
 
 @pytest.mark.asyncio
