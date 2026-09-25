@@ -103,10 +103,10 @@ BIAS_NONE = "none"
 
 
 def classify_oi_bias(
-    otm_call_oi_920: float, otm_call_oi_925: float,
-    atm_put_oi_920: float, atm_put_oi_925: float,
-    otm_put_oi_920: float, otm_put_oi_925: float,
-    atm_call_oi_920: float, atm_call_oi_925: float,
+    otm_call_oi_920: Optional[float], otm_call_oi_925: Optional[float],
+    atm_put_oi_920: Optional[float], atm_put_oi_925: Optional[float],
+    otm_put_oi_920: Optional[float], otm_put_oi_925: Optional[float],
+    atm_call_oi_920: Optional[float], atm_call_oi_925: Optional[float],
 ) -> str:
     """Decision 5 (frozen), mechanical only -- no claim about who is behind
     the OI move, purely an observable-movement rule:
@@ -117,9 +117,24 @@ def classify_oi_bias(
         neither -> no signal
 
     Strictly '<' / '>' (not '<=' / '>=') -- an unchanged OI is neither a
-    rise nor a fall, so it can never itself satisfy either condition."""
-    bullish = (otm_call_oi_925 < otm_call_oi_920) and (atm_put_oi_925 > atm_put_oi_920)
-    bearish = (otm_put_oi_925 < otm_put_oi_920) and (atm_call_oi_925 > atm_call_oi_920)
+    rise nor a fall, so it can never itself satisfy either condition.
+
+    Any of the 8 readings may genuinely be missing (a thin single-stock
+    option can easily have no real trade/OI update at exactly 9:20 or 9:25
+    -- same illiquidity class as this codebase's own entry_ltp_timeout
+    incident, not a backtest-only concern). A missing reading makes that
+    specific rising/falling condition unconfirmable -- it evaluates to
+    False, never raises, and the caller is expected to have already
+    forward-filled from the last known real reading before calling this;
+    None here means genuinely no reading exists yet at all."""
+    def _falls(a: Optional[float], b: Optional[float]) -> bool:
+        return a is not None and b is not None and b < a
+
+    def _rises(a: Optional[float], b: Optional[float]) -> bool:
+        return a is not None and b is not None and b > a
+
+    bullish = _falls(otm_call_oi_920, otm_call_oi_925) and _rises(atm_put_oi_920, atm_put_oi_925)
+    bearish = _falls(otm_put_oi_920, otm_put_oi_925) and _rises(atm_call_oi_920, atm_call_oi_925)
     if bullish and bearish:
         return BIAS_CONFLICT
     if bullish:

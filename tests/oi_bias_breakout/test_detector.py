@@ -82,6 +82,18 @@ def test_classify_oi_bias_none_when_neither_condition_holds():
     assert bias == d.BIAS_NONE
 
 
+def test_classify_oi_bias_missing_reading_never_raises_and_reads_as_no_signal():
+    # Real incident: a thin single-stock option can have no real trade/OI
+    # update at exactly 9:20 or 9:25 -- must degrade to BIAS_NONE, not crash.
+    bias = d.classify_oi_bias(
+        otm_call_oi_920=1000, otm_call_oi_925=None,
+        atm_put_oi_920=500, atm_put_oi_925=700,
+        otm_put_oi_920=300, otm_put_oi_925=300,
+        atm_call_oi_920=400, atm_call_oi_925=400,
+    )
+    assert bias == d.BIAS_NONE
+
+
 def test_classify_oi_bias_unchanged_oi_is_not_a_rise_or_a_fall():
     # OTM Call OI unchanged (not falling) -> bullish condition must NOT hold
     # even though ATM Put OI genuinely rose.
