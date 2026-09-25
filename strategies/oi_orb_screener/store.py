@@ -609,6 +609,79 @@ def load_latest_scan_symbols(client_id: str, binding_id: str, trade_date: Option
         con.close()
 
 
+def load_shortlist_for_today(client_id: str, binding_id: str, trade_date: Optional[str] = None) -> List[dict]:
+    """2026-09-25 CRITICAL FIX, real incident: restart-recovery used to
+    reconstruct 'what should currently be tracked' from load_latest_scan_
+    symbols' MOST RECENT oi_spurt_history poll -- a live, ever-drifting
+    snapshot, not a frozen record. Real incident: a restart at 10:21 grew a
+    genuinely 1-stock shortlist (POLICYBZR, frozen at the real 09:26 scan)
+    to 13 stocks, onboarding anything that happened to be above the 7%
+    filter at THAT moment -- directly violating the 2026-09-07 'no fresh
+    stocks after 9:25am' spec. This reads the actual PERSISTED shortlist
+    table instead -- the real frozen record of what this book had already
+    committed to tracking before the restart, written by the same
+    record_shortlist() call every shortlist-building path in engine.py
+    already uses. [] if nothing has been shortlisted yet today (a restart
+    before the original scan ever completed -- _run_today_pipeline still
+    runs normally in that case, same as always)."""
+    init_db()
+    con = sqlite3.connect(_DB_PATH)
+    con.row_factory = sqlite3.Row
+    try:
+        rows = con.execute(
+            """SELECT symbol, side_bias, price_change_pct, oi_spurt_pct, orb_high, orb_low
+               FROM shortlist WHERE client_id=? AND binding_id=? AND trade_date=?""",
+            (client_id, binding_id, trade_date or _today()),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    except Exception as exc:
+        logger.error("oi_orb store.load_shortlist_for_today failed: %s", exc)
+        return []
+    finally:
+        con.close()
+
+
+def load_option_native_selection_for_today(
+    client_id: str, binding_id: str, trade_date: Optional[str] = None,
+) -> List[dict]:
+    """Companion to load_shortlist_for_today, same 2026-09-25 restart-safety
+    fix: restores each symbol's already-frozen option_native Layer 1
+    selection (decision 10 -- never re-selected once picked) from the
+    persisted record, instead of letting a restart's fresh scoring cycle
+    re-select a strike from scratch. Deduped to the EARLIEST selected_ts per
+    (symbol, option_type) -- the real original selection -- since a process
+    that hit the exact bug this fix closes may have already written a
+    later, erroneous duplicate row for the same symbol/side today; the
+    earliest one is always the genuine frozen pick. Excludes skipped=1 rows
+    (no in-band candidate on that side -- nothing to restore)."""
+    init_db()
+    con = sqlite3.connect(_DB_PATH)
+    con.row_factory = sqlite3.Row
+    try:
+        rows = con.execute(
+            """SELECT symbol, option_type, strike, expiry, upstox_key, selected_ts
+               FROM option_native_selection
+               WHERE client_id=? AND binding_id=? AND trade_date=?
+                 AND (skipped IS NULL OR skipped=0)
+               ORDER BY selected_ts ASC""",
+            (client_id, binding_id, trade_date or _today()),
+        ).fetchall()
+        seen = set()
+        out = []
+        for r in rows:
+            key = (r["symbol"], r["option_type"])
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(dict(r))
+        return out
+    except Exception as exc:
+        logger.error("oi_orb store.load_option_native_selection_for_today failed: %s", exc)
+        return []
+    finally:
+        con.close()
+
+
 # 2026-09-17: oi_orb_screener_top20's own record/update functions removed
 # (the strategy itself was deleted -- see registry.py's own comment for
 # why). The oi_orb_top20_daily_scan table schema below is left in place,

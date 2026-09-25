@@ -1941,65 +1941,91 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
     async def _reconcile_shortlist_from_db(self, cfg: dict) -> None:
         """2026-09-08, direct user spec: on a mid-day restart, don't trust
         this restarted process's own single fresh scan to reproduce the same
-        top-N a prior process instance already found and was tracking --
-        OI-spurt/price-move values drift minute to minute, so a restart's own
-        scan can genuinely differ (the real 2026-09-08 incident that dropped
-        GVT&D/HAL/NATIONALUM/HINDZINC from the shortlist entirely). The DB's
-        own continuous per-minute scan log (oi_spurt_history, written by
-        _oi_spurt_history_loop, on by default all session) is the
-        authoritative record of what should currently be tracked -- reads
-        its MOST RECENT poll and onboards any symbol that passes this book's
-        own tradeable filter and isn't already on this process's own
-        shortlist, using the SAME onboarding steps _maybe_run_afternoon_scan
-        already uses for a newly-discovered symbol (ORB/VWAP backfill from
-        Yahoo, orb_frozen, and -- critically -- the historical VWAP-retest
-        replay, so a retest that already genuinely happened before this
-        process restarted still fires immediately). Best-effort, runs once
-        per process life (same guard shape as _morning_historical_retest_
-        applied): no rows in the DB yet (first-ever start of the day) is a
-        normal no-op, not a failure."""
-        rows = await asyncio.to_thread(
-            store.load_latest_scan_symbols, self._client_id, self._binding_id,
-            datetime.now(IST).date().isoformat())
-        if not rows:
+        top-N a prior process instance already found and was tracking.
+
+        2026-09-25 CRITICAL FIX, real incident (direct user decision after
+        review): this used to reconstruct 'what should currently be tracked'
+        from load_latest_scan_symbols' MOST RECENT oi_spurt_history poll --
+        a live, ever-drifting snapshot of whatever currently passes the
+        filter, not a frozen record of what was actually decided earlier
+        that day. Real incident: a restart at 10:21 grew a genuinely
+        1-stock shortlist (POLICYBZR, frozen at the real 09:26 scan) to 13
+        stocks -- onboarding anything above the 7% filter AT THAT MOMENT --
+        and, far worse, RE-SELECTED POLICYBZR's own option_native contracts
+        at a new strike (CE1140/PE1180, replacing the frozen CE1240/PE1260
+        from 09:26:11), directly violating decision 10 (never re-select once
+        picked) and the 2026-09-07 'no fresh stocks after 9:25am' spec.
+        Fixed to restore strictly from the PERSISTED shortlist +
+        option_native_selection tables -- the actual frozen record of what
+        this book had already committed to before the restart -- never from
+        a live poll. Still solves the original 2026-09-08 incident this
+        function was built for (GVT&D/HAL/NATIONALUM/HINDZINC): those were
+        already persisted to the shortlist table via record_shortlist() the
+        moment they were first found, so they restore correctly from here
+        too, without the drift risk.
+
+        Best-effort, runs once per process life (guard shape unchanged): no
+        rows persisted yet today (a restart before the original scan ever
+        completed) is a normal no-op -- _run_today_pipeline still runs
+        fresh in that case, same as always."""
+        # 2026-09-25 fix (found while rewriting this function): use self._today
+        # (the book's own tracked date, set by _daily_loop right before this
+        # runs) rather than datetime.now(IST).date() -- in real production use
+        # these are always the same value at call time, but a test/fixture
+        # that sets self._today independently would otherwise silently query
+        # the wrong day and restore nothing.
+        td = self._today.isoformat() if self._today else datetime.now(IST).date().isoformat()
+        shortlist_rows = await asyncio.to_thread(
+            store.load_shortlist_for_today, self._client_id, self._binding_id, td)
+        if not shortlist_rows:
             return
-        min_pct = cfg.get("OI_SPURT_MIN_PCT", 7.0)
         new_syms = []
-        for r in rows:
+        for r in shortlist_rows:
             sym = r.get("symbol")
             if not sym or sym in self._shortlist_symbols:
-                continue
-            metric = r.get("oi_spurt_pct")
-            if metric is None or abs(metric) < min_pct:
                 continue
             pchange = r.get("price_change_pct") or 0.0
             self._shortlist_symbols.append(sym)
             self._shortlist_pchange[sym] = pchange
             new_syms.append(sym)
             self._clog.info(
-                "OiOrb[%s/%s]: %s reconstructed from DB scan history (restart recovery) -- "
+                "OiOrb[%s/%s]: %s restored from persisted shortlist (restart recovery) -- "
                 "pChange=%+.2f%% oi_spurt=%s.",
                 self._client_id, self._binding_id, sym, pchange, r.get("oi_spurt_pct"))
+            orb_high, orb_low = r.get("orb_high"), r.get("orb_low")
+            if orb_high is not None and orb_low is not None:
+                self._orb_frozen[sym] = (orb_high, orb_low)
+            else:
+                try:
+                    # 2026-09-23 CRITICAL FIX, real incident: yf.download() has no
+                    # timeout of its own, and yfinance's internal cookie/crumb
+                    # retry logic can hang for a very long time (not infinite, but
+                    # long enough to look like one) when Yahoo rate-limits this
+                    # box (confirmed live: HTTP 429 from query1.finance.yahoo.com
+                    # for this exact IP). That hang sat inside a background thread
+                    # (asyncio.to_thread), so the event loop itself stayed "idle"
+                    # the whole time -- _restore_from_db_ready never got set,
+                    # silently starving every one of this book's poll loops
+                    # (top-gainer/loser, rank-tracking, OI-spurt-history) for the
+                    # rest of the session, with zero exception ever logged. A hard
+                    # wall-clock bound here means a slow/rate-limited Yahoo can
+                    # never again freeze the whole restart-recovery chain -- this
+                    # step degrades to "ORB starts without the Yahoo backfill,
+                    # live-polled bars only" exactly as its own docstring already
+                    # promises for every other failure mode.
+                    await asyncio.wait_for(
+                        asyncio.to_thread(screener.backfill_orb_from_yahoo, self._bars, [sym], cfg),
+                        timeout=15.0)
+                    h, l = self._bars.orb(sym, cfg["ORB_START"], cfg["ORB_END"])
+                    if h is not None:
+                        self._orb_frozen[sym] = (h, l)
+                        await asyncio.to_thread(
+                            store.update_orb_levels, self._client_id, self._binding_id, sym, h, l)
+                except Exception:
+                    self._clog.exception(
+                        "OiOrb[%s/%s]: %s restart-recovery ORB backfill failed (non-fatal, "
+                        "ORB starts unfrozen from now).", self._client_id, self._binding_id, sym)
             try:
-                # 2026-09-23 CRITICAL FIX, real incident: yf.download() has no
-                # timeout of its own, and yfinance's internal cookie/crumb
-                # retry logic can hang for a very long time (not infinite, but
-                # long enough to look like one) when Yahoo rate-limits this
-                # box (confirmed live: HTTP 429 from query1.finance.yahoo.com
-                # for this exact IP). That hang sat inside a background thread
-                # (asyncio.to_thread), so the event loop itself stayed "idle"
-                # the whole time -- _restore_from_db_ready never got set,
-                # silently starving every one of this book's poll loops
-                # (top-gainer/loser, rank-tracking, OI-spurt-history) for the
-                # rest of the session, with zero exception ever logged. A hard
-                # wall-clock bound here means a slow/rate-limited Yahoo can
-                # never again freeze the whole restart-recovery chain -- this
-                # step degrades to "ORB starts without the Yahoo backfill,
-                # live-polled bars only" exactly as its own docstring already
-                # promises for every other failure mode.
-                await asyncio.wait_for(
-                    asyncio.to_thread(screener.backfill_orb_from_yahoo, self._bars, [sym], cfg),
-                    timeout=15.0)
                 # 2026-09-10, direct user spec: restart recovery re-seeds VWAP from
                 # real Upstox intraday history (not Yahoo) -- same real-bar,
                 # HLC3-weighted, REPLACE-semantics seed used when a symbol first
@@ -2013,22 +2039,42 @@ class OiOrbScreenerStrategy(AbstractStrategyBook):
                 await asyncio.wait_for(self._seed_vwap_from_upstox_intraday(sym), timeout=15.0)
             except Exception:
                 self._clog.exception(
-                    "OiOrb[%s/%s]: %s restart-recovery ORB/VWAP backfill failed (non-fatal, "
-                    "VWAP starts cold from now).", self._client_id, self._binding_id, sym)
-            h, l = self._bars.orb(sym, cfg["ORB_START"], cfg["ORB_END"])
-            if h is not None:
-                self._orb_frozen[sym] = (h, l)
-                await asyncio.to_thread(store.update_orb_levels, self._client_id, self._binding_id, sym, h, l)
+                    "OiOrb[%s/%s]: %s restart-recovery VWAP seed failed (non-fatal, VWAP "
+                    "starts cold from now).", self._client_id, self._binding_id, sym)
             self._ensure_spot_feed(sym)
         if not new_syms:
             return
-        await asyncio.to_thread(
-            store.record_shortlist, self._client_id, self._binding_id,
-            [{"symbol": s, "price_change_pct": self._shortlist_pchange.get(s), "oi_spurt_pct": None,
-              "score": None, "side_bias": "bullish" if self._shortlist_pchange.get(s, 0) > 0 else "bearish"}
-             for s in new_syms])
+
+        # Restore each restored symbol's already-frozen option_native Layer 1
+        # selection too, so _native_select_contracts' own guard (decision 10:
+        # "if symbol in self._native_selected: return") correctly no-ops for
+        # it on the next scoring cycle instead of re-selecting a fresh strike
+        # from scratch -- exactly the gap that let POLICYBZR's contracts get
+        # re-picked in the real incident above.
+        native_rows = await asyncio.to_thread(
+            store.load_option_native_selection_for_today, self._client_id, self._binding_id, td)
+        for r in native_rows:
+            sym = r["symbol"]
+            if sym not in new_syms:
+                continue
+            try:
+                expiry = date.fromisoformat(r["expiry"])
+            except (TypeError, ValueError):
+                continue
+            contract = await stock_resolve.resolve_contract_exact_async(
+                sym, expiry, int(r["strike"]), r["option_type"])
+            if contract is None:
+                continue
+            self._native_selected.setdefault(sym, {"CE": None, "PE": None})
+            self._native_selected[sym][r["option_type"]] = contract
+            self._ensure_option_feed(sym, contract)
+            self._clog.info(
+                "OiOrb[%s/%s]: %s %s%d option_native selection restored from DB (restart "
+                "recovery, frozen -- will not be re-selected).",
+                self._client_id, self._binding_id, sym, r["option_type"], contract.strike)
+
         self._clog.info(
-            "OiOrb[%s/%s]: restart recovery reconstructed %d stock(s) from DB scan history: %s",
+            "OiOrb[%s/%s]: restart recovery restored %d stock(s) from persisted shortlist: %s",
             self._client_id, self._binding_id, len(new_syms), ", ".join(new_syms))
 
 

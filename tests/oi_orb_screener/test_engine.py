@@ -1587,16 +1587,23 @@ async def test_restore_from_db_restores_shortlist_and_regime_regardless_of_time_
     bails out before its main polling loop (the only place regime/
     shortlist/ORB used to get reconstructed from the DB on a restart) is
     ever reached. _restore_from_db must now restore them unconditionally,
-    regardless of what time it is when this restart happens."""
+    regardless of what time it is when this restart happens.
+
+    2026-09-25 update: restoration now reads the PERSISTED shortlist table
+    (store.record_shortlist), not a live oi_spurt_history poll snapshot --
+    see _reconcile_shortlist_from_db's own docstring for the real incident
+    that changed this. Seeds via record_shortlist (the real, frozen record)
+    instead of record_oi_spurt_history (the removed, drift-prone source)."""
     bus = _FakeBus()
     book = _make_book(bus)
     book._today = date(2026, 9, 10)
 
     store.record_scan(_TEST_CLIENT_ID, _TEST_BINDING_ID, -0.8, "ok", trade_date="2026-09-10")
     store.update_scan_regime(_TEST_CLIENT_ID, _TEST_BINDING_ID, "bearish", trade_date="2026-09-10")
-    store.record_oi_spurt_history(
-        _TEST_CLIENT_ID, _TEST_BINDING_ID, "12:45:00",
-        [{"symbol": "UNIONBANK", "rank": 1, "oi_spurt_pct": 12.0, "price_change_pct": -3.0}],
+    store.record_shortlist(
+        _TEST_CLIENT_ID, _TEST_BINDING_ID,
+        [{"symbol": "UNIONBANK", "price_change_pct": -3.0, "oi_spurt_pct": 12.0,
+          "score": None, "side_bias": "bearish"}],
         trade_date="2026-09-10",
     )
 
@@ -1611,6 +1618,87 @@ async def test_restore_from_db_restores_shortlist_and_regime_regardless_of_time_
     assert book._regime == "bearish"
     assert "UNIONBANK" in book._shortlist_symbols
     assert book._restart_db_reconcile_applied is True
+
+
+@pytest.mark.asyncio
+async def test_reconcile_shortlist_never_onboards_a_symbol_missing_from_persisted_shortlist(monkeypatch):
+    """2026-09-25, real incident: restoration must NEVER onboard a symbol
+    just because it currently passes the live oi_spurt_history filter --
+    only symbols already committed to the PERSISTED shortlist table before
+    this restart may be restored. Seeds oi_spurt_history with a symbol that
+    was never actually shortlisted (the exact shape of the real incident,
+    where 12 extra stocks got pulled in from a live poll) and confirms it
+    stays out."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._today = date(2026, 9, 25)
+
+    store.record_shortlist(
+        _TEST_CLIENT_ID, _TEST_BINDING_ID,
+        [{"symbol": "POLICYBZR", "price_change_pct": 3.31, "oi_spurt_pct": 21.3,
+          "score": None, "side_bias": "bullish"}],
+        trade_date="2026-09-25",
+    )
+    # A symbol that ONLY ever showed up in the live poll, never persisted to
+    # the real shortlist -- must NOT be onboarded on restart.
+    store.record_oi_spurt_history(
+        _TEST_CLIENT_ID, _TEST_BINDING_ID, "10:21:00",
+        [{"symbol": "AMBUJACEM", "rank": 1, "oi_spurt_pct": 12.0, "price_change_pct": 0.25}],
+        trade_date="2026-09-25",
+    )
+
+    async def _no_seed(sym):
+        return None
+    monkeypatch.setattr(book, "_seed_vwap_from_upstox_intraday", _no_seed)
+    monkeypatch.setattr(book, "_ensure_spot_feed", lambda sym: None)
+
+    await book._restore_from_db()
+
+    assert "POLICYBZR" in book._shortlist_symbols
+    assert "AMBUJACEM" not in book._shortlist_symbols
+
+
+@pytest.mark.asyncio
+async def test_reconcile_shortlist_restores_frozen_option_native_selection_without_reselecting(monkeypatch):
+    """2026-09-25, real incident: POLICYBZR's own already-frozen CE1240/
+    PE1260 contracts (selected 09:26:11) got RE-SELECTED at a new strike
+    (CE1140/PE1180) after a mid-day restart -- directly violating decision
+    10 (never re-select once picked). Restoring the persisted
+    option_native_selection row must populate self._native_selected so
+    _native_select_contracts' own guard ('if symbol in self._native_
+    selected: return') skips re-selection on the next scoring cycle."""
+    bus = _FakeBus()
+    book = _make_book(bus)
+    book._today = date(2026, 9, 25)
+
+    store.record_shortlist(
+        _TEST_CLIENT_ID, _TEST_BINDING_ID,
+        [{"symbol": "POLICYBZR", "price_change_pct": 3.31, "oi_spurt_pct": 21.3,
+          "score": None, "side_bias": "bullish"}],
+        trade_date="2026-09-25",
+    )
+    store.record_option_native_selection(
+        _TEST_CLIENT_ID, _TEST_BINDING_ID, "2026-09-25",
+        [{"symbol": "POLICYBZR", "option_type": "CE", "strike": 1240, "expiry": "2026-08-27",
+          "upstox_key": "NSE_FO|POLICYBZR1240CE", "selected_ts": "2026-09-25T09:26:11+05:30"},
+         {"symbol": "POLICYBZR", "option_type": "PE", "strike": 1260, "expiry": "2026-08-27",
+          "upstox_key": "NSE_FO|POLICYBZR1260PE", "selected_ts": "2026-09-25T09:26:11+05:30"}],
+    )
+
+    async def _no_seed(sym):
+        return None
+    monkeypatch.setattr(book, "_seed_vwap_from_upstox_intraday", _no_seed)
+    monkeypatch.setattr(book, "_ensure_spot_feed", lambda sym: None)
+    monkeypatch.setattr(book, "_ensure_option_feed", lambda sym, contract: None)
+    monkeypatch.setattr(
+        stock_resolve, "resolve_contract_exact_async",
+        _async_return(_contract("POLICYBZR", 1240, "CE")))
+
+    await book._restore_from_db()
+
+    assert "POLICYBZR" in book._native_selected
+    # The guard _native_select_contracts relies on: key present -> no re-select.
+    assert book._native_selected["POLICYBZR"]["CE"] is not None
 
 
 @pytest.mark.asyncio
