@@ -304,7 +304,18 @@ class RollingMixin:
             # day_loss_sl call site -- direct user spec, "day stop is false,
             # only true on day profit."
             self._roll_fail_streak = getattr(self, "_roll_fail_streak", 0) + 1
-            if (reason != "itm_pair_gate_profit_rollover" and not pos.is_hedged_positional
+            # 2026-09-26, direct user instruction: "when roll fails don't roll
+            # continue with the position already running" -- a failed rollover
+            # search must always fall back to the plain no-op above (keep the
+            # existing legs running untouched), never escalate to a hedge on
+            # its own, regardless of streak length. Gated behind
+            # roll_fail_hedge_enabled (config.py, default False) rather than
+            # deleted outright, so it can be re-enabled per-deployment without
+            # another code change if ever revisited. Hedging remains fully
+            # live via the EOD path (_maybe_prehedge/_eod_close_or_hedge) --
+            # this only removes this OTHER, time-of-day-unrestricted trigger.
+            if (getattr(self, "_roll_fail_hedge_enabled", False)
+                    and reason != "itm_pair_gate_profit_rollover" and not pos.is_hedged_positional
                     and self._roll_fail_streak >= _ROLL_FAIL_HEDGE_STREAK):
                 _hedged_now = await self._hedge_or_roll_if_eligible(pos, now, stop_for_day_on_hedge=False)
                 if _hedged_now:

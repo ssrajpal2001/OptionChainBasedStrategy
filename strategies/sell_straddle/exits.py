@@ -1159,7 +1159,13 @@ class ExitMixin:
         return True
 
     _POST1500_START = dtime(15, 0)
-    _POST1500_PROFIT_CHECK = dtime(15, 15)
+    # 2026-09-26, direct user spec: was 15:15 -- moved to 15:00 (same as
+    # _POST1500_START) so the profit-only arm path is live from the very
+    # start of this mechanic's window, not 15 minutes into it. Combined with
+    # the day-low branch below also now requiring profit, both arm paths are
+    # active across the same [15:00, force_exit) window and differ only in
+    # WHICH condition (day-low retest vs. plain profit) actually triggers.
+    _POST1500_PROFIT_CHECK = dtime(15, 0)
 
     async def _check_post1500_r1_exit(self, pos: "StraddlePosition", now: datetime) -> None:
         """Post-15:00 per-leg R1 exit (2026-08-28, direct user spec).
@@ -1179,18 +1185,28 @@ class ExitMixin:
              (a) the position's combined value reaches the frozen day-low
                  (self._session_min_straddle_frozen -- the SAME one-time
                  REST value day_low_exit_enabled's own block computes; read
-                 here, never written by this feature), at any time from
-                 15:00 onward, OR
-             (b) it is 15:15 or later AND the overall day P&L (booked +
-                 running, hedge-inclusive via _combined_pnl_pts) is
-                 positive.
-             If the day is still in overall loss at 15:15 and neither has
-             happened yet, NOTHING closes here -- the existing EOD
-             hedge-and-carry mechanic (unchanged, not touched by this
-             feature) is what takes over as force_exit approaches. The arm
-             check keeps re-running every tick, so a loss that later flips
-             to profit arms immediately at that point, same as reaching the
-             day-low would.
+                 here, never written by this feature), from 15:00 onward,
+                 AND the overall day P&L (booked + running, hedge-inclusive
+                 via _combined_pnl_pts) is positive, OR
+             (b) from 15:00 onward (2026-09-26: was 15:15, moved to align
+                 with (a)'s own start) the overall day P&L alone is positive.
+             2026-09-26 CRITICAL FIX, direct user spec: BOTH paths now
+             require day P&L > 0 -- the day-low branch used to arm on the
+             price retest alone, with no profit check, meaning a day still
+             in overall LOSS could arm this mechanic and go on to fire a
+             real one-side R1-breach close. That put the position into
+             single-leg mode, and single-leg mode is never hedge-eligible at
+             EOD (_maybe_prehedge/_eod_close_or_hedge both refuse to hedge a
+             position with either leg already closed) -- so a losing day
+             that happened to retest its own day-low could end up closing
+             one side early for no protective reason and riding the other
+             side to EOD with no hedge, exactly the outcome this fix
+             prevents. If the day is still in overall loss, NOTHING arms
+             here regardless of day-low -- the existing EOD hedge-and-carry
+             mechanic (unchanged, not touched by this feature) is what takes
+             over as force_exit approaches. The arm check keeps re-running
+             every tick, so a loss that later flips to profit arms
+             immediately at that point.
           3. Once armed, each leg is watched INDEPENDENTLY: the instant a
              leg's own live LTP closes above its own R1.high, that ONE leg
              closes via _close_leg -- the other, not-yet-breached leg keeps
@@ -1276,15 +1292,25 @@ class ExitMixin:
                 acc["l"] = min(acc["l"], ltp)
 
         if not self._post1500_armed:
+            # 2026-09-26 CRITICAL FIX, direct user spec: the day-low branch
+            # used to arm on the price retest ALONE, with no P&L check --
+            # meaning a day still in overall loss could arm this mechanic
+            # (and go on to fire a real one-side R1-breach close, which then
+            # makes the position single-leg -- and single-leg mode is never
+            # hedge-eligible at EOD, see _maybe_prehedge/_eod_close_or_hedge).
+            # Direct user correction: "day low will be checked after 15:00
+            # and if overall pnl is in profit then only R1 for single side
+            # will be active for exit ... if day low is there but overall
+            # p&l is in loss it will not fire r1 breach." Both arm paths now
+            # require the SAME day P&L > 0 condition, computed once.
+            _day_pnl = self._session_realized_pnl_pts + self._combined_pnl_pts(pos, pos.unrealized_pnl)
             _frozen = self._session_min_straddle_frozen
-            if _frozen is not None and pos.current_value <= _frozen:
+            if _frozen is not None and pos.current_value <= _frozen and _day_pnl > 0:
                 self._post1500_armed = True
                 self._post1500_armed_reason = "day_low"
-            elif now.time() >= self._POST1500_PROFIT_CHECK:
-                _day_pnl = self._session_realized_pnl_pts + self._combined_pnl_pts(pos, pos.unrealized_pnl)
-                if _day_pnl > 0:
-                    self._post1500_armed = True
-                    self._post1500_armed_reason = "profit"
+            elif now.time() >= self._POST1500_PROFIT_CHECK and _day_pnl > 0:
+                self._post1500_armed = True
+                self._post1500_armed_reason = "profit"
             if self._post1500_armed:
                 self._clog.info(
                     "POST-15:00 R1 EXIT ARMED (%s) — now watching each open leg's own R1 "

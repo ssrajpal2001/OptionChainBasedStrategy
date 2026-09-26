@@ -158,17 +158,54 @@ def test_no_arm_before_1500_even_if_profitable():
     assert s._post1500_armed is False
 
 
-def test_arms_via_day_low_at_any_time_after_1500():
+def test_arms_via_day_low_at_any_time_after_1500_when_also_profitable():
+    """2026-09-26 CRITICAL FIX, direct user spec: the day-low branch now ALSO
+    requires the day to be in overall profit -- a day-low retest alone, while
+    still in loss, must never arm this mechanic (see the dedicated
+    test_day_low_alone_without_profit_never_arms below). This test keeps the
+    original day-low-arms-it assertion, just with a genuinely profitable
+    position so it still exercises that branch."""
     s = _strategy()
     s._post1500_exit_enabled = True
     s._session_min_straddle_frozen = 50.0
-    s._position = _position(20.0, 20.0)   # current_value = 40, at/below frozen 50
+    # current_value = 40 (at/below frozen 50); entries 60 each -> net_credit
+    # 120, unrealized_pnl = 120-40 = +80 -> genuinely profitable.
+    s._position = _position(20.0, 20.0, ce_entry=60.0, pe_entry=60.0)
     import strategies.sell_straddle.exits as exits_mod
     from datetime import datetime
     now = datetime.now(exits_mod.IST).replace(hour=15, minute=2, second=0, microsecond=0)
     asyncio.run(s._check_post1500_r1_exit(s._position, now))
     assert s._post1500_armed is True
     assert s._post1500_armed_reason == "day_low"
+
+
+def test_day_low_alone_without_profit_never_arms():
+    """2026-09-26 CRITICAL FIX, direct user spec ("if day low is there but
+    overall p&l is in loss it will not fire r1 breach"): a real incident
+    class this closes -- a day still in overall loss that happens to retest
+    its own combined-premium day-low used to arm this mechanic anyway (no
+    P&L check on that branch), go on to fire a genuine one-side R1-breach
+    close, and thereby put the position into single-leg mode -- which is
+    NEVER hedge-eligible at EOD (_maybe_prehedge/_eod_close_or_hedge both
+    refuse once either leg is closed). A losing day could end up closing one
+    side early for no protective reason with no hedge backstop left. Same
+    position as the day-low test above, but flat/no-profit entries -- must
+    NOT arm."""
+    s = _strategy()
+    s._post1500_exit_enabled = True
+    s._session_min_straddle_frozen = 50.0
+    s._position = _position(20.0, 20.0)   # current_value=40 <= frozen 50, but flat P&L (not > 0)
+    import strategies.sell_straddle.exits as exits_mod
+    from datetime import datetime
+    now = datetime.now(exits_mod.IST).replace(hour=15, minute=2, second=0, microsecond=0)
+    asyncio.run(s._check_post1500_r1_exit(s._position, now))
+    assert s._post1500_armed is False
+
+    # Still true even deep in the window, right up to force_exit -- day-low
+    # alone is never sufficient while the day stays flat/loss.
+    now2 = datetime.now(exits_mod.IST).replace(hour=15, minute=19, second=0, microsecond=0)
+    asyncio.run(s._check_post1500_r1_exit(s._position, now2))
+    assert s._post1500_armed is False
 
 
 def test_no_arm_while_overall_loss_at_1515_waits_for_profit_flip():
@@ -196,7 +233,10 @@ def test_per_leg_independent_r1_breach_closes_only_that_leg():
     s._post1500_exit_enabled = True
     s._session_min_straddle_frozen = 1000.0   # arms immediately (any value >= current_value)
     close_calls = _spy_close_leg(s)
-    s._position = _position(20.0, 20.0)
+    # 2026-09-26: the day-low arm branch now also requires overall profit --
+    # genuinely profitable entries (60 each) so this test's real focus
+    # (per-leg independent breach behavior once armed) is unaffected.
+    s._position = _position(20.0, 20.0, ce_entry=60.0, pe_entry=60.0)
 
     import strategies.sell_straddle.exits as exits_mod
     from datetime import datetime, timedelta

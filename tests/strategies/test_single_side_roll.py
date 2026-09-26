@@ -153,6 +153,12 @@ def test_single_side_roll_no_candidate_activates_hedge_at_streak_threshold():
         s._spot = 23500
         s._strike_prem = {}
         s._roll_fail_streak = 9
+        # 2026-09-26: this escalation is now gated behind roll_fail_hedge_enabled
+        # (default False, direct user instruction -- a failed rollover search
+        # should always just keep the position running, never escalate to a
+        # hedge on its own). This test is specifically about the escalation's
+        # own dispatch contract, so opt it in explicitly.
+        s._roll_fail_hedge_enabled = True
         s._hedge_or_roll_if_eligible = AsyncMock(return_value=True)
 
         now = datetime.datetime.now(IST)
@@ -187,6 +193,37 @@ def test_single_side_roll_no_candidate_skips_hedge_when_already_hedged():
         await s._single_side_roll(datetime.datetime.now(IST), "ltp_decay")
 
         s._hedge_or_roll_if_eligible.assert_not_awaited()
+    asyncio.run(run())
+
+
+def test_single_side_roll_no_candidate_never_hedges_when_flag_off_by_default():
+    """2026-09-26, direct user instruction ("when roll fails don't roll
+    continue with the position already running"): roll_fail_hedge_enabled
+    defaults to False, so even at/past the streak threshold, a failed
+    rollover search must never escalate to a hedge -- it just keeps the
+    existing legs running (the plain no-op every failed search already
+    falls back to), exactly as if the streak counter didn't exist."""
+    async def run():
+        bus = EventBus()
+        s = SellStraddleStrategy(bus, cfg=GlobalConfig(), underlying="NIFTY")
+        s._position = StraddlePosition(
+            underlying="NIFTY", atm_at_entry=23500, entry_spot=23500,
+            ce_leg=StraddleLeg("CE", 23500, 80.0, 10.0),
+            pe_leg=StraddleLeg("PE", 23500, 80.0, 70.0),
+            net_credit=160.0, status="open",
+        )
+        s._spot = 23500
+        s._strike_prem = {}
+        s._roll_fail_streak = 9
+        assert s._roll_fail_hedge_enabled is False  # confirm the real default
+        s._hedge_or_roll_if_eligible = AsyncMock(return_value=True)
+
+        now = datetime.datetime.now(IST)
+        rolled = await s._single_side_roll(now, "ltp_decay")
+
+        assert rolled is False  # still no roll -- but no hedge attempt either
+        s._hedge_or_roll_if_eligible.assert_not_awaited()
+        assert s._position.status == "open"  # position simply keeps running
     asyncio.run(run())
 
 

@@ -91,6 +91,8 @@ class SellStraddleConfig:
 
     r1_breach_reentry_enabled: bool
 
+    roll_fail_hedge_enabled: bool
+
 
 def _apply_client_overrides(
     cfg: SellStraddleConfig,
@@ -299,6 +301,20 @@ def load_sell_straddle_config(
     # change if ever revisited; default OFF for every deployment now.
     r1_breach_reentry_enabled = bool(ss.get("r1_breach_reentry_enabled", False))
 
+    # Roll-fail-streak auto-hedge (rolling.py, _ROLL_FAIL_HEDGE_STREAK=10
+    # consecutive failed rollover-partner searches -> hedge instead of
+    # keeping the position running, with NO time-of-day restriction).
+    # Disabled 2026-09-26, direct user instruction: "when roll fails don't
+    # roll continue with the position already running" -- a failed rollover
+    # search should always fall back to the plain no-op (keep the existing
+    # legs running untouched), never escalate to a hedge on its own,
+    # regardless of how many times in a row it fails. Opt-in flag, default
+    # OFF, so it can be re-enabled per-deployment without another code
+    # change if ever revisited. Hedging remains fully live via the EOD path
+    # (_maybe_prehedge/_eod_close_or_hedge) -- this only removes the OTHER,
+    # time-of-day-unrestricted trigger.
+    roll_fail_hedge_enabled = bool(ss.get("roll_fail_hedge_enabled", False))
+
     config = SellStraddleConfig(
         entry_start=entry_start,
         entry_cutoff=entry_cutoff,
@@ -344,6 +360,7 @@ def load_sell_straddle_config(
         same_day_expiry_enabled=same_day_expiry_enabled,
         hedge_carry_enabled=hedge_carry_enabled,
         r1_breach_reentry_enabled=r1_breach_reentry_enabled,
+        roll_fail_hedge_enabled=roll_fail_hedge_enabled,
     )
 
     # Apply per-client risk overrides if a client_id is provided.
@@ -414,6 +431,7 @@ class ConfigMixin:
         self._exit_rules = cfg.exit_rules
 
         self._r1_breach_reentry_enabled = cfg.r1_breach_reentry_enabled
+        self._roll_fail_hedge_enabled = cfg.roll_fail_hedge_enabled
 
         self._itm_pair_gate_enabled = cfg.itm_pair_gate_enabled
         self._itm_pair_gate_profit_inr = cfg.itm_pair_gate_profit_inr
