@@ -1247,6 +1247,7 @@ class ExitMixin:
             self._post1500_pair = _pair_id
             self._post1500_calc = {"CE": SupportResistanceCalculator(), "PE": SupportResistanceCalculator()}
             self._post1500_bar_acc = {}
+            self._post1500_bar_closed_at = {}
             if _pair_changed:
                 self._post1500_armed = False
                 self._post1500_armed_reason = None
@@ -1269,27 +1270,52 @@ class ExitMixin:
             minute = now.replace(second=0, microsecond=0)
             acc = self._post1500_bar_acc.get(side)
             if acc is None:
-                self._post1500_bar_acc[side] = {"minute": minute, "h": ltp, "l": ltp}
+                self._post1500_bar_acc[side] = {"minute": minute, "h": ltp, "l": ltp, "c": ltp}
             elif minute != acc["minute"]:
+                # 2026-09-29 CRITICAL FIX, direct user correction, real incident:
+                # a genuine intrabar breach at 15:04:47 (ltp=136.30 vs established
+                # R1=136.20) fired even though that same 1-min bar went on to
+                # CLOSE at 135.30 -- BELOW the established R1 -- a wick-and-reject,
+                # not a real breakout. Save this just-closed bar's own close price
+                # (the last live tick seen before the minute rolled over) BEFORE
+                # updating the calculator with its own high/low, so the breach
+                # check below can require the bar to have genuinely CLOSED above
+                # R1, not merely wicked above it intrabar. Near EOD (15:00-15:35),
+                # the ~1 extra minute of latency this adds is an acceptable cost
+                # for filtering out a false wick-based signal.
+                # Capture R1's state as it stood BEFORE this same bar updates it --
+                # process_straddle_candle below can itself flip is_established/phase
+                # using this very bar's own high/low, so reading R1 AFTER that call
+                # would compare the bar's close against a value the bar itself just
+                # changed (e.g. a breach candle can flip phase back to R1_TRACKING
+                # and clear is_established in the same call, silently masking a
+                # real breach instead of confirming it).
+                _prior_state = self._post1500_calc[side].get_calculated_sr_state(
+                    f"{self._underlying}_{side}_P1500")
+                _prior_r1 = _prior_state.get("sr_levels", {}).get("R1")
+                if (_prior_r1 and _prior_r1.get("is_established")
+                        and _prior_state.get("current_phase") != "R1_TRACKING"):
+                    self._post1500_bar_closed_at[side] = (float(acc["c"]), float(_prior_r1["high"]))
                 self._post1500_calc[side].process_straddle_candle(
                     f"{self._underlying}_{side}_P1500",
                     {"timestamp": acc["minute"], "high": acc["h"], "low": acc["l"], "duration": 1},
                 )
-                self._post1500_bar_acc[side] = {"minute": minute, "h": ltp, "l": ltp}
+                self._post1500_bar_acc[side] = {"minute": minute, "h": ltp, "l": ltp, "c": ltp}
                 # 2026-09-03 diagnostic (direct user request): prove/disprove
                 # whether R1 genuinely recomputes every closed 1-min bar, since
                 # this is only observable per-bar here, never dumped elsewhere.
                 _r1_now = self._post1500_calc[side].get_calculated_sr_state(
                     f"{self._underlying}_{side}_P1500").get("sr_levels", {}).get("R1")
                 self._clog.info(
-                    "POST-15:00 R1 BAR CLOSE %s — bar %s h=%.2f l=%.2f -> R1.high=%s established=%s",
-                    side, acc["minute"].strftime("%H:%M"), acc["h"], acc["l"],
+                    "POST-15:00 R1 BAR CLOSE %s — bar %s h=%.2f l=%.2f c=%.2f -> R1.high=%s established=%s",
+                    side, acc["minute"].strftime("%H:%M"), acc["h"], acc["l"], acc["c"],
                     f"{_r1_now['high']:.2f}" if _r1_now else "None",
                     _r1_now.get("is_established") if _r1_now else "-",
                 )
             else:
                 acc["h"] = max(acc["h"], ltp)
                 acc["l"] = min(acc["l"], ltp)
+                acc["c"] = ltp
 
         if not self._post1500_armed:
             # 2026-09-26 CRITICAL FIX, direct user spec: the day-low branch
@@ -1339,31 +1365,32 @@ class ExitMixin:
             if self._post1500_closing.get(side):
                 continue
             leg = pos.ce_leg if side == "CE" else pos.pe_leg
-            _sr_state = self._post1500_calc[side].get_calculated_sr_state(
-                f"{self._underlying}_{side}_P1500")
-            sr = _sr_state.get("sr_levels", {})
-            r1 = sr.get("R1")
-            if r1 is None:
+            # 2026-09-29 CRITICAL FIX, direct user correction, real incident
+            # (2026-09-29 15:04:47): the old check compared a live tick against
+            # WHATEVER R1 currently holds -- but a genuine breach candle can
+            # itself flip R1's phase/is_established in the SAME bar-close call
+            # that produced it (see the bar-accumulation loop above), so
+            # re-reading R1 here, AFTER that update, could either mask a real
+            # breach (phase already flipped back to R1_TRACKING) or -- the
+            # actual live incident -- fire on a mere intrabar WICK that the
+            # same bar went on to close back BELOW R1 (a wick-and-reject, not a
+            # real breakout). Fixed by requiring the most recently CLOSED bar
+            # to have genuinely closed above the R1 value that was established
+            # BEFORE that bar closed -- both captured together, atomically, in
+            # the bar-accumulation loop's own _post1500_bar_closed_at entry, so
+            # there's no window for either value to have since been mutated by
+            # the same or a later bar. Cleared via pop() so a stale close can't
+            # re-trigger a breach on a later tick with no new bar having closed
+            # since. Near EOD, the ~1 extra minute this adds (waiting for the
+            # bar to close, rather than reacting to a live tick) is an
+            # acceptable cost for filtering out a false intrabar wick.
+            _closed = self._post1500_bar_closed_at.pop(side, None)
+            if _closed is None:
                 continue
-            # 2026-09-08 CRITICAL FIX, direct user spec: a breach must only be
-            # actioned once R1 is a genuinely ESTABLISHED, stable level -- not
-            # while the phase is still R1_TRACKING (R1 itself is mid-formation/
-            # being tested as a hurdle, not yet confirmed). The old code read
-            # whatever R1 currently held with no established/phase check at
-            # all, so it could fire on an R1 that had never actually been
-            # confirmed. Once established+not-tracking, every tick is still
-            # checked live (this naturally catches a genuine "R2 breaches R1"
-            # breach in real time, well before the 1-min candle that would
-            # eventually confirm it even closes -- see this function's other
-            # bar-close block above, which is what would flip the phase to
-            # R1_TRACKING on the NEXT candle close using a NEW r1['high'];
-            # by then a real breach has already fired here, tick-by-tick,
-            # against the still-valid established value).
-            if not r1.get("is_established") or _sr_state.get("current_phase") == "R1_TRACKING":
+            _bar_close, _r1_high_at_close = _closed
+            if _bar_close <= _r1_high_at_close:
                 continue
             ltp = float(leg.ltp or 0.0)
-            if ltp <= 0 or ltp <= float(r1["high"]):
-                continue
             if not self._defer_exit(f"post1500_r1_breach_{side}", now):
                 continue
             self._post1500_closing[side] = True
@@ -1375,8 +1402,8 @@ class ExitMixin:
             self._post1500_leg_closed[side] = True
             self._clog.info(
                 "POST-15:00 R1 BREACH — %s leg (strike=%.0f) closed independently "
-                "(R1.high=%.2f, ltp=%.2f); the other leg keeps running solo.",
-                side, leg.strike, float(r1["high"]), ltp,
+                "(R1.high=%.2f, bar_close=%.2f, ltp=%.2f); the other leg keeps running solo.",
+                side, leg.strike, _r1_high_at_close, _bar_close, ltp,
             )
             self._persist()
             if pos.ce_leg_closed and pos.pe_leg_closed:

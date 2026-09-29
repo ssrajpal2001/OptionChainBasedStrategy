@@ -420,10 +420,15 @@ def test_both_legs_closing_independently_finalizes_the_position():
     from datetime import datetime
 
     async def _run():
+        from datetime import timedelta
         base = datetime.now(exits_mod.IST).replace(hour=15, minute=10, second=0, microsecond=0)
         breach_ts = await _establish_r1(s, "PE", base, "pe_leg")
         s._position.pe_leg.ltp = 35.0   # breaches the now-established R1(=30)
         await s._check_post1500_r1_exit(s._position, breach_ts)
+        # 2026-09-29 fix: a breach now requires the bar to have genuinely
+        # CLOSED above R1, not merely ticked above it -- one more call at the
+        # next minute boundary closes the bar containing the 35.0 tick.
+        await s._check_post1500_r1_exit(s._position, breach_ts + timedelta(minutes=1))
     asyncio.run(_run())
 
     assert s._stop_for_day is True or s._position is None or s._position.pe_leg_closed
@@ -690,9 +695,20 @@ def test_concurrent_r1_breach_checks_close_the_leg_only_once():
     s._position.ce_leg.ltp = 200.0   # unambiguous breach of whatever R1 formed
     s._position.pe_leg.ltp = 20.0
 
+    # 2026-09-29 fix: a breach now requires the bar to have genuinely CLOSED
+    # above R1, not merely ticked above it. This first call closes the
+    # already-forming candle_C bar (establishing R1) and starts a NEW minute3
+    # accumulator seeded at ltp=200 -- no breach yet, since that new bar
+    # hasn't closed. The actual race under test now happens one minute later,
+    # when two concurrent calls both observe that same just-closed 200-high
+    # bar and race on which one calls _close_leg first.
+    from datetime import timedelta
+    asyncio.run(s._check_post1500_r1_exit(s._position, breach_now))
+    breach_close_now = breach_now + timedelta(minutes=1)
+
     async def _race():
-        t1 = asyncio.create_task(s._check_post1500_r1_exit(s._position, breach_now))
-        t2 = asyncio.create_task(s._check_post1500_r1_exit(s._position, breach_now))
+        t1 = asyncio.create_task(s._check_post1500_r1_exit(s._position, breach_close_now))
+        t2 = asyncio.create_task(s._check_post1500_r1_exit(s._position, breach_close_now))
         # Let both tasks run until they've each reached (or skipped) the
         # close call, then release the slow close so whichever one is
         # actually in flight can complete.

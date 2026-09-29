@@ -1273,6 +1273,7 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         self._post1500_closing = {"CE": False, "PE": False}
         self._post1500_calc = {}
         self._post1500_bar_acc = {}
+        self._post1500_bar_closed_at = {}
         self._shadow_vwap = {}
         self._shadow_vwap_seeding = set()
         # 2026-09-23 CRITICAL FIX, real live incident (calculative-vwap_source

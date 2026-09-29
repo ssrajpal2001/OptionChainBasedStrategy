@@ -477,6 +477,8 @@ class ConfigMixin:
             self._post1500_closing = {"CE": False, "PE": False}
             self._post1500_calc = {}       # side -> SupportResistanceCalculator
             self._post1500_bar_acc = {}    # side -> {"minute": datetime, "h":, "l":, "c":}
+        if not hasattr(self, "_post1500_bar_closed_at"):
+            self._post1500_bar_closed_at = {}   # side -> just-closed bar's own close price
         if not hasattr(self, "_shadow_vwap"):
             self._shadow_vwap = {}         # (strike, side) -> {"cum_pv":, "cum_v":, "last":}
         if not hasattr(self, "_shadow_vwap_seeding"):
