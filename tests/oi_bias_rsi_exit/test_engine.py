@@ -24,6 +24,26 @@ def _strategy():
     return OiBiasRsiExitStrategy(EventBus(), GlobalConfig(), client_id="C", binding_id="B")
 
 
+def test_entry_exit_and_oi_recheck_params_are_genuinely_overridable_per_deployment():
+    """2026-09-30 CRITICAL FIX, direct user audit request: these used to be
+    module-level constants in engine.py with ZERO per-deployment override --
+    confirms the constructor now genuinely accepts and stores different
+    values than the module defaults, not just re-reading the same constant
+    under a new name."""
+    s = OiBiasRsiExitStrategy(
+        EventBus(), GlobalConfig(), client_id="C", binding_id="B",
+        entry_timeframe_min=5, entry_stoch_rsi_lengths=(14, 14, 3, 3),
+        exit_timeframe_min=30, exit_stoch_rsi_lengths=(9, 9, 3, 3),
+        oi_recheck_minutes=10, oi_bias_flip_count=3,
+    )
+    assert s._entry_timeframe_min == 5
+    assert s._entry_stoch_rsi_lengths == (14, 14, 3, 3)
+    assert s._exit_timeframe_min == 30
+    assert s._exit_stoch_rsi_lengths == (9, 9, 3, 3)
+    assert s._oi_recheck_minutes == 10
+    assert s._oi_bias_flip_count == 3
+
+
 class _FakeContract:
     upstox_key = "NSE_FO|999999"
 

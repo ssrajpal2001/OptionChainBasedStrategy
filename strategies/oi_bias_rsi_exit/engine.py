@@ -122,6 +122,19 @@ class OiBiasRsiExitStrategy:
         start_time: str = "09:25", force_exit_time: str = "15:25",
         oi_spurt_min_pct: float = 7.0, top_n_per_side: int = 10,
         poll_seconds: float = 60.0,
+        # 2026-09-30 CRITICAL FIX, direct user audit request: these were
+        # module-level constants used directly throughout this file with
+        # ZERO per-deployment override -- the exact "nothing hardcoded"
+        # violation flagged this session, now fixed to match the
+        # constructor-param + strategy_params pattern every other current
+        # strategy (CAG Straddle, Iron Fly) already uses correctly. Defaults
+        # unchanged (the same 2026-09-27 optimize.py-validated values).
+        entry_timeframe_min: int = ENTRY_TIMEFRAME_MIN,
+        entry_stoch_rsi_lengths: tuple = ENTRY_STOCH_RSI_LENGTHS,
+        exit_timeframe_min: int = EXIT_TIMEFRAME_MIN,
+        exit_stoch_rsi_lengths: tuple = EXIT_STOCH_RSI_LENGTHS,
+        oi_recheck_minutes: int = OI_RECHECK_MINUTES,
+        oi_bias_flip_count: int = 2,
     ) -> None:
         self._bus = bus
         self._cfg = cfg
@@ -134,6 +147,12 @@ class OiBiasRsiExitStrategy:
         self._oi_spurt_min_pct = oi_spurt_min_pct
         self._top_n_per_side = top_n_per_side
         self._poll_seconds = poll_seconds
+        self._entry_timeframe_min = entry_timeframe_min
+        self._entry_stoch_rsi_lengths = tuple(entry_stoch_rsi_lengths)
+        self._exit_timeframe_min = exit_timeframe_min
+        self._exit_stoch_rsi_lengths = tuple(exit_stoch_rsi_lengths)
+        self._oi_recheck_minutes = oi_recheck_minutes
+        self._oi_bias_flip_count = oi_bias_flip_count
 
         self._clog = logging.getLogger(f"OiBiasRsiExit[{client_id}/{binding_id}]")
         self._running = False
@@ -337,9 +356,9 @@ class OiBiasRsiExitStrategy:
         bars = sorted(_to_bars(rows), key=lambda b: b.ts)
         if not bars:
             return
-        bars_e = to_n_min_bars_market_anchored(bars, ENTRY_TIMEFRAME_MIN)
+        bars_e = to_n_min_bars_market_anchored(bars, self._entry_timeframe_min)
         closes_e = [b.close for b in bars_e]
-        k, d = compute_stoch_rsi_double_smoothed(closes_e, *ENTRY_STOCH_RSI_LENGTHS)
+        k, d = compute_stoch_rsi_double_smoothed(closes_e, *self._entry_stoch_rsi_lengths)
         idx = next(
             (i for i, b in enumerate(bars_e) if b.ts.time() >= self._start_time and check_entry_state(k[i], d[i], bias)),
             None)
@@ -388,11 +407,11 @@ class OiBiasRsiExitStrategy:
             "prev_oi": {"atm_call": atm_call_oi, "otm_call": otm_call_oi,
                         "atm_put": atm_put_oi, "otm_put": otm_put_oi},
             "oi_bias_history": [],
-            "next_oi_check": entry_ts + timedelta(minutes=OI_RECHECK_MINUTES),
+            "next_oi_check": entry_ts + timedelta(minutes=self._oi_recheck_minutes),
         }
         row_id = await asyncio.to_thread(
             store.record_entry, self._client_id, self._binding_id, symbol, pos,
-            ENTRY_TIMEFRAME_MIN, ENTRY_STOCH_RSI_LENGTHS,
+            self._entry_timeframe_min, self._entry_stoch_rsi_lengths,
         )
         pos["db_row_id"] = row_id
         self._positions[symbol] = pos
@@ -438,10 +457,10 @@ class OiBiasRsiExitStrategy:
         )
         pos["oi_bias_history"].append(reading)
         pos["prev_oi"] = cur
-        pos["next_oi_check"] = now + timedelta(minutes=OI_RECHECK_MINUTES)
+        pos["next_oi_check"] = now + timedelta(minutes=self._oi_recheck_minutes)
         self._clog.info("%s: OI re-check reading=%s (entry_bias=%s) history=%s",
                          symbol, reading, bias, pos["oi_bias_history"])
-        if count_opposite_bias_readings(pos["oi_bias_history"], bias) >= 2:
+        if count_opposite_bias_readings(pos["oi_bias_history"], bias) >= self._oi_bias_flip_count:
             await self._close_position(symbol, "oi_bias_flip_twice", token)
             return True
         return False
@@ -459,13 +478,13 @@ class OiBiasRsiExitStrategy:
         bars = sorted(_to_bars(rows), key=lambda b: b.ts)
         if not bars:
             return
-        bars_x = to_n_min_bars_market_anchored(bars, EXIT_TIMEFRAME_MIN)
+        bars_x = to_n_min_bars_market_anchored(bars, self._exit_timeframe_min)
         closes_x = [b.close for b in bars_x]
-        k, d = compute_stoch_rsi_double_smoothed(closes_x, *EXIT_STOCH_RSI_LENGTHS)
+        k, d = compute_stoch_rsi_double_smoothed(closes_x, *self._exit_stoch_rsi_lengths)
         entry_ts = pos["entry_ts"]
         crossed = False
         for i in range(1, len(bars_x)):
-            bucket_close = bars_x[i].ts + timedelta(minutes=EXIT_TIMEFRAME_MIN)
+            bucket_close = bars_x[i].ts + timedelta(minutes=self._exit_timeframe_min)
             if bucket_close <= entry_ts:
                 continue
             if bucket_close > datetime.now(IST):
@@ -488,7 +507,7 @@ class OiBiasRsiExitStrategy:
         pnl = (exit_price - pos["entry_price"]) * pos["qty"]
         await asyncio.to_thread(
             store.record_exit, pos.get("db_row_id", -1), exit_price, reason, pnl,
-            EXIT_TIMEFRAME_MIN, EXIT_STOCH_RSI_LENGTHS,
+            self._exit_timeframe_min, self._exit_stoch_rsi_lengths,
         )
         await self._bus.publish(Topic.OI_BIAS_RSI_EXIT_ORDER_REQUEST, OiBiasRsiExitOrderEvent(
             client_id=self._client_id, binding_id=self._binding_id, action="SELL",
