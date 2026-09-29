@@ -50,6 +50,54 @@ def test_pair_indicators_slope_prev_present_with_three_bars():
     assert round(ind["slope_prev"], 6) == 5.0
 
 
+# 2026-09-29 CRITICAL FIX regression: real live incident. A freshly-subscribed
+# strike's very first committed bar at market open can genuinely be (ltp=0,
+# atp=0) -- the exchange just opened and that strike hasn't traded yet. The
+# old code included that stored zero bar in the slope history purely because
+# its minute was >= session start, so the first REAL bar afterward computed
+# slope = real_vwap - 0, a false multi-hundred-point spike, instead of
+# correctly waiting for a second genuinely-traded bar.
+
+def test_pair_indicators_slope_ignores_leading_zero_atp_bar():
+    eng = PoolIndicatorEngine(rsi_len=14, roc_len=10)
+    # Minute 555 (09:15): CE hasn't traded yet this session -> atp=0 stored bar.
+    eng.update_tick(100, "CE", 0.0, 0.0)
+    eng.update_tick(100, "PE", 40.0, 39.0)
+    eng.commit_bar(minute=555)
+    # Minute 556 (09:16): CE gets its first real trade.
+    eng.update_tick(100, "CE", 50.0, 49.0)
+    eng.update_tick(100, "PE", 41.0, 40.0)
+    eng.commit_bar(minute=556)
+    ind = eng.pair_indicators(100, 100)
+    # Only ONE genuinely-traded bar exists so far -- slope must NOT fabricate
+    # a false spike off the stored zero bar (old bug: slope = 89 - 0 = 89).
+    assert "slope" not in ind
+    # Minute 557 (09:17): a second genuinely-traded bar -- NOW slope is valid,
+    # computed only from the two real bars.
+    eng.update_tick(100, "CE", 51.0, 50.0)
+    eng.update_tick(100, "PE", 42.0, 41.0)
+    eng.commit_bar(minute=557)
+    ind2 = eng.pair_indicators(100, 100)
+    assert round(ind2["slope"], 6) == round((50 + 41) - (49 + 40), 6)
+
+
+def test_pair_indicators_tf_slope_ignores_leading_zero_atp_group():
+    eng = PoolIndicatorEngine(rsi_len=14, roc_len=10)
+    eng.update_tick(100, "CE", 0.0, 0.0)
+    eng.update_tick(100, "PE", 40.0, 39.0)
+    eng.commit_bar(minute=555)
+    eng.update_tick(100, "CE", 50.0, 49.0)
+    eng.update_tick(100, "PE", 41.0, 40.0)
+    eng.commit_bar(minute=556)
+    ind = eng.pair_indicators_tf(100, 100, tf=1)
+    assert "slope" not in ind
+    eng.update_tick(100, "CE", 51.0, 50.0)
+    eng.update_tick(100, "PE", 42.0, 41.0)
+    eng.commit_bar(minute=557)
+    ind2 = eng.pair_indicators_tf(100, 100, tf=1)
+    assert round(ind2["slope"], 6) == round((50 + 41) - (49 + 40), 6)
+
+
 def test_pair_indicators_tf_slope_prev_present_with_three_tf_bars():
     eng = PoolIndicatorEngine(rsi_len=14, roc_len=10)
     bars = [(50, 49, 40, 40), (51, 50, 41, 41), (52, 51, 46, 45), (53, 52, 41, 40)]

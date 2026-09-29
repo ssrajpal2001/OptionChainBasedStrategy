@@ -144,11 +144,26 @@ class PoolIndicatorEngine:
         _floor_min = _SESSION_START_MIN if session_start_min is None else int(session_start_min)
         ca, pa = self._atps.get(ce), self._atps.get(pe)
         cm, pm = self._mins.get(ce), self._mins.get(pe)
-        ca_live = [a for a, m in zip(ca, cm) if m >= _floor_min] if (ca and cm) else []
-        pa_live = [a for a, m in zip(pa, pm) if m >= _floor_min] if (pa and pm) else []
-        if len(ca_live) >= 2 and len(pa_live) >= 2:
-            _curr = ca_live[-1] + pa_live[-1]
-            _prev = ca_live[-2] + pa_live[-2]
+        # 2026-09-29 fix, real live incident: a freshly-subscribed strike's very first
+        # committed bar can genuinely be (ltp=0, atp=0) -- the exchange just opened and
+        # that strike hasn't traded yet. The old code included that stored zero bar in
+        # the slope history purely because its minute was >= session start, so the FIRST
+        # real bar afterward computed slope = real_vwap - 0, a huge false spike, instead
+        # of correctly waiting for a second genuinely-traded bar. Filter by LIST POSITION
+        # (commit_bar always advances every tracked key in lockstep, one entry per call,
+        # so position i is the same commit event for both legs) rather than by minute
+        # VALUE -- two real commits can legitimately share the same minute-of-day integer
+        # (e.g. two CANDLE_CLOSE events processed within the same wall-clock minute), and
+        # grouping by minute value would wrongly collapse them into one bar.
+        _n = min(len(ca or ()), len(pa or ()), len(cm or ()), len(pm or ()))
+        _live_vwaps = [
+            ca[i] + pa[i]
+            for i in range(_n)
+            if cm[i] >= _floor_min and pm[i] >= _floor_min and ca[i] > 0 and pa[i] > 0
+        ]
+        if len(_live_vwaps) >= 2:
+            _curr = _live_vwaps[-1]
+            _prev = _live_vwaps[-2]
             ind["slope"] = _curr - _prev
             ind["vwap_prev"] = _prev   # exposed so logs can show prev->curr VWAP (verify slope)
             # 2026-08-25 fix, real incident: SLOPE>SLOPE_PREV(1m) is a valid dynamic-exit rule
@@ -159,8 +174,8 @@ class PoolIndicatorEngine:
             # slope_prev = the PRIOR candle's own slope (one bar further back than "slope" itself),
             # i.e. is VWAP decay accelerating or decelerating -- needs one more historical point
             # than "slope" alone, so it becomes available one candle later in the session.
-            if len(ca_live) >= 3 and len(pa_live) >= 3:
-                _prev2 = ca_live[-3] + pa_live[-3]
+            if len(_live_vwaps) >= 3:
+                _prev2 = _live_vwaps[-3]
                 ind["slope_prev"] = _prev - _prev2
         cc, pc = self._closes.get(ce), self._closes.get(pe)
         if cc and pc:
@@ -290,7 +305,11 @@ class PoolIndicatorEngine:
         # CLOSE / VWAP / SLOPE are INTRADAY — LIVE groups only (g >= 0). Seed groups (negative
         # minute index → negative group) carry prev-day ATP and would corrupt VWAP/SLOPE across
         # the day boundary (false SLOPE + false vwap_rise_sl). See pair_indicators() note.
-        live = [g for g in common if g >= 0]
+        # 2026-09-29 fix (same as pair_indicators() above, applied at the resampled-tf
+        # level): a tf-group whose last 1-min bar happened to land on a not-yet-traded
+        # strike's zero atp would otherwise be treated as a real zero VWAP point,
+        # producing a false slope spike the moment a genuine bar follows it.
+        live = [g for g in common if g >= 0 and cg[g][1] > 0 and pg[g][1] > 0]
         if not live:
             return None
         vwaps = [cg[g][1] + pg[g][1] for g in live]
