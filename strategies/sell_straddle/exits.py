@@ -1811,34 +1811,31 @@ class ExitMixin:
                     )
                 if not _execute_now:
                     return
-                # 2026-09-11, direct user spec: a day-loss-SL breach now tries to
-                # ACTIVATE THE HEDGE (both sold legs stay open, protective legs
-                # added -- 4 legs running as a positional carry) instead of
-                # closing outright, reusing the exact same eligibility/T-1-roll/
-                # strike-selection machinery already built for EOD hedge-and-
-                # carry. stop_for_day stays False on success (direct user spec:
-                # reserved for day_profit_target only) -- a fresh beginning-entry
-                # can't fire anyway while this position is still open. Falls back
-                # to the original close-and-stop-for-day if hedging isn't
-                # eligible/enabled or genuinely can't be built (no valid
-                # protective strike, order failure) -- direct user confirmation.
-                hedged = await self._hedge_or_roll_if_eligible(pos, now, stop_for_day_on_hedge=False)
-                if hedged:
+                # 2026-09-29 CRITICAL FIX, direct user correction (supersedes the
+                # 2026-09-11 spec below): a day-loss-SL breach must trigger a
+                # ROLLOVER of the bleeding leg (single-side roll, same mechanism
+                # as vwap_rise_roll/ltp_decay/ratio_exit), NEVER the 4-leg hedge
+                # activation this used to call. If no valid roll partner exists,
+                # the position is left running unchanged (same as every other
+                # roll trigger's own no-partner behavior) -- direct user
+                # decision, not closed and not stopped for the day. This no
+                # longer depends on self._hedge_carry_enabled at all (rolling is
+                # independent of the hedge feature).
+                rolled = await self._single_side_roll(now, "day_loss_sl_roll")
+                if rolled:
                     logger.info(
-                        "SellStraddle[%s]: DAY LOSS SL — HEDGE ACTIVATED instead of closing "
-                        "(sold legs kept open, protective legs added / rolled to next week).",
+                        "SellStraddle[%s]: DAY LOSS SL — ROLLED the bleeding leg (no hedge).",
                         self._underlying,
                     )
-                    self._clog.info(
-                        "DAY LOSS SL — HEDGE ACTIVATED instead of closing (positional carry, "
-                        "4 legs running)"
-                    )
+                    self._clog.info("DAY LOSS SL — rolled the bleeding leg (no hedge)")
                     return
-                self._stop_for_day = True
-                await self._close_position_and_hedge("day_loss_sl")
                 logger.info(
-                    "SellStraddle[%s]: STOPPED FOR DAY (loss SL hit, hedge not available/eligible).",
+                    "SellStraddle[%s]: DAY LOSS SL — no valid roll partner found, holding "
+                    "position unchanged (no hedge, no close).",
                     self._underlying,
+                )
+                self._clog.info(
+                    "DAY LOSS SL — no roll partner found, holding position (no hedge, no close)"
                 )
                 return
 
