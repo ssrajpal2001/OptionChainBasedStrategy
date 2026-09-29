@@ -68,6 +68,7 @@ from strategies.oi_bias_rsi_exit.detector import (
     check_entry_state, check_exit_cross,
 )
 from strategies.oi_bias_rsi_exit.events import OiBiasRsiExitOrderEvent
+from strategies.oi_bias_rsi_exit import store
 from strategies.oi_orb_screener import screener as _screener
 from strategies.oi_orb_screener import stock_resolve
 
@@ -263,6 +264,16 @@ class OiBiasRsiExitStrategy:
         )
         self._bias[symbol] = bias
         self._clog.info("%s: combined OI bias=%s (call=%s put=%s)", symbol, bias, call, put)
+        await asyncio.to_thread(
+            store.record_shortlist_oi, self._client_id, self._binding_id, symbol,
+            {
+                "open_915": bar_915.open, "strike_step": step, "atm_strike": strikes.atm,
+                "otm_call_strike": strikes.otm_call, "otm_put_strike": strikes.otm_put,
+                "call_oi_915": call[dtime(9, 15)], "call_oi_920": call[dtime(9, 20)], "call_oi_925": call[dtime(9, 25)],
+                "put_oi_915": put[dtime(9, 15)], "put_oi_920": put[dtime(9, 20)], "put_oi_925": put[dtime(9, 25)],
+                "bias": bias,
+            },
+        )
 
     # ── Entry ────────────────────────────────────────────────────────────
 
@@ -304,11 +315,17 @@ class OiBiasRsiExitStrategy:
         lot = await stock_resolve.resolve_lot_async(symbol)
         qty = lot * self._lot_multiplier
 
-        self._positions[symbol] = {
+        pos = {
             "option_type": option_type, "strike": contract.strike, "expiry": expiry,
             "qty": qty, "entry_price": entry_price, "entry_ts": datetime.now(IST),
             "upstox_key": contract.upstox_key,
         }
+        row_id = await asyncio.to_thread(
+            store.record_entry, self._client_id, self._binding_id, symbol, pos,
+            ENTRY_TIMEFRAME_MIN, ENTRY_STOCH_RSI_LENGTHS,
+        )
+        pos["db_row_id"] = row_id
+        self._positions[symbol] = pos
         self._clog.info("ENTRY %s %s%s qty=%d @ %.2f (bias=%s)",
                          symbol, contract.strike, option_type, qty, entry_price, bias)
         await self._bus.publish(Topic.OI_BIAS_RSI_EXIT_ORDER_REQUEST, OiBiasRsiExitOrderEvent(
@@ -355,6 +372,11 @@ class OiBiasRsiExitStrategy:
         exit_price = prem_rows[-1]["close"] if prem_rows else pos["entry_price"]
         self._clog.info("EXIT %s %s%s qty=%d @ %.2f (reason=%s)",
                          symbol, pos["strike"], pos["option_type"], pos["qty"], exit_price, reason)
+        pnl = (exit_price - pos["entry_price"]) * pos["qty"]
+        await asyncio.to_thread(
+            store.record_exit, pos.get("db_row_id", -1), exit_price, reason, pnl,
+            EXIT_TIMEFRAME_MIN, EXIT_STOCH_RSI_LENGTHS,
+        )
         await self._bus.publish(Topic.OI_BIAS_RSI_EXIT_ORDER_REQUEST, OiBiasRsiExitOrderEvent(
             client_id=self._client_id, binding_id=self._binding_id, action="SELL",
             underlying=symbol, option_type=pos["option_type"], strike=pos["strike"], expiry=pos["expiry"],
