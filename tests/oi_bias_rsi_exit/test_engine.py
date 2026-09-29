@@ -11,12 +11,13 @@ Fixed by treating OI as a snapshot LEVEL: the read for "OI at 09:20" is now
 the most recent REAL (>0) reading at-or-before 09:20, not an exact-minute
 match, applied uniformly to all three snapshot times."""
 import asyncio
-from datetime import time as dtime
+from datetime import datetime, time as dtime, timedelta
 from unittest.mock import AsyncMock, patch
 
-from config.global_config import GlobalConfig
+from config.global_config import IST, GlobalConfig
 from data_layer.base_feeder import EventBus
-from strategies.oi_bias_rsi_exit.engine import OiBiasRsiExitStrategy
+from strategies.oi_bias_breakout.detector import SignalStrikes
+from strategies.oi_bias_rsi_exit.engine import OiBiasRsiExitStrategy, OI_RECHECK_MINUTES
 
 
 def _strategy():
@@ -92,3 +93,79 @@ def test_exact_minute_readings_used_when_present():
     assert out[dtime(9, 15)] == 100.0
     assert out[dtime(9, 20)] == 120.0
     assert out[dtime(9, 25)] == 140.0
+
+
+# ── Third exit condition: OI bias flips to the opposite direction, twice ───
+
+def _pos(entry_bias_strikes=None, next_oi_check=None, prev_oi=None, history=None):
+    return {
+        "strikes": entry_bias_strikes or SignalStrikes(atm=100, otm_call=110, otm_put=90),
+        "prev_oi": prev_oi or {"atm_call": 1000.0, "otm_call": 1000.0, "atm_put": 1000.0, "otm_put": 1000.0},
+        "oi_bias_history": history if history is not None else [],
+        "next_oi_check": next_oi_check or datetime.now(IST) - timedelta(seconds=1),
+        "db_row_id": 1, "upstox_key": "NSE_FO|1", "entry_price": 10.0,
+        "option_type": "CE", "strike": 100, "expiry": "2026-10-06", "qty": 75,
+        "entry_ts": datetime.now(IST) - timedelta(minutes=30),
+    }
+
+
+def test_oi_flip_does_not_recheck_before_the_interval_elapses():
+    """Re-check must not fire before next_oi_check -- avoids hammering REST
+    every 60s poll cycle when the real cadence is every 5 minutes."""
+    s = _strategy()
+    pos = _pos(next_oi_check=datetime.now(IST) + timedelta(minutes=4))
+    s._current_oi = AsyncMock(return_value=1000.0)
+    fired = asyncio.run(s._check_oi_bias_flip("SYM", pos, "bullish", "tok"))
+    assert fired is False
+    s._current_oi.assert_not_awaited()
+    assert pos["oi_bias_history"] == []
+
+
+def test_oi_flip_records_history_but_does_not_exit_on_a_single_opposite_reading():
+    s = _strategy()
+    pos = _pos()
+    # OTM Call falls, ATM Put rises -- bullish per classify_oi_bias -- the
+    # OPPOSITE of an entered "bearish" position -- but only ONE reading so far.
+    s._current_oi = AsyncMock(side_effect=[900.0, 800.0, 1200.0, 1000.0])  # atm_call, otm_call, atm_put, otm_put
+    s._close_position = AsyncMock()
+    fired = asyncio.run(s._check_oi_bias_flip("SYM", pos, "bearish", "tok"))
+    assert fired is False
+    assert pos["oi_bias_history"] == ["bullish"]
+    s._close_position.assert_not_awaited()
+    # next_oi_check advanced and prev_oi updated for the next re-check.
+    assert pos["next_oi_check"] > datetime.now(IST)
+    assert pos["prev_oi"] == {"atm_call": 900.0, "otm_call": 800.0, "atm_put": 1200.0, "otm_put": 1000.0}
+
+
+def test_oi_flip_exits_after_two_opposite_readings_not_necessarily_consecutive():
+    s = _strategy()
+    pos = _pos(history=["none", "bullish"])  # already one opposite reading for a "bearish" entry
+    s._current_oi = AsyncMock(side_effect=[900.0, 800.0, 1200.0, 1000.0])  # -> "bullish" again
+    s._close_position = AsyncMock()
+    fired = asyncio.run(s._check_oi_bias_flip("SYM", pos, "bearish", "tok"))
+    assert fired is True
+    assert pos["oi_bias_history"] == ["none", "bullish", "bullish"]
+    s._close_position.assert_awaited_once_with("SYM", "oi_bias_flip_twice", "tok")
+
+
+def test_check_exit_skips_stoch_rsi_check_when_oi_flip_already_closed_position():
+    """Once the OI-flip exit has fired and closed the position, _check_exit
+    must not also run the StochRSI crossover check against a now-closed
+    position."""
+    s = _strategy()
+    pos = _pos(history=["none", "bearish"])
+    s._positions = {"SYM": pos}
+    s._bias = {"SYM": "bullish"}
+    s._current_oi = AsyncMock(side_effect=[1200.0, 1000.0, 1000.0, 800.0])  # atm_call,otm_call,atm_put,otm_put -> "bearish"
+
+    async def _fake_close(symbol, reason, token):
+        del s._positions[symbol]
+    s._close_position = AsyncMock(side_effect=_fake_close)
+
+    from unittest.mock import Mock
+    fetch_mock = AsyncMock()
+    with patch("strategies.oi_bias_rsi_exit.engine.fetch_upstox_intraday_1m", fetch_mock):
+        asyncio.run(s._check_exit("SYM", "tok"))
+
+    s._close_position.assert_awaited_once_with("SYM", "oi_bias_flip_twice", "tok")
+    fetch_mock.assert_not_awaited()  # never reached the StochRSI bar-fetch path

@@ -36,16 +36,24 @@ Mechanic per trading day, one book per (client, binding):
      (bullish=K>D, bearish=D>K), starting only at/after start_time. First
      true bar fires a BUY at the ATM CE/PE's own live premium (last real
      intraday bar close).
-  4. Exit, first of two to fire: a genuine crossover event (mirrored by
-     bias) on the stock's 75-min (optimized) StochRSI, or EOD (default
-     15:25, direct user spec) force-close.
+  4. Exit, first of three to fire:
+       (a) a genuine crossover event (mirrored by bias) on the stock's
+           75-min (optimized) StochRSI;
+       (b) the OI bias (re-run every OI_RECHECK_MINUTES on the SAME frozen
+           ATM/OTM strikes, via strategies.oi_bias_breakout.detector.
+           classify_oi_bias -- a single-transition, cross-referenced rule,
+           distinct from classify_combined_oi_bias's stricter both-
+           transition rule used once at entry) reading as the exact
+           opposite of the entry direction, twice (not necessarily
+           consecutively);
+       (c) EOD (default 15:25, direct user spec) force-close.
 
-Deliberately NOT implemented yet (flagged, not hidden): the frozen spec's
-third exit ("OI bias flips to the opposite direction, twice") -- re-reading
-combined OI every 5 minutes intraday for every open position adds real
-polling load and hasn't been validated even in backtest (the backtest
-couldn't simulate it either, see oi_bias_rsi_exit_backtest.py's own
-docstring). Watch real paper-mode logs before adding it.
+2026-09-29, direct user request: (b) implemented -- previously deferred at
+first ship since it adds real polling load and hadn't been validated even
+in backtest (the backtest couldn't simulate it either, see
+oi_bias_rsi_exit_backtest.py's own docstring). Unvalidated against real
+forward data; watch real paper-mode logs before trusting it broadly, same
+graduation discipline as every other new mechanic in this codebase.
 """
 from __future__ import annotations
 
@@ -62,10 +70,10 @@ from data_layer.historical_candles import fetch_upstox_intraday_1m
 from data_layer.instrument_registry import REGISTRY
 from strategies.core.trap_zone_utils import Bar
 from strategies.core.candle_indicators import to_n_min_bars_market_anchored
-from strategies.oi_bias_breakout.detector import freeze_signal_strikes
+from strategies.oi_bias_breakout.detector import freeze_signal_strikes, classify_oi_bias
 from strategies.oi_bias_rsi_exit.detector import (
     classify_combined_oi_bias, compute_stoch_rsi_double_smoothed,
-    check_entry_state, check_exit_cross,
+    check_entry_state, check_exit_cross, count_opposite_bias_readings,
 )
 from strategies.oi_bias_rsi_exit.events import OiBiasRsiExitOrderEvent
 from strategies.oi_bias_rsi_exit import store
@@ -84,6 +92,17 @@ EXIT_TIMEFRAME_MIN = 75
 EXIT_STOCH_RSI_LENGTHS = (21, 21, 3, 3)
 
 _OI_SNAPSHOT_TIMES = (dtime(9, 15), dtime(9, 20), dtime(9, 25))
+
+# 2026-09-29, direct user request: the third exit condition from the
+# original frozen spec, "OI bias flips to the opposite direction, twice" --
+# deliberately deferred at first ship since it adds real polling load and
+# couldn't be validated in backtest either. Re-checks the SAME frozen
+# ATM/OTM strikes' OI every OI_RECHECK_MINUTES using
+# oi_bias_breakout.detector.classify_oi_bias (a single-transition,
+# cross-referenced rule -- OTM Call vs ATM Put for bullish, OTM Put vs ATM
+# Call for bearish -- distinct from classify_combined_oi_bias's stricter
+# both-transition ATM+OTM-summed rule used once at entry).
+OI_RECHECK_MINUTES = 5
 
 
 def _to_bars(rows: List[dict]) -> List[Bar]:
@@ -253,6 +272,22 @@ class OiBiasRsiExitStrategy:
             out[t] = best
         return out
 
+    async def _current_oi(self, symbol: str, strike: float, option_type: str, token: str) -> Optional[float]:
+        """Latest real (>0) OI reading for a contract, for the rolling
+        OI-bias-flip re-check -- same forward-fill-from-last-real-reading
+        principle as _oi_at_snapshots, but "as of now" instead of a fixed
+        historical time."""
+        contract = await asyncio.to_thread(stock_resolve.resolve_contract, symbol, strike, option_type, ("upstox",))
+        if contract is None:
+            return None
+        rows = await fetch_upstox_intraday_1m(contract.upstox_key, token)
+        best = None
+        for r in rows:
+            oi = r.get("oi")
+            if oi:
+                best = float(oi)
+        return best
+
     async def _compute_bias_for(self, symbol: str, token: str) -> None:
         REGISTRY.load_sync(symbol, token)
         stock_key = stock_resolve.resolve_eq_instrument_key(symbol)
@@ -333,11 +368,27 @@ class OiBiasRsiExitStrategy:
         entry_price = prem_rows[-1]["close"]
         lot = await stock_resolve.resolve_lot_async(symbol)
         qty = lot * self._lot_multiplier
+        entry_ts = datetime.now(IST)
+
+        # Baseline OI reading for the rolling "bias flips twice" exit check
+        # below (strategies.oi_bias_breakout.detector.classify_oi_bias) --
+        # the SAME frozen ATM/OTM strikes used for the entry bias, read
+        # fresh at entry time so the first re-check has a real prior
+        # reading to compare against.
+        atm_call_oi = await self._current_oi(symbol, strikes.atm, "CE", token)
+        otm_call_oi = await self._current_oi(symbol, strikes.otm_call, "CE", token)
+        atm_put_oi = await self._current_oi(symbol, strikes.atm, "PE", token)
+        otm_put_oi = await self._current_oi(symbol, strikes.otm_put, "PE", token)
 
         pos = {
             "option_type": option_type, "strike": contract.strike, "expiry": expiry,
-            "qty": qty, "entry_price": entry_price, "entry_ts": datetime.now(IST),
+            "qty": qty, "entry_price": entry_price, "entry_ts": entry_ts,
             "upstox_key": contract.upstox_key,
+            "strikes": strikes,
+            "prev_oi": {"atm_call": atm_call_oi, "otm_call": otm_call_oi,
+                        "atm_put": atm_put_oi, "otm_put": otm_put_oi},
+            "oi_bias_history": [],
+            "next_oi_check": entry_ts + timedelta(minutes=OI_RECHECK_MINUTES),
         }
         row_id = await asyncio.to_thread(
             store.record_entry, self._client_id, self._binding_id, symbol, pos,
@@ -356,11 +407,54 @@ class OiBiasRsiExitStrategy:
 
     # ── Exit ─────────────────────────────────────────────────────────────
 
+    async def _check_oi_bias_flip(self, symbol: str, pos: dict, bias: str, token: str) -> bool:
+        """2026-09-29, direct user request: the third exit condition from
+        the original frozen spec, deferred at first ship -- re-runs the OI
+        bias on the SAME frozen ATM/OTM strikes every OI_RECHECK_MINUTES,
+        using classify_oi_bias (single-transition, cross-referenced:
+        OTM Call vs ATM Put for bullish, OTM Put vs ATM Call for bearish --
+        distinct from the stricter both-transition, ATM+OTM-summed rule
+        classify_combined_oi_bias uses once at entry). Exits once the
+        opposite-of-entry bias has read twice (not necessarily
+        consecutively) via count_opposite_bias_readings. Returns True if
+        this fired an exit (caller must not also check the StochRSI
+        crossover once this has already closed the position)."""
+        now = datetime.now(IST)
+        if now < pos["next_oi_check"]:
+            return False
+        strikes = pos["strikes"]
+        prev = pos["prev_oi"]
+        cur = {
+            "atm_call": await self._current_oi(symbol, strikes.atm, "CE", token),
+            "otm_call": await self._current_oi(symbol, strikes.otm_call, "CE", token),
+            "atm_put": await self._current_oi(symbol, strikes.atm, "PE", token),
+            "otm_put": await self._current_oi(symbol, strikes.otm_put, "PE", token),
+        }
+        reading = classify_oi_bias(
+            otm_call_oi_920=prev["otm_call"], otm_call_oi_925=cur["otm_call"],
+            atm_put_oi_920=prev["atm_put"], atm_put_oi_925=cur["atm_put"],
+            otm_put_oi_920=prev["otm_put"], otm_put_oi_925=cur["otm_put"],
+            atm_call_oi_920=prev["atm_call"], atm_call_oi_925=cur["atm_call"],
+        )
+        pos["oi_bias_history"].append(reading)
+        pos["prev_oi"] = cur
+        pos["next_oi_check"] = now + timedelta(minutes=OI_RECHECK_MINUTES)
+        self._clog.info("%s: OI re-check reading=%s (entry_bias=%s) history=%s",
+                         symbol, reading, bias, pos["oi_bias_history"])
+        if count_opposite_bias_readings(pos["oi_bias_history"], bias) >= 2:
+            await self._close_position(symbol, "oi_bias_flip_twice", token)
+            return True
+        return False
+
     async def _check_exit(self, symbol: str, token: str) -> None:
         pos = self._positions.get(symbol)
         if pos is None:
             return
         bias = self._bias[symbol]
+
+        if await self._check_oi_bias_flip(symbol, pos, bias, token):
+            return
+
         rows = await fetch_upstox_intraday_1m(stock_resolve.resolve_eq_instrument_key(symbol), token)
         bars = sorted(_to_bars(rows), key=lambda b: b.ts)
         if not bars:
