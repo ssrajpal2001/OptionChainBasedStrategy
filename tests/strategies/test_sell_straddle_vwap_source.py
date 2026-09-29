@@ -114,10 +114,23 @@ async def test_calculative_mode_feeds_pool_engine_the_cumulative_vwap_not_broker
     2026-09-23: pre-seeds _shadow_vwap_rest_seeded directly (bypassing the
     real async REST-seed task, same as this file's other tests mock out
     background REST calls) so this test isolates the cum_pv/cum_v MATH from
-    the separate warmup-gate behavior covered by the test below it."""
+    the separate warmup-gate behavior covered by the test below it.
+
+    2026-09-29: also backdates first_tick_ts past _SHADOW_VWAP_MIN_AGE_SEC so
+    the new key-age gate (see test_calculative_mode_falls_back_to_broker_atp_
+    when_key_is_too_new below) doesn't mask this test's own math assertion --
+    a real key this mature would have that gate open regardless."""
     s = _strategy(vwap_source="calculative")
     s._seed_shadow_vwap_from_rest = _no_op_async  # no real network/DB I/O in a unit test
     s._shadow_vwap_rest_seeded.add((24000, "CE"))
+    import time as _time
+    # last_vol matches the first tick's own volume so that tick still
+    # contributes delta=0 (the baseline-seeding tick), exactly like the
+    # original unmodified sequence this test was written against.
+    s._shadow_vwap[(24000, "CE")] = {
+        "cum_pv": 0.0, "cum_v": 0.0, "last_vol": 1000,
+        "first_tick_ts": _time.monotonic() - (s._SHADOW_VWAP_MIN_AGE_SEC + 5.0),
+    }
     ts = datetime(2026, 9, 3, 10, 0, tzinfo=IST)
     ts2 = datetime(2026, 9, 3, 10, 0, 30, tzinfo=IST)
     await _drive_option_loop(s, [
@@ -129,6 +142,43 @@ async def test_calculative_mode_feeds_pool_engine_the_cumulative_vwap_not_broker
     _, atp = s._pool_engine._latest[(24000, "CE")]
     assert atp == pytest.approx(110.0)
     assert atp != 95.0, "must not have used the broker's own atp field"
+
+
+@pytest.mark.asyncio
+async def test_calculative_mode_falls_back_to_broker_atp_when_key_is_too_new():
+    """2026-09-29 CRITICAL FIX, real live incident (2026-09-28 09:20:03): a
+    vwap_rise_roll fired on a false rise=5.27% moments after a fresh
+    BEGINNING entry. Root cause: _shadow_vwap_rest_seeded marks a key
+    "ready" even when the one-shot REST seed found ZERO bars (by design, so
+    crypto/no-token keys that can NEVER get a real seed aren't stuck
+    forever) -- but a strike selected within its own first ~60-90s hits
+    this for a TRANSIENT reason (Upstox hasn't indexed a candle for it
+    yet), and a paper-thin cum_pv/cum_v (built from the couple of live
+    ticks seen so far) gets trusted as if it were a converged VWAP.
+
+    Real REST reconstruction of the incident day confirmed the true
+    combined VWAP was stable ~137-139 throughout; the live tracker recorded
+    a false low of 130.27 right after entry from exactly this race.
+
+    Same tick sequence as test_calculative_mode_feeds_pool_engine_the_
+    cumulative_vwap_not_broker_atp (which WOULD compute vwap=110.0 once
+    matured) but with a key younger than _SHADOW_VWAP_MIN_AGE_SEC -- must
+    still fall back to the broker's own atp (95.0), even with
+    _shadow_vwap_rest_seeded already true and cum_v>0."""
+    s = _strategy(vwap_source="calculative")
+    s._seed_shadow_vwap_from_rest = _no_op_async
+    s._shadow_vwap_rest_seeded.add((24000, "CE"))  # seed "completed" (found nothing)
+    ts = datetime(2026, 9, 3, 10, 0, tzinfo=IST)
+    ts2 = datetime(2026, 9, 3, 10, 0, 30, tzinfo=IST)
+    await _drive_option_loop(s, [
+        _tick(24000, "CE", ltp=100.0, atp=95.0, volume=1000, ts=ts),
+        _tick(24000, "CE", ltp=110.0, atp=95.0, volume=1500, ts=ts2),
+    ])
+    _, atp = s._pool_engine._latest[(24000, "CE")]
+    assert atp == 95.0, (
+        "key is younger than _SHADOW_VWAP_MIN_AGE_SEC -- must fall back to broker atp, "
+        "not trust a cum_pv/cum_v that hasn't had time to mature"
+    )
 
 
 @pytest.mark.asyncio

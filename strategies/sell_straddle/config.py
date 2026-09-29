@@ -486,6 +486,11 @@ class ConfigMixin:
             # seed has finished at least once THIS process -- see engine.py's
             # _eng_atp computation for the real incident this closes.
             self._shadow_vwap_rest_seeded = set()
+        if not hasattr(self, "_SHADOW_VWAP_MIN_AGE_SEC"):
+            # 2026-09-29 CRITICAL FIX: minimum real seconds since a key's own
+            # first tick before its cum_pv/cum_v is trusted -- see engine.py's
+            # _eng_atp computation for the real incident this closes.
+            self._SHADOW_VWAP_MIN_AGE_SEC = 75.0
         if not hasattr(self, "_day_low_tracked_pair"):
             self._day_low_tracked_pair = None
         if not hasattr(self, "_day_low_computing"):

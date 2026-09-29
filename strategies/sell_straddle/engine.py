@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import os
+import time as _time
 from collections import deque
 from datetime import datetime, date, time as dtime
 from typing import Dict, List, Optional, Tuple
@@ -1279,6 +1280,11 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         # seed for this key has finished at least once THIS process (success
         # or failure) -- see _eng_atp's own computation below for why.
         self._shadow_vwap_rest_seeded = set()
+        # 2026-09-29 CRITICAL FIX, real live incident (09-28 09:20:03 false
+        # vwap_rise_roll): minimum real seconds since a key's own first tick
+        # before its cum_pv/cum_v is trusted -- see _eng_atp's own computation
+        # for the full incident this closes.
+        self._SHADOW_VWAP_MIN_AGE_SEC = 75.0
         self._prem_closes.clear()
         self._prem_volumes.clear()
         self._chart_series.clear()
@@ -1888,7 +1894,19 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         st = self._shadow_vwap.get(key)
         vol = int(getattr(tick, "volume", 0) or 0)
         if st is None:
-            self._shadow_vwap[key] = {"cum_pv": 0.0, "cum_v": 0.0, "last_vol": vol}
+            # 2026-09-29 fix, real live incident: stamp this key's own first-tick
+            # time so _eng_atp (below) can tell a genuinely-matured accumulator
+            # from a paper-thin one a few seconds old -- see that computation's
+            # own comment for the full incident (a fresh key's cum_pv/cum_v was
+            # trusted the instant its one-shot REST seed call returned, even when
+            # that call found zero bars because the strike hadn't traded long
+            # enough yet for Upstox's own intraday endpoint to have indexed a
+            # candle -- a noisy, unconverged average got locked in as
+            # session_min_vwap's permanent floor).
+            self._shadow_vwap[key] = {
+                "cum_pv": 0.0, "cum_v": 0.0, "last_vol": vol,
+                "first_tick_ts": _time.monotonic(),
+            }
             if key not in self._shadow_vwap_seeding:
                 self._shadow_vwap_seeding.add(key)
                 asyncio.create_task(self._seed_shadow_vwap_from_rest(key))
@@ -2099,7 +2117,36 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                         # same safe fallback the old guard already used for
                         # the cum_v==0 case.
                         _rest_ready = _k in self._shadow_vwap_rest_seeded
-                        _eng_atp = (_sv["cum_pv"] / _cum_v) if (_cum_v > 0 and _rest_ready) else \
+                        # 2026-09-29 CRITICAL FIX, real live incident (09-28
+                        # 09:20:03, vwap_rise_roll fired on a false rise=5.27%):
+                        # _rest_ready alone isn't enough -- the one-shot REST
+                        # seed (_seed_shadow_vwap_from_rest) marks a key "ready"
+                        # even when it found ZERO historical bars (by design,
+                        # so crypto/no-token/no-symbol keys that can NEVER get a
+                        # real seed aren't stuck on broker-ATP forever). A
+                        # strike selected within the first ~60-90s of its own
+                        # first trade hits exactly this: Upstox's intraday
+                        # endpoint hasn't indexed a candle for it yet, the seed
+                        # genuinely finds nothing, gets marked ready anyway, and
+                        # cum_pv/cum_v -- still just a handful of live ticks --
+                        # gets trusted as if it were a converged session VWAP.
+                        # Confirmed via real REST reconstruction of the incident
+                        # day: the true combined VWAP for that pair was stable
+                        # at ~137-139 the whole time; the live tracker recorded
+                        # a false low of 130.27 moments after entry, then read
+                        # the normal settling-back-up as a 5%+ "rise".
+                        # Fixed with a time-since-first-tick floor: cum_pv/cum_v
+                        # is only trusted once BOTH the REST seed has had its
+                        # one shot AND at least _SHADOW_VWAP_MIN_AGE_SEC real
+                        # seconds have passed since this key's own first tick
+                        # -- by then a real 1-min candle for this strike is
+                        # guaranteed to exist (and be re-fetchable) if the
+                        # strike has traded at all, so the accumulator has had
+                        # a genuine chance to mature either way. Falls back to
+                        # broker ATP until then, same safe fallback as before.
+                        _age_ok = (_time.monotonic() - _sv.get("first_tick_ts", 0.0)
+                                   ) >= self._SHADOW_VWAP_MIN_AGE_SEC
+                        _eng_atp = (_sv["cum_pv"] / _cum_v) if (_cum_v > 0 and _rest_ready and _age_ok) else \
                             float(self._strike_prem[_k].get("atp", 0.0) or 0.0)
                     else:
                         _eng_atp = float(self._strike_prem[_k].get("atp", 0.0) or 0.0)
