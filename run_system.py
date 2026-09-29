@@ -805,6 +805,14 @@ async def _run_live(
         bus, router,
         log_dir=os.path.join(cfg.storage.log_dir, "trades"),
     )
+    # 2026-09-29: fully standalone bridge -- own Topics (OI_BIAS_RSI_EXIT_
+    # ORDER_REQUEST/FILL), shares no runtime state with any bridge above.
+    # 10th standalone strategy.
+    from execution_bridge.oi_bias_rsi_exit_bridge import OiBiasRsiExitExecutionBridge
+    oi_bias_rsi_exit_bridge = OiBiasRsiExitExecutionBridge(
+        bus, router,
+        log_dir=os.path.join(cfg.storage.log_dir, "trades"),
+    )
     # 2026-08-20: SellStraddle's EOD hedge-and-carry feature -- deliberately its own
     # standalone BUY-to-open/SELL-to-close bridge (own Topics, STRADDLE_HEDGE_ORDER_
     # REQUEST/FILL) rather than touching straddle_bridge.py above, which is hardcoded
@@ -1035,6 +1043,7 @@ async def _run_live(
         asyncio.create_task(straddle_hedge_bridge.run(), name="straddle_hedge_bridge"),
         asyncio.create_task(oi_orb_bridge.run(),        name="oi_orb_bridge"),
         asyncio.create_task(cag_straddle_bridge.run(),  name="cag_straddle_bridge"),
+        asyncio.create_task(oi_bias_rsi_exit_bridge.run(), name="oi_bias_rsi_exit_bridge"),
         asyncio.create_task(iron_fly_bridge.run(),      name="iron_fly_bridge"),
         asyncio.create_task(client_mgr.run(),           name="client_mgr"),
         asyncio.create_task(risk_mgr.run(),             name="risk_mgr"),
@@ -1076,6 +1085,7 @@ async def _run_live(
     straddle_hedge_bridge.stop()
     oi_orb_bridge.stop()
     cag_straddle_bridge.stop()
+    oi_bias_rsi_exit_bridge.stop()
     iron_fly_bridge.stop()
     await router.stop()
     await client_mgr.stop()

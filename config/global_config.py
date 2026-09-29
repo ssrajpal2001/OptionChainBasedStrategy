@@ -208,6 +208,17 @@ class Topic:
                                                       # as every other strategy above. LEG-CENTRIC events
                                                       # (one order = one leg's open or close), never a
                                                       # bundled multi-leg action -- see events.py.
+    OI_BIAS_RSI_EXIT_ORDER_REQUEST = "oi_bias_rsi_exit_order_request"  # OI-spurt selection + combined-OI
+    OI_BIAS_RSI_EXIT_ORDER_FILL    = "oi_bias_rsi_exit_order_fill"     # bias + StochRSI(entry 3m/exit 75m,
+                                                      # both mirrored by bias) entry/exit -- 2026-09-29,
+                                                      # first live cut after a real-data backtest +
+                                                      # parameter sweep (scripts/oi_bias_rsi_exit_*.py).
+                                                      # Fully standalone, same zero-shared-runtime mandate
+                                                      # as every other strategy above. Polls REST (stock
+                                                      # spot + option premium 1-min intraday) rather than
+                                                      # subscribing to live WS ticks -- deliberate first-cut
+                                                      # choice so the live engine can never drift from the
+                                                      # validated backtest's own bar-based computation.
 
 
 # ─────────────────────────────────────────────────────────────────────────────

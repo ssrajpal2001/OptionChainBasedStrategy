@@ -4128,7 +4128,7 @@ class DashboardServer:
 
             allowed_strategies = {
                 "sell_straddle", "sell_straddle_calc_vwap", "oi_orb_screener",
-                "cag_straddle", "iron_fly",
+                "cag_straddle", "iron_fly", "oi_bias_rsi_exit",
             }
             if body.strategy_name not in allowed_strategies:
                 return {"ok": False, "error": f"Unknown strategy '{body.strategy_name}'."}

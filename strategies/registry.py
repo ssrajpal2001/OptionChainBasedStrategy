@@ -12,6 +12,7 @@ from strategies.sell_straddle import StraddleBookManager
 from strategies.oi_orb_screener import OiOrbScreenerBookManager
 from strategies.cag_straddle import CagStraddleBookManager
 from strategies.iron_fly.book_manager import IronFlyBookManager
+from strategies.oi_bias_rsi_exit import OiBiasRsiExitBookManager
 
 
 STRATEGY_REGISTRY: Dict[str, Dict[str, Any]] = {
@@ -79,6 +80,20 @@ STRATEGY_REGISTRY: Dict[str, Dict[str, Any]] = {
     # across days (no EOD square-off) -- product_type NRML, not MIS.
     "iron_fly": {
         "manager_class": IronFlyBookManager,
+        "per_binding": True,
+    },
+    # 2026-09-29: 10th standalone strategy. OI-spurt/gainer-loser selection
+    # (reuses strategies.oi_orb_screener.screener's own real NSE fetch
+    # functions directly, unchanged) + the user's own combined-OI (ATM+OTM
+    # summed, both transitions) bias rule + StochRSI entry/exit, all
+    # validated against 20 real trading days before this live cut (scripts/
+    # oi_bias_rsi_exit_backtest.py / _optimize.py). Same zero-shared-runtime
+    # mandate as every strategy above -- own Topics, own bridge, own book
+    # manager. First live cut deliberately polls REST (not WS ticks) so it
+    # can never behaviorally drift from the validated backtest -- see
+    # strategies/oi_bias_rsi_exit/engine.py's own module docstring.
+    "oi_bias_rsi_exit": {
+        "manager_class": OiBiasRsiExitBookManager,
         "per_binding": True,
     },
 }

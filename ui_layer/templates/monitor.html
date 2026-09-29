@@ -2240,7 +2240,7 @@ document.addEventListener('alpine:init', () => {
     async toggleStrategyRun(dep, b) {
       const want = !this.depRunning(dep);
       const did = dep.deploy_id || `${this.authClientId}_${dep.binding_id}_${dep.strategy_name}_${dep.underlying}`;
-      const _stratLabel = {sell_straddle:'Sell Straddle',sell_straddle_calc_vwap:'Sell Straddle (Calc VWAP)',d1_trap_option:'D1 Trap Option',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow',liquidity_sweep:'Liquidity Sweep',liquidity_trap:'Liquidity Trap',oi_orb_screener:'OI-ORB Screener',cag_straddle:'CAG Long Straddle',iron_fly:'Iron Fly'};
+      const _stratLabel = {sell_straddle:'Sell Straddle',sell_straddle_calc_vwap:'Sell Straddle (Calc VWAP)',d1_trap_option:'D1 Trap Option',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow',liquidity_sweep:'Liquidity Sweep',liquidity_trap:'Liquidity Trap',oi_orb_screener:'OI-ORB Screener',cag_straddle:'CAG Long Straddle',iron_fly:'Iron Fly',oi_bias_rsi_exit:'OI-Bias RSI Exit'};
       const _undLabel = u => u==='ALL_FNO'?'All FnO Stocks':u==='WATCHLIST'?'Watchlist (top-5)':u;
       const label = (_stratLabel[dep.strategy_name]||dep.strategy_name)+' · '+_undLabel(dep.underlying);
       // 2026-09-16 CRITICAL CHANGE, direct user spec: stopping a strategy
@@ -2276,7 +2276,7 @@ document.addEventListener('alpine:init', () => {
     // on that broker) and the client-wide STOP & SQUARE-OFF (everything).
     async squareOffStrategy(dep) {
       const did = dep.deploy_id || `${this.authClientId}_${dep.binding_id}_${dep.strategy_name}_${dep.underlying}`;
-      const _stratLabel = {sell_straddle:'Sell Straddle',sell_straddle_calc_vwap:'Sell Straddle (Calc VWAP)',oi_orb_screener:'OI-ORB Screener',cag_straddle:'CAG Long Straddle',iron_fly:'Iron Fly'};
+      const _stratLabel = {sell_straddle:'Sell Straddle',sell_straddle_calc_vwap:'Sell Straddle (Calc VWAP)',oi_orb_screener:'OI-ORB Screener',cag_straddle:'CAG Long Straddle',iron_fly:'Iron Fly',oi_bias_rsi_exit:'OI-Bias RSI Exit'};
       const label = _stratLabel[dep.strategy_name] || dep.strategy_name;
       if (!confirm(`Square off ${label} on ${dep.binding_id}?\n\nThis closes ONLY this strategy's own open position (real buy-to-close at the broker) and stops it. Every other strategy on this broker is unaffected.`)) return;
       this.botOk = null; this.botMsg = 'Working…';
@@ -2845,7 +2845,7 @@ document.addEventListener('alpine:init', () => {
             // default (SELL-to-open), mislabeling every D1Trap/FVG entry backwards.
             // d1_trap_sr added 2026-08-12 -- same option-buyer mechanic, only the entry
             // trigger (S&R ping-pong vs T1/T2) differs from d1_trap_bear_only.
-            const _buyerOnlyStrats = ['d1_trap_bear_only', 'd1_trap_sr', 'd1_trap_option', 'd1_trap_index', 'd1_trap_fno', 'fvg', 'oi_flow', 'liquidity_sweep', 'liquidity_trap', 'oi_orb_screener', 'cag_straddle'];
+            const _buyerOnlyStrats = ['d1_trap_bear_only', 'd1_trap_sr', 'd1_trap_option', 'd1_trap_index', 'd1_trap_fno', 'fvg', 'oi_flow', 'liquidity_sweep', 'liquidity_trap', 'oi_orb_screener', 'cag_straddle', 'oi_bias_rsi_exit'];
             // 2026-09-17, real user-found bug: a sell_straddle record can ALSO
             // contain EOD hedge-and-carry legs (execution_bridge/straddle_hedge_
             // bridge.py, entry_reason='eod_hedge') -- those are BOUGHT (long)
@@ -7095,7 +7095,7 @@ function amoTest() {
                           <span class="absolute top-0.5 w-2.5 h-2.5 bg-white rounded-full shadow transition-all"
                                 :style="depRunning(dep)?'left:16px':'left:2px'"></span>
                         </span>
-                        <span x-text="({sell_straddle:'Sell Straddle',sell_straddle_calc_vwap:'Sell Straddle (Calc VWAP)',d1_trap_option:'D1 Trap',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow',liquidity_sweep:'Liquidity Sweep',liquidity_trap:'Liquidity Trap',oi_orb_screener:'OI-ORB Screener',cag_straddle:'CAG Long Straddle',iron_fly:'Iron Fly'}[dep.strategy_name]||dep.strategy_name)+' · '+(dep.underlying==='ALL_FNO'?'All FnO Stocks':dep.underlying)+' — '+(depRunning(dep)?'RUNNING':'stopped')"></span>
+                        <span x-text="({sell_straddle:'Sell Straddle',sell_straddle_calc_vwap:'Sell Straddle (Calc VWAP)',d1_trap_option:'D1 Trap',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow',liquidity_sweep:'Liquidity Sweep',liquidity_trap:'Liquidity Trap',oi_orb_screener:'OI-ORB Screener',cag_straddle:'CAG Long Straddle',iron_fly:'Iron Fly',oi_bias_rsi_exit:'OI-Bias RSI Exit'}[dep.strategy_name]||dep.strategy_name)+' · '+(dep.underlying==='ALL_FNO'?'All FnO Stocks':dep.underlying)+' — '+(depRunning(dep)?'RUNNING':'stopped')"></span>
                       </button>
                       <button type="button" @click.stop="squareOffStrategy(dep)"
                               :disabled="dep._squareOffLoading"
@@ -7334,6 +7334,20 @@ function amoTest() {
                           deployForm.product_type='MIS';
                           deployForm.underlying='NIFTY';
                           deployForm.squareoff_time='15:35';
+                        } else if(deployForm.strategy_name==='oi_bias_rsi_exit'){
+                          // 2026-09-29, direct user spec: OI-spurt selection +
+                          // combined-OI (ATM+OTM, both transitions) bias +
+                          // StochRSI(21,21,3,3) entry(3m)/exit(75m), validated
+                          // against 20 real trading days before this live cut
+                          // (scripts/oi_bias_rsi_exit_backtest.py / _optimize.py).
+                          // Underlying is always the SCREENER sentinel -- real
+                          // stocks chosen dynamically each day, same as OI-ORB
+                          // Screener. Default 1 lot, NRML, start 09:25, EOD 15:25
+                          // -- matches the validated backtest exactly.
+                          deployForm.product_type='NRML';
+                          deployForm.underlying='SCREENER';
+                          deployForm.squareoff_time='15:25';
+                          deployForm.lot_multiplier=1;
                         } else if(deployForm.strategy_name==='iron_fly'){
                           // NIFTY Weekly Iron Condor -> Iron Fly (2026-09-14) -- carries
                           // positions across days (no EOD square-off), so squareoff_time
@@ -7366,6 +7380,8 @@ function amoTest() {
                           ? '{}'
                           : deployForm.strategy_name==='cag_straddle'
                           ? '{}'
+                          : deployForm.strategy_name==='oi_bias_rsi_exit'
+                          ? JSON.stringify({start_time:'09:25', force_exit_time:'15:25'})
                           : deployForm.strategy_name==='iron_fly'
                           ? JSON.stringify({
                               otm1: deployForm._if_otm1||50,
@@ -7385,6 +7401,7 @@ function amoTest() {
                      (see allowed_strategies in ui_layer/dashboard_server.py). -->
                 <option value="oi_orb_screener">OI-ORB Screener (F&amp;O Stocks, VWAP-retest + HA/StochRSI exit)</option>
                 <option value="cag_straddle">CAG Long Straddle (15:00-15:35 R1/S1 Breach)</option>
+                <option value="oi_bias_rsi_exit">OI-Bias RSI Exit (F&amp;O Stocks, combined-OI bias + StochRSI 3m/75m)</option>
                 <option value="iron_fly">Iron Fly (NIFTY Weekly Iron Condor -&gt; Iron Fly, paper_route)</option>
               </select>
             </div>
@@ -7406,7 +7423,13 @@ function amoTest() {
                   <option value="SCREENER">Screener-Selected Stocks (dynamic, daily)</option>
                 </select>
               </template>
-              <template x-if="deployForm.strategy_name !== 'd1_trap_fno' && deployForm.strategy_name !== 'oi_orb_screener'">
+              <template x-if="deployForm.strategy_name === 'oi_bias_rsi_exit'">
+                <select class="t-input" x-model="deployForm.underlying"
+                        x-init="deployForm.underlying='SCREENER'" disabled>
+                  <option value="SCREENER">Screener-Selected Stocks (dynamic, daily)</option>
+                </select>
+              </template>
+              <template x-if="deployForm.strategy_name !== 'd1_trap_fno' && deployForm.strategy_name !== 'oi_orb_screener' && deployForm.strategy_name !== 'oi_bias_rsi_exit'">
                 <select x-model="deployForm.underlying" class="t-input"
                         @change="
                           if(deployForm.strategy_name==='d1_trap_bear_only'){
@@ -7965,7 +7988,7 @@ function amoTest() {
                   <div class="flex items-center justify-between mb-3">
                     <div>
                       <div class="font-ui font-bold text-sm" style="color:var(--t-bright)"
-                           x-text="({sell_straddle:'Sell Straddle',sell_straddle_calc_vwap:'Sell Straddle (Calc VWAP)',d1_trap_option:'Trap Scanner',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow',liquidity_sweep:'Liquidity Sweep',liquidity_trap:'Liquidity Trap',oi_orb_screener:'OI-ORB Screener',cag_straddle:'CAG Long Straddle',iron_fly:'Iron Fly'}[dep.strategy_name]||dep.strategy_name)"></div>
+                           x-text="({sell_straddle:'Sell Straddle',sell_straddle_calc_vwap:'Sell Straddle (Calc VWAP)',d1_trap_option:'Trap Scanner',d1_trap_index:'Trap Scanner - Index',d1_trap_fno:'Trap Scanner - FnO',d1_trap_bear_only:'Bear Trap Only',d1_trap_sr:'D1 Trap S&R',d1_trap_fno_sr:'FnO Watchlist S&R',fvg:'FVG',oi_flow:'OI-Flow',liquidity_sweep:'Liquidity Sweep',liquidity_trap:'Liquidity Trap',oi_orb_screener:'OI-ORB Screener',cag_straddle:'CAG Long Straddle',iron_fly:'Iron Fly',oi_bias_rsi_exit:'OI-Bias RSI Exit'}[dep.strategy_name]||dep.strategy_name)"></div>
                       <div class="flex items-center gap-2 mt-0.5">
                         <span class="font-mono text-xs" style="color:var(--t-cyan)" x-text="dep.underlying==='ALL_FNO'?'All 30 FnO Stocks':dep.underlying==='WATCHLIST'?'Watchlist (top-5)':dep.underlying"></span>
                         <span class="font-mono text-xs" style="color:var(--t-muted)"
