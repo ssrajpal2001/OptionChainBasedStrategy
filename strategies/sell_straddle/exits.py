@@ -1558,41 +1558,36 @@ class ExitMixin:
                 _pe_key = (int(pos.pe_leg.strike), "PE")
                 _both_fresh = (_ce_key in self._shadow_vwap_rest_seeded
                                 and _pe_key in self._shadow_vwap_rest_seeded)
-            _elapsed = _t.monotonic() - self._post_restore_at
+            # 2026-09-29 CRITICAL FIX, real live incident (2026-09-29 open):
+            # the clock used to start at _post_restore_at, set the instant the
+            # position was restored from disk -- i.e. at PROCESS RESTART, which
+            # the daily deploy script runs well before market open (observed:
+            # 08:56:22). The 2026-09-17 fix below correctly stopped the guard
+            # from ATTEMPTING a real close while genuinely pre-market (avoiding
+            # an AMO-rejection storm), but never paused the underlying clock --
+            # so by the time the market actually opened at 09:15 and this
+            # branch could finally act, _elapsed was already ~19 minutes, 4x
+            # past the 5-min timeout, and the safety-close fired on the very
+            # FIRST post-open tick (09:15:00.108, confirmed live) regardless of
+            # whether a fresh tick might have arrived moments later. This
+            # closed a genuinely-intended-to-carry EOD hedge position every
+            # single morning, defeating the whole point of carrying it.
+            # Fixed: the 5-minute clock now only starts once the market is
+            # genuinely open -- a pre-market restart gets a full, real 5
+            # minutes after 09:15 to see a fresh tick, same as an intraday
+            # restart already got (market already open -> clock starts
+            # immediately, unchanged behavior for that case).
+            if self._post_restore_warmup_clock_start is None and self._market_genuinely_open():
+                self._post_restore_warmup_clock_start = _t.monotonic()
+            _elapsed = (
+                _t.monotonic() - self._post_restore_warmup_clock_start
+                if self._post_restore_warmup_clock_start is not None else 0.0
+            )
             if _both_fresh:
                 self._post_restore_warmup = False
                 logger.info("SellStraddle[%s]: post-restore warm-up complete — exits armed "
                             "(CE_ltp=%.2f PE_ltp=%.2f pnl=%.2f pts).",
                             self._underlying, pos.ce_leg.ltp, pos.pe_leg.ltp, pos.unrealized_pnl)
-            elif _elapsed > self._POST_RESTORE_WARMUP_MAX_SEC and not self._market_genuinely_open():
-                # 2026-09-17 CRITICAL FIX, real live incident: a restart that
-                # happens shortly before market open (e.g. 08:56:50, common
-                # for a pre-market pm2 restart) hits this 5-min timeout at
-                # ~09:01:50 -- still inside NSE's 09:00-09:15 pre-open/call-
-                # auction window, where CE/PE option ticks legitimately may
-                # not be flowing meaningfully yet (that's not a "stuck feed",
-                # it's just genuinely too early). The safety-close below then
-                # placed a REAL order every single tick (no backoff by
-                # design -- see the retry-until-confirmed comment further
-                # down), and Zerodha correctly rejected every single one with
-                # "Your order could not be converted to a After Market Order
-                # (AMO)" (the same root cause as the Iron Fly pre-open
-                # rejection incident, same day) -- confirmed live: 100+ real
-                # order-placement attempts in under 3 minutes, hammering the
-                # broker's real order API before it was even open. Fix:
-                # while genuinely before market_open, do NOT attempt the
-                # safety close at all -- just wait; a real tick after 09:15
-                # will either resolve _both_fresh naturally (no close
-                # needed) or this same elapsed-time check will correctly
-                # fire the close once the exchange is actually open to
-                # accept it.
-                logger.warning(
-                    "SellStraddle[%s]: post-restore warm-up timeout (%.0fs) reached before "
-                    "market open -- deferring the safety close until the exchange is "
-                    "genuinely open, not attempting a real order into the pre-open session.",
-                    self._underlying, _elapsed,
-                )
-                return
             elif _elapsed > self._POST_RESTORE_WARMUP_MAX_SEC:
                 # 2026-08-06 fix: do NOT clear _post_restore_warmup until the safety
                 # close actually confirms. The old order (clear the flag, then

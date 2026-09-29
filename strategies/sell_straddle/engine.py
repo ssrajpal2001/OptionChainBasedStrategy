@@ -233,6 +233,7 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
 
         self._post_restore_warmup: bool = False
         self._post_restore_at: float = 0.0
+        self._post_restore_warmup_clock_start: Optional[float] = None
         self._ce_ltp_fresh: bool = True
         self._pe_ltp_fresh: bool = True
 
@@ -827,6 +828,13 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                 import time as _t
                 self._post_restore_warmup = True
                 self._post_restore_at = _t.monotonic()
+                # 2026-09-29 fix: the actual 5-min timeout clock (see exits.py's
+                # POST-RESTORE WARM-UP GUARD) starts from this, set lazily once
+                # the market is genuinely open -- NOT from _post_restore_at
+                # above, which is set at raw process-restart time and may be
+                # well before market open (a pre-market daily restart used to
+                # make the timeout expire before the exchange even opened).
+                self._post_restore_warmup_clock_start = None
                 self._ce_ltp_fresh = False
                 self._pe_ltp_fresh = False
                 logger.info("SellStraddle[%s]: restored open position from store (credit=%.2f, qty=%d) "

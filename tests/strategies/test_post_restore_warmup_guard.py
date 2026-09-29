@@ -23,7 +23,7 @@ from strategies.sell_straddle import SellStraddleStrategy
 from strategies.sell_straddle.dataclasses import StraddleLeg, StraddlePosition
 
 
-def _restored_strategy(bus, elapsed_sec: float, ce_fresh: bool, pe_fresh: bool):
+def _restored_strategy(bus, elapsed_sec: float, ce_fresh: bool, pe_fresh: bool, market_open: bool = True):
     s = SellStraddleStrategy(bus, cfg=GlobalConfig(), underlying="NIFTY")
     s._lot_size = 75
     s._lot_multiplier = 1
@@ -38,6 +38,16 @@ def _restored_strategy(bus, elapsed_sec: float, ce_fresh: bool, pe_fresh: bool):
     )
     s._post_restore_warmup = True
     s._post_restore_at = _time.monotonic() - elapsed_sec
+    # 2026-09-29: the real timeout clock is _post_restore_warmup_clock_start,
+    # which only starts once the market is genuinely open (see engine.py's
+    # own fix comment) -- a pre-market restart no longer burns its 5-minute
+    # window before the exchange even opens. Simulate "the clock has already
+    # been running for elapsed_sec" directly when market_open=True; leave it
+    # unset (None) when market_open=False, matching how it genuinely never
+    # starts pre-market.
+    s._post_restore_warmup_clock_start = (_time.monotonic() - elapsed_sec) if market_open else None
+    if not market_open:
+        s._market_genuinely_open = lambda: False
     s._ce_ltp_fresh = ce_fresh
     s._pe_ltp_fresh = pe_fresh
     # Spy on the ITM-pair-gate check (called near the end of _check_exits,
@@ -178,10 +188,17 @@ def test_5min_ceiling_defers_close_when_market_not_genuinely_open(caplog):
     order in that window at all (Zerodha rejects it with "could not be
     converted to AMO", and the retry-until-confirmed design then hammers the
     broker every tick) -- it must defer instead, staying ARMED, and try
-    again on a later tick once the exchange is genuinely open."""
-    import logging
-    s = _restored_strategy(EventBus(), elapsed_sec=301.0, ce_fresh=False, pe_fresh=True)
-    s._market_genuinely_open = lambda: False
+    again on a later tick once the exchange is genuinely open.
+
+    2026-09-29 update: the warmup clock itself now only starts once the
+    market is genuinely open (see engine.py/exits.py's own fix comments for
+    the real 09:15:00.108 incident this superseded) -- so while pre-market,
+    _post_restore_warmup_clock_start simply never gets set and _elapsed stays
+    0.0, which already can't exceed the 300s ceiling. The old dedicated
+    "defer" branch + its own warning log are gone (dead code under the new
+    design, since elapsed can never be >300 while market isn't open) -- the
+    deferral is now implicit, not a separately logged event."""
+    s = _restored_strategy(EventBus(), elapsed_sec=301.0, ce_fresh=False, pe_fresh=True, market_open=False)
     close_calls = []
 
     async def _fake_close_position(reason):
@@ -189,14 +206,15 @@ def test_5min_ceiling_defers_close_when_market_not_genuinely_open(caplog):
         s._position.status = "closed"
     s._close_position = _fake_close_position
 
-    with caplog.at_level(logging.WARNING, logger="strategies.sell_straddle.exits"):
-        asyncio.run(s._check_exits())
+    asyncio.run(s._check_exits())
 
     assert close_calls == [], "must not attempt a real close before market is genuinely open"
     assert s._post_restore_warmup is True
     assert s._position is not None and s._position.status == "open"
     s._check_itm_pair_gate.assert_not_awaited()
-    assert any("deferring the safety close" in r.message for r in caplog.records)
+    assert s._post_restore_warmup_clock_start is None, (
+        "clock must not start at all while market is not genuinely open"
+    )
 
 
 def test_5min_ceiling_keeps_guard_armed_when_close_is_not_confirmed(caplog):
