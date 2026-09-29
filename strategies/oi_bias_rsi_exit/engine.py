@@ -217,21 +217,40 @@ class OiBiasRsiExitStrategy:
                 self._clog.exception("bias computation failed for %s.", sym)
 
     async def _oi_at_snapshots(self, symbol: str, strike: float, option_type: str, token: str) -> Dict[dtime, Optional[float]]:
+        """2026-09-29 CRITICAL FIX, real incident (JUBLFOOD 2026-09-29
+        backtest): a thin OTM leg can genuinely have no reported OI in
+        Upstox's own intraday candle response for its first several minutes
+        -- the old code only had a single hardcoded 9:15->9:16 fallback,
+        with none at all for 9:20/9:25, so a leg missing OI at those points
+        permanently classified the stock's bias as "none" even though a
+        real, carried-forward OI value existed moments earlier. OI is a
+        snapshot LEVEL (open interest outstanding), not a per-trade field --
+        a contract not trading in one exact minute doesn't mean its OI
+        vanished, so the correct read for "OI at 09:20" is the most recent
+        REAL (>0) reading at-or-before 09:20, not an exact-minute match.
+        Applied uniformly to all three snapshot times now, not just the
+        first."""
         out: Dict[dtime, Optional[float]] = {t: None for t in _OI_SNAPSHOT_TIMES}
         contract = await asyncio.to_thread(stock_resolve.resolve_contract, symbol, strike, option_type, ("upstox",))
         if contract is None:
             return out
         rows = await fetch_upstox_intraday_1m(contract.upstox_key, token)
-        by_time = {}
+        parsed = []
         for r in rows:
             ts = r["ts"]
             if isinstance(ts, str):
                 ts = datetime.fromisoformat(ts)
-            by_time[ts.time()] = r.get("oi")
+            oi = r.get("oi")
+            if oi:
+                parsed.append((ts.time(), float(oi)))
+        parsed.sort(key=lambda x: x[0])
         for t in _OI_SNAPSHOT_TIMES:
-            out[t] = by_time.get(t)
-        if out[dtime(9, 15)] is None:
-            out[dtime(9, 15)] = by_time.get(dtime(9, 16))  # direct user fallback
+            best = None
+            for bar_t, oi in parsed:
+                if bar_t > t:
+                    break
+                best = oi
+            out[t] = best
         return out
 
     async def _compute_bias_for(self, symbol: str, token: str) -> None:
