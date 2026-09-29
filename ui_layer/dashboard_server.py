@@ -839,6 +839,16 @@ class DashboardServer:
             version="2.0.0",
             docs_url="/api/docs",
         )
+        # 2026-09-30, direct user request: compress HTTP API responses. Uses
+        # Starlette's built-in GZipMiddleware (bundled with FastAPI, no new
+        # dependency) -- gzip, not zstd/Brotli, because gzip is the ONLY one
+        # of the three every HTTP client (browser fetch/XHR) decompresses
+        # automatically via the standard Content-Encoding negotiation, same
+        # reasoning as the WebSocket permessage-deflate choice below. Only
+        # compresses responses >=1KB (minimum_size) -- not worth the CPU cost
+        # on small JSON payloads.
+        from starlette.middleware.gzip import GZipMiddleware
+        app.add_middleware(GZipMiddleware, minimum_size=1024)
         from fastapi.staticfiles import StaticFiles
         _static_dir = os.path.join(os.path.dirname(__file__), "static")
         os.makedirs(_static_dir, exist_ok=True)
@@ -2479,7 +2489,7 @@ class DashboardServer:
                 except Exception as exc:
                     logger.error("Dashboard: per-strategy square-off failed for %s: %s", deploy_id, exc)
                     return {"ok": False, "deploy_id": deploy_id,
-                            "error": f"Square-off failed: {exc}"}
+                            "error": f"Square-off failed: {_safe_error(exc)}"}
             await _srv._client_db.set_deployment_running(deploy_id, cid, False)
             logger.info("Dashboard: per-strategy square-off %s (%s/%s/%s) — squared=%s.",
                         deploy_id, cid, bid, strat, squared)
@@ -4711,7 +4721,7 @@ pm2 save
                 try:
                     ss.reconfigure()
                 except Exception as e:
-                    reconfigure_errors.append(f"sell_straddle[{ss._underlying}]: {e}")
+                    reconfigure_errors.append(f"sell_straddle[{ss._underlying}]: {_safe_error(e)}")
 
             if reconfigure_errors:
                 logger.warning("strategy/config/update: partial reconfigure errors: %s", reconfigure_errors)
