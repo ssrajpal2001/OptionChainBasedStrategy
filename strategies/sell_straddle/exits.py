@@ -2146,6 +2146,16 @@ class ExitMixin:
             _vp = self._pool_engine.pair_indicators(int(pos.ce_leg.strike), int(pos.pe_leg.strike))
             curr_vwap = float(_vp.get("vwap", 0.0)) if _vp else 0.0
             _vp_close = float(_vp.get("close", 0.0)) if _vp else 0.0
+            # 2026-09-29, direct user request: curr_vwap is ALWAYS the COMBINED
+            # ce_atp+pe_atp sum (see pool_indicator_engine.pair_indicators) -- a
+            # single leg spiking can drive the whole "rise" even if the other leg
+            # barely moved, and this binding's vwap_source="calculative" already
+            # skips the one diagnostic (SHADOW_VWAP) that would otherwise show each
+            # leg's own VWAP. Read each leg's own atp directly off the pool engine's
+            # latest tick so the VWAP RISE line below is per-leg auditable, not just
+            # the combined number.
+            _ce_atp_now = self._pool_engine._latest.get((int(pos.ce_leg.strike), "CE"), (0.0, 0.0))[1]
+            _pe_atp_now = self._pool_engine._latest.get((int(pos.pe_leg.strike), "PE"), (0.0, 0.0))[1]
             _glitch = (pos.vwap_last_good > 0 and curr_vwap > 0
                        and curr_vwap < 0.80 * pos.vwap_last_good)
             if curr_vwap > 0 and not _glitch and (_vp_close <= 0 or curr_vwap >= 0.60 * _vp_close):
@@ -2178,9 +2188,10 @@ class ExitMixin:
                         _already_alerted = getattr(self, "_vwap_rise_alert_low", None) == pos.session_min_vwap
                         if (_execute_now or not _was_pending) and not _already_alerted:
                             self._clog.info(
-                                "SellStraddle[%s]: VWAP RISE — rise=%.2f%% curr=%.2f low=%.2f → "
-                                "single-side roll (CE pnl=%.2f PE pnl=%.2f)",
+                                "SellStraddle[%s]: VWAP RISE — rise=%.2f%% curr=%.2f low=%.2f "
+                                "[CE%d_atp=%.2f PE%d_atp=%.2f] → single-side roll (CE pnl=%.2f PE pnl=%.2f)",
                                 self._underlying, rise_pct, curr_vwap, pos.session_min_vwap,
+                                int(pos.ce_leg.strike), _ce_atp_now, int(pos.pe_leg.strike), _pe_atp_now,
                                 _ce_pnl, _pe_pnl,
                             )
                             self._vwap_rise_alert_low = pos.session_min_vwap
