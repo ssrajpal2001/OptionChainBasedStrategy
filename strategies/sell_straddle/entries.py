@@ -590,11 +590,26 @@ class EntryMixin:
         # self._spot itself. atm_ref is now redundant with this (both equal _atm_src)
         # but kept for explicitness/robustness.
         _atm_src = self._atm_ref if self._atm_ref > 0 else self._spot
+        # 2026-09-29 CRITICAL FIX, direct user correction: the entry rule
+        # (VWAP/SLOPE/RSI/ROC, admin rule-builder config) must filter EVERY
+        # candidate pair BEFORE balance-ratio picks a winner -- "from all the
+        # pairs which passed the indicator condition, then they will be
+        # checked for balance-ratio." The old code did the reverse: balance-
+        # ratio picked a single winner off LTP alone, and the entry rule was
+        # only checked afterward on that one pair -- a candidate with a
+        # better/passing indicator read could be silently skipped in favor of
+        # a purely LTP-balanced one that then failed the rule anyway.
+        # select_balanced_pair_at already supports a rule_pass(ce,pe)->bool
+        # gate applied to every candidate before scoring (see selection.py);
+        # it was just never wired in at this call site. Must return a plain
+        # bool, not the (passed, reason) tuple _eval_rules returns -- a
+        # truthy tuple would make every candidate look like it passed.
         sel = select_balanced_pair(
             self._strike_prem, _atm_src, reentry_step, offset, ltp_target, trace=_trace,
             entry_basis=self._entry_basis, theta_target=self._theta_target,
             variable_strikes=variable_strikes, balance_ratio=balance_ratio,
             atm_ref=_atm_src,
+            rule_pass=lambda cs, ps: _eval_rules(rules, self._ind_by_tf(cs, ps, rules))[0],
         )
 
         for _ln in _trace:
@@ -666,11 +681,15 @@ class EntryMixin:
         # (anchor tv, partner tv, the floor's theta check) is ALSO computed off
         # the mean reference (_atm_src), not real spot -- "for theta we need to
         # subtract from the mean value to get intrinsic and time value both."
+        # 2026-09-29 CRITICAL FIX, same as the RE-ENTRY path in _eval_ruleset above:
+        # the entry rule must filter every candidate partner before balance-ratio
+        # picks a winner, not just validate the single LTP-balanced winner afterward.
         sel = select_balanced_pair_at(
             self._strike_prem, atm, _atm_src, step, offset, ltp_target, trace=_trace,
             entry_basis=self._entry_basis, theta_target=theta_target,
             variable_strikes=variable_strikes, balance_ratio=balance_ratio,
             anchor_otm_steps=1,
+            rule_pass=lambda cs, ps: _eval_rules(rules, self._ind_by_tf(cs, ps, rules))[0],
         )
         for _ln in _trace:
             self._clog.info("SELECT %s | [atm@%d] %s", self._underlying, atm, _ln)
