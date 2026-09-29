@@ -349,23 +349,21 @@ class RollingMixin:
                 )
                 return False
 
-        # 4. CURRENT-TICK SANITY CHECK: the configured re-entry rule may use a higher
-        # timeframe (e.g. tf=2), so a partner can pass on the last closed candle while
-        # the current 1-min tick already shows close >= vwap. Reject the roll in that
-        # case — rolling into a pair that is already above its combined VWAP is a bad
-        # re-entry, exactly what the chart at 13:46 showed.
-        cand_ce = int(new_strike if roll_side == "CE" else keep_strike)
-        cand_pe = int(keep_strike if roll_side == "CE" else new_strike)
-        cur_ind = self._pair_indicators(cand_ce, cand_pe) or {}
-        cur_close = float(cur_ind.get("close", 0.0) or 0.0)
-        cur_vwap = float(cur_ind.get("vwap", 0.0) or 0.0)
-        if cur_close > 0 and cur_vwap > 0 and cur_close >= cur_vwap:
-            self._clog.info(
-                "SellStraddle[%s]: ROLLOVER %s — partner CE%d/PE%d current close=%.2f "
-                ">= vwap=%.2f; keeping original pair.",
-                self._underlying, reason, cand_ce, cand_pe, cur_close, cur_vwap,
-            )
-            return False
+        # 2026-09-29 REMOVED, direct user decision: a "current-tick sanity check"
+        # (candidate pair's live close >= its own combined VWAP -> reject) used to
+        # sit here, unconditionally, on top of whatever the configured re-entry
+        # rule (entry_rules_reentry) already decided. Real 2-day log evidence
+        # (2026-09-28/29) showed this wasn't catching a rare bad moment -- it was
+        # vetoing the LARGE MAJORITY of every rollover attempt, for hours, on
+        # both days, regardless of strike or reason (ratio_exit/vwap_rise_roll/
+        # exit_rules all funnel through here): VWAP is a lagging average, so a
+        # combined premium in any real trending session spends long stretches
+        # above its own VWAP -- normal chart behavior, not an edge case. Direct
+        # user framing: "we're checking re-entry conditions but there were no
+        # re-entry conditions -- somewhere it's hardcoded." The configured
+        # re-entry rule (whatever the user sets in the rule-builder) is now the
+        # ONLY gate a rollover candidate has to pass -- no separate, non-
+        # configurable veto behind it.
 
         # 5. Execute the roll: close the good leg FIRST, wait for the close fill,
         #    then open the new partner. This guarantees the buy-to-close is confirmed
