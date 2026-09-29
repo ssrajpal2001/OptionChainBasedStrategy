@@ -63,7 +63,6 @@ from strategies.iron_fly.detector import (
     profit_target_hit,
     reconcile_protective_leg,
     round_to_atm,
-    should_use_next_week_expiry,
 )
 
 logger = logging.getLogger(__name__)
@@ -655,29 +654,22 @@ class IronFlyStrategy:
         return symbol in aliases.get(u, ())
 
     def _resolve_expiry(self):
-        """Resolves the expiry a FRESH entry should use right now. Direct
-        user spec (2026-09-15, real incident; simplified 2026-09-16): if the
-        currently active contract is 0 or 1 days from expiry, a fresh entry
-        has too little time left to manage -- resolve NEXT week's expiry
-        instead, unconditionally (no time-of-day check; falls back to the
-        active one if next week can't be resolved, rather than blocking
-        entry entirely)."""
+        """Resolves the expiry a FRESH entry should use right now.
+
+        2026-09-30 CRITICAL FIX, direct user correction: REVERSES the
+        2026-09-15/16 next-week-expiry switch below. Direct user spec:
+        "T-1 concept is for sell straddle only... for iron fly same week
+        expiry should be used" -- Iron Fly must ALWAYS trade the currently
+        active (same-week) contract, unconditionally, with no next-week
+        substitution regardless of days-to-expiry. should_use_next_week_
+        expiry() is intentionally no longer called here -- kept in
+        detector.py as historical reference only, not deleted, in case this
+        is ever revisited, but must not be resurrected without a new
+        explicit ask."""
         from data_layer.instrument_registry import REGISTRY
         from config.global_config import IST
         now = datetime.now(IST)
-        active = REGISTRY.get_active_expiry_strict(self._underlying, now.date())
-        if active is None:
-            return None
-        if should_use_next_week_expiry(now.date(), active):
-            next_week = REGISTRY.get_active_expiry_strict(self._underlying, active + timedelta(days=1))
-            if next_week is not None:
-                self._clog.info(
-                    "Active contract (%s) is within 1 day of expiry -- resolving NEXT week's "
-                    "expiry (%s) instead for a fresh entry.",
-                    active, next_week,
-                )
-                return next_week
-        return active
+        return REGISTRY.get_active_expiry_strict(self._underlying, now.date())
 
     def _get_premium(self, strike: int, side: str) -> Optional[float]:
         return self._live_premium.get((int(strike), side))

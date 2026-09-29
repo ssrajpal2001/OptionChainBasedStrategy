@@ -156,11 +156,12 @@ def _patch_registry_and_clock(monkeypatch, frozen_dt, expiry_map):
     monkeypatch.setitem(sys.modules, "data_layer.instrument_registry", fake_module)
 
 
-def test_resolve_expiry_jumps_to_next_week_on_expiry_day_even_in_the_morning(monkeypatch):
-    """Real incident (2026-09-15), simplified spec (2026-09-16): "we will
-    NEVER take trade of same week expiry on expiry day" -- unconditional,
-    no time-of-day check. This would have changed the real 09:21 first
-    entry of the day to use next week's contract instead."""
+def test_resolve_expiry_stays_on_same_week_contract_on_expiry_day(monkeypatch):
+    """2026-09-30 CRITICAL FIX, direct user correction: REVERSES the old
+    next-week-expiry switch below. Direct user spec: "T-1 concept is for
+    sell straddle only... for iron fly same week expiry should be used" --
+    Iron Fly must always trade the currently active (same-week) contract,
+    unconditionally, even on expiry day itself."""
     from datetime import date, datetime as real_datetime
 
     bus = _FakeBus()
@@ -170,12 +171,11 @@ def test_resolve_expiry_jumps_to_next_week_on_expiry_day_even_in_the_morning(mon
         {date(2026, 9, 15): date(2026, 9, 15), date(2026, 9, 16): date(2026, 9, 22)},
     )
 
-    assert book._resolve_expiry() == date(2026, 9, 22)
+    assert book._resolve_expiry() == date(2026, 9, 15)
 
 
-def test_resolve_expiry_jumps_to_next_week_day_before_expiry_too(monkeypatch):
-    """Direct user spec: "if 1 day before ... 65% is achieved then also it
-    will jump to next week" -- any time of day, same as expiry day itself."""
+def test_resolve_expiry_stays_on_same_week_contract_day_before_expiry_too(monkeypatch):
+    """Same reversal as above, the day-before-expiry case."""
     from datetime import date, datetime as real_datetime
 
     bus = _FakeBus()
@@ -185,7 +185,7 @@ def test_resolve_expiry_jumps_to_next_week_day_before_expiry_too(monkeypatch):
         {date(2026, 9, 14): date(2026, 9, 15), date(2026, 9, 16): date(2026, 9, 22)},
     )
 
-    assert book._resolve_expiry() == date(2026, 9, 22)
+    assert book._resolve_expiry() == date(2026, 9, 15)
 
 
 def test_resolve_expiry_uses_current_contract_two_days_before_expiry(monkeypatch):
