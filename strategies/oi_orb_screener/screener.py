@@ -29,6 +29,7 @@ adapted to asyncio).
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
@@ -37,6 +38,47 @@ from typing import List, Optional
 
 import pandas as pd
 import requests
+
+# 2026-09-30, direct user request: fetch_fno_price_universe/fetch_oi_spurts_nse/
+# fetch_nifty_pchange are all real NSE HTTP calls for market-WIDE data (not
+# per-client, not per-binding) -- but every book (oi_orb_screener,
+# oi_orb_screener_top20, oi_bias_rsi_exit, one instance per client/binding)
+# polls them independently on its own cadence. Running 2+ bindings of these
+# strategies simultaneously means each fires its own separate real NSE
+# request for data that's identical across all of them at that moment.
+# Shared, short-TTL, thread-safe cache (these functions run inside
+# asyncio.to_thread() worker threads, possibly concurrently across
+# different books' own event loops, so a plain dict without a lock would
+# race) -- the first caller after the TTL expires triggers one real fetch;
+# every other caller within the window gets that same result. TTL is well
+# under any single book's own poll interval (60-90s) so this never serves
+# data staler than what a single book would already tolerate on its own.
+_NSE_CACHE_TTL_SEC = 30.0
+_nse_cache_lock = threading.Lock()
+_nse_cache: dict = {}  # key -> (fetched_at, value_or_exception)
+
+
+def _cached_nse_fetch(key: str, fn, *args, **kwargs):
+    now = time.time()
+    with _nse_cache_lock:
+        entry = _nse_cache.get(key)
+        if entry is not None and (now - entry[0]) < _NSE_CACHE_TTL_SEC:
+            cached = entry[1]
+            if isinstance(cached, Exception):
+                raise cached
+            return cached.copy() if isinstance(cached, pd.DataFrame) else cached
+    try:
+        result = fn(*args, **kwargs)
+    except Exception as exc:
+        # Cache the failure too (briefly) -- a genuine NSE outage/rate-limit
+        # shouldn't mean every concurrent book each burns its own retry
+        # budget hammering the same dead endpoint at the same moment.
+        with _nse_cache_lock:
+            _nse_cache[key] = (now, exc)
+        raise
+    with _nse_cache_lock:
+        _nse_cache[key] = (now, result)
+    return result.copy() if isinstance(result, pd.DataFrame) else result
 
 try:
     from zoneinfo import ZoneInfo
@@ -312,6 +354,15 @@ class NSESession:
 
 
 def fetch_fno_price_universe(nse: "NSESession") -> pd.DataFrame:
+    """Shared-cache wrapper -- see _cached_nse_fetch's own module-level
+    comment. `nse` (the calling book's own session) is intentionally NOT
+    part of the cache key: the underlying market data is identical
+    regardless of which book's session object happens to make the real
+    request."""
+    return _cached_nse_fetch("fno_price_universe", _fetch_fno_price_universe_uncached, nse)
+
+
+def _fetch_fno_price_universe_uncached(nse: "NSESession") -> pd.DataFrame:
     """Response shape: {"data": {"aduCount": {...}, "data": [...rows...]}} --
     confirmed against a real captured request/response pair, 2026-08-24."""
     payload = nse.get_json(FNO_UNIVERSE_URL, params=FNO_UNIVERSE_PARAMS)
@@ -340,6 +391,11 @@ def fetch_fno_price_universe(nse: "NSESession") -> pd.DataFrame:
 
 
 def fetch_nifty_pchange(nse: "NSESession") -> float:
+    """Shared-cache wrapper -- see _cached_nse_fetch's own module-level comment."""
+    return _cached_nse_fetch("nifty_pchange", _fetch_nifty_pchange_uncached, nse)
+
+
+def _fetch_nifty_pchange_uncached(nse: "NSESession") -> float:
     payload = nse.get_json(ALL_INDICES_URL)
     if not payload or "data" not in payload:
         raise RuntimeError("Could not fetch NIFTY 50 data from NSE (allIndices).")
@@ -375,6 +431,16 @@ def _find_column(columns, candidates):
 
 
 def fetch_oi_spurts_nse(nse: "NSESession") -> pd.DataFrame:
+    """Shared-cache wrapper -- see _cached_nse_fetch's own module-level
+    comment. Existing per-book throttling of this specific call (see
+    engine.py's own docstring, "re-fetches ALL ~214 [stocks]") stays
+    unchanged and still applies on top of this -- that throttle limits how
+    OFTEN one book asks; this cache limits how often two or more books'
+    simultaneous asks actually reach NSE."""
+    return _cached_nse_fetch("oi_spurts_nse", _fetch_oi_spurts_nse_uncached, nse)
+
+
+def _fetch_oi_spurts_nse_uncached(nse: "NSESession") -> pd.DataFrame:
     """symbol/avgInOI field names confirmed against a real live response,
     2026-08-23 (avgInOI verified arithmetically against a real row)."""
     payload = nse.get_json(OI_SPURT_URL)
