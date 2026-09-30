@@ -150,15 +150,20 @@ class OiBiasRsiExitStrategy:
         oi_bias_flip_count: int = 2,
         # 2026-09-30, direct user spec ("scan for fresh stocks after 9:25 as
         # well ... check OI as same concept and entry and exit will be
-        # same"): the original build only ever scanned ONCE at start_time,
-        # per OI-ORB Screener's original single-scan precedent. This
-        # strategy now keeps re-running the exact same selection/OI-bias
-        # pipeline every `rescan_interval_min` minutes for the rest of the
-        # day, ADDING any newly-qualifying stock to the same candidate pool
-        # -- entry/exit logic is untouched, a rescan-added symbol goes
-        # through _check_entry/_check_exit exactly like a 09:25 one. Set to
-        # 0 to disable (reverts to the original single-scan behavior).
-        rescan_interval_min: int = 15,
+        # same"; cadence corrected same day to "every 60 sec" per direct
+        # follow-up instruction): the original build only ever scanned ONCE
+        # at start_time, per OI-ORB Screener's original single-scan
+        # precedent. This strategy now keeps re-running the exact same
+        # selection/OI-bias pipeline every `rescan_interval_sec` seconds for
+        # the rest of the day, ADDING any newly-qualifying stock to the same
+        # candidate pool -- entry/exit logic is untouched, a rescan-added
+        # symbol goes through _check_entry/_check_exit exactly like a 09:25
+        # one. Set to 0 to disable (reverts to the original single-scan
+        # behavior). The underlying NSE fetches (fetch_fno_price_universe/
+        # fetch_oi_spurts_nse/fetch_top_gainers_losers) already share a 30s-
+        # TTL cache (screener.py's _cached_nse_fetch) across every caller, so
+        # a 60s rescan cadence does not mean a fresh real NSE hit every 60s.
+        rescan_interval_sec: int = 60,
     ) -> None:
         self._bus = bus
         self._cfg = cfg
@@ -177,7 +182,7 @@ class OiBiasRsiExitStrategy:
         self._exit_stoch_rsi_lengths = tuple(exit_stoch_rsi_lengths)
         self._oi_recheck_minutes = oi_recheck_minutes
         self._oi_bias_flip_count = oi_bias_flip_count
-        self._rescan_interval_min = rescan_interval_min
+        self._rescan_interval_sec = rescan_interval_sec
 
         self._clog = _make_strategy_logger(client_id, binding_id)
         self._running = False
@@ -249,15 +254,15 @@ class OiBiasRsiExitStrategy:
         if not self._selection_done:
             await self._run_selection_and_bias(token, is_rescan=False)
             self._selection_done = True
-            if self._rescan_interval_min > 0:
-                self._next_rescan_at = now + timedelta(minutes=self._rescan_interval_min)
+            if self._rescan_interval_sec > 0:
+                self._next_rescan_at = now + timedelta(seconds=self._rescan_interval_sec)
         elif (
-            self._rescan_interval_min > 0
+            self._rescan_interval_sec > 0
             and self._next_rescan_at is not None
             and now >= self._next_rescan_at
         ):
             await self._run_selection_and_bias(token, is_rescan=True)
-            self._next_rescan_at = now + timedelta(minutes=self._rescan_interval_min)
+            self._next_rescan_at = now + timedelta(seconds=self._rescan_interval_sec)
 
         for sym in list(self._bias):
             if self._bias[sym] in ("bullish", "bearish") and sym not in self._positions:

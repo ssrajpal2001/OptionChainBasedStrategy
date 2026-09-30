@@ -253,8 +253,8 @@ def test_rescan_with_no_new_symbols_does_not_reprocess_bias():
 
 def test_rescan_interval_configurable_and_zero_disables():
     s = OiBiasRsiExitStrategy(EventBus(), GlobalConfig(), client_id="C", binding_id="B",
-                               rescan_interval_min=30)
-    assert s._rescan_interval_min == 30
+                               rescan_interval_sec=90)
+    assert s._rescan_interval_sec == 90
     s2 = OiBiasRsiExitStrategy(EventBus(), GlobalConfig(), client_id="C", binding_id="B",
-                                rescan_interval_min=0)
-    assert s2._rescan_interval_min == 0
+                                rescan_interval_sec=0)
+    assert s2._rescan_interval_sec == 0
