@@ -92,7 +92,63 @@ SECTOR_INDEX_NAMES: List[str] = [
     "NIFTY 100",
     "NIFTY 200",
     "NIFTY 500",
+    # 2026-09-30, direct user follow-up ("many algo which check sectors shows
+    # more than 30 sectors, check latest web"): a web check against NSE/
+    # Upstox-listing sources (dhan.co, anandrathi.com sector-index pages)
+    # turned up 3 real sector/thematic indices missing from the list above.
+    # UNCONFIRMED against Upstox's own NSE_INDEX instrument-master naming
+    # convention (unlike every entry above, which was corrected live at
+    # least once already, e.g. "CONSR DURBL" not "CONSUMER DURABLES") --
+    # verify these resolve on the next real scan and fix the exact spelling
+    # if resolve_index_key() logs a miss for any of them.
+    "NIFTY CHEMICALS",
+    "NIFTY CPSE",
+    "NIFTY EV & NEW AGE AUTOMOTIVE",
+    # Same follow-up, direct user choice: also include the "factor"/smart-
+    # beta indices, even though these are NOT sector indices -- they select
+    # stocks by a cross-sector factor (momentum, quality, low volatility,
+    # alpha) rather than by industry. Included in the SAME scan/ranking
+    # pipeline per explicit instruction ("add missing sectors + factor
+    # indices"), not because they behave like a sector -- a "best sector"
+    # result of one of these just means "the strongest factor-driven basket
+    # this week", which is a different kind of signal than a real sector
+    # rotation call. Also UNCONFIRMED against Upstox's real index-master
+    # spelling, same caveat as the 3 above.
+    "NIFTY100 QUALITY 30",
+    "NIFTY ALPHA 50",
+    "NIFTY LOW VOLATILITY 50",
+    "NIFTY100 LOW VOLATILITY 30",
+    "NIFTY500 MOMENTUM 50",
+    "NIFTY MIDCAP150 MOMENTUM 50",
+    "NIFTY ALPHA LOW-VOLATILITY 30",
 ]
+
+# 2026-09-30, direct user spec: for "wealth creation" (positional, not
+# intraday), prefer mid/small-cap stocks over blue chips -- user's own
+# stated reasoning is that large, already-efficiently-priced blue chips
+# don't re-rate as dramatically as a smaller company can. Direct user
+# decision after discussion: WEIGHT toward mid/small-cap rather than
+# hard-excluding large caps outright, so a genuinely strong large-cap RS
+# signal can still surface if it's strong enough to overcome the penalty,
+# while microcap/illiquid names aren't given an unfair boost just for being
+# small (weighting, not a hard filter, avoids that trap too).
+#
+# NIFTY 100 (the existing top-100-by-float-market-cap index, already in
+# SECTOR_INDEX_NAMES above) is the standard, industry-recognized large-cap/
+# "blue chip" universe in the Indian market -- reused here as the real,
+# live-fetched blue-chip membership set rather than a second hardcoded
+# guess-list, via the same fetch_sector_constituents() plumbing every other
+# sector already uses.
+LARGE_CAP_INDEX_NAME = "NIFTY 100"
+
+
+def fetch_large_cap_universe(nse: "NSESession") -> set:
+    """Real, live NIFTY 100 constituent symbols -- the blue-chip set used to
+    apply scan.py's mid/small-cap weighting. Returns an empty set (never
+    raises) if the fetch fails, same degrade-safely convention as every
+    other NSE fetch in this module; scan.py must treat an empty result as
+    "no large-cap penalty applied this run", not a fatal error."""
+    return set(fetch_sector_constituents(nse, LARGE_CAP_INDEX_NAME))
 
 _UPSTOX_NSE_MASTER_URL = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz"
 

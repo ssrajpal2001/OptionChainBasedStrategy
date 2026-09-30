@@ -67,8 +67,9 @@ def _print_report(result) -> None:
         print("  (no stocks ranked -- see warnings above for why)")
     for i, st in enumerate(result.stocks_ranked, 1):
         trend = st.rs.rs_trend or "?"
-        print(f"  {i:>2}. {st.symbol:<15} RS={st.rs.rs:+.4f}  trend={trend:<8} "
-              f"ma_trend={st.rs.ma_trend or '?'}")
+        cap_tag = "BLUE-CHIP" if st.is_large_cap else "mid/small"
+        print(f"  {i:>2}. {st.symbol:<15} RS={st.rs.rs:+.4f}  cap_weighted={st.cap_weighted_rs:+.4f} "
+              f" [{cap_tag}]  trend={trend:<8} ma_trend={st.rs.ma_trend or '?'}")
 
 
 def _to_jsonable(result) -> dict:
@@ -82,7 +83,8 @@ def _to_jsonable(result) -> dict:
         "best_sector": result.best_sector.sector_name if result.best_sector else None,
         "stocks_ranked": [
             {"symbol": st.symbol, "stock_key": st.stock_key, "rs": st.rs.rs,
-             "rs_trend": st.rs.rs_trend, "rs_ma": st.rs.rs_ma, "ma_trend": st.rs.ma_trend}
+             "rs_trend": st.rs.rs_trend, "rs_ma": st.rs.rs_ma, "ma_trend": st.rs.ma_trend,
+             "is_large_cap": st.is_large_cap, "cap_weighted_rs": st.cap_weighted_rs}
             for st in result.stocks_ranked
         ],
     }

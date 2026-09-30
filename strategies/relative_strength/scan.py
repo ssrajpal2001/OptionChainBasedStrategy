@@ -31,6 +31,7 @@ from strategies.relative_strength.detector import (
 )
 from strategies.relative_strength.sectors import (
     SECTOR_INDEX_NAMES, resolve_index_key, fetch_all_sector_constituents,
+    fetch_large_cap_universe,
 )
 
 logger = logging.getLogger(__name__)
@@ -40,6 +41,20 @@ _RS_TREND_BASE = 5
 _RS_MA_LENGTH = 50
 
 _NIFTY_KEY = "NSE_INDEX|Nifty 50"
+
+# 2026-09-30, direct user decision ("weight toward small/mid-cap") for the
+# "wealth creation" use case this scanner exists for: a stock whose symbol
+# appears in the live-fetched NIFTY 100 (blue-chip) membership set has its
+# RS score multiplied by this factor BEFORE ranking -- a genuinely strong
+# blue-chip signal can still win if its raw RS clears the penalty, but a
+# mid/small-cap stock with a similar raw RS will now consistently rank
+# higher on the ranking. This is intentionally a WEIGHT, not a hard filter
+# (avoids two traps at once: missing a genuinely strong large-cap move, and
+# giving an illiquid microcap an unfair boost just for being small) -- see
+# sectors.py's
+# fetch_large_cap_universe() docstring for why NIFTY 100 is the real,
+# live-fetched blue-chip proxy rather than a second hardcoded guess-list.
+_LARGE_CAP_RS_WEIGHT = 0.7
 
 
 @dataclass
@@ -54,6 +69,8 @@ class StockScanResult:
     symbol: str
     stock_key: str
     rs: RSReading
+    is_large_cap: bool = False
+    cap_weighted_rs: float = 0.0
 
 
 @dataclass
@@ -128,6 +145,12 @@ async def scan_sector_stocks(
         logger.warning("relative_strength: no live NSE constituents found for sector %s.", sector_name)
         return []
 
+    # 2026-09-30: real, live-fetched blue-chip membership (NIFTY 100), used
+    # below to apply the mid/small-cap weighting -- see _LARGE_CAP_RS_WEIGHT's
+    # own comment. A fetch failure degrades to an empty set (no penalty
+    # applied this run), never a fatal error for the whole scan.
+    large_caps = await asyncio.to_thread(fetch_large_cap_universe, nse)
+
     results: List[StockScanResult] = []
     for symbol in constituents:
         # resolve_eq_instrument_key is blocking on its own first-ever call
@@ -150,11 +173,23 @@ async def scan_sector_stocks(
             logger.warning("relative_strength: not enough aligned hourly history for %s "
                             "(%d common bars, need >%d) -- skipping.", symbol, len(base), _RS_LENGTH)
             continue
-        results.append(StockScanResult(symbol=symbol, stock_key=stock_key, rs=reading))
+        is_large_cap = symbol in large_caps
+        weighted_rs = reading.rs * (_LARGE_CAP_RS_WEIGHT if is_large_cap else 1.0)
+        results.append(StockScanResult(
+            symbol=symbol, stock_key=stock_key, rs=reading,
+            is_large_cap=is_large_cap, cap_weighted_rs=weighted_rs,
+        ))
 
-    ranked_readings = rank_by_relative_strength([r.rs for r in results])
-    by_symbol = {r.rs.symbol: r for r in results}
-    return [by_symbol[reading.symbol] for reading in ranked_readings]
+    # Ranked by the CAP-WEIGHTED score (mid/small-cap preference), not the
+    # raw RS -- reading.rs itself is left untouched on each result so the
+    # caller/report can still show the true, unweighted RS value alongside
+    # the cap-aware rank. Same trend tie-break rule as
+    # detector.rank_by_relative_strength (rising > flat > falling on a
+    # near-tied score), reimplemented here since it now sorts on
+    # cap_weighted_rs, not r.rs.
+    _trend_rank = {"rising": 0, "flat": 1, "falling": 2, None: 1}
+    results.sort(key=lambda r: (-round(r.cap_weighted_rs, 6), _trend_rank.get(r.rs.rs_trend, 1)))
+    return results
 
 
 async def run_full_scan(access_token: str, top_n_stocks: int = 10) -> FullScanResult:
