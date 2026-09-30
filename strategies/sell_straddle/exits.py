@@ -2134,6 +2134,34 @@ class ExitMixin:
                 self._clog.info(format_exit_eval(self._underlying, pnl, _credit, _crit))
                 if _exit_dump is not None:
                     self._clog.info("EXIT-EVAL %s exit_ind_by_tf=%s", self._underlying, _exit_dump)
+                # 2026-09-30, direct user request: a real live/REST-replay RSI
+                # discrepancy (52.56 live vs ~77 independently recomputed on
+                # identical Upstox price data) couldn't be explained from
+                # outside the process -- one-time dump of the pool engine's
+                # OWN raw 1-min (_mins, _closes) arrays for this exact pair,
+                # so they can be compared bar-by-bar against a REST replay.
+                # Fires exactly once per process run (self._rsi_diag_dumped
+                # guard) to avoid permanent log noise -- remove once the gap
+                # is understood.
+                if not getattr(self, "_rsi_diag_dumped", False):
+                    try:
+                        _ce_k = self._pool_engine._key(int(pos.ce_leg.strike), "CE")
+                        _pe_k = self._pool_engine._key(int(pos.pe_leg.strike), "PE")
+                        self._clog.info(
+                            "RSI-DIAG %s CE%d mins=%s closes=%s",
+                            self._underlying, int(pos.ce_leg.strike),
+                            list(self._pool_engine._mins.get(_ce_k, [])),
+                            list(self._pool_engine._closes.get(_ce_k, [])),
+                        )
+                        self._clog.info(
+                            "RSI-DIAG %s PE%d mins=%s closes=%s",
+                            self._underlying, int(pos.pe_leg.strike),
+                            list(self._pool_engine._mins.get(_pe_k, [])),
+                            list(self._pool_engine._closes.get(_pe_k, [])),
+                        )
+                        self._rsi_diag_dumped = True
+                    except Exception:
+                        self._clog.exception("RSI-DIAG dump failed (non-fatal).")
                 for _n, _d, _h in _crit:
                     if _n == "Dynamic":
                         _passed, _reason = bool(_h), _d
