@@ -189,3 +189,72 @@ def test_check_exit_skips_stoch_rsi_check_when_oi_flip_already_closed_position()
 
     s._close_position.assert_awaited_once_with("SYM", "oi_bias_flip_twice", "tok")
     fetch_mock.assert_not_awaited()  # never reached the StochRSI bar-fetch path
+
+
+# ── Continuous rescan after 09:25, 2026-09-30 direct user spec ─────────────
+
+import pandas as pd
+
+
+def _df(symbols):
+    return pd.DataFrame({"symbol": symbols})
+
+
+def _oi_df(rows):
+    """rows: dict symbol -> oi_spurt_pct."""
+    return pd.DataFrame({"symbol": list(rows.keys()), "oi_spurt_pct": list(rows.values())})
+
+
+def test_rescan_adds_only_genuinely_new_symbols():
+    """First call (is_rescan=False) qualifies SYM_A. A later rescan's fetch
+    returns SYM_A again (still qualifying) plus a genuinely new SYM_B --
+    only SYM_B should trigger a fresh bias computation; SYM_A must not be
+    reprocessed (would wipe/duplicate its already-tracked state)."""
+    s = _strategy()
+    s._compute_bias_for = AsyncMock()
+
+    with patch("strategies.oi_bias_rsi_exit.engine._screener.NSESession", return_value=object()), \
+         patch("strategies.oi_bias_rsi_exit.engine._screener.fetch_fno_price_universe", return_value=_df(["SYM_A"])), \
+         patch("strategies.oi_bias_rsi_exit.engine._screener.fetch_oi_spurts_nse", return_value=_oi_df({"SYM_A": 9.0})), \
+         patch("strategies.oi_bias_rsi_exit.engine._screener.fetch_top_gainers_losers", return_value=_df(["SYM_A"])), \
+         patch("strategies.oi_bias_rsi_exit.engine.REGISTRY.load_sync"):
+        asyncio.run(s._run_selection_and_bias("tok", is_rescan=False))
+
+    assert s._candidates == ["SYM_A"]
+    s._compute_bias_for.assert_awaited_once_with("SYM_A", "tok")
+    s._compute_bias_for.reset_mock()
+
+    with patch("strategies.oi_bias_rsi_exit.engine._screener.NSESession", return_value=object()), \
+         patch("strategies.oi_bias_rsi_exit.engine._screener.fetch_fno_price_universe", return_value=_df(["SYM_A", "SYM_B"])), \
+         patch("strategies.oi_bias_rsi_exit.engine._screener.fetch_oi_spurts_nse", return_value=_oi_df({"SYM_A": 9.0, "SYM_B": 8.0})), \
+         patch("strategies.oi_bias_rsi_exit.engine._screener.fetch_top_gainers_losers", return_value=_df(["SYM_A", "SYM_B"])), \
+         patch("strategies.oi_bias_rsi_exit.engine.REGISTRY.load_sync"):
+        asyncio.run(s._run_selection_and_bias("tok", is_rescan=True))
+
+    assert s._candidates == ["SYM_A", "SYM_B"]
+    s._compute_bias_for.assert_awaited_once_with("SYM_B", "tok")
+
+
+def test_rescan_with_no_new_symbols_does_not_reprocess_bias():
+    s = _strategy()
+    s._candidates = ["SYM_A"]
+    s._compute_bias_for = AsyncMock()
+
+    with patch("strategies.oi_bias_rsi_exit.engine._screener.NSESession", return_value=object()), \
+         patch("strategies.oi_bias_rsi_exit.engine._screener.fetch_fno_price_universe", return_value=_df(["SYM_A"])), \
+         patch("strategies.oi_bias_rsi_exit.engine._screener.fetch_oi_spurts_nse", return_value=_oi_df({"SYM_A": 9.0})), \
+         patch("strategies.oi_bias_rsi_exit.engine._screener.fetch_top_gainers_losers", return_value=_df(["SYM_A"])), \
+         patch("strategies.oi_bias_rsi_exit.engine.REGISTRY.load_sync"):
+        asyncio.run(s._run_selection_and_bias("tok", is_rescan=True))
+
+    assert s._candidates == ["SYM_A"]
+    s._compute_bias_for.assert_not_awaited()
+
+
+def test_rescan_interval_configurable_and_zero_disables():
+    s = OiBiasRsiExitStrategy(EventBus(), GlobalConfig(), client_id="C", binding_id="B",
+                               rescan_interval_min=30)
+    assert s._rescan_interval_min == 30
+    s2 = OiBiasRsiExitStrategy(EventBus(), GlobalConfig(), client_id="C", binding_id="B",
+                                rescan_interval_min=0)
+    assert s2._rescan_interval_min == 0

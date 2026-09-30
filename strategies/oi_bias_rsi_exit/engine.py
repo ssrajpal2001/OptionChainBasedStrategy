@@ -148,6 +148,17 @@ class OiBiasRsiExitStrategy:
         exit_stoch_rsi_lengths: tuple = EXIT_STOCH_RSI_LENGTHS,
         oi_recheck_minutes: int = OI_RECHECK_MINUTES,
         oi_bias_flip_count: int = 2,
+        # 2026-09-30, direct user spec ("scan for fresh stocks after 9:25 as
+        # well ... check OI as same concept and entry and exit will be
+        # same"): the original build only ever scanned ONCE at start_time,
+        # per OI-ORB Screener's original single-scan precedent. This
+        # strategy now keeps re-running the exact same selection/OI-bias
+        # pipeline every `rescan_interval_min` minutes for the rest of the
+        # day, ADDING any newly-qualifying stock to the same candidate pool
+        # -- entry/exit logic is untouched, a rescan-added symbol goes
+        # through _check_entry/_check_exit exactly like a 09:25 one. Set to
+        # 0 to disable (reverts to the original single-scan behavior).
+        rescan_interval_min: int = 15,
     ) -> None:
         self._bus = bus
         self._cfg = cfg
@@ -166,12 +177,14 @@ class OiBiasRsiExitStrategy:
         self._exit_stoch_rsi_lengths = tuple(exit_stoch_rsi_lengths)
         self._oi_recheck_minutes = oi_recheck_minutes
         self._oi_bias_flip_count = oi_bias_flip_count
+        self._rescan_interval_min = rescan_interval_min
 
         self._clog = _make_strategy_logger(client_id, binding_id)
         self._running = False
         self._task: Optional[asyncio.Task] = None
         self._today: Optional[date] = None
         self._selection_done = False
+        self._next_rescan_at: Optional[datetime] = None
         self._candidates: List[str] = []
         self._bias: Dict[str, str] = {}
         self._entry_idx_start: Dict[str, int] = {}
@@ -198,6 +211,7 @@ class OiBiasRsiExitStrategy:
     def _reset_session(self, today: date) -> None:
         self._today = today
         self._selection_done = False
+        self._next_rescan_at = None
         self._candidates = []
         self._bias = {}
         self._entry_idx_start = {}
@@ -233,8 +247,17 @@ class OiBiasRsiExitStrategy:
             return
 
         if not self._selection_done:
-            await self._run_selection_and_bias(token)
+            await self._run_selection_and_bias(token, is_rescan=False)
             self._selection_done = True
+            if self._rescan_interval_min > 0:
+                self._next_rescan_at = now + timedelta(minutes=self._rescan_interval_min)
+        elif (
+            self._rescan_interval_min > 0
+            and self._next_rescan_at is not None
+            and now >= self._next_rescan_at
+        ):
+            await self._run_selection_and_bias(token, is_rescan=True)
+            self._next_rescan_at = now + timedelta(minutes=self._rescan_interval_min)
 
         for sym in list(self._bias):
             if self._bias[sym] in ("bullish", "bearish") and sym not in self._positions:
@@ -245,18 +268,27 @@ class OiBiasRsiExitStrategy:
 
     # ── Step 1: selection (reuses oi_orb_screener.screener unchanged) ──────
 
-    async def _run_selection_and_bias(self, token: str) -> None:
+    async def _run_selection_and_bias(self, token: str, is_rescan: bool = False) -> None:
+        """Runs the exact same OI-spurt selection pipeline whether this is the
+        initial 09:25 scan or a later periodic rescan (`is_rescan=True`,
+        direct 2026-09-30 user spec: "scan for fresh stocks after 9:25 as
+        well... check OI as same concept"). On a rescan, only symbols that
+        were NOT already candidates get added and get bias/entry/exit
+        processing -- an already-seen symbol (traded or not) is left alone,
+        so a rescan can never re-wipe or re-run an in-progress/closed
+        position's own state."""
+        _tag = "rescan" if is_rescan else "selection"
         try:
             nse = await asyncio.to_thread(_screener.NSESession)
             universe = await asyncio.to_thread(_screener.fetch_fno_price_universe, nse)
             oi_spurts = await asyncio.to_thread(_screener.fetch_oi_spurts_nse, nse)
             candidates = await asyncio.to_thread(_screener.fetch_top_gainers_losers, universe, self._top_n_per_side)
         except Exception:
-            self._clog.exception("Step 1 selection fetch failed.")
+            self._clog.exception("%s: fetch failed.", _tag)
             return
         merged = candidates.merge(oi_spurts, on="symbol", how="left")
         qualifying = merged[merged["oi_spurt_pct"].fillna(0) >= self._oi_spurt_min_pct]
-        self._candidates = sorted(set(qualifying["symbol"].tolist()))
+        qualifying_syms = sorted(set(qualifying["symbol"].tolist()))
         # 2026-09-30, direct user request: the old single summary line only
         # ever showed the FINAL post-filter result -- when 0 qualified there
         # was zero visibility into why (empty top-gainers/losers fetch? a
@@ -264,20 +296,30 @@ class OiBiasRsiExitStrategy:
         # never merged at all?). Log every intermediate stage so a 0-result
         # day is diagnosable from this log alone, same transparency standard
         # as oi_orb_screener's own scan/shortlist logging.
-        self._clog.info("selection: universe=%d rows, oi_spurts=%d rows, top-gainers/losers candidates=%d: %s",
-                         len(universe), len(oi_spurts), len(candidates),
+        self._clog.info("%s: universe=%d rows, oi_spurts=%d rows, top-gainers/losers candidates=%d: %s",
+                         _tag, len(universe), len(oi_spurts), len(candidates),
                          sorted(candidates["symbol"].tolist()) if "symbol" in candidates else [])
         _ranked = merged[["symbol", "oi_spurt_pct"]].copy()
         _ranked["oi_spurt_pct"] = _ranked["oi_spurt_pct"].fillna(0)
         _ranked = _ranked.sort_values("oi_spurt_pct", ascending=False)
-        self._clog.info("selection: candidate OI-spurt%% (threshold=%.1f%%): %s",
-                         self._oi_spurt_min_pct,
+        self._clog.info("%s: candidate OI-spurt%% (threshold=%.1f%%): %s",
+                         _tag, self._oi_spurt_min_pct,
                          [f"{r.symbol}={r.oi_spurt_pct:.2f}%" for r in _ranked.itertuples()])
-        self._clog.info("selection: %d candidates qualified (>=%.1f%% OI-spurt): %s",
-                         len(self._candidates), self._oi_spurt_min_pct, self._candidates)
 
+        new_syms = [s for s in qualifying_syms if s not in self._candidates]
+        self._candidates = sorted(set(self._candidates) | set(qualifying_syms))
+        if is_rescan:
+            self._clog.info("rescan: %d qualified this pass (>=%.1f%% OI-spurt): %s -- %d genuinely NEW: %s",
+                             len(qualifying_syms), self._oi_spurt_min_pct, qualifying_syms,
+                             len(new_syms), new_syms)
+        else:
+            self._clog.info("selection: %d candidates qualified (>=%.1f%% OI-spurt): %s",
+                             len(qualifying_syms), self._oi_spurt_min_pct, qualifying_syms)
+
+        if not new_syms:
+            return
         REGISTRY.load_sync("NIFTY", token)
-        for sym in self._candidates:
+        for sym in new_syms:
             try:
                 await self._compute_bias_for(sym, token)
             except Exception:

@@ -36,9 +36,14 @@ _DEFAULT_PARAMS = {
     "exit_stoch_rsi_lengths": [21, 21, 3, 3],
     "oi_recheck_minutes": 5,
     "oi_bias_flip_count": 2,
+    # 2026-09-30, direct user spec ("scan for fresh stocks after 9:25 as
+    # well"): 0 disables and reverts to the original single-scan-at-09:25
+    # behavior.
+    "rescan_interval_min": 15,
 }
 _FLOAT_KEYS = ("oi_spurt_min_pct", "poll_seconds")
-_INT_KEYS = ("entry_timeframe_min", "exit_timeframe_min", "oi_recheck_minutes", "oi_bias_flip_count")
+_INT_KEYS = ("entry_timeframe_min", "exit_timeframe_min", "oi_recheck_minutes", "oi_bias_flip_count",
+             "rescan_interval_min")
 
 
 def _parse_params(raw: str) -> dict:
@@ -94,6 +99,7 @@ class OiBiasRsiExitBookManager(StrategyBookManager):
             exit_stoch_rsi_lengths=value["exit_stoch_rsi_lengths"],
             oi_recheck_minutes=value["oi_recheck_minutes"],
             oi_bias_flip_count=value["oi_bias_flip_count"],
+            rescan_interval_min=value["rescan_interval_min"],
         )
         logger.info(
             "OiBiasRsiExitBookManager: spawned %s/%s (lots=%d product=%s start=%s exit=%s).",
@@ -121,6 +127,7 @@ class OiBiasRsiExitBookManager(StrategyBookManager):
             or book._exit_stoch_rsi_lengths != value["exit_stoch_rsi_lengths"]
             or book._oi_recheck_minutes != value["oi_recheck_minutes"]
             or book._oi_bias_flip_count != value["oi_bias_flip_count"]
+            or book._rescan_interval_min != value["rescan_interval_min"]
         )
 
     def _log_spawned(self, key: tuple, value: dict) -> None:
