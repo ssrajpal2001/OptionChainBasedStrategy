@@ -66,7 +66,7 @@ from typing import Dict, List, Optional
 from config.global_config import IST, Topic
 from data_layer.base_feeder import EventBus
 from data_layer.client_db import ClientDB
-from data_layer.historical_candles import fetch_upstox_intraday_1m
+from data_layer.historical_candles import fetch_upstox_intraday_1m, fetch_upstox_range_1m
 from data_layer.instrument_registry import REGISTRY
 from strategies.core.trap_zone_utils import Bar
 from strategies.core.candle_indicators import to_n_min_bars_market_anchored
@@ -203,6 +203,17 @@ class OiBiasRsiExitStrategy:
         self._entry_idx_start: Dict[str, int] = {}
         self._positions: Dict[str, dict] = {}
         self._day_done = False
+        # 2026-09-30, direct user correction: StochRSI(21,21,3,3) needs ~46
+        # bars minimum before ANY real K/D value can exist -- at 3-min entry
+        # bars that's 138 real minutes (~11:33 IST from a 09:15 open) before
+        # entry can EVER fire; at 75-min exit bars it's 3,450 minutes (~9.2
+        # TRADING DAYS) before the exit cross could ever fire at all if
+        # seeded from scratch every day. Prior-day history is fetched once
+        # per symbol (via fetch_upstox_range_1m, real 1-min bars, real
+        # trading days only) and cached here so the indicator is already
+        # warm at market open -- see _bars_with_history().
+        self._history_bars_cache: Dict[str, List[Bar]] = {}
+        self._history_cache_date: Optional[date] = None
 
     def start(self) -> None:
         if self._running:
@@ -230,6 +241,8 @@ class OiBiasRsiExitStrategy:
         self._entry_idx_start = {}
         self._positions = {}
         self._day_done = False
+        self._history_bars_cache = {}
+        self._history_cache_date = None
         self._clog.info("session reset for new trading day %s.", today)
 
     async def _loop(self) -> None:
@@ -463,19 +476,62 @@ class OiBiasRsiExitStrategy:
             },
         )
 
+    # ── Prior-day warmup, 2026-09-30 direct user correction ────────────────
+    # "for warmup u need to fetch data from prev day as well" -- StochRSI
+    # (21,21,3,3) needs ~46 bars minimum before ANY real K/D value exists.
+    # At 3-min entry bars that's 138 real minutes -- not reachable until
+    # ~11:33 IST from a 09:15 open if seeded from scratch every day. At
+    # 75-min exit bars it's 3,450 minutes (~9.2 TRADING DAYS) -- the exit
+    # cross could never fire at all within one day without this.
+
+    _HISTORY_LOOKBACK_CALENDAR_DAYS = 20  # comfortably covers ~14 trading
+    # days after weekends -- the 75-min exit side needs ~10 trading days'
+    # worth of real bars (5 usable 75-min bars/trading day) to warm up.
+
+    async def _bars_with_history(self, symbol: str, token: str) -> List[Bar]:
+        """Today's real bars, prefixed with real prior-trading-day bars
+        (fetched once per symbol per day, cached -- prior days never change
+        intraday so there's no reason to refetch them every poll cycle).
+        Only TODAY's bars ever get treated as a fresh entry/exit signal by
+        the callers below; the historical prefix exists purely so the
+        indicator's internal rolling state is already warm by the time
+        today's own bars start evaluating."""
+        if self._history_cache_date != self._today:
+            self._history_bars_cache = {}
+            self._history_cache_date = self._today
+        if symbol not in self._history_bars_cache:
+            stock_key = stock_resolve.resolve_eq_instrument_key(symbol)
+            end = (self._today or date.today()) - timedelta(days=1)
+            start = end - timedelta(days=self._HISTORY_LOOKBACK_CALENDAR_DAYS)
+            try:
+                hist_rows = await fetch_upstox_range_1m(stock_key, token, start, end)
+            except Exception:
+                self._clog.exception("%s: prior-day history fetch failed -- warming up from scratch today.", symbol)
+                hist_rows = []
+            self._history_bars_cache[symbol] = sorted(_to_bars(hist_rows), key=lambda b: b.ts)
+        today_rows = await fetch_upstox_intraday_1m(stock_resolve.resolve_eq_instrument_key(symbol), token)
+        today_bars = sorted(_to_bars(today_rows), key=lambda b: b.ts)
+        return self._history_bars_cache[symbol] + today_bars
+
     # ── Entry ────────────────────────────────────────────────────────────
 
     async def _check_entry(self, symbol: str, token: str) -> None:
         bias = self._bias[symbol]
-        rows = await fetch_upstox_intraday_1m(stock_resolve.resolve_eq_instrument_key(symbol), token)
-        bars = sorted(_to_bars(rows), key=lambda b: b.ts)
+        bars = await self._bars_with_history(symbol, token)
         if not bars:
             return
         bars_e = to_n_min_bars_market_anchored(bars, self._entry_timeframe_min)
         closes_e = [b.close for b in bars_e]
         k, d = compute_stoch_rsi_double_smoothed(closes_e, *self._entry_stoch_rsi_lengths)
+        # 2026-09-30 CRITICAL FIX: now that bars_e can include PRIOR DAYS'
+        # bars (needed to warm up k/d above), the entry-time gate must also
+        # require the bar's DATE is genuinely today -- b.ts.time() alone
+        # would let a prior day's bar at e.g. 10:00 wrongly satisfy
+        # "time >= start_time" and fire an entry off yesterday's data.
         idx = next(
-            (i for i, b in enumerate(bars_e) if b.ts.time() >= self._start_time and check_entry_state(k[i], d[i], bias)),
+            (i for i, b in enumerate(bars_e)
+             if b.ts.date() == self._today and b.ts.time() >= self._start_time
+             and check_entry_state(k[i], d[i], bias)),
             None)
         if idx is None:
             # 2026-09-30, direct user request (same visibility gap already
@@ -498,7 +554,10 @@ class OiBiasRsiExitStrategy:
             return
 
         option_type = "CE" if bias == "bullish" else "PE"
-        bar_915 = next((b for b in bars if b.ts.time() == dtime(9, 15)), None)
+        # 2026-09-30 CRITICAL FIX: bars now includes prior-day history for
+        # StochRSI warmup -- must match TODAY's 09:15 bar specifically, not
+        # any historical day's.
+        bar_915 = next((b for b in bars if b.ts.date() == self._today and b.ts.time() == dtime(9, 15)), None)
         if bar_915 is None:
             return
         step = stock_resolve.resolve_strike_step_for_price(symbol, bar_915.open)
@@ -606,8 +665,14 @@ class OiBiasRsiExitStrategy:
         if await self._check_oi_bias_flip(symbol, pos, bias, token):
             return
 
-        rows = await fetch_upstox_intraday_1m(stock_resolve.resolve_eq_instrument_key(symbol), token)
-        bars = sorted(_to_bars(rows), key=lambda b: b.ts)
+        # 2026-09-30 CRITICAL FIX, direct user correction: prior-day history
+        # is needed to warm up StochRSI here too -- at 75-min exit bars,
+        # (21,21,3,3) needs ~46 bars = ~9.2 TRADING DAYS to ever produce a
+        # real K/D from scratch. The existing bucket_close<=entry_ts guard
+        # below already safely excludes any historical (pre-entry_ts) bar
+        # from ever being treated as a real post-entry exit signal -- the
+        # historical prefix here exists purely to warm up k/d.
+        bars = await self._bars_with_history(symbol, token)
         if not bars:
             return
         bars_x = to_n_min_bars_market_anchored(bars, self._exit_timeframe_min)

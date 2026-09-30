@@ -11,7 +11,7 @@ Fixed by treating OI as a snapshot LEVEL: the read for "OI at 09:20" is now
 the most recent REAL (>0) reading at-or-before 09:20, not an exact-minute
 match, applied uniformly to all three snapshot times."""
 import asyncio
-from datetime import datetime, time as dtime, timedelta
+from datetime import date, datetime, time as dtime, timedelta
 from unittest.mock import AsyncMock, patch
 
 from config.global_config import IST, GlobalConfig
@@ -318,3 +318,87 @@ def test_oi_max_in_windows_window_boundaries_are_half_open():
         out = asyncio.run(s._oi_max_in_windows("SYM", 100, "CE", "tok"))
     assert out[0] == 50.0
     assert out[1] == 999.0
+
+
+# ── Prior-day StochRSI warmup, 2026-09-30 direct user correction ───────────
+# "for warmup u need to fetch data from prev day as well" -- StochRSI
+# (21,21,3,3) needs ~46 bars minimum before any real K/D exists; at 3-min
+# entry bars that's ~138 real minutes (not reachable until ~11:33 IST from a
+# 09:15 open); at 75-min exit bars it's ~9.2 TRADING DAYS -- unreachable in
+# a single day at all without prior-day seeding.
+
+def _hist_rows(day_str, entries):
+    """entries: list of (HH, MM, close) -> Upstox-shaped candle dicts for a
+    given calendar day (YYYY-MM-DD)."""
+    out = []
+    for hh, mm, close in entries:
+        out.append({
+            "ts": f"{day_str}T{hh:02d}:{mm:02d}:00+05:30",
+            "open": close, "high": close, "low": close, "close": close, "volume": 100,
+        })
+    return out
+
+
+def test_bars_with_history_prepends_prior_day_and_caches_it():
+    s = _strategy()
+    s._today = date(2026, 9, 30)
+    hist_rows = _hist_rows("2026-09-29", [(9, 15, 100.0), (9, 18, 101.0)])
+    today_rows = _hist_rows("2026-09-30", [(9, 15, 110.0), (9, 18, 111.0)])
+    range_mock = AsyncMock(return_value=hist_rows)
+    intraday_mock = AsyncMock(return_value=today_rows)
+    with patch("strategies.oi_bias_rsi_exit.engine.fetch_upstox_range_1m", range_mock), \
+         patch("strategies.oi_bias_rsi_exit.engine.fetch_upstox_intraday_1m", intraday_mock), \
+         patch("strategies.oi_bias_rsi_exit.engine.stock_resolve.resolve_eq_instrument_key",
+               return_value="NSE_EQ|TEST"):
+        bars1 = asyncio.run(s._bars_with_history("SYM", "tok"))
+        bars2 = asyncio.run(s._bars_with_history("SYM", "tok"))
+
+    assert [b.ts.date() for b in bars1] == [date(2026, 9, 29), date(2026, 9, 29),
+                                             date(2026, 9, 30), date(2026, 9, 30)]
+    assert len(bars2) == 4
+    range_mock.assert_awaited_once()  # prior-day history fetched ONCE, cached
+    assert intraday_mock.await_count == 2  # today's bars refetched every call (real-time)
+
+
+def test_bars_with_history_cache_invalidated_on_new_day():
+    s = _strategy()
+    s._today = date(2026, 9, 30)
+    s._history_bars_cache = {"SYM": [object()]}
+    s._history_cache_date = date(2026, 9, 29)  # stale, from a prior day
+    with patch("strategies.oi_bias_rsi_exit.engine.fetch_upstox_range_1m",
+               new=AsyncMock(return_value=[])), \
+         patch("strategies.oi_bias_rsi_exit.engine.fetch_upstox_intraday_1m",
+               new=AsyncMock(return_value=[])), \
+         patch("strategies.oi_bias_rsi_exit.engine.stock_resolve.resolve_eq_instrument_key",
+               return_value="NSE_EQ|TEST"):
+        asyncio.run(s._bars_with_history("SYM", "tok"))
+    assert s._history_cache_date == date(2026, 9, 30)
+
+
+def test_check_entry_ignores_prior_day_bar_even_if_time_of_day_matches():
+    """CRITICAL: a prior-day bar at e.g. 10:00 must NOT satisfy the entry
+    time gate just because its clock time is >= start_time -- only a bar
+    genuinely dated TODAY may trigger an entry."""
+    s = _strategy()
+    s._today = date(2026, 9, 30)
+    s._bias["SYM"] = "bullish"
+    s._start_time = dtime(9, 25)
+    # Prior day has PLENTY of bars with a K/D state that would satisfy
+    # check_entry_state if the date guard were missing -- today has only 2
+    # bars (nowhere near enough to independently produce a real K/D itself).
+    hist_entries = [((9 * 60 + 15 + i) // 60, (9 * 60 + 15 + i) % 60, 100.0 + i)
+                    for i in range(200)]  # trending up -> K>D eventually, spans past 10:00
+    hist_rows = _hist_rows("2026-09-29", hist_entries)
+    today_rows = _hist_rows("2026-09-30", [(9, 15, 200.0), (9, 18, 199.0)])
+    with patch("strategies.oi_bias_rsi_exit.engine.fetch_upstox_range_1m",
+               new=AsyncMock(return_value=hist_rows)), \
+         patch("strategies.oi_bias_rsi_exit.engine.fetch_upstox_intraday_1m",
+               new=AsyncMock(return_value=today_rows)), \
+         patch("strategies.oi_bias_rsi_exit.engine.stock_resolve.resolve_eq_instrument_key",
+               return_value="NSE_EQ|TEST"), \
+         patch("strategies.oi_bias_rsi_exit.engine.stock_resolve.resolve_contract") as _rc:
+        asyncio.run(s._check_entry("SYM", "tok"))
+        # If the date guard were missing, a prior-day bar could satisfy the
+        # entry condition and this would have been called to resolve a
+        # contract for a real entry -- assert it never got that far.
+        _rc.assert_not_called()
