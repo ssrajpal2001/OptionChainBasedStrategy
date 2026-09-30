@@ -31,14 +31,38 @@ ADX_PERIOD:  int = 20
 
 def rsi(closes: NDArray[np.float64]) -> float:
     """
-    Wilder's RSI — always RSI(14).
+    Wilder's RSI — always RSI(14), genuine recursive smoothing over the
+    WHOLE series passed in (not just the trailing 14 bars).
+
+    2026-09-30 CRITICAL FIX, real live incident: this used to slice to
+    `closes[-n:]` (the last 15 closes) BEFORE computing anything, which
+    leaves exactly 14 deltas -- so the recursive smoothing loop below
+    (`for i in range(period, len(deltas))`) was `range(14, 14)`, an empty
+    range that NEVER executed. Every call was silently just a plain,
+    unsmoothed average of the last 14 gains/losses, re-seeded from
+    scratch -- not Wilder's RSI at all, despite the name and the
+    module-level "Wilder's smoothing" comment. Confirmed live: SellStraddle's
+    reported RSI (18.13) diverged sharply from a real third-party chart's
+    genuine Wilder RSI(14) on the identical combined CE+PE premium series
+    (34.54) at the same moment -- a naive last-14-bars-only average reacts
+    far more sharply to a recent sustained move than true Wilder smoothing,
+    which carries a slow-moving average forward from the start of the data.
+
+    Fix: drop the truncation. Every caller already passes the FULL
+    accumulated closes series (PoolIndicatorEngine's own `combined` array,
+    ws_bridge's own running closes) -- Wilder's RSI is fully determined by
+    the complete delta sequence from the start, so recomputing over the
+    whole array each call is mathematically equivalent to true incremental
+    smoothing (just redone from the top instead of carried in an object's
+    state), with no API/call-site change needed anywhere.
+
     Returns 50.0 when fewer than RSI_PERIOD+1 candles are available.
     """
     period = RSI_PERIOD
     n = period + 1
     if len(closes) < n:
         return 50.0
-    deltas = np.diff(closes[-n:])
+    deltas = np.diff(closes)
     gains  = np.where(deltas > 0, deltas, 0.0)
     losses = np.where(deltas < 0, -deltas, 0.0)
     avg_g = float(gains[:period].mean())
