@@ -30,7 +30,11 @@ What this NEVER touches:
 
 Usage (run from the repo root, on EC2, BEFORE restarting pm2):
     python3 scripts/fresh_start_selective.py
-    python3 scripts/fresh_start_selective.py --dry-run   # preview only, deletes nothing
+    python3 scripts/fresh_start_selective.py --dry-run       # preview only, deletes nothing
+    python3 scripts/fresh_start_selective.py --skip-sell-straddle
+        # 2026-09-30, direct user follow-up: wipe ONLY the OI scanners
+        # (oi_orb_screener/oi_bias_rsi_exit), leave sell_straddle's
+        # currently-open trade + logs completely untouched.
 """
 from __future__ import annotations
 
@@ -38,8 +42,6 @@ import argparse
 import glob
 import json
 import os
-
-_WIPED_STRATEGY_PREFIXES = ("sell_straddle", "oi_orb_screener", "oi_bias_rsi_exit")
 
 
 def _wipe_glob(pattern: str, dry_run: bool) -> int:
@@ -52,7 +54,7 @@ def _wipe_glob(pattern: str, dry_run: bool) -> int:
     return n
 
 
-def _filter_trade_history(dry_run: bool) -> None:
+def _filter_trade_history(dry_run: bool, wiped_prefixes: tuple) -> None:
     hist_dir = os.path.join("data", "history")
     if not os.path.isdir(hist_dir):
         return
@@ -68,12 +70,12 @@ def _filter_trade_history(dry_run: bool) -> None:
             continue
         trades = data.get("trades", [])
         kept = [t for t in trades
-                if not str(t.get("strategy", "")).startswith(_WIPED_STRATEGY_PREFIXES)]
+                if not str(t.get("strategy", "")).startswith(wiped_prefixes)]
         removed = len(trades) - len(kept)
         if removed == 0:
             continue
-        print(f"  {path}: removing {removed} sell_straddle/oi_* records, "
-              f"keeping {len(kept)} other-strategy records (e.g. iron_fly/cag_straddle)")
+        print(f"  {path}: removing {removed} {'/'.join(wiped_prefixes)} records, "
+              f"keeping {len(kept)} other-strategy records")
         if not dry_run:
             data["trades"] = kept
             tmp = path + ".tmp"
@@ -85,17 +87,32 @@ def _filter_trade_history(dry_run: bool) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--skip-sell-straddle", action="store_true",
+                     help="Wipe only the OI scanners; leave sell_straddle's open trade/logs untouched.")
     args = ap.parse_args()
 
-    print("== fresh_start_selective: sell_straddle + OI scanner only (Iron Fly/CAG untouched) ==")
+    wiped_prefixes = ("oi_orb_screener", "oi_bias_rsi_exit")
+    if not args.skip_sell_straddle:
+        wiped_prefixes = ("sell_straddle",) + wiped_prefixes
 
-    print("\n[1/4] sell_straddle position/session/pool state:")
-    _wipe_glob(os.path.join("data", "positions", "*sell_straddle*.json"), args.dry_run)
+    step = 1
+    total_steps = 3 if args.skip_sell_straddle else 4
 
-    print("\n[2/4] sell_straddle logs:")
-    _wipe_glob(os.path.join("logs", "clients", "ss_*.log*"), args.dry_run)
+    if args.skip_sell_straddle:
+        print("== fresh_start_selective: OI scanners ONLY (sell_straddle + Iron Fly/CAG untouched) ==")
+    else:
+        print("== fresh_start_selective: sell_straddle + OI scanner only (Iron Fly/CAG untouched) ==")
 
-    print("\n[3/4] OI scanner databases + logs:")
+    if not args.skip_sell_straddle:
+        print(f"\n[{step}/{total_steps}] sell_straddle position/session/pool state:")
+        _wipe_glob(os.path.join("data", "positions", "*sell_straddle*.json"), args.dry_run)
+        step += 1
+
+        print(f"\n[{step}/{total_steps}] sell_straddle logs:")
+        _wipe_glob(os.path.join("logs", "clients", "ss_*.log*"), args.dry_run)
+        step += 1
+
+    print(f"\n[{step}/{total_steps}] OI scanner databases + logs:")
     for db in ("data/oi_orb_screener.db", "data/oi_bias_rsi_exit.db"):
         if os.path.exists(db):
             print(f"  {'[dry-run] would delete' if args.dry_run else 'deleting'}: {db}")
@@ -103,14 +120,17 @@ def main() -> None:
                 os.remove(db)
     _wipe_glob(os.path.join("logs", "clients", "oiorb_*.log*"), args.dry_run)
     _wipe_glob(os.path.join("logs", "clients", "oibiasrsi_*.log*"), args.dry_run)
+    step += 1
 
-    print("\n[4/4] trade_history.py per-client history (filtered, not deleted):")
-    _filter_trade_history(args.dry_run)
+    print(f"\n[{step}/{total_steps}] trade_history.py per-client history (filtered, not deleted):")
+    _filter_trade_history(args.dry_run, wiped_prefixes)
 
     print("\nDone." if not args.dry_run else "\nDry-run complete -- nothing was deleted.")
+    if args.skip_sell_straddle:
+        print("sell_straddle's open trade/logs were never touched (--skip-sell-straddle).")
     print("Iron Fly and CAG Straddle files were never touched.")
     print("\nNext: pm2 restart terminus   (all strategies share one process --")
-    print("      Iron Fly/CAG Straddle will reload their own untouched state normally)")
+    print("      untouched strategies will reload their own state normally)")
 
 
 if __name__ == "__main__":
