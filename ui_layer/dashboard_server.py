@@ -3425,6 +3425,17 @@ class DashboardServer:
                                 "cycle_realized_pnl": eng.cycle_realized_pnl,
                                 "lifetime_realized_pnl": eng.lifetime_realized_pnl,
                             }
+                            # 2026-09-30 CRITICAL FIX, real live incident: "in iron
+                            # fly when profit is booked it dosenmt show in booked
+                            # pnl under position section in client side" -- this
+                            # block already builds `tracking` with the engine's own
+                            # lifetime_realized_pnl, but never assigned it to the
+                            # `booked` variable this endpoint actually returns (it
+                            # stayed at its 0.0 default, sell_straddle-only, the
+                            # entire time). Confirmed live: History showed real
+                            # +Rs6955 booked today from 2 roll pairs, while this
+                            # card showed "Booked P&L +Rs0" the whole time.
+                            booked = round(float(eng.lifetime_realized_pnl or 0.0), 2)
                 except Exception as exc:
                     logger.warning("client/positions: %s/%s build error: %s", sname, underlying, exc, exc_info=True)
                 _entry_time = (getattr(pos, "open_time", None).isoformat(timespec="seconds")
