@@ -363,3 +363,42 @@ def test_eval_ruleset_skips_selection_on_the_shift_cycle():
 
     assert called["selection"] is False, "selection must be skipped the same cycle a shift just happened"
     assert s._entry_expiry_date == NEXT_EXPIRY
+
+
+def test_beginning_does_not_shift_when_all_candidates_fail_only_on_rule():
+    """2026-09-30 CRITICAL FIX, real live incident (NIFTY, 09:17 IST): every
+    single PE partner candidate cleared the ltp/theta floor fine (e.g.
+    PE22450 ltp=61.95 against a 50 floor) and was rejected ONLY by
+    rule_pass (the SLOPE entry condition not being satisfied at that
+    instant) -- yet the old code fired the same next-week-expiry safety
+    net as a genuine floor/liquidity failure, permanently abandoning the
+    current week's contract for the rest of the day over what was really
+    just "not this exact cycle." A rule miss must retry next cycle on the
+    SAME expiry, never shift."""
+    s = _strategy(spot=24512.0)
+    s._strike_prem = {
+        (24500, "CE"): {"ltp": 184.25, "atp": 180.0},
+        (24500, "PE"): {"ltp": 133.75, "atp": 130.0},
+        (24450, "CE"): {"ltp": 210.0, "atp": 205.0},   # 1-OTM anchor shift target
+        (24550, "PE"): {"ltp": 90.0, "atp": 88.0},     # clears the floor easily
+        (24600, "PE"): {"ltp": 60.0, "atp": 58.0},     # also clears the floor
+    }
+    s._entry_basis = "ltp"
+    s._balance_ratio = 1.0
+
+    # Empty rules ([]) would pass vacuously -- the real regression needs
+    # rule_pass to genuinely reject every candidate despite each one
+    # clearing the floor, so patch _eval_rules directly to force that.
+    import strategies.sell_straddle.entries as _entries_mod
+    _orig = _entries_mod._eval_rules
+    _entries_mod._eval_rules = lambda rules, ind: (False, "SLOPE not satisfied")
+    try:
+        asyncio.run(s._eval_beginning_near_far(
+            datetime.now(IST), "entry_rules_beginning", [("SLOPE",)], step=50.0, offset=7,
+            ltp_target=50.0, theta_target=0.0, variable_strikes=False, balance_ratio=1.0,
+        ))
+    finally:
+        _entries_mod._eval_rules = _orig
+
+    assert s._expiry_shifted_low_anchor_ltp is False
+    assert s._entry_expiry_date == CURRENT_EXPIRY

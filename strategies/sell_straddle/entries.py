@@ -698,6 +698,30 @@ class EntryMixin:
                 "EVAL %s [%s] NO-PAIR @ atm(%d) — spot=%.2f (ltp≥%.0f theta≥%.0f offset=%d)",
                 self._underlying, rule_key, atm, self._spot, ltp_target, theta_target, offset,
             )
+            # 2026-09-30 CRITICAL FIX, real live incident: this safety net was
+            # firing on EVERY no-partner cycle, including one where every
+            # candidate cleared the ltp/theta floor fine and was rejected only
+            # by rule_pass (the entry indicator condition, e.g. SLOPE) -- a
+            # purely temporal "not this instant" miss that the very next
+            # cycle could clear on the SAME expiry. It's not a genuine
+            # illiquidity/threshold problem, so it must not trigger a
+            # same-day-sticky jump to next week's expiry. Only shift when NO
+            # candidate in the trace even cleared the floor (every "cand"
+            # line tagged "floor", never "rule") -- that's the actual
+            # "threshold not achievable on this expiry" case the safety net
+            # was built for (2026-08-31 user spec: "the pair we are looking
+            # for is not available due to threshold").
+            _any_floor_pass = any(
+                _ln.strip().startswith("cand") and _ln.rstrip().endswith("rule")
+                for _ln in _trace
+            )
+            if _any_floor_pass:
+                self._clog.info(
+                    "EXPIRY-SHIFT skipped -- at least one candidate cleared the ltp/theta "
+                    "floor and was only rejected by the entry rule (not a threshold/"
+                    "liquidity problem); staying on the current expiry, retrying next cycle."
+                )
+                return
             # 2026-08-31, direct user spec: "when we jump to the OTM and the pair
             # we are looking for is not available due to threshold, we will jump
             # to next week" -- same next-week-expiry safety net the raw-anchor-
