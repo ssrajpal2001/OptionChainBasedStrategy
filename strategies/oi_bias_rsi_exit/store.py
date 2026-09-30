@@ -32,7 +32,14 @@ _DDL = """
 -- One row per (client, binding, trade_date, symbol) -- every shortlisted
 -- stock's full combined-OI reading and the resulting bias, whether or not
 -- it ever got a real entry. This is the table a future backtest re-runs
--- classify_combined_oi_bias against, independent of any trade outcome.
+-- classify_windowed_oi_bias against, independent of any trade outcome.
+-- 2026-09-30 CRITICAL FIX, direct user correction: replaced the original
+-- three exact-instant columns (call_oi_915/920/925) with two 5-minute
+-- WINDOW-max columns (W1=[09:15,09:20), W2=[09:20,09:25)) -- the point-in-
+-- time design was found live to permanently misclassify most real
+-- candidates as "none" whenever a contract's first real OI print landed
+-- even one minute off the exact snapshot boundary. See
+-- classify_windowed_oi_bias's own docstring for the full incident.
 CREATE TABLE IF NOT EXISTS shortlist_oi (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     client_id           TEXT NOT NULL,
@@ -44,12 +51,10 @@ CREATE TABLE IF NOT EXISTS shortlist_oi (
     atm_strike          REAL,
     otm_call_strike     REAL,
     otm_put_strike      REAL,
-    call_oi_915         REAL,
-    call_oi_920         REAL,
-    call_oi_925         REAL,
-    put_oi_915          REAL,
-    put_oi_920          REAL,
-    put_oi_925          REAL,
+    call_oi_w1          REAL,
+    call_oi_w2          REAL,
+    put_oi_w1           REAL,
+    put_oi_w2           REAL,
     bias                TEXT NOT NULL,
     recorded_ts         TEXT NOT NULL
 );
@@ -111,10 +116,11 @@ def _today() -> str:
 def record_shortlist_oi(client_id: str, binding_id: str, symbol: str, row: dict,
                          trade_date: Optional[str] = None) -> None:
     """row: {"open_915","strike_step","atm_strike","otm_call_strike",
-    "otm_put_strike","call_oi_915","call_oi_920","call_oi_925","put_oi_915",
-    "put_oi_920","put_oi_925","bias"}. Upserts -- a later poll in the same
-    day for the same symbol replaces the earlier (fresher OI-925 reading is
-    always the one worth keeping)."""
+    "otm_put_strike","call_oi_w1","call_oi_w2","put_oi_w1","put_oi_w2",
+    "bias"}. W1=[09:15,09:20) max, W2=[09:20,09:25) max -- see
+    classify_windowed_oi_bias. Upserts -- a later poll in the same day for
+    the same symbol replaces the earlier (fresher W2 reading is always the
+    one worth keeping)."""
     init_db()
     td = trade_date or _today()
     con = sqlite3.connect(_DB_PATH)
@@ -123,19 +129,17 @@ def record_shortlist_oi(client_id: str, binding_id: str, symbol: str, row: dict,
             """INSERT INTO shortlist_oi
                    (client_id, binding_id, trade_date, symbol, open_915, strike_step,
                     atm_strike, otm_call_strike, otm_put_strike,
-                    call_oi_915, call_oi_920, call_oi_925,
-                    put_oi_915, put_oi_920, put_oi_925, bias, recorded_ts)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    call_oi_w1, call_oi_w2, put_oi_w1, put_oi_w2, bias, recorded_ts)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(client_id, binding_id, trade_date, symbol) DO UPDATE SET
-                   call_oi_915=excluded.call_oi_915, call_oi_920=excluded.call_oi_920,
-                   call_oi_925=excluded.call_oi_925, put_oi_915=excluded.put_oi_915,
-                   put_oi_920=excluded.put_oi_920, put_oi_925=excluded.put_oi_925,
+                   call_oi_w1=excluded.call_oi_w1, call_oi_w2=excluded.call_oi_w2,
+                   put_oi_w1=excluded.put_oi_w1, put_oi_w2=excluded.put_oi_w2,
                    bias=excluded.bias, recorded_ts=excluded.recorded_ts""",
             (client_id, binding_id, td, symbol,
              row.get("open_915"), row.get("strike_step"), row.get("atm_strike"),
              row.get("otm_call_strike"), row.get("otm_put_strike"),
-             row.get("call_oi_915"), row.get("call_oi_920"), row.get("call_oi_925"),
-             row.get("put_oi_915"), row.get("put_oi_920"), row.get("put_oi_925"),
+             row.get("call_oi_w1"), row.get("call_oi_w2"),
+             row.get("put_oi_w1"), row.get("put_oi_w2"),
              row.get("bias", "none"), datetime.now(IST).isoformat()),
         )
         con.commit()

@@ -72,7 +72,7 @@ from strategies.core.trap_zone_utils import Bar
 from strategies.core.candle_indicators import to_n_min_bars_market_anchored
 from strategies.oi_bias_breakout.detector import freeze_signal_strikes, classify_oi_bias
 from strategies.oi_bias_rsi_exit.detector import (
-    classify_combined_oi_bias, compute_stoch_rsi_double_smoothed,
+    classify_combined_oi_bias, classify_windowed_oi_bias, compute_stoch_rsi_double_smoothed,
     check_entry_state, check_exit_cross, count_opposite_bias_readings,
 )
 from strategies.oi_bias_rsi_exit.events import OiBiasRsiExitOrderEvent
@@ -105,6 +105,14 @@ EXIT_TIMEFRAME_MIN = 75
 EXIT_STOCH_RSI_LENGTHS = (21, 21, 3, 3)
 
 _OI_SNAPSHOT_TIMES = (dtime(9, 15), dtime(9, 20), dtime(9, 25))
+
+# 2026-09-30, direct user correction ("we want total oi from 915-920 and
+# from 920-925 and then do the needful"): replaces the fixed-instant
+# snapshot design above (kept only for the still-referencing regression
+# tests' historical record -- _oi_at_snapshots itself is no longer called
+# by _compute_bias_for). See classify_windowed_oi_bias's own docstring for
+# the full incident/rationale.
+_OI_WINDOWS = ((dtime(9, 15), dtime(9, 20)), (dtime(9, 20), dtime(9, 25)))
 
 # 2026-09-29, direct user request: the third exit condition from the
 # original frozen spec, "OI bias flips to the opposite direction, twice" --
@@ -367,6 +375,38 @@ class OiBiasRsiExitStrategy:
             out[t] = best
         return out
 
+    async def _oi_max_in_windows(self, symbol: str, strike: float, option_type: str, token: str) -> Dict[int, Optional[float]]:
+        """2026-09-30 CRITICAL FIX, direct user correction after a real live
+        incident: the point-in-time design above (_oi_at_snapshots) was
+        found to permanently misclassify most real candidates as "none" --
+        confirmed via direct REST verification (raw Upstox dict dump) that
+        several genuinely tradeable stocks simply had NO candle at all for
+        one or more of the exact 09:15/09:20/09:25 minutes (thin early-
+        session trading is normal, not a data/feed bug). Direct user spec:
+        "we want total oi from 915-920 and from 920-925 and then do the
+        needful" -- replaces the fixed instants with two 5-minute windows,
+        returning the MAX real (>0) OI reading found anywhere within each
+        window (direct user choice among last/max/net-change alternatives).
+        Returns {0: W1[09:15,09:20) max, 1: W2[09:20,09:25) max}, None for
+        a window with no real reading at all (never fabricated)."""
+        out: Dict[int, Optional[float]] = {0: None, 1: None}
+        contract = await asyncio.to_thread(stock_resolve.resolve_contract, symbol, strike, option_type, ("upstox",))
+        if contract is None:
+            return out
+        rows = await fetch_upstox_intraday_1m(contract.upstox_key, token)
+        parsed = []
+        for r in rows:
+            ts = r["ts"]
+            if isinstance(ts, str):
+                ts = datetime.fromisoformat(ts)
+            oi = r.get("oi")
+            if oi:
+                parsed.append((ts.time(), float(oi)))
+        for i, (start, end) in enumerate(_OI_WINDOWS):
+            in_window = [oi for bar_t, oi in parsed if start <= bar_t < end]
+            out[i] = max(in_window) if in_window else None
+        return out
+
     async def _current_oi(self, symbol: str, strike: float, option_type: str, token: str) -> Optional[float]:
         """Latest real (>0) OI reading for a contract, for the rolling
         OI-bias-flip re-check -- same forward-fill-from-last-real-reading
@@ -395,31 +435,30 @@ class OiBiasRsiExitStrategy:
         step = stock_resolve.resolve_strike_step_for_price(symbol, bar_915.open)
         strikes = freeze_signal_strikes(open_915_price=bar_915.open, strike_step=step)
 
-        atm_call = await self._oi_at_snapshots(symbol, strikes.atm, "CE", token)
-        otm_call = await self._oi_at_snapshots(symbol, strikes.otm_call, "CE", token)
-        atm_put = await self._oi_at_snapshots(symbol, strikes.atm, "PE", token)
-        otm_put = await self._oi_at_snapshots(symbol, strikes.otm_put, "PE", token)
+        atm_call = await self._oi_max_in_windows(symbol, strikes.atm, "CE", token)
+        otm_call = await self._oi_max_in_windows(symbol, strikes.otm_call, "CE", token)
+        atm_put = await self._oi_max_in_windows(symbol, strikes.atm, "PE", token)
+        otm_put = await self._oi_max_in_windows(symbol, strikes.otm_put, "PE", token)
 
-        def combine(a, b, t):
-            av, bv = a[t], b[t]
+        def combine(a, b, w):
+            av, bv = a[w], b[w]
             return None if av is None or bv is None else av + bv
 
-        call = {t: combine(atm_call, otm_call, t) for t in _OI_SNAPSHOT_TIMES}
-        put = {t: combine(atm_put, otm_put, t) for t in _OI_SNAPSHOT_TIMES}
+        call = {w: combine(atm_call, otm_call, w) for w in (0, 1)}
+        put = {w: combine(atm_put, otm_put, w) for w in (0, 1)}
 
-        bias = classify_combined_oi_bias(
-            call_oi_915=call[dtime(9, 15)], call_oi_920=call[dtime(9, 20)], call_oi_925=call[dtime(9, 25)],
-            put_oi_915=put[dtime(9, 15)], put_oi_920=put[dtime(9, 20)], put_oi_925=put[dtime(9, 25)],
+        bias = classify_windowed_oi_bias(
+            call_w1=call[0], call_w2=call[1], put_w1=put[0], put_w2=put[1],
         )
         self._bias[symbol] = bias
-        self._clog.info("%s: combined OI bias=%s (call=%s put=%s)", symbol, bias, call, put)
+        self._clog.info("%s: windowed OI bias=%s (call=%s put=%s)", symbol, bias, call, put)
         await asyncio.to_thread(
             store.record_shortlist_oi, self._client_id, self._binding_id, symbol,
             {
                 "open_915": bar_915.open, "strike_step": step, "atm_strike": strikes.atm,
                 "otm_call_strike": strikes.otm_call, "otm_put_strike": strikes.otm_put,
-                "call_oi_915": call[dtime(9, 15)], "call_oi_920": call[dtime(9, 20)], "call_oi_925": call[dtime(9, 25)],
-                "put_oi_915": put[dtime(9, 15)], "put_oi_920": put[dtime(9, 20)], "put_oi_925": put[dtime(9, 25)],
+                "call_oi_w1": call[0], "call_oi_w2": call[1],
+                "put_oi_w1": put[0], "put_oi_w2": put[1],
                 "bias": bias,
             },
         )

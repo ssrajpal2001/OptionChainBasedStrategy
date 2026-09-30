@@ -162,3 +162,46 @@ def test_classify_combined_oi_bias_none_when_any_reading_missing():
         put_oi_915=500, put_oi_920=600, put_oi_925=700,
     )
     assert bias == "none"
+
+
+# ── classify_windowed_oi_bias, 2026-09-30 direct user correction ───────────
+# "we want total oi from 915-920 and from 920-925 and then do the needful" --
+# replaces the fixed-instant design above with two 5-minute windows (each a
+# MAX-in-window value, direct user choice), single transition W1->W2.
+
+def test_classify_windowed_oi_bias_bullish_call_falls_put_rises():
+    bias = d.classify_windowed_oi_bias(call_w1=1000, call_w2=800, put_w1=500, put_w2=700)
+    assert bias == "bullish"
+
+
+def test_classify_windowed_oi_bias_bearish_put_falls_call_rises():
+    bias = d.classify_windowed_oi_bias(call_w1=500, call_w2=700, put_w1=1000, put_w2=800)
+    assert bias == "bearish"
+
+
+def test_classify_windowed_oi_bias_none_when_both_fall():
+    bias = d.classify_windowed_oi_bias(call_w1=1000, call_w2=800, put_w1=1000, put_w2=800)
+    assert bias == "none"
+
+
+def test_classify_windowed_oi_bias_none_when_both_rise():
+    bias = d.classify_windowed_oi_bias(call_w1=500, call_w2=700, put_w1=500, put_w2=700)
+    assert bias == "none"
+
+
+def test_classify_windowed_oi_bias_none_when_any_reading_missing():
+    bias = d.classify_windowed_oi_bias(call_w1=None, call_w2=800, put_w1=500, put_w2=700)
+    assert bias == "none"
+    bias2 = d.classify_windowed_oi_bias(call_w1=1000, call_w2=800, put_w1=500, put_w2=None)
+    assert bias2 == "none"
+
+
+def test_classify_windowed_oi_bias_abb_real_incident_shape():
+    """Real incident: ABB's OTM PE had zero real OI prints in the whole
+    09:15-09:25 span under the old fixed-instant design (permanently
+    'none'). Under the windowed design, a window that genuinely has NO real
+    print anywhere in it still correctly stays 'none' -- this fix is about
+    tolerating a print landing anywhere WITHIN a 5-min window, not
+    fabricating data for a window with zero real prints at all."""
+    bias = d.classify_windowed_oi_bias(call_w1=44375, call_w2=47250, put_w1=None, put_w2=None)
+    assert bias == "none"

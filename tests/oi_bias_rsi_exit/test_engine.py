@@ -258,3 +258,63 @@ def test_rescan_interval_configurable_and_zero_disables():
     s2 = OiBiasRsiExitStrategy(EventBus(), GlobalConfig(), client_id="C", binding_id="B",
                                 rescan_interval_sec=0)
     assert s2._rescan_interval_sec == 0
+
+
+# ── _oi_max_in_windows, 2026-09-30 direct user correction ──────────────────
+
+def _win_rows(rows):
+    """rows: list of (HH, MM, oi) -> Upstox-shaped candle dicts (no row at
+    all for minutes where the contract genuinely didn't trade -- matches
+    the real raw Upstox response confirmed live for ABB PE6700)."""
+    out = []
+    for hh, mm, oi in rows:
+        out.append({
+            "ts": f"2026-09-30T{hh:02d}:{mm:02d}:00+05:30",
+            "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0,
+            "volume": 100, "oi": oi,
+        })
+    return out
+
+
+def test_oi_max_in_windows_real_abb_incident_shape():
+    """Real incident: ABB PE6700 had ZERO rows at all from market open
+    through 09:28 (confirmed via a direct raw Upstox dict dump) -- both
+    windows must resolve to None, not a fabricated 0 or a stale carry-in."""
+    s = _strategy()
+    rows = _win_rows([(9, 29, 27750.0), (9, 32, 27875.0)])  # first real print after both windows
+    with patch("strategies.oi_bias_rsi_exit.engine.stock_resolve.resolve_contract",
+               return_value=_FakeContract()), \
+         patch("strategies.oi_bias_rsi_exit.engine.fetch_upstox_intraday_1m",
+               new=AsyncMock(return_value=rows)):
+        out = asyncio.run(s._oi_max_in_windows("ABB", 6700, "PE", "tok"))
+    assert out[0] is None  # W1 [09:15,09:20)
+    assert out[1] is None  # W2 [09:20,09:25)
+
+
+def test_oi_max_in_windows_takes_max_within_each_window():
+    s = _strategy()
+    rows = _win_rows([
+        (9, 15, 100.0), (9, 17, 150.0), (9, 19, 120.0),   # W1: max=150
+        (9, 21, 200.0), (9, 23, 250.0), (9, 24, 180.0),   # W2: max=250
+    ])
+    with patch("strategies.oi_bias_rsi_exit.engine.stock_resolve.resolve_contract",
+               return_value=_FakeContract()), \
+         patch("strategies.oi_bias_rsi_exit.engine.fetch_upstox_intraday_1m",
+               new=AsyncMock(return_value=rows)):
+        out = asyncio.run(s._oi_max_in_windows("SYM", 100, "CE", "tok"))
+    assert out[0] == 150.0
+    assert out[1] == 250.0
+
+
+def test_oi_max_in_windows_window_boundaries_are_half_open():
+    """09:20:00 itself belongs to W2 [09:20,09:25), never W1 -- confirms no
+    off-by-one double counting at the boundary."""
+    s = _strategy()
+    rows = _win_rows([(9, 19, 50.0), (9, 20, 999.0)])
+    with patch("strategies.oi_bias_rsi_exit.engine.stock_resolve.resolve_contract",
+               return_value=_FakeContract()), \
+         patch("strategies.oi_bias_rsi_exit.engine.fetch_upstox_intraday_1m",
+               new=AsyncMock(return_value=rows)):
+        out = asyncio.run(s._oi_max_in_windows("SYM", 100, "CE", "tok"))
+    assert out[0] == 50.0
+    assert out[1] == 999.0

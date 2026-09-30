@@ -165,6 +165,55 @@ def classify_combined_oi_bias(
     return "none"
 
 
+def classify_windowed_oi_bias(
+    call_w1: Optional[float], call_w2: Optional[float],
+    put_w1: Optional[float], put_w2: Optional[float],
+) -> str:
+    """2026-09-30 CRITICAL FIX, real live incident + direct user correction:
+    the original point-in-time design (classify_combined_oi_bias, exact
+    09:15/09:20/09:25 instants) was found live to permanently misclassify
+    the majority of real OI-spurt candidates as "none" -- confirmed via
+    direct REST verification (raw Upstox dict dump) that several genuinely
+    tradeable stocks (BSE/FORTIS/MAXHEALTH/SOLARINDS) simply had NO candle
+    at all for one or more of those exact minutes (thin early-session
+    trading, not a data/feed bug), and one (ABB) had zero real prints
+    anywhere in the whole 09:15-09:25 span for its OTM PE leg.
+
+    Direct user correction: "we want total oi from 915-920 and from 920-925
+    and then do the needful" -- replaces the three exact-instant snapshots
+    with two 5-minute WINDOWS, W1=[09:15,09:20) and W2=[09:20,09:25).
+    call_w1/call_w2/put_w1/put_w2 are each the MAX real OI reading observed
+    anywhere within that window (direct user choice among last/max/net-
+    change alternatives) -- callers compute this per leg then sum ATM+OTM
+    before calling here, same combine-before-classify convention as
+    classify_combined_oi_bias.
+
+    Single transition (W1->W2), not the double-transition rule the fixed-
+    instant version used -- there are only two windows now, so requiring
+    "both transitions agree" has no meaning here. bullish: combined Call OI
+    max FALLS W1->W2 AND combined Put OI max RISES W1->W2. bearish: the
+    mirror. Any reading missing (no real OI anywhere in that whole window)
+    -> 'none', never fabricated."""
+    vals = (call_w1, call_w2, put_w1, put_w2)
+    if any(v is None for v in vals):
+        return "none"
+
+    call_falls = call_w2 < call_w1
+    call_rises = call_w2 > call_w1
+    put_falls = put_w2 < put_w1
+    put_rises = put_w2 > put_w1
+
+    bullish = call_falls and put_rises
+    bearish = put_falls and call_rises
+    if bullish and bearish:
+        return "conflict"
+    if bullish:
+        return "bullish"
+    if bearish:
+        return "bearish"
+    return "none"
+
+
 def count_opposite_bias_readings(bias_history: List[str], entry_bias: str) -> int:
     """Direct user spec: the 'bias flips twice' exit counts how many times
     the (externally supplied, re-run every 5 min) OI bias has read as the
