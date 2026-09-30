@@ -135,3 +135,46 @@ def test_reentry_block_reason_atm_ref_matches_select_balanced_pair():
     at_explicit = select_balanced_pair_at(cache, atm=24550, spot=24512.90, step=50, offset=4, ltp_target=50.0)
     assert diag["kind"] == "passed"
     assert (diag["ce"], diag["pe"]) == (at_explicit[0], at_explicit[1])
+
+
+def test_trace_shows_rule_reason_not_bare_word(monkeypatch):
+    """2026-09-30, direct user request: the trace used to collapse every
+    rule-rejected candidate to the bare word "rule", giving zero visibility
+    into which indicator (e.g. SLOPE) was actually checked or its value --
+    indistinguishable from a genuinely-failing condition vs an indicator
+    that simply wasn't computable yet (both read as "rule"/N/A). rule_pass
+    may now return (bool, reason) and that reason must show up verbatim in
+    the trace line."""
+    cache = _cache()
+    trace: list = []
+
+    def _rule_pass(cs, ps):
+        return False, "SLOPE(-1.37)<VALUE(0.00)=✗"
+
+    result = select_balanced_pair_at(
+        cache, 24500, 24512.0, 50, 2, 50.0, trace=trace, rule_pass=_rule_pass,
+    )
+    assert result is None
+    cand_lines = [ln for ln in trace if ln.strip().startswith("cand")]
+    assert cand_lines, "expected at least one candidate trace line"
+    for ln in cand_lines:
+        assert "SLOPE(-1.37)<VALUE(0.00)=✗" in ln
+        assert ln.rstrip().endswith("]")
+
+
+def test_trace_still_shows_bare_rule_word_when_rule_pass_returns_plain_bool():
+    """Backward compat: an older-style rule_pass returning a plain bool
+    (no reason) must still work, falling back to the original bare "rule"
+    tag rather than crashing or showing an empty bracket."""
+    cache = _cache()
+    trace: list = []
+
+    result = select_balanced_pair_at(
+        cache, 24500, 24512.0, 50, 2, 50.0, trace=trace, rule_pass=lambda cs, ps: False,
+    )
+    assert result is None
+    cand_lines = [ln for ln in trace if ln.strip().startswith("cand")]
+    assert cand_lines
+    for ln in cand_lines:
+        assert ln.rstrip().endswith("rule")
+        assert "[" not in ln

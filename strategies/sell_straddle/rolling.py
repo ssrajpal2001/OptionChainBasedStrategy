@@ -770,35 +770,52 @@ class RollingMixin:
         max_itm = int(ss.get("roll_max_itm_steps", 5))
         variable_strikes = bool(ss.get("variable_strikes", False))
 
-        def _rule_pass(ce_s: int, pe_s: int) -> bool:
+        # 2026-09-30, direct user request: surface WHICH indicator/value
+        # decided each candidate here too, not just a bare bool -- same
+        # (passed, reason) detail select_rollover_partner_directional's own
+        # _rule_pass_with_detail already provides for the primary rollover.
+        def _rule_pass(ce_s: int, pe_s: int):
             ind = self._ind_by_tf(ce_s, pe_s, rules)
-            passed, _reason = _eval_rules_prot(rules, ind)
-            return bool(passed)
+            return _eval_rules_prot(rules, ind)
 
         # Step 1: does the strike we ORIGINALLY rolled out of still pass re-entry now?
         orig_v = self._strike_prem.get((orig_strike, new_side))
         orig_ltp = float(orig_v.get("ltp", 0.0) or 0.0) if orig_v else 0.0
         ce_s = orig_strike if new_side == "CE" else kept_strike
         pe_s = kept_strike if new_side == "CE" else orig_strike
-        if orig_ltp > 0 and _rule_pass(ce_s, pe_s):
+        _orig_passed, _orig_reason = _rule_pass(ce_s, pe_s)
+        if orig_ltp > 0 and _orig_passed:
             self._clog.info(
-                "SellStraddle[%s]: ITM-ROLL PROTECTION — restoring prior strike %s%d @%.2f (passes re-entry).",
-                self._underlying, new_side, orig_strike, orig_ltp,
+                "SellStraddle[%s]: ITM-ROLL PROTECTION — restoring prior strike %s%d @%.2f "
+                "(passes re-entry: %s).",
+                self._underlying, new_side, orig_strike, orig_ltp, _orig_reason,
             )
             await self._open_leg(new_side, orig_strike, orig_ltp, now, "itm_roll_protection_restore")
             self._persist()
             return
+        self._clog.info(
+            "SellStraddle[%s]: ITM-ROLL PROTECTION — prior strike %s%d @%.2f did not restore "
+            "(ltp>0=%s, rule: %s).",
+            self._underlying, new_side, orig_strike, orig_ltp, orig_ltp > 0, _orig_reason,
+        )
 
         # Step 2: broader pool search for the still-running kept leg, excluding ONLY the
         # strike we just stopped out of (not orig_strike, which was already checked above).
         pool = {k: v for k, v in self._strike_prem.items()
                 if not (k[0] == stopped_strike and k[1] == new_side)}
+        _pool_trace: list = []
         partner = select_partner_for(
             pool, roll_side=new_side, kept_strike=kept_strike, kept_ltp=kept_ltp,
             spot=(self._atm_ref if self._atm_ref > 0 else self._spot),
             step=step, offset=offset, ltp_target=ltp_target,
-            rule_pass=_rule_pass, max_itm_steps=max_itm, theta_target=self._theta_target,
+            rule_pass=_rule_pass,
+            max_itm_steps=max_itm, theta_target=self._theta_target,
             variable_strikes=variable_strikes, ltp_le_kept=True, metric="balanced_ratio",
+            trace=_pool_trace,
+        )
+        self._clog.info(
+            "SellStraddle[%s]: ITM-ROLL PROTECTION pool search detail:\n%s",
+            self._underlying, _format_partner_trace(_pool_trace),
         )
         if partner:
             pool_strike, pool_ltp = partner

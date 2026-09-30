@@ -601,15 +601,18 @@ class EntryMixin:
         # a purely LTP-balanced one that then failed the rule anyway.
         # select_balanced_pair_at already supports a rule_pass(ce,pe)->bool
         # gate applied to every candidate before scoring (see selection.py);
-        # it was just never wired in at this call site. Must return a plain
-        # bool, not the (passed, reason) tuple _eval_rules returns -- a
-        # truthy tuple would make every candidate look like it passed.
+        # it was just never wired in at this call site.
+        # 2026-09-30, direct user request: pass the full (bool, reason) tuple
+        # through (selection.py's candidate loop now explicitly unpacks a
+        # tuple return, same backward-compat contract _evaluate_roll_
+        # candidate already used) so the trace shows WHICH indicator/value
+        # decided each RE-ENTRY candidate too, not just the bare word "rule".
         sel = select_balanced_pair(
             self._strike_prem, _atm_src, reentry_step, offset, ltp_target, trace=_trace,
             entry_basis=self._entry_basis, theta_target=self._theta_target,
             variable_strikes=variable_strikes, balance_ratio=balance_ratio,
             atm_ref=_atm_src,
-            rule_pass=lambda cs, ps: _eval_rules(rules, self._ind_by_tf(cs, ps, rules))[0],
+            rule_pass=lambda cs, ps: _eval_rules(rules, self._ind_by_tf(cs, ps, rules)),
         )
 
         for _ln in _trace:
@@ -689,7 +692,12 @@ class EntryMixin:
             entry_basis=self._entry_basis, theta_target=theta_target,
             variable_strikes=variable_strikes, balance_ratio=balance_ratio,
             anchor_otm_steps=1,
-            rule_pass=lambda cs, ps: _eval_rules(rules, self._ind_by_tf(cs, ps, rules))[0],
+            # 2026-09-30, direct user request: pass the full (bool, reason)
+            # tuple through so the trace shows WHICH indicator/value decided
+            # each candidate (e.g. "SLOPE(-1.37)<VALUE(0.00)=✗" or, when the
+            # indicator genuinely wasn't computable yet, "SLOPE(N/A)<VALUE
+            # (0.00)=✗") instead of the bare, undiagnosable word "rule".
+            rule_pass=lambda cs, ps: _eval_rules(rules, self._ind_by_tf(cs, ps, rules)),
         )
         for _ln in _trace:
             self._clog.info("SELECT %s | [atm@%d] %s", self._underlying, atm, _ln)
@@ -712,7 +720,7 @@ class EntryMixin:
             # was built for (2026-08-31 user spec: "the pair we are looking
             # for is not available due to threshold").
             _any_floor_pass = any(
-                _ln.strip().startswith("cand") and _ln.rstrip().endswith("rule")
+                _ln.strip().startswith("cand") and " rule" in _ln
                 for _ln in _trace
             )
             if _any_floor_pass:

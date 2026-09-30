@@ -887,7 +887,20 @@ def select_balanced_pair_at(
             cs, ps = anchor_strike, s
         else:
             cs, ps = s, anchor_strike
-        _ok_rule = rule_pass(cs, ps) if rule_pass is not None else True
+        _rp = rule_pass(cs, ps) if rule_pass is not None else True
+        # 2026-09-30, direct user request: the trace used to collapse every
+        # rule rejection to the bare word "rule", with no visibility into
+        # WHICH indicator (e.g. SLOPE) was checked, its actual value, or
+        # whether it was genuinely computed vs still "N/A" (not enough bars
+        # yet -- eval_rules() treats a missing indicator exactly the same as
+        # a real comparison failure, so this distinction was previously
+        # invisible). rule_pass may return bool or (bool, reason) -- same
+        # backward-compat contract _evaluate_roll_candidate already uses.
+        if isinstance(_rp, tuple):
+            _ok_rule = bool(_rp[0])
+            _rule_reason = str(_rp[1]) if len(_rp) > 1 else ""
+        else:
+            _ok_rule, _rule_reason = bool(_rp), ""
         _ok = _ok_floor and _ok_rule
         _denom = anchor_ltp + ltp
         _score = abs(anchor_ltp - ltp) / _denom if _denom > 0 else 999.0
@@ -896,9 +909,9 @@ def select_balanced_pair_at(
             if not _ok_floor:
                 _why = "floor"
             elif not _ok_rule:
-                _why = "rule"
+                _why = f"rule [{_rule_reason}]" if _rule_reason else "rule"
             else:
-                _why = f"OK score={_score:.4f}"
+                _why = f"OK score={_score:.4f}" + (f" [{_rule_reason}]" if _rule_reason else "")
             trace.append(
                 f"  cand {partner_side}{s} ltp={ltp:.2f} tv={_tv:.2f} {_why}"
             )
