@@ -214,6 +214,12 @@ class OiBiasRsiExitStrategy:
         # warm at market open -- see _bars_with_history().
         self._history_bars_cache: Dict[str, List[Bar]] = {}
         self._history_cache_date: Optional[date] = None
+        # 2026-09-30, direct user request: "position not showing anything
+        # that which all stocks were scanned and what r they doing now" --
+        # tracks the latest entry-side K/D per candidate so monitoring_state()
+        # can show it for every scanned stock, not just ones already in a
+        # position.
+        self._last_entry_kd: Dict[str, dict] = {}
 
     def start(self) -> None:
         if self._running:
@@ -243,6 +249,7 @@ class OiBiasRsiExitStrategy:
         self._day_done = False
         self._history_bars_cache = {}
         self._history_cache_date = None
+        self._last_entry_kd = {}
         self._clog.info("session reset for new trading day %s.", today)
 
     async def _loop(self) -> None:
@@ -533,6 +540,13 @@ class OiBiasRsiExitStrategy:
              if b.ts.date() == self._today and b.ts.time() >= self._start_time
              and check_entry_state(k[i], d[i], bias)),
             None)
+        # 2026-09-30, direct user request: track the latest K/D for every
+        # scanned candidate (not just open positions) so monitoring_state()
+        # can show "what are they doing now" for the whole scan list.
+        self._last_entry_kd[symbol] = {
+            "k": k[-1] if k else None, "d": d[-1] if d else None,
+            "bias": bias, "bars": len(bars_e),
+        }
         if idx is None:
             # 2026-09-30, direct user request (same visibility gap already
             # fixed for sell_straddle's SELECT trace and OI-ORB's selection
@@ -723,8 +737,45 @@ class OiBiasRsiExitStrategy:
                 self._clog.exception("EOD square-off failed for %s.", symbol)
 
     def monitoring_state(self) -> dict:
+        # 2026-09-30, direct user request: "position not showing anything
+        # that which all stocks were scanned and what r they doing now" --
+        # a per-candidate breakdown (bias, live K/D, in-position or not),
+        # not just the raw candidates/bias/positions dicts, so the
+        # dashboard can show every scanned stock's current state, not only
+        # ones that already have an open position.
+        scanned = []
+        for sym in self._candidates:
+            kd = self._last_entry_kd.get(sym, {})
+            pos = self._positions.get(sym)
+            scanned.append({
+                "symbol": sym,
+                "bias": self._bias.get(sym, "none"),
+                "k": kd.get("k"), "d": kd.get("d"),
+                "bars_3m": kd.get("bars"),
+                "in_position": pos is not None,
+                "position_summary": (
+                    f"{pos['option_type']}{pos['strike']} qty={pos['qty']} @{pos['entry_price']:.2f}"
+                    if pos else None
+                ),
+            })
+        # "strikes" is a SignalStrikes dataclass -- not JSON-serializable by
+        # the dashboard's default encoder, so it's flattened here rather
+        # than passed through raw.
+        import dataclasses as _dc
+        positions_out = {}
+        for s, p in self._positions.items():
+            pp = dict(p)
+            if "strikes" in pp and _dc.is_dataclass(pp["strikes"]):
+                pp["strikes"] = _dc.asdict(pp["strikes"])
+            for _k in ("entry_ts", "next_oi_check"):
+                if isinstance(pp.get(_k), datetime):
+                    pp[_k] = pp[_k].isoformat()
+            if isinstance(pp.get("expiry"), date):
+                pp["expiry"] = pp["expiry"].isoformat()
+            positions_out[s] = pp
         return {
             "client_id": self._client_id, "binding_id": self._binding_id,
             "candidates": self._candidates, "bias": dict(self._bias),
-            "positions": {s: dict(p) for s, p in self._positions.items()},
+            "scanned": scanned,
+            "positions": positions_out,
         }

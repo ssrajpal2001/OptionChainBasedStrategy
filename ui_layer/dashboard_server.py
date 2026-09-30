@@ -776,6 +776,7 @@ class DashboardServer:
         oi_orb_manager=None,  # OiOrbScreenerBookManager — OI-Spurt + ORB screener books (F&O stocks)
         cag_straddle_manager=None,  # CagStraddleBookManager — 15:00-15:35 R1/S1 breach books
         iron_fly_manager=None,  # IronFlyBookManager — NIFTY Weekly Iron Condor -> Iron Fly, 2026-09-14
+        oi_bias_rsi_exit_manager=None,  # OiBiasRsiExitBookManager — OI-spurt + windowed-OI-bias + StochRSI, 2026-09-30
     ) -> None:
         self._bus = bus
         self._cfg = cfg
@@ -790,6 +791,7 @@ class DashboardServer:
         self._oi_orb_manager = oi_orb_manager
         self._cag_straddle_manager = cag_straddle_manager
         self._iron_fly_manager = iron_fly_manager
+        self._oi_bias_rsi_exit_manager = oi_bias_rsi_exit_manager
         self._ws_bridge = WsBridge(bus, cfg=cfg)
         self._uvicorn_server = None
 
@@ -6151,6 +6153,7 @@ pm2 save
         self._register_oi_orb_routes(app)
         self._register_cag_straddle_routes(app)
         self._register_iron_fly_routes(app)
+        self._register_oi_bias_rsi_exit_routes(app)
         return app
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -6501,6 +6504,36 @@ pm2 save
                         getattr(b, "_underlying", "?"),
                     )
             result.sort(key=lambda r: (0 if not r.get("is_flat") else 1, r.get("underlying", "")))
+            return {"ok": True, "books": result}
+
+    def _register_oi_bias_rsi_exit_routes(self, app) -> None:
+        _srv = self
+
+        @app.get("/api/oibiasrsiexit/status")
+        async def oi_bias_rsi_exit_status():
+            """Per-book state straight from OiBiasRsiExitStrategy.
+            monitoring_state() (strategies/oi_bias_rsi_exit/engine.py) --
+            2026-09-30 direct user request ("position not showing anything
+            that which all stocks were scanned and what r they doing now"):
+            every scanned candidate's bias + live K/D (not just ones with an
+            open position), plus the open position(s) if any. Same shape
+            convention as every other strategy's own status endpoint above."""
+            if _srv._oi_bias_rsi_exit_manager is None:
+                return {"ok": True, "books": []}
+            books = getattr(_srv._oi_bias_rsi_exit_manager, "books", [])
+            result = []
+            for b in books:
+                if not hasattr(b, "monitoring_state"):
+                    continue
+                try:
+                    result.append(b.monitoring_state())
+                except Exception:
+                    logger.exception(
+                        "oi_bias_rsi_exit_status: monitoring_state() raised for %s/%s -- dropped from panel.",
+                        getattr(b, "_client_id", "?"), getattr(b, "_binding_id", "?"),
+                    )
+            result.sort(key=lambda r: (0 if r.get("positions") else 1,
+                                        r.get("client_id", ""), r.get("binding_id", "")))
             return {"ok": True, "books": result}
 
     def _open_history_rows(self, cid: str) -> list:

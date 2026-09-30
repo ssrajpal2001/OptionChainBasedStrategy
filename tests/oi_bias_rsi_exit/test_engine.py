@@ -402,3 +402,49 @@ def test_check_entry_ignores_prior_day_bar_even_if_time_of_day_matches():
         # entry condition and this would have been called to resolve a
         # contract for a real entry -- assert it never got that far.
         _rc.assert_not_called()
+
+
+# ── monitoring_state, 2026-09-30 direct user request ────────────────────────
+# "position not showing anything that which all stocks were scanned and
+# what r they doing now" -- every candidate's live bias/K/D, plus a fully
+# JSON-serializable positions dict (SignalStrikes/datetime/date all flattened).
+
+def test_monitoring_state_shows_every_scanned_candidate_not_just_positions():
+    s = _strategy()
+    s._candidates = ["COFORGE", "SOLARINDS", "ABB"]
+    s._bias = {"COFORGE": "bearish", "SOLARINDS": "bullish", "ABB": "none"}
+    s._last_entry_kd = {
+        "COFORGE": {"k": 1.02, "d": 2.55, "bias": "bearish", "bars": 1787},
+        "SOLARINDS": {"k": None, "d": None, "bias": "bullish", "bars": 5},
+    }
+    state = s.monitoring_state()
+    by_sym = {row["symbol"]: row for row in state["scanned"]}
+    assert by_sym["COFORGE"]["bias"] == "bearish"
+    assert by_sym["COFORGE"]["k"] == 1.02
+    assert by_sym["COFORGE"]["d"] == 2.55
+    assert by_sym["COFORGE"]["in_position"] is False
+    assert by_sym["ABB"]["bias"] == "none"
+    assert by_sym["ABB"]["k"] is None  # never had an entry check yet
+
+
+def test_monitoring_state_positions_are_json_serializable():
+    import json
+    s = _strategy()
+    s._candidates = ["SYM"]
+    s._bias = {"SYM": "bullish"}
+    s._positions["SYM"] = {
+        "option_type": "CE", "strike": 100.0, "qty": 75, "entry_price": 50.0,
+        "entry_ts": datetime.now(IST), "expiry": date(2026, 10, 27),
+        "upstox_key": "NSE_FO|1",
+        "strikes": SignalStrikes(atm=100, otm_call=110, otm_put=90),
+        "prev_oi": {}, "oi_bias_history": [],
+        "next_oi_check": datetime.now(IST),
+    }
+    state = s.monitoring_state()
+    json.dumps(state)  # must not raise
+    assert state["positions"]["SYM"]["strikes"] == {"atm": 100, "otm_call": 110, "otm_put": 90}
+    assert isinstance(state["positions"]["SYM"]["expiry"], str)
+    assert isinstance(state["positions"]["SYM"]["entry_ts"], str)
+    by_sym = {row["symbol"]: row for row in state["scanned"]}
+    assert by_sym["SYM"]["in_position"] is True
+    assert "CE100" in by_sym["SYM"]["position_summary"]

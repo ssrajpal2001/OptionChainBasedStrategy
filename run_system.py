@@ -886,6 +886,7 @@ async def _run_live(
                 oi_orb_manager=managers.get("oi_orb_screener"),
                 cag_straddle_manager=managers.get("cag_straddle"),
                 iron_fly_manager=managers.get("iron_fly"),
+                oi_bias_rsi_exit_manager=managers.get("oi_bias_rsi_exit"),
             )
         except ImportError as exc:
             logger.warning("Could not start dashboard (missing deps): %s", exc)
