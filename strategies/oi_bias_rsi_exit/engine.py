@@ -868,9 +868,17 @@ class OiBiasRsiExitStrategy:
         # a genuine post-entry bar exists but hasn't crossed yet.
         _k_last = k[_last_i] if _last_i is not None else None
         _d_last = d[_last_i] if _last_i is not None else None
+        # 2026-09-30 CRITICAL FIX, real live incident: this showed the RAW
+        # LENGTH of oi_bias_history (every reading, including "none"s that
+        # never count toward the flip-twice exit per count_opposite_bias_
+        # readings' own docstring) -- confirmed live: SOLARINDS's history
+        # was 8 entries, ALL "none", yet the log showed "OI-flip 8/2",
+        # falsely implying the exit should have fired at 2 and hadn't. The
+        # real opposite-reading count (what _check_oi_bias_flip itself
+        # actually compares against the threshold) was genuinely 0.
         self._last_exit_kd[symbol] = {
             "k": _k_last, "d": _d_last, "bias": bias,
-            "oi_flip_count": len(pos.get("oi_bias_history", [])),
+            "oi_flip_count": count_opposite_bias_readings(pos.get("oi_bias_history", []), bias),
             "oi_flip_threshold": self._oi_bias_flip_count,
         }
         if not crossed:

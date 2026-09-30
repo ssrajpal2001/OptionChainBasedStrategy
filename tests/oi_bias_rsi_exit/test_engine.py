@@ -703,3 +703,36 @@ def test_tick_restores_positions_exactly_once():
         asyncio.run(s._tick())
     assert s._restore_positions.await_count == 1
     assert s._positions_restored is True
+
+
+def test_check_exit_oi_flip_count_is_real_opposite_count_not_raw_length():
+    """CRITICAL FIX, real live incident: confirmed live that SOLARINDS's
+    oi_bias_history grew to 8 entries, ALL "none" (never opposite of its
+    bullish entry), yet the WAIT-EXIT log showed "OI-flip 8/2" -- falsely
+    implying the flip-twice exit should have fired. The real count (what
+    _check_oi_bias_flip itself compares against the threshold) must stay 0
+    when every reading is "none"."""
+    s = _strategy()
+    s._today = date(2026, 9, 30)
+    s._bias["SOLARINDS"] = "bullish"
+    pos = _pos()
+    pos["option_type"] = "CE"
+    pos["oi_bias_history"] = ["none"] * 8  # matches the real live incident shape
+    s._positions["SOLARINDS"] = pos
+
+    hist_entries = [((9 * 60 + 15 + i) // 60, (9 * 60 + 15 + i) % 60, 100.0 + i * 0.1)
+                    for i in range(400)]
+    hist_rows = _exit_bars("2026-09-25", hist_entries)
+    with patch("strategies.oi_bias_rsi_exit.engine.fetch_upstox_range_1m",
+               new=AsyncMock(return_value=hist_rows)), \
+         patch("strategies.oi_bias_rsi_exit.engine.fetch_upstox_intraday_1m",
+               new=AsyncMock(return_value=[])), \
+         patch("strategies.oi_bias_rsi_exit.engine.stock_resolve.resolve_eq_instrument_key",
+               return_value="NSE_EQ|TEST"), \
+         patch.object(s, "_check_oi_bias_flip", new=AsyncMock(return_value=False)):
+        asyncio.run(s._check_exit("SOLARINDS", "tok"))
+
+    assert s._last_exit_kd["SOLARINDS"]["oi_flip_count"] == 0, (
+        "8 'none' readings must count as 0 opposite readings, not 8"
+    )
+    assert s._last_exit_kd["SOLARINDS"]["oi_flip_threshold"] == s._oi_bias_flip_count
