@@ -496,16 +496,26 @@ def test_check_exit_logs_wait_exit_when_no_cross_yet(caplog):
 
 
 def test_monitoring_state_exposes_exit_tracking_for_open_positions():
+    """2026-09-30 CRITICAL FIX, direct user correction ("u need to check
+    for d and k every 5 min ... and keep changign that in posiiton
+    section"): once a symbol is in a position, _check_entry never runs
+    again (see _tick()'s own gate) so entry-side k/d is frozen forever --
+    the PRIMARY k/d shown must be the still-live exit-side reading, not
+    the stale entry one. The frozen entry snapshot is kept separately as
+    entry_k/entry_d for reference."""
     s = _strategy()
     s._candidates = ["SYM"]
     s._bias = {"SYM": "bearish"}
     s._positions["SYM"] = _pos()
+    s._last_entry_kd["SYM"] = {"k": 1.0, "d": 2.0, "bias": "bearish", "bars": 100}
     s._last_exit_kd["SYM"] = {"k": 10.0, "d": 20.0, "bias": "bearish",
                                "oi_flip_count": 1, "oi_flip_threshold": 2}
     state = s.monitoring_state()
     row = next(r for r in state["scanned"] if r["symbol"] == "SYM")
-    assert row["exit_k"] == 10.0
-    assert row["exit_d"] == 20.0
+    assert row["k"] == 10.0  # primary k/d is the live exit-side reading
+    assert row["d"] == 20.0
+    assert row["entry_k"] == 1.0  # frozen entry snapshot kept for reference
+    assert row["entry_d"] == 2.0
     assert row["oi_flip_count"] == 1
     assert row["oi_flip_threshold"] == 2
 

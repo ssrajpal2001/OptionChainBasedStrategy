@@ -8885,10 +8885,22 @@ function amoTest() {
                                   <span :style="{
                                       'bullish':'color:var(--t-green)', 'bearish':'color:var(--t-red)',
                                     }[row.bias]||'color:var(--t-dim)'" x-text="row.bias"></span>
+                                  <!-- 2026-09-30 CRITICAL FIX, direct user correction ("u need to
+                                       check for d and k every 5 min ... and keep changign that in
+                                       posiiton section"): row.k/row.d is now ALWAYS the still-live
+                                       reading for this symbol's current state -- entry-side while
+                                       scanning, exit-side once in a position (entry-side freezes
+                                       forever the instant a position opens, since _check_entry
+                                       never runs again for it). Refreshes every poll cycle
+                                       (admin-configurable poll_seconds) on whichever timeframe is
+                                       active (entry_timeframe_min/exit_timeframe_min, both
+                                       admin-configurable) -- never a stale snapshot. -->
                                   <span x-text="'K:'+(row.k!=null?fmt(row.k):'N/A')+' D:'+(row.d!=null?fmt(row.d):'N/A')"></span>
                                 </div>
-                                <!-- Open-position detail: entry, live LTP, running P&L, exit-side
-                                     tracking (StochRSI 75-min K/D + OI-bias-flip progress) --
+                                <!-- Open-position detail: entry, live LTP, running P&L, and the
+                                     frozen entry-time K/D (the reading that actually fired the
+                                     trade, kept for reference since the main K/D above has since
+                                     moved on to live exit tracking) + OI-bias-flip progress --
                                      2026-09-30 direct user request ("ltp of option shoudl eb shown
                                      in position ... it is nto showign proper pnl"). -->
                                 <div x-show="row.in_position" class="flex items-center justify-between" style="color:var(--t-muted)">
@@ -8898,7 +8910,7 @@ function amoTest() {
                                         x-text="'P&amp;L: '+(row.unrealized_pnl!=null ? fmt(row.unrealized_pnl) : '—')"></span>
                                 </div>
                                 <div x-show="row.in_position" style="color:var(--t-dim);font-size:10px">
-                                  <span x-text="'Exit K:'+(row.exit_k!=null?fmt(row.exit_k):'N/A')+' D:'+(row.exit_d!=null?fmt(row.exit_d):'N/A')"></span>
+                                  <span x-text="'Entry K:'+(row.entry_k!=null?fmt(row.entry_k):'N/A')+' D:'+(row.entry_d!=null?fmt(row.entry_d):'N/A')"></span>
                                   <span x-text="' | OI-flip: '+(row.oi_flip_count!=null?row.oi_flip_count:0)+'/'+(row.oi_flip_threshold!=null?row.oi_flip_threshold:'?')"></span>
                                 </div>
                               </div>

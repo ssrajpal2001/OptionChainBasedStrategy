@@ -833,10 +833,24 @@ class OiBiasRsiExitStrategy:
                 (live_ltp - pos["entry_price"]) * pos["qty"]
                 if pos and live_ltp is not None else None
             )
+            # 2026-09-30 CRITICAL FIX, direct user correction ("u need to
+            # check for d and k every 5 min ... and keep changign that in
+            # posiiton section"): _check_entry only ever runs for symbols
+            # NOT YET in a position (see _tick()'s own `sym not in
+            # self._positions` gate) -- so _last_entry_kd freezes forever
+            # the instant a symbol enters, while _check_exit keeps running
+            # every poll cycle (self._poll_seconds, admin-configurable) on
+            # exit_timeframe_min bars (also admin-configurable -- "tf is
+            # dynamic from admin"). The panel's PRIMARY k/d must reflect
+            # whichever one is actually still live for that symbol's
+            # current state: exit-side once in a position, entry-side
+            # while still scanning.
+            _primary_k = exit_kd.get("k") if pos else kd.get("k")
+            _primary_d = exit_kd.get("d") if pos else kd.get("d")
             scanned.append({
                 "symbol": sym,
                 "bias": self._bias.get(sym, "none"),
-                "k": kd.get("k"), "d": kd.get("d"),
+                "k": _primary_k, "d": _primary_d,
                 "bars_3m": kd.get("bars"),
                 "in_position": pos is not None,
                 "position_summary": (
@@ -845,10 +859,10 @@ class OiBiasRsiExitStrategy:
                 ),
                 "live_ltp": live_ltp,
                 "unrealized_pnl": unrealized_pnl,
-                # 2026-09-30, direct user request: expose exit-side tracking
-                # (75-min StochRSI K/D + OI-bias-flip progress) for open
-                # positions the same way entry K/D is already shown.
-                "exit_k": exit_kd.get("k"), "exit_d": exit_kd.get("d"),
+                # Entry-side snapshot (frozen once in a position -- the
+                # reading that actually fired the trade) kept separately
+                # for reference, distinct from the now-primary live k/d.
+                "entry_k": kd.get("k"), "entry_d": kd.get("d"),
                 "oi_flip_count": exit_kd.get("oi_flip_count"),
                 "oi_flip_threshold": exit_kd.get("oi_flip_threshold"),
             })
