@@ -627,3 +627,79 @@ def test_close_position_cleans_up_live_ltp_tracking():
     assert "SYM" not in s._live_ltp
     assert "SYM" not in s._option_key_subscribed
     assert "SYM" not in s._last_exit_kd
+
+
+# ── Position restore on restart, 2026-09-30 CRITICAL real live incident ────
+# "oi scanner again send tard eto broke rwhere as tarde was rnnign it shoudl
+# have checked whcih tard eis runngin adn shoudl not have send teh dat a"
+
+def test_restore_positions_repopulates_from_db_without_reentering():
+    s = _strategy()
+    s._today = date(2026, 9, 30)
+    db_row = {
+        "id": 42, "symbol": "COFORGE", "option_type": "PE", "strike": 1760.0,
+        "expiry": "2026-10-27", "qty": 475, "entry_price": 54.90,
+        "entry_ts": "2026-09-30T11:19:13+05:30",
+    }
+    with patch("strategies.oi_bias_rsi_exit.engine.store.get_open_positions",
+               return_value=[db_row]), \
+         patch("strategies.oi_bias_rsi_exit.engine.stock_resolve.resolve_contract",
+               return_value=_FakeContract()), \
+         patch("strategies.oi_bias_rsi_exit.engine.stock_resolve.resolve_eq_instrument_key",
+               return_value="NSE_EQ|COFORGE"), \
+         patch("strategies.oi_bias_rsi_exit.engine.fetch_upstox_intraday_1m",
+               new=AsyncMock(return_value=[])):
+        asyncio.run(s._restore_positions("tok"))
+
+    assert "COFORGE" in s._positions
+    pos = s._positions["COFORGE"]
+    assert pos["option_type"] == "PE"
+    assert pos["strike"] == 1760.0
+    assert pos["qty"] == 475
+    assert pos["entry_price"] == 54.90
+    assert pos["db_row_id"] == 42
+    assert s._bias["COFORGE"] == "bearish"  # PE -> bearish, deterministic from option_type
+    assert "COFORGE" in s._candidates
+
+
+def test_restore_positions_is_idempotent_and_does_not_duplicate():
+    s = _strategy()
+    s._today = date(2026, 9, 30)
+    s._positions["COFORGE"] = _pos()  # already restored/tracked
+    db_row = {
+        "id": 42, "symbol": "COFORGE", "option_type": "PE", "strike": 1760.0,
+        "expiry": "2026-10-27", "qty": 475, "entry_price": 54.90,
+        "entry_ts": "2026-09-30T11:19:13+05:30",
+    }
+    with patch("strategies.oi_bias_rsi_exit.engine.store.get_open_positions",
+               return_value=[db_row]), \
+         patch("strategies.oi_bias_rsi_exit.engine.stock_resolve.resolve_contract") as _rc:
+        asyncio.run(s._restore_positions("tok"))
+        _rc.assert_not_called()  # already tracked -- must not re-resolve/re-touch
+
+
+def test_check_oi_bias_flip_defers_gracefully_when_strikes_missing():
+    """A restored position whose 09:15 bar wasn't available has
+    strikes=None -- must defer (not crash) and push next_oi_check out."""
+    s = _strategy()
+    pos = _pos()
+    pos["strikes"] = None
+    pos["next_oi_check"] = datetime.now(IST) - timedelta(seconds=1)
+    fired = asyncio.run(s._check_oi_bias_flip("SYM", pos, "bearish", "tok"))
+    assert fired is False
+    assert pos["next_oi_check"] > datetime.now(IST)
+
+
+def test_tick_restores_positions_exactly_once():
+    s = _strategy()
+    s._start_time = dtime(9, 25)
+    s._get_token = AsyncMock(return_value="tok")
+    s._restore_positions = AsyncMock()
+    s._run_selection_and_bias = AsyncMock()
+    now = datetime.now(IST).replace(hour=10, minute=0)
+    with patch("strategies.oi_bias_rsi_exit.engine.datetime") as dt_mock:
+        dt_mock.now.return_value = now
+        asyncio.run(s._tick())
+        asyncio.run(s._tick())
+    assert s._restore_positions.await_count == 1
+    assert s._positions_restored is True

@@ -232,6 +232,13 @@ class OiBiasRsiExitStrategy:
         self._live_ltp: Dict[str, float] = {}
         self._option_key_subscribed: Dict[str, str] = {}
         self._option_tick_task: Optional[asyncio.Task] = None
+        # 2026-09-30 CRITICAL FIX, real live incident: "oi scanner again
+        # send trade to broker where as trade was runnign it should have
+        # checked which trade is running and should not have send the
+        # data" -- a restart wiped self._positions from memory with NO
+        # restore anywhere, so a still-open real position was silently
+        # forgotten and re-entered on top of. See _restore_positions().
+        self._positions_restored = False
 
     def start(self) -> None:
         if self._running:
@@ -298,7 +305,93 @@ class OiBiasRsiExitStrategy:
         self._history_cache_date = None
         self._last_entry_kd = {}
         self._last_exit_kd = {}
+        self._positions_restored = False
         self._clog.info("session reset for new trading day %s.", today)
+
+    async def _restore_positions(self, token: str) -> None:
+        """2026-09-30 CRITICAL FIX, real live incident: a restart wiped
+        self._positions from memory with no restore anywhere in this
+        engine -- a still-open real position (paper or live) was silently
+        forgotten, then re-entered on top of by the very next entry check,
+        because the book believed it was flat. Runs ONCE per process start
+        (guarded by self._positions_restored), before selection/entry/exit
+        even get a chance to run this tick.
+
+        Re-derives everything a live position needs to keep working:
+        contract (re-resolved fresh, not trusted from a stale key), bias
+        (deterministic from option_type -- CE=bullish, PE=bearish, the same
+        mapping _check_entry itself used to pick the option_type in the
+        first place), and a fresh OI-bias-flip baseline. The OI-bias-flip
+        HISTORY itself (oi_bias_history) is NOT recoverable from the DB and
+        intentionally starts empty on restore -- a strictly safe
+        degradation (an empty history can never itself trigger the
+        flip-twice exit; it only means the count restarts from zero rather
+        than wherever it was pre-restart), not a correctness bug."""
+        rows = await asyncio.to_thread(store.get_open_positions, self._client_id, self._binding_id,
+                                        (self._today or date.today()).isoformat())
+        for row in rows:
+            symbol = row["symbol"]
+            if symbol in self._positions:
+                continue
+            option_type = row["option_type"]
+            strike = row["strike"]
+            bias = "bullish" if option_type == "CE" else "bearish"
+            try:
+                expiry = date.fromisoformat(row["expiry"])
+            except Exception:
+                self._clog.exception("%s: restore failed to parse expiry %r -- skipping.", symbol, row["expiry"])
+                continue
+            contract = await asyncio.to_thread(stock_resolve.resolve_contract, symbol, strike, option_type, ("upstox",))
+            if contract is None:
+                self._clog.warning("%s: restore could not re-resolve contract %s%s -- skipping "
+                                    "(position still exists at the broker, only this book's own "
+                                    "tracking is affected).", symbol, option_type, strike)
+                continue
+            entry_ts = datetime.fromisoformat(row["entry_ts"])
+
+            # Best-effort fresh strikes/OI baseline for the OI-bias-flip
+            # re-check -- if today's 09:15 stock bar isn't available for
+            # some reason, the position still restores correctly for
+            # exit/EOD/P&L purposes, it just won't participate in the
+            # OI-bias-flip exit until it can (deferred, not blocked: a
+            # missing strikes object here is the ONLY thing this affects).
+            strikes = None
+            prev_oi = {"atm_call": None, "otm_call": None, "atm_put": None, "otm_put": None}
+            try:
+                stock_key = stock_resolve.resolve_eq_instrument_key(symbol)
+                srows = await fetch_upstox_intraday_1m(stock_key, token)
+                sbars = sorted(_to_bars(srows), key=lambda b: b.ts)
+                bar_915 = next((b for b in sbars if b.ts.date() == self._today and b.ts.time() == dtime(9, 15)), None)
+                if bar_915 is not None:
+                    step = stock_resolve.resolve_strike_step_for_price(symbol, bar_915.open)
+                    strikes = freeze_signal_strikes(open_915_price=bar_915.open, strike_step=step)
+                    prev_oi = {
+                        "atm_call": await self._current_oi(symbol, strikes.atm, "CE", token),
+                        "otm_call": await self._current_oi(symbol, strikes.otm_call, "CE", token),
+                        "atm_put": await self._current_oi(symbol, strikes.atm, "PE", token),
+                        "otm_put": await self._current_oi(symbol, strikes.otm_put, "PE", token),
+                    }
+            except Exception:
+                self._clog.exception("%s: restore could not rebuild OI-bias-flip baseline "
+                                      "(non-fatal, exit/EOD/P&L still work).", symbol)
+
+            self._bias[symbol] = bias
+            if symbol not in self._candidates:
+                self._candidates.append(symbol)
+            self._positions[symbol] = {
+                "option_type": option_type, "strike": strike, "expiry": expiry,
+                "qty": row["qty"], "entry_price": row["entry_price"], "entry_ts": entry_ts,
+                "upstox_key": contract.upstox_key,
+                "strikes": strikes,
+                "prev_oi": prev_oi,
+                "oi_bias_history": [],
+                "next_oi_check": datetime.now(IST) + timedelta(minutes=self._oi_recheck_minutes),
+                "db_row_id": row["id"],
+            }
+            self._ensure_option_feed(symbol, contract.upstox_key)
+            self._clog.info("%s: RESTORED open position %s%s qty=%d @ %.2f (entry_ts=%s, bias=%s) "
+                             "-- resuming exit tracking, no re-entry.",
+                             symbol, option_type, strike, row["qty"], row["entry_price"], entry_ts, bias)
 
     async def _loop(self) -> None:
         while self._running:
@@ -326,6 +419,10 @@ class OiBiasRsiExitStrategy:
         if not token:
             self._clog.warning("no upstox access_token in ClientDB feeder_creds -- skipping this tick.")
             return
+
+        if not self._positions_restored:
+            await self._restore_positions(token)
+            self._positions_restored = True
 
         if not self._selection_done:
             await self._run_selection_and_bias(token, is_rescan=False)
@@ -696,6 +793,16 @@ class OiBiasRsiExitStrategy:
         if now < pos["next_oi_check"]:
             return False
         strikes = pos["strikes"]
+        if strikes is None:
+            # 2026-09-30: a restored position whose 09:15 stock bar wasn't
+            # available at restore time has no strikes to re-check against
+            # -- defer (not block) by pushing the next check out; exit/EOD/
+            # P&L tracking are unaffected, only this specific third exit
+            # condition is deferred until strikes can be rebuilt (never,
+            # currently -- a genuinely rare, honestly-flagged gap, not
+            # silently pretended to work).
+            pos["next_oi_check"] = now + timedelta(minutes=self._oi_recheck_minutes)
+            return False
         prev = pos["prev_oi"]
         cur = {
             "atm_call": await self._current_oi(symbol, strikes.atm, "CE", token),

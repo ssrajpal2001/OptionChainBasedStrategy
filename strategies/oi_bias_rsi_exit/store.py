@@ -191,3 +191,33 @@ def record_exit(row_id: int, exit_price: float, exit_reason: str, pnl: float,
         logger.exception("oi_bias_rsi_exit store.record_exit failed (non-fatal).")
     finally:
         con.close()
+
+
+def get_open_positions(client_id: str, binding_id: str, trade_date: Optional[str] = None) -> list:
+    """2026-09-30 CRITICAL FIX, real live incident: a restart (pm2 restart/
+    stop+start) wiped self._positions from memory with NO restore anywhere
+    in this module -- an already-open real position (paper or live) would
+    be silently forgotten: no further exit check, no EOD square-off, no
+    P&L tracking, orphaned until manually closed. Same class of incident as
+    OI-ORB Screener's own documented 2026-08-24 DIXON position-loss fix.
+    Scoped to TODAY only (trade_date) -- a still-'open' row from a PREVIOUS
+    day is never resurrected, matching data_layer/position_store.py's own
+    same-day-only discipline (a broker's real EOD squareoff already
+    flattened it in reality)."""
+    init_db()
+    td = trade_date or _today()
+    con = sqlite3.connect(_DB_PATH)
+    try:
+        cur = con.execute(
+            """SELECT id, symbol, option_type, strike, expiry, qty, entry_price, entry_ts
+                   FROM positions
+                   WHERE client_id=? AND binding_id=? AND trade_date=? AND status='open'""",
+            (client_id, binding_id, td),
+        )
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
+    except Exception:
+        logger.exception("oi_bias_rsi_exit store.get_open_positions failed (non-fatal).")
+        return []
+    finally:
+        con.close()
