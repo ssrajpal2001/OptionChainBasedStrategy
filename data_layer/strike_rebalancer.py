@@ -124,15 +124,59 @@ class StrikeRebalancer:
         """
         Register strike as having an open position — prevents unsubscription.
         Called by the execution layer (or automatically via ORDER_FILL event).
+
+        2026-09-30 CRITICAL FIX, real live incident (Iron Fly mid-day restart
+        showing every leg's LTP stuck at "--" indefinitely): this method used
+        to be pure bookkeeping -- it added the strike to pinned_strikes/
+        active_strikes but never actually told the feeder to subscribe it.
+        The real WS subscribe only ever happened in _initial_subscribe() (once
+        per day, on the first live index tick) or a later ATM-drift
+        _rebalance(). On a mid-day process restart, _UnderlyingState is fresh
+        (open_atm=None again), so _initial_subscribe() DOES fire again on the
+        next tick -- but it's a pure task-scheduling race against a book's own
+        _restore_position()/pin_strike() calls (e.g. IronFlyStrategy.start()).
+        If pin_strike() lands AFTER _initial_subscribe() has already fired for
+        the day, the strike is pinned but never actually subscribed -- and for
+        a well-OTM wing leg (exactly Iron Fly's shape), a natural ATM-drift
+        rebalance including it later is unlikely, so it can go the entire
+        session with zero live ticks. Mirrors the exact pattern enable_chain()
+        already uses for the analogous "registered after the fact" case
+        (_catchup_chain_subscribe): if the initial subscribe has already run
+        this session and this specific strike isn't already active, fire an
+        immediate one-strike catch-up subscribe instead of waiting on a drift
+        that may never come.
         """
         if underlying in self._state:
             st = self._state[underlying]
+            already_active = strike in st.active_strikes
             st.pinned_strikes.add(strike)
             st.active_strikes.add(strike)   # Ensure it stays in the active set
             logger.debug(
                 "StrikeRebalancer: [%s] pinned strike %.0f (%d total pinned).",
                 underlying, strike, len(st.pinned_strikes),
             )
+            if not already_active and st.open_atm is not None:
+                asyncio.ensure_future(self._catchup_pin_subscribe(underlying, strike))
+
+    async def _catchup_pin_subscribe(self, underlying: str, strike: float) -> None:
+        """Immediately subscribes a single just-pinned strike when it was
+        registered after this session's _initial_subscribe() already ran --
+        see pin_strike()'s own docstring for the full incident this fixes."""
+        if self._feeder is None:
+            return
+        tokens = self._strikes_to_tokens(underlying, [strike])
+        if not tokens:
+            return
+        try:
+            await self._feeder.subscribe_tokens(tokens)
+            logger.info(
+                "StrikeRebalancer: [%s] catch-up subscribed late-pinned strike %.0f "
+                "(mid-day restart / post-initial-subscribe pin).",
+                underlying, strike,
+            )
+        except Exception as exc:
+            logger.warning("StrikeRebalancer: [%s] catch-up pin subscribe(%.0f) failed: %s",
+                            underlying, strike, exc)
 
     def unpin_strike(self, underlying: str, strike: float) -> None:
         """
