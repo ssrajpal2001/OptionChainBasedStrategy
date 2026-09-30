@@ -257,6 +257,22 @@ class OiBiasRsiExitStrategy:
         merged = candidates.merge(oi_spurts, on="symbol", how="left")
         qualifying = merged[merged["oi_spurt_pct"].fillna(0) >= self._oi_spurt_min_pct]
         self._candidates = sorted(set(qualifying["symbol"].tolist()))
+        # 2026-09-30, direct user request: the old single summary line only
+        # ever showed the FINAL post-filter result -- when 0 qualified there
+        # was zero visibility into why (empty top-gainers/losers fetch? a
+        # real OI-spurt list that just missed the threshold? symbols that
+        # never merged at all?). Log every intermediate stage so a 0-result
+        # day is diagnosable from this log alone, same transparency standard
+        # as oi_orb_screener's own scan/shortlist logging.
+        self._clog.info("selection: universe=%d rows, oi_spurts=%d rows, top-gainers/losers candidates=%d: %s",
+                         len(universe), len(oi_spurts), len(candidates),
+                         sorted(candidates["symbol"].tolist()) if "symbol" in candidates else [])
+        _ranked = merged[["symbol", "oi_spurt_pct"]].copy()
+        _ranked["oi_spurt_pct"] = _ranked["oi_spurt_pct"].fillna(0)
+        _ranked = _ranked.sort_values("oi_spurt_pct", ascending=False)
+        self._clog.info("selection: candidate OI-spurt%% (threshold=%.1f%%): %s",
+                         self._oi_spurt_min_pct,
+                         [f"{r.symbol}={r.oi_spurt_pct:.2f}%" for r in _ranked.itertuples()])
         self._clog.info("selection: %d candidates qualified (>=%.1f%% OI-spurt): %s",
                          len(self._candidates), self._oi_spurt_min_pct, self._candidates)
 
