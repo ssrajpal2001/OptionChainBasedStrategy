@@ -101,26 +101,41 @@ SECTOR_INDEX_NAMES: List[str] = [
     # least once already, e.g. "CONSR DURBL" not "CONSUMER DURABLES") --
     # verify these resolve on the next real scan and fix the exact spelling
     # if resolve_index_key() logs a miss for any of them.
-    "NIFTY CHEMICALS",
-    "NIFTY CPSE",
-    "NIFTY EV & NEW AGE AUTOMOTIVE",
+    "NIFTY CHEMICALS",   # CONFIRMED resolves live 2026-09-30, but currently
+                         # skipped by the scan anyway -- too little weekly
+                         # history yet (47 bars vs the RS calc's 123-bar
+                         # need). Not a naming issue; will start contributing
+                         # once the index has enough history, no code change
+                         # needed.
+    "NIFTY CPSE",        # CONFIRMED live 2026-09-30.
+    "NIFTY EV",          # CONFIRMED live 2026-09-30 -- real Upstox name is
+                         # the short "Nifty EV", NOT the fuller official name
+                         # "NIFTY EV & New Age Automotive" originally
+                         # guessed (that guess resolved to nothing).
     # Same follow-up, direct user choice: also include the "factor"/smart-
     # beta indices, even though these are NOT sector indices -- they select
-    # stocks by a cross-sector factor (momentum, quality, low volatility,
-    # alpha) rather than by industry. Included in the SAME scan/ranking
-    # pipeline per explicit instruction ("add missing sectors + factor
-    # indices"), not because they behave like a sector -- a "best sector"
-    # result of one of these just means "the strongest factor-driven basket
-    # this week", which is a different kind of signal than a real sector
-    # rotation call. Also UNCONFIRMED against Upstox's real index-master
-    # spelling, same caveat as the 3 above.
-    "NIFTY100 QUALITY 30",
-    "NIFTY ALPHA 50",
-    "NIFTY LOW VOLATILITY 50",
-    "NIFTY100 LOW VOLATILITY 30",
-    "NIFTY500 MOMENTUM 50",
-    "NIFTY MIDCAP150 MOMENTUM 50",
-    "NIFTY ALPHA LOW-VOLATILITY 30",
+    # stocks by a cross-sector factor (alpha, low-volatility) rather than by
+    # industry. A "best sector" result of one of these just means "the
+    # strongest factor-driven basket this week", a different kind of signal
+    # than a real sector rotation call.
+    #
+    # 2026-09-30 CONFIRMED live via scripts/dump_nse_index_names.py (direct
+    # Upstox NSE_INDEX instrument-master dump, not a guess): Upstox simply
+    # does NOT carry a Quality-, (plain) Low-Volatility-, or Momentum-named
+    # index at all -- a keyword search for QUALITY/VOLATILITY/MOMENTUM
+    # across its full 139-entry NSE_INDEX list returned zero matches. The 5
+    # originally-guessed entries for those factors ("NIFTY100 QUALITY 30",
+    # "NIFTY LOW VOLATILITY 50", "NIFTY100 LOW VOLATILITY 30", "NIFTY500
+    # MOMENTUM 50", "NIFTY MIDCAP150 MOMENTUM 50") are REMOVED, not
+    # renamed -- there is nothing to rename them to. Only Alpha-family
+    # factor indices are actually available; the ones below are the real,
+    # confirmed spellings.
+    "NIFTY ALPHA 50",           # CONFIRMED live (already resolved on the
+                                 # first run under this exact name).
+    "NIFTY ALPHALOWVOL",        # CONFIRMED live 2026-09-30 -- real Upstox
+                                 # name is "NIFTY AlphaLowVol" (no spaces/
+                                 # hyphen), NOT the guessed "NIFTY ALPHA
+                                 # LOW-VOLATILITY 30".
 ]
 
 # 2026-09-30, direct user spec: for "wealth creation" (positional, not
