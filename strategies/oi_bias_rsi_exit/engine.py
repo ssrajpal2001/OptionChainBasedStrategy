@@ -80,6 +80,19 @@ from strategies.oi_bias_rsi_exit import store
 from strategies.oi_orb_screener import screener as _screener
 from strategies.oi_orb_screener import stock_resolve
 
+
+def _make_strategy_logger(client_id: str, binding_id: str) -> logging.Logger:
+    """Dedicated, rotating, per-(client,binding,day) log file -- same
+    utils.logging_utils.make_strategy_logger platform utility every other
+    strategy here uses (oi_orb_screener/iron_fly/cag_straddle/sell_straddle).
+    2026-09-30: this book previously only had a bare named logger with no
+    file handler of its own, so its lines only ever reached the shared
+    process log -- fixed per direct user spec ("RSI exit will have
+    individual log to register all the details")."""
+    from utils.logging_utils import make_strategy_logger
+    date_str = datetime.now(IST).strftime("%Y%m%d")
+    return make_strategy_logger(f"oibiasrsi_{client_id}_{binding_id}_{date_str}", propagate=False)
+
 logger = logging.getLogger(__name__)
 
 UNDERLYING_SENTINEL = "SCREENER"
@@ -154,7 +167,7 @@ class OiBiasRsiExitStrategy:
         self._oi_recheck_minutes = oi_recheck_minutes
         self._oi_bias_flip_count = oi_bias_flip_count
 
-        self._clog = logging.getLogger(f"OiBiasRsiExit[{client_id}/{binding_id}]")
+        self._clog = _make_strategy_logger(client_id, binding_id)
         self._running = False
         self._task: Optional[asyncio.Task] = None
         self._today: Optional[date] = None
