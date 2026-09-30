@@ -8841,6 +8841,62 @@ function amoTest() {
                     </div>
                   </template>
 
+                  <!-- OI-Bias RSI Exit live panel (2026-09-30 direct user request:
+                       "position not showing anything that which all stocks were
+                       scanned and what r they doing now"): OiBiasRsiExitStrategy's
+                       own monitoring_state() -- every scanned candidate (not just
+                       ones with an open position), its OI bias, live entry StochRSI
+                       K/D, and any open position(s). One book per (client,binding) --
+                       matched on binding_id only, since the deployment's own
+                       underlying is always the SCREENER sentinel (same convention
+                       as OI-ORB Screener's own panel above). -->
+                  <template x-if="dep.strategy_name==='oi_bias_rsi_exit'">
+                    <div class="rounded p-3 mb-2 text-xs font-mono" style="background:rgba(var(--t-cyan-rgb),0.04);border:1px solid rgba(var(--t-cyan-rgb),0.18)"
+                         x-data="{
+                           _bk: null,
+                           async _load() {
+                             try {
+                               const tok = localStorage.getItem('terminus_token') || (authToken||'');
+                               const r = await fetch('/api/oibiasrsiexit/status', {headers:{'Authorization':'Bearer '+tok}});
+                               const d = await r.json();
+                               if (d.ok) {
+                                 this._bk = (d.books||[]).find(bk => bk.binding_id===b.binding_id) || null;
+                               }
+                             } catch(e) {}
+                           }
+                         }"
+                         x-init="_load(); setInterval(()=>_load(), 15000)">
+                      <template x-if="!_bk">
+                        <div class="text-center" style="color:var(--t-dim)">Loading OI-Bias RSI Exit state…</div>
+                      </template>
+                      <template x-if="_bk">
+                        <div>
+                          <div class="flex items-center justify-between mb-2">
+                            <span style="color:var(--t-muted)">SCANNED</span>
+                            <span class="px-1.5 py-0.5 rounded" style="background:rgba(var(--t-cyan-rgb),0.15);color:var(--t-cyan)"
+                                  x-text="(_bk.scanned||[]).length+' stocks'"></span>
+                          </div>
+                          <div style="max-height:220px;overflow-y:auto">
+                            <template x-for="row in (_bk.scanned||[])" :key="row.symbol">
+                              <div class="flex items-center justify-between mb-1 pb-1" style="border-bottom:1px solid var(--t-border)">
+                                <span :style="row.in_position?'color:var(--t-green);font-weight:600':'color:var(--t-muted)'"
+                                      x-text="row.symbol+(row.in_position?' ●':'')"></span>
+                                <span :style="{
+                                    'bullish':'color:var(--t-green)', 'bearish':'color:var(--t-red)',
+                                  }[row.bias]||'color:var(--t-dim)'" x-text="row.bias"></span>
+                                <span x-text="'K:'+(row.k!=null?fmt(row.k):'N/A')+' D:'+(row.d!=null?fmt(row.d):'N/A')"></span>
+                                <span x-show="row.in_position" style="color:var(--t-muted)" x-text="row.position_summary"></span>
+                              </div>
+                            </template>
+                            <div x-show="(_bk.scanned||[]).length===0" class="text-center" style="color:var(--t-dim)">
+                              No candidates scanned yet today.
+                            </div>
+                          </div>
+                        </div>
+                      </template>
+                    </div>
+                  </template>
+
                   <!-- Iron Fly live panel (2026-09-14): IronFlyStrategy's own
                        monitoring_state() (strategies/iron_fly/engine.py) -- shows all 4
                        legs (short_ce/long_ce/short_pe/long_pe), whether the position has
