@@ -448,3 +448,172 @@ def test_monitoring_state_positions_are_json_serializable():
     by_sym = {row["symbol"]: row for row in state["scanned"]}
     assert by_sym["SYM"]["in_position"] is True
     assert "CE100" in by_sym["SYM"]["position_summary"]
+
+
+# ── Exit-side tracking visibility, 2026-09-30 direct user request ──────────
+# "for exit what r v tracking that shoudl eb shows in log as well" -- same
+# WAIT-ENTRY-style diagnostic, now for the StochRSI exit-cross check.
+
+def _exit_bars(day_str, entries):
+    return _hist_rows(day_str, entries)
+
+
+def test_check_exit_logs_wait_exit_when_no_cross_yet(caplog):
+    s = _strategy()
+    s._today = date(2026, 9, 30)
+    s._bias["SYM"] = "bearish"
+    entry_ts = datetime(2026, 9, 30, 9, 30, tzinfo=IST)
+    s._positions["SYM"] = {
+        "option_type": "PE", "strike": 100, "qty": 75, "entry_price": 50.0,
+        "entry_ts": entry_ts, "upstox_key": "NSE_FO|1",
+        "prev_oi": {"atm_call": 1.0, "otm_call": 1.0, "atm_put": 1.0, "otm_put": 1.0},
+        "oi_bias_history": ["none"],
+        "next_oi_check": datetime.now(IST) + timedelta(minutes=10),  # not due yet
+    }
+    # Enough real post-entry 75-min bars to produce a real K/D (needs ~46
+    # bars minimum = ~10 trading days at 5 usable 75-min buckets/day) --
+    # 1-min bars across the real trading session on each of several days.
+    days = ["2026-09-18", "2026-09-19", "2026-09-22", "2026-09-23", "2026-09-24",
+            "2026-09-25", "2026-09-26", "2026-09-28", "2026-09-29"]
+    hist_rows = []
+    for di, day_str in enumerate(days):
+        day_entries = [((9 * 60 + 15 + m) // 60, (9 * 60 + 15 + m) % 60, 100.0 + di + m * 0.01)
+                       for m in range(0, 375, 3)]  # every 3 min, 09:15-15:30
+        hist_rows.extend(_exit_bars(day_str, day_entries))
+    today_rows = _exit_bars("2026-09-30", [(9, 15, 200.0), (11, 0, 199.0)])
+    with patch("strategies.oi_bias_rsi_exit.engine.fetch_upstox_range_1m",
+               new=AsyncMock(return_value=hist_rows)), \
+         patch("strategies.oi_bias_rsi_exit.engine.fetch_upstox_intraday_1m",
+               new=AsyncMock(return_value=today_rows)), \
+         patch("strategies.oi_bias_rsi_exit.engine.stock_resolve.resolve_eq_instrument_key",
+               return_value="NSE_EQ|TEST"):
+        asyncio.run(s._check_exit("SYM", "tok"))
+
+    assert "SYM" in s._last_exit_kd
+    assert s._last_exit_kd["SYM"]["bias"] == "bearish"
+    assert s._last_exit_kd["SYM"]["oi_flip_threshold"] == s._oi_bias_flip_count
+    assert "SYM" in s._positions  # not closed
+
+
+def test_monitoring_state_exposes_exit_tracking_for_open_positions():
+    s = _strategy()
+    s._candidates = ["SYM"]
+    s._bias = {"SYM": "bearish"}
+    s._positions["SYM"] = _pos()
+    s._last_exit_kd["SYM"] = {"k": 10.0, "d": 20.0, "bias": "bearish",
+                               "oi_flip_count": 1, "oi_flip_threshold": 2}
+    state = s.monitoring_state()
+    row = next(r for r in state["scanned"] if r["symbol"] == "SYM")
+    assert row["exit_k"] == 10.0
+    assert row["exit_d"] == 20.0
+    assert row["oi_flip_count"] == 1
+    assert row["oi_flip_threshold"] == 2
+
+
+# ── Live option-tick LTP/PnL, 2026-09-30 direct user request ───────────────
+# "trade is taken that shoudl eb subscribed to websocket also ltp of option
+# shoudl eb shown in position also it is nto showign proper pnl"
+
+class _FakeGlobalFeeder:
+    def __init__(self):
+        self.subscribed = []
+
+    async def subscribe_tokens(self, keys):
+        self.subscribed.extend(keys)
+
+
+class _FakeTick:
+    def __init__(self, underlying, strike, option_type, expiry, ltp):
+        self.underlying = underlying
+        self.strike = strike
+        self.option_type = option_type
+        self.expiry = expiry
+        self.ltp = ltp
+
+
+def test_ensure_option_feed_subscribes_once_per_symbol():
+    s = _strategy()
+    gf = _FakeGlobalFeeder()
+    s._bus._global_feeder = gf
+
+    async def _drive():
+        s._ensure_option_feed("SYM", "NSE_FO|1")
+        s._ensure_option_feed("SYM", "NSE_FO|1")  # idempotent, no duplicate subscribe
+        await asyncio.sleep(0)  # let the fire-and-forget subscribe task run
+
+    asyncio.run(_drive())
+    assert s._option_key_subscribed["SYM"] == "NSE_FO|1"
+
+
+def test_option_tick_loop_updates_live_ltp_only_for_matching_position():
+    s = _strategy()
+    s._positions["SYM"] = _pos()  # strike=100, option_type="CE" per _pos() default fixture
+    s._positions["SYM"]["strike"] = 100
+    s._positions["SYM"]["option_type"] = "CE"
+    s._positions["SYM"]["expiry"] = date(2026, 10, 6)
+
+    from config.global_config import Topic as Topic_for_test
+
+    async def _drive():
+        s._running = True
+        task = asyncio.create_task(s._option_tick_loop())
+        await asyncio.sleep(0)  # let the loop subscribe before we publish
+        # matching tick
+        await s._bus.publish(Topic_for_test.OPTION_TICK, _FakeTick("SYM", 100, "CE", date(2026, 10, 6), 55.5))
+        # non-matching tick (different strike) -- must not overwrite
+        await s._bus.publish(Topic_for_test.OPTION_TICK, _FakeTick("SYM", 200, "CE", date(2026, 10, 6), 999.0))
+        # tick for a symbol with no open position -- ignored
+        await s._bus.publish(Topic_for_test.OPTION_TICK, _FakeTick("OTHER", 100, "CE", date(2026, 10, 6), 1.0))
+        await asyncio.sleep(0.05)
+        s._running = False
+        task.cancel()
+
+    asyncio.run(_drive())
+    assert s._live_ltp["SYM"] == 55.5
+    assert "OTHER" not in s._live_ltp
+
+
+def test_monitoring_state_shows_live_ltp_and_unrealized_pnl():
+    s = _strategy()
+    s._candidates = ["SYM"]
+    s._bias = {"SYM": "bullish"}
+    pos = _pos()
+    pos["entry_price"] = 50.0
+    pos["qty"] = 75
+    pos["option_type"] = "CE"
+    pos["strike"] = 100
+    s._positions["SYM"] = pos
+    s._live_ltp["SYM"] = 60.0
+
+    state = s.monitoring_state()
+    row = next(r for r in state["scanned"] if r["symbol"] == "SYM")
+    assert row["live_ltp"] == 60.0
+    assert row["unrealized_pnl"] == (60.0 - 50.0) * 75
+    assert state["positions"]["SYM"]["live_ltp"] == 60.0
+    assert state["positions"]["SYM"]["unrealized_pnl"] == (60.0 - 50.0) * 75
+
+
+def test_monitoring_state_ltp_none_when_no_live_tick_yet():
+    s = _strategy()
+    s._candidates = ["SYM"]
+    s._bias = {"SYM": "bullish"}
+    s._positions["SYM"] = _pos()
+    state = s.monitoring_state()
+    row = next(r for r in state["scanned"] if r["symbol"] == "SYM")
+    assert row["live_ltp"] is None
+    assert row["unrealized_pnl"] is None
+
+
+def test_close_position_cleans_up_live_ltp_tracking():
+    s = _strategy()
+    s._positions["SYM"] = _pos()
+    s._live_ltp["SYM"] = 42.0
+    s._option_key_subscribed["SYM"] = "NSE_FO|1"
+    s._last_exit_kd["SYM"] = {"k": 1.0}
+    with patch("strategies.oi_bias_rsi_exit.engine.fetch_upstox_intraday_1m",
+               new=AsyncMock(return_value=[])), \
+         patch("strategies.oi_bias_rsi_exit.engine.store.record_exit"):
+        asyncio.run(s._close_position("SYM", "test_reason", "tok"))
+    assert "SYM" not in s._live_ltp
+    assert "SYM" not in s._option_key_subscribed
+    assert "SYM" not in s._last_exit_kd

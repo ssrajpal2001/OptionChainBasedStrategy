@@ -220,19 +220,66 @@ class OiBiasRsiExitStrategy:
         # can show it for every scanned stock, not just ones already in a
         # position.
         self._last_entry_kd: Dict[str, dict] = {}
+        self._last_exit_kd: Dict[str, dict] = {}
+        # 2026-09-30, direct user request: "trade is taken that shoudl eb
+        # subscribed to websocket also ltp of option shoudl eb shown in
+        # position also it is nto showign proper pnl" -- a filled position
+        # now subscribes the real live OPTION_TICK feed for its own
+        # contract (same pattern OI-ORB Screener's own _ensure_option_feed
+        # uses), purely for live LTP/PnL DISPLAY in monitoring_state(); the
+        # actual entry/exit DECISION mechanic stays REST-poll driven,
+        # unchanged, per this module's own documented design.
+        self._live_ltp: Dict[str, float] = {}
+        self._option_key_subscribed: Dict[str, str] = {}
+        self._option_tick_task: Optional[asyncio.Task] = None
 
     def start(self) -> None:
         if self._running:
             return
         self._running = True
         self._task = asyncio.create_task(self._loop(), name=f"OiBiasRsiExit_{self._client_id}_{self._binding_id}")
+        self._option_tick_task = asyncio.create_task(
+            self._option_tick_loop(), name=f"OiBiasRsiExit_opttick_{self._client_id}_{self._binding_id}")
         self._clog.info("started.")
 
     def stop(self) -> None:
         self._running = False
         if self._task:
             self._task.cancel()
+        if self._option_tick_task:
+            self._option_tick_task.cancel()
         self._clog.info("stopped.")
+
+    def _ensure_option_feed(self, symbol: str, upstox_key: str) -> None:
+        """Subscribe the live option tick feed for this position's contract
+        -- purely for live LTP/PnL display (see class-level comment).
+        Idempotent per symbol. Mirrors OI-ORB Screener's own
+        _ensure_option_feed exactly."""
+        if not upstox_key or self._option_key_subscribed.get(symbol) == upstox_key:
+            return
+        gf = getattr(self._bus, "_global_feeder", None)
+        if gf is None or not hasattr(gf, "subscribe_tokens"):
+            self._clog.warning("%s: no live GlobalFeeder available -- cannot subscribe live LTP feed.", symbol)
+            return
+        asyncio.create_task(gf.subscribe_tokens([upstox_key]))
+        self._option_key_subscribed[symbol] = upstox_key
+        self._clog.info("%s: subscribed live option feed for %s.", symbol, upstox_key)
+
+    async def _option_tick_loop(self) -> None:
+        q = self._bus.subscribe(Topic.OPTION_TICK)
+        while self._running:
+            try:
+                tick = await asyncio.wait_for(q.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                break
+            pos = self._positions.get(tick.underlying)
+            if pos is None:
+                continue
+            if (tick.strike == pos["strike"] and tick.option_type == pos["option_type"]
+                    and tick.expiry == pos["expiry"]):
+                self._live_ltp[tick.underlying] = tick.ltp
 
     async def _get_token(self) -> str:
         creds = await asyncio.to_thread(ClientDB().get_feeder_creds_sync, "upstox")
@@ -250,6 +297,7 @@ class OiBiasRsiExitStrategy:
         self._history_bars_cache = {}
         self._history_cache_date = None
         self._last_entry_kd = {}
+        self._last_exit_kd = {}
         self._clog.info("session reset for new trading day %s.", today)
 
     async def _loop(self) -> None:
@@ -620,6 +668,7 @@ class OiBiasRsiExitStrategy:
         )
         pos["db_row_id"] = row_id
         self._positions[symbol] = pos
+        self._ensure_option_feed(symbol, contract.upstox_key)
         self._clog.info("ENTRY %s %s%s qty=%d @ %.2f (bias=%s)",
                          symbol, contract.strike, option_type, qty, entry_price, bias)
         await self._bus.publish(Topic.OI_BIAS_RSI_EXIT_ORDER_REQUEST, OiBiasRsiExitOrderEvent(
@@ -694,16 +743,39 @@ class OiBiasRsiExitStrategy:
         k, d = compute_stoch_rsi_double_smoothed(closes_x, *self._exit_stoch_rsi_lengths)
         entry_ts = pos["entry_ts"]
         crossed = False
+        _last_i = None
         for i in range(1, len(bars_x)):
             bucket_close = bars_x[i].ts + timedelta(minutes=self._exit_timeframe_min)
             if bucket_close <= entry_ts:
                 continue
             if bucket_close > datetime.now(IST):
                 break
+            _last_i = i
             if check_exit_cross(k[i - 1], d[i - 1], k[i], d[i], bias):
                 crossed = True
                 break
+        # 2026-09-30, direct user request ("for exit what r v tracking that
+        # shoudl eb shows in log as well"): same visibility fix as
+        # WAIT-ENTRY -- track the latest post-entry K/D so monitoring_state()
+        # can show exit progress for an open position, and log it whenever
+        # a genuine post-entry bar exists but hasn't crossed yet.
+        _k_last = k[_last_i] if _last_i is not None else None
+        _d_last = d[_last_i] if _last_i is not None else None
+        self._last_exit_kd[symbol] = {
+            "k": _k_last, "d": _d_last, "bias": bias,
+            "oi_flip_count": len(pos.get("oi_bias_history", [])),
+            "oi_flip_threshold": self._oi_bias_flip_count,
+        }
         if not crossed:
+            if _last_i is not None:
+                _need = "K crosses above D" if bias == "bearish" else "D crosses above K"
+                _k_s = f"{_k_last:.2f}" if isinstance(_k_last, float) else "N/A"
+                _d_s = f"{_d_last:.2f}" if isinstance(_d_last, float) else "N/A"
+                self._clog.info(
+                    "%s: WAIT-EXIT bias=%s need %s -- K=%s D=%s (not yet; OI-flip %d/%d opposite readings)",
+                    symbol, bias, _need, _k_s, _d_s,
+                    len(pos.get("oi_bias_history", [])), self._oi_bias_flip_count,
+                )
             return
         await self._close_position(symbol, "stoch_exit_cross", token)
 
@@ -727,6 +799,9 @@ class OiBiasRsiExitStrategy:
             event_id=str(uuid.uuid4()), entry_ts=pos["entry_ts"], product_type=self._product_type,
         ))
         del self._positions[symbol]
+        self._live_ltp.pop(symbol, None)
+        self._option_key_subscribed.pop(symbol, None)
+        self._last_exit_kd.pop(symbol, None)
 
     async def _square_off_all(self, reason: str) -> None:
         token = await self._get_token()
@@ -747,6 +822,17 @@ class OiBiasRsiExitStrategy:
         for sym in self._candidates:
             kd = self._last_entry_kd.get(sym, {})
             pos = self._positions.get(sym)
+            exit_kd = self._last_exit_kd.get(sym, {}) if pos else {}
+            # 2026-09-30, direct user request: "ltp of option shoudl eb
+            # shown in position ... it is nto showign proper pnl" -- live
+            # LTP from the real OPTION_TICK subscription (falls back to the
+            # entry price if no live tick has arrived yet), and a running
+            # unrealized P&L computed from it.
+            live_ltp = self._live_ltp.get(sym) if pos else None
+            unrealized_pnl = (
+                (live_ltp - pos["entry_price"]) * pos["qty"]
+                if pos and live_ltp is not None else None
+            )
             scanned.append({
                 "symbol": sym,
                 "bias": self._bias.get(sym, "none"),
@@ -757,6 +843,14 @@ class OiBiasRsiExitStrategy:
                     f"{pos['option_type']}{pos['strike']} qty={pos['qty']} @{pos['entry_price']:.2f}"
                     if pos else None
                 ),
+                "live_ltp": live_ltp,
+                "unrealized_pnl": unrealized_pnl,
+                # 2026-09-30, direct user request: expose exit-side tracking
+                # (75-min StochRSI K/D + OI-bias-flip progress) for open
+                # positions the same way entry K/D is already shown.
+                "exit_k": exit_kd.get("k"), "exit_d": exit_kd.get("d"),
+                "oi_flip_count": exit_kd.get("oi_flip_count"),
+                "oi_flip_threshold": exit_kd.get("oi_flip_threshold"),
             })
         # "strikes" is a SignalStrikes dataclass -- not JSON-serializable by
         # the dashboard's default encoder, so it's flattened here rather
@@ -772,6 +866,9 @@ class OiBiasRsiExitStrategy:
                     pp[_k] = pp[_k].isoformat()
             if isinstance(pp.get("expiry"), date):
                 pp["expiry"] = pp["expiry"].isoformat()
+            _ltp = self._live_ltp.get(s)
+            pp["live_ltp"] = _ltp
+            pp["unrealized_pnl"] = (_ltp - pp["entry_price"]) * pp["qty"] if _ltp is not None else None
             positions_out[s] = pp
         return {
             "client_id": self._client_id, "binding_id": self._binding_id,
