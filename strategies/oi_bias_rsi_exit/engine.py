@@ -478,6 +478,23 @@ class OiBiasRsiExitStrategy:
             (i for i, b in enumerate(bars_e) if b.ts.time() >= self._start_time and check_entry_state(k[i], d[i], bias)),
             None)
         if idx is None:
+            # 2026-09-30, direct user request (same visibility gap already
+            # fixed for sell_straddle's SELECT trace and OI-ORB's selection
+            # funnel this same session): this branch used to return in
+            # total silence -- indistinguishable from "broken" vs "still
+            # waiting on its own momentum state." Log the latest K/D and
+            # the exact condition still required, mirrored by bias
+            # (bearish needs D>K, bullish needs K>D -- check_entry_state's
+            # own rule), so a quiet stock is diagnosable from the log alone.
+            _last_k = k[-1] if k else None
+            _last_d = d[-1] if d else None
+            _need = "D>K" if bias == "bearish" else "K>D"
+            _k_s = f"{_last_k:.2f}" if isinstance(_last_k, float) else "N/A"
+            _d_s = f"{_last_d:.2f}" if isinstance(_last_d, float) else "N/A"
+            self._clog.info(
+                "%s: WAIT-ENTRY bias=%s need %s -- K=%s D=%s (not yet, %d %dmin bars so far)",
+                symbol, bias, _need, _k_s, _d_s, len(bars_e), self._entry_timeframe_min,
+            )
             return
 
         option_type = "CE" if bias == "bullish" else "PE"
