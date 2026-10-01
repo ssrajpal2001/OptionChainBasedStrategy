@@ -865,9 +865,34 @@ class OiBiasRsiExitStrategy:
         # shoudl eb shows in log as well"): same visibility fix as
         # WAIT-ENTRY -- track the latest post-entry K/D so monitoring_state()
         # can show exit progress for an open position, and log it whenever
-        # a genuine post-entry bar exists but hasn't crossed yet.
+        # a genuine post-entry bar exists but hasn't crossed yet. _last_i
+        # (entry_ts-gated) stays as-is for this WAIT-EXIT log line, which is
+        # specifically about post-entry crossover progress.
         _k_last = k[_last_i] if _last_i is not None else None
         _d_last = d[_last_i] if _last_i is not None else None
+
+        # 2026-10-01 CRITICAL FIX, direct user correction ("i said to get the
+        # values from pev day data to warmup teh same"): the DASHBOARD display
+        # value (self._last_exit_kd, read by monitoring_state()) was reusing
+        # the entry_ts-gated _last_i above -- meaning it showed N/A for the
+        # ENTIRE first exit_timeframe_min window after every single entry
+        # (75 min by default), even though _bars_with_history() already
+        # prefixes real prior-trading-day bars specifically so this indicator
+        # is continuously warm and never needs to "start from scratch" at
+        # entry. A real, valid current K/D already exists in k[]/d[] from
+        # that warmed-up series; it just wasn't being shown. This is a
+        # DIFFERENT question from "has the exit crossover had a chance to
+        # fire since entry" (which correctly stays entry_ts-gated, unchanged,
+        # for both the crossover-detection loop above and the WAIT-EXIT log
+        # line's own _k_last/_d_last) -- the display should simply show
+        # whatever the indicator's current value genuinely is right now.
+        _last_closed_i = None
+        for i in range(len(bars_x) - 1, -1, -1):
+            if bars_x[i].ts + timedelta(minutes=self._exit_timeframe_min) <= datetime.now(IST):
+                _last_closed_i = i
+                break
+        _k_display = k[_last_closed_i] if _last_closed_i is not None else None
+        _d_display = d[_last_closed_i] if _last_closed_i is not None else None
         # 2026-09-30 CRITICAL FIX, real live incident: this showed the RAW
         # LENGTH of oi_bias_history (every reading, including "none"s that
         # never count toward the flip-twice exit per count_opposite_bias_
@@ -877,7 +902,7 @@ class OiBiasRsiExitStrategy:
         # real opposite-reading count (what _check_oi_bias_flip itself
         # actually compares against the threshold) was genuinely 0.
         self._last_exit_kd[symbol] = {
-            "k": _k_last, "d": _d_last, "bias": bias,
+            "k": _k_display, "d": _d_display, "bias": bias,
             "oi_flip_count": count_opposite_bias_readings(pos.get("oi_bias_history", []), bias),
             "oi_flip_threshold": self._oi_bias_flip_count,
         }

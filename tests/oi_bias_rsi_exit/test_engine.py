@@ -495,6 +495,59 @@ def test_check_exit_logs_wait_exit_when_no_cross_yet(caplog):
     assert "SYM" in s._positions  # not closed
 
 
+def test_check_exit_display_kd_uses_warmed_history_even_with_no_post_entry_bar_yet():
+    """2026-10-01 CRITICAL FIX, direct user correction ("i said to get the
+    values from pev day data to warmup teh same"): a position entered only
+    moments ago (before even one post-entry exit_timeframe_min bar has
+    closed) used to show K/D=None/N/A on the dashboard for the entire first
+    75-min window after every entry -- even though _bars_with_history()
+    already prefixes real prior-trading-day bars specifically so this
+    indicator is continuously warm. The crossover-detection scan correctly
+    stays gated to post-entry bars only (an exit must never fire off a
+    pre-entry historical crossover) -- but the DISPLAY value must show
+    whatever the indicator's current, warmed-up value genuinely is, not
+    N/A."""
+    s = _strategy()
+    s._today = date(2026, 9, 30)
+    s._bias["SYM"] = "bearish"
+    # Entry happens "right now" -- deliberately AFTER every bar this test
+    # supplies, so zero post-entry 75-min buckets exist yet (the exact
+    # scenario this fix addresses).
+    entry_ts = datetime.now(IST)
+    s._positions["SYM"] = {
+        "option_type": "PE", "strike": 100, "qty": 75, "entry_price": 50.0,
+        "entry_ts": entry_ts, "upstox_key": "NSE_FO|1",
+        "prev_oi": {"atm_call": 1.0, "otm_call": 1.0, "atm_put": 1.0, "otm_put": 1.0},
+        "oi_bias_history": ["none"],
+        "next_oi_check": datetime.now(IST) + timedelta(minutes=10),
+    }
+    days = ["2026-09-18", "2026-09-19", "2026-09-22", "2026-09-23", "2026-09-24",
+            "2026-09-25", "2026-09-26", "2026-09-28", "2026-09-29"]
+    hist_rows = []
+    for di, day_str in enumerate(days):
+        day_entries = [((9 * 60 + 15 + m) // 60, (9 * 60 + 15 + m) % 60, 100.0 + di + m * 0.01)
+                       for m in range(0, 375, 3)]
+        hist_rows.extend(_exit_bars(day_str, day_entries))
+    # "Today" supplies only pre-entry bars (2026-09-30 historically, but in
+    # terms of entry_ts = now, these are all comfortably in the past too).
+    today_rows = _exit_bars("2026-09-30", [(9, 15, 200.0), (11, 0, 199.0)])
+    with patch("strategies.oi_bias_rsi_exit.engine.fetch_upstox_range_1m",
+               new=AsyncMock(return_value=hist_rows)), \
+         patch("strategies.oi_bias_rsi_exit.engine.fetch_upstox_intraday_1m",
+               new=AsyncMock(return_value=today_rows)), \
+         patch("strategies.oi_bias_rsi_exit.engine.stock_resolve.resolve_eq_instrument_key",
+               return_value="NSE_EQ|TEST"):
+        asyncio.run(s._check_exit("SYM", "tok"))
+
+    assert "SYM" in s._last_exit_kd
+    k, d = s._last_exit_kd["SYM"]["k"], s._last_exit_kd["SYM"]["d"]
+    assert k is not None and d is not None, (
+        "display K/D must come from the warmed-up historical series, not be "
+        "None just because no post-entry bar has closed yet"
+    )
+    assert isinstance(k, float) and isinstance(d, float)
+
+
 def test_monitoring_state_exposes_exit_tracking_for_open_positions():
     """2026-09-30 CRITICAL FIX, direct user correction ("u need to check
     for d and k every 5 min ... and keep changign that in posiiton
