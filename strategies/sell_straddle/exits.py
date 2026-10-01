@@ -822,16 +822,30 @@ class ExitMixin:
         if not (getattr(self, "_hedge_carry_enabled", False) and self._cumulative_hedge_pnl(pos) < 0):
             return False
         if self._is_t1_from_expiry(pos, now):
+            # 2026-10-01 CRITICAL FIX, direct user correction: this used to
+            # roll straight onto next week's expiry SAME DAY
+            # (_start_hedge_roll) instead of hedging a contract that expires
+            # tomorrow -- user clarified the real intended behavior: on T-1
+            # EOD, a still-unhedged position in loss should NOT hedge (same
+            # reasoning as before -- a hedge built against tomorrow's expiry
+            # is pointless) AND should NOT roll/reopen same-day either. It
+            # simply closes both legs, books the loss, and starts genuinely
+            # fresh tomorrow via the normal entry_rules_beginning path (which
+            # already has its own low-anchor-LTP-shift safety net to move to
+            # next week's expiry on its own if the now-expiring-today
+            # contract's premiums are too decayed to clear the entry floor --
+            # no special-casing needed here for that).
             logger.info(
-                "SellStraddle[%s]: HEDGE ROLL (T-1) — cumulative loss on the "
-                "expiring week, rolling straight to next week instead of hedging a "
-                "contract that expires tomorrow.", self._underlying,
+                "SellStraddle[%s]: T-1 EOD CLOSE (no hedge) — cumulative loss on the "
+                "expiring week; not hedging/rolling a contract that expires tomorrow -- "
+                "closing and starting fresh tomorrow.", self._underlying,
             )
             self._clog.info(
-                "HEDGE ROLL (T-1) — cumulative loss on the expiring week, rolling "
-                "straight to next week instead of hedging a contract that expires tomorrow."
+                "T-1 EOD CLOSE (no hedge) — cumulative loss on the expiring week; "
+                "closing both legs, starting fresh tomorrow (no same-day reopen)."
             )
-            await self._start_hedge_roll(pos, now, "t1_new_hedge_roll")
+            await self._close_position_and_hedge("t1_no_hedge_eod_close")
+            self._stop_for_day = True
             return True
         hedged = await self._try_build_hedge(pos, now)
         if hedged:
@@ -938,16 +952,32 @@ class ExitMixin:
 
         if pos.is_hedged_positional:
             if self._is_t1_from_expiry(pos, now):
+                # 2026-10-01 CRITICAL FIX, direct user correction: this used
+                # to roll the whole 4-leg position onto next week's expiry
+                # SAME DAY (_start_hedge_roll) instead of stopping the carry.
+                # Real intended behavior: a hedge that hasn't yet reached the
+                # ₹500/lot cumulative profit target (that case is handled
+                # separately, every tick, by _check_hedge_cumulative_profit_
+                # close -- including ON T-1 -- and already closes + starts
+                # fresh THE SAME DAY, unaffected by this change) should, once
+                # T-1 EOD genuinely arrives without having hit that target,
+                # simply close out for a loss and start completely fresh
+                # tomorrow -- no same-day roll/reopen. Tomorrow's normal
+                # entry_rules_beginning already has its own low-anchor-LTP-
+                # shift safety net to move to next week's expiry on its own
+                # if today's (now-expiring) contract's premiums are too
+                # decayed to clear the entry floor.
                 logger.info(
-                    "SellStraddle[%s]: HEDGE ROLL (T-1) — carried hedge's own sold legs "
-                    "expire tomorrow, rolling to next week instead of stopping the carry.",
-                    self._underlying,
+                    "SellStraddle[%s]: T-1 EOD CLOSE (hedge not yet profitable) — carried "
+                    "hedge's own sold legs expire tomorrow; closing out and starting fresh "
+                    "tomorrow (no same-day reopen).", self._underlying,
                 )
                 self._clog.info(
-                    "HEDGE ROLL (T-1) — carried hedge's own sold legs expire tomorrow, "
-                    "rolling to next week instead of stopping the carry."
+                    "T-1 EOD CLOSE (hedge not yet profitable) — carried hedge's own sold "
+                    "legs expire tomorrow; closing all 4 legs, starting fresh tomorrow."
                 )
-                await self._start_hedge_roll(pos, now, "t1_hedge_roll")
+                await self._close_position_and_hedge("t1_hedge_eod_close")
+                self._stop_for_day = True
             # else: leave running -- tick-by-tick profit-close handles it.
             return
 

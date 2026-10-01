@@ -329,14 +329,18 @@ def _seed_next_expiry(pos_expiry: datetime.date, weeks_out: int = 1):
     REGISTRY._expiries["NIFTY"] = [pos_expiry, pos_expiry + datetime.timedelta(days=7 * weeks_out)]
 
 
-def test_eod_t1_from_expiry_rolls_instead_of_closing_when_cumulative_negative():
-    """2026-08-24 correction: T-1 no longer forces a plain close -- it rolls
-    to next week's expiry, same as any other day's hedge trigger would, just
-    onto fresh (non-expiring) contracts instead of the current dying ones."""
+def test_eod_t1_from_expiry_closes_plainly_no_same_day_reopen_when_cumulative_negative():
+    """2026-10-01 CRITICAL FIX, direct user correction: supersedes the
+    2026-08-24 roll-to-next-week behavior below. A still-unhedged position
+    in loss on T-1 EOD no longer hedges (pointless -- the hedge would expire
+    tomorrow) NOR rolls/reopens same-day -- it simply closes both legs,
+    books the loss, and stops for the day. Tomorrow's normal entry_rules_
+    beginning starts genuinely fresh (with its own independent low-anchor-
+    LTP-shift safety net to pick next week's expiry on its own if needed --
+    not this code's concern)."""
     async def run():
         s = _make(expiry_offset_days=1)   # T-1, sold legs net -50 (cumulative < 0)
         s._hedge_carry_enabled = True
-        _seed_next_expiry(s._position.expiry_date)
         closed = []
         async def _fake_close(reason):
             closed.append(reason)
@@ -346,13 +350,11 @@ def test_eod_t1_from_expiry_rolls_instead_of_closing_when_cumulative_negative():
 
         await s._eod_close_or_hedge(s._position, datetime.datetime.now(IST))
 
-        assert closed == ["t1_new_hedge_roll"]
+        assert closed == ["t1_no_hedge_eod_close"]
         assert calls == []
-        assert s._hedge_roll_pending is True
-        assert s._hedge_roll_reason == "t1_new_hedge_roll"
-        assert s._entry_expiry_date == s._position.expiry_date + datetime.timedelta(days=7)
-        assert s._expiry_shifted_low_anchor_ltp is True
-        assert s._strike_prem == {}
+        assert s._stop_for_day is True
+        # No same-day roll/reopen state of any kind.
+        assert s._hedge_roll_pending is False
     asyncio.run(run())
 
 
@@ -380,17 +382,20 @@ def test_eod_t1_no_roll_when_cumulative_not_negative():
     asyncio.run(run())
 
 
-def test_eod_t1_already_hedged_rolls_closing_old_hedge_legs_for_real():
-    """A hedge carried from an earlier day, reaching T-1 on its own sold
-    legs' expiry: the standing hedge legs are closed for real (never
-    stashed -- they're on the same expiring contract as the sold legs, so
-    carrying them onto a next-week sold pair would mismatch expiries)."""
+def test_eod_t1_already_hedged_closes_plainly_no_same_day_reopen():
+    """2026-10-01 CRITICAL FIX, direct user correction: supersedes the
+    2026-08-24 roll-to-next-week behavior below. A hedge carried from an
+    earlier day that reaches T-1 (its own sold legs' expiry) WITHOUT yet
+    having hit the ₹500/lot cumulative profit target (that case is handled
+    separately and unaffected, every tick, by _check_hedge_cumulative_
+    profit_close -- including on T-1) simply closes out for a loss and stops
+    for the day -- no same-day roll/reopen. The standing hedge legs are
+    still closed for real (never stashed), same as before."""
     async def run():
         s = _make(expiry_offset_days=1)   # T-1
         s._position.hedge_ce_leg = StraddleLeg("CE", 24500, 60.0, 40.0)
         s._position.hedge_pe_leg = StraddleLeg("PE", 23500, 55.0, 35.0)
         s._position.is_hedged_positional = True
-        _seed_next_expiry(s._position.expiry_date)
         closed = []
         async def _fake_close(reason):
             closed.append(reason)
@@ -407,19 +412,21 @@ def test_eod_t1_already_hedged_rolls_closing_old_hedge_legs_for_real():
         assert ("SELL", "PE", 23500) in calls
         assert s._position.hedge_ce_leg is None
         assert s._position.hedge_pe_leg is None
-        assert closed == ["t1_hedge_roll"]
-        assert s._hedge_roll_pending is True
-        assert s._hedge_roll_reason == "t1_hedge_roll"
+        assert closed == ["t1_hedge_eod_close"]
+        assert s._stop_for_day is True
+        assert s._hedge_roll_pending is False
     asyncio.run(run())
 
 
-def test_eod_t1_roll_logs_critical_and_gives_up_when_no_next_expiry():
-    """REGISTRY has no expiry past the current one -- the roll can't happen.
-    Position is still closed (never left dangling), but no roll is pending."""
+def test_eod_t1_closes_plainly_regardless_of_next_expiry_availability():
+    """2026-10-01: since T-1 no longer rolls at all, whether REGISTRY has a
+    next expiry available is now irrelevant to this decision -- the position
+    closes plainly either way. Supersedes the old "roll gives up gracefully
+    when no next expiry exists" test, which no longer applies."""
     async def run():
         s = _make(expiry_offset_days=1)
         s._hedge_carry_enabled = True
-        REGISTRY._expiries["NIFTY"] = [s._position.expiry_date]   # nothing later
+        REGISTRY._expiries["NIFTY"] = [s._position.expiry_date]   # nothing later -- irrelevant now
         closed = []
         async def _fake_close(reason):
             closed.append(reason)
@@ -428,7 +435,8 @@ def test_eod_t1_roll_logs_critical_and_gives_up_when_no_next_expiry():
 
         await s._eod_close_or_hedge(s._position, datetime.datetime.now(IST))
 
-        assert closed == ["t1_new_hedge_roll"]
+        assert closed == ["t1_no_hedge_eod_close"]
+        assert s._stop_for_day is True
         assert s._hedge_roll_pending is False
     asyncio.run(run())
 
