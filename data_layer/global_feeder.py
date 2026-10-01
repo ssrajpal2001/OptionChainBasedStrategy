@@ -1300,6 +1300,12 @@ class AngelOneFeeder(BaseFeeder):
     "did it connect."
     """
 
+    # How long a FAILED scrip-search result is trusted before retrying --
+    # see __init__'s own comment on _scrip_cache_fail_ts for the 2026-10-01
+    # incident this prevents. A successful resolution is cached forever (no
+    # cooldown) since a token genuinely doesn't change intraday.
+    _SCRIP_NEGATIVE_RETRY_SEC = 30.0
+
     def __init__(self, bus: EventBus, cfg: GlobalConfig = None) -> None:  # type: ignore[assignment]
         super().__init__(bus)
         self._cfg = cfg
@@ -1313,6 +1319,22 @@ class AngelOneFeeder(BaseFeeder):
         self._token_meta: Dict[str, Tuple[str, float, str, date]] = {}
         self._subscribed: Dict[int, set] = {}   # exchangeType -> set of tokens
         self._scrip_cache: Dict[str, str] = {}  # (exchange, tradingsymbol) -> token, flattened key
+        # 2026-10-01 CRITICAL FIX, real live incident: a FAILED resolution used
+        # to be cached identically to a successful one (`token or ""`), forever,
+        # with zero retry -- a single transient scrip-search miss (AngelOne's
+        # scrip master not fully warmed up right at market open, a momentary
+        # rate-limit) permanently blinded every strategy sharing this feeder
+        # for the rest of the process's life, since every later attempt just
+        # read the poisoned "" cache entry without ever calling AngelOne
+        # again. Confirmed live: SellStraddle AND Iron Fly both sat with zero
+        # option ticks for 20+ minutes past market open on 2026-10-01, with no
+        # error logs at all (because after the first failed attempt, nothing
+        # ever tried again to produce one) -- only a process restart (clearing
+        # this in-memory cache) restored data flow. Failed lookups now live in
+        # their own dict with a retry cooldown instead -- see
+        # _cached_or_search_scrip() below, the new single entry point both
+        # _resolve_option_token/_resolve_futures_token route through.
+        self._scrip_cache_fail_ts: Dict[str, float] = {}
         # 2026-09-09 real incident fix -- see _resolve_option_token's own comment.
         self._last_scrip_search_ts: float = 0.0
         self._SCRIP_SEARCH_MIN_GAP_SEC: float = 0.35
@@ -1480,18 +1502,37 @@ class AngelOneFeeder(BaseFeeder):
         tradingsymbol = SymbolTranslator.to_angelone(internal)
         exchange = "BFO" if underlying.upper() == "SENSEX" else "NFO"
         cache_key = f"{exchange}:{tradingsymbol}"
+        token = await self._cached_or_search_scrip(cache_key, exchange, tradingsymbol)
+        if token:
+            self._token_meta[token] = (underlying, strike, opt_type, expiry)
+        return token
+
+    async def _cached_or_search_scrip(self, cache_key: str, exchange: str,
+                                       tradingsymbol: str) -> Optional[str]:
+        """Single entry point for scrip-master lookups with cache semantics
+        that do NOT permanently poison a transient failure -- see __init__'s
+        own comment on _scrip_cache_fail_ts for the real 2026-10-01 incident
+        this fixes (a one-off failed search used to block ticks for the rest
+        of the day). A successful token is cached forever (never re-searched);
+        a failed one is retried after _SCRIP_NEGATIVE_RETRY_SEC rather than
+        trusted indefinitely."""
         if cache_key in self._scrip_cache:
-            token = self._scrip_cache[cache_key]
-            if token:
-                self._token_meta[token] = (underlying, strike, opt_type, expiry)
-            return token or None
+            return self._scrip_cache[cache_key] or None
+        last_fail = self._scrip_cache_fail_ts.get(cache_key)
+        if last_fail is not None:
+            import time as _time
+            if _time.monotonic() - last_fail < self._SCRIP_NEGATIVE_RETRY_SEC:
+                return None  # still in cooldown -- don't hammer AngelOne again yet
         if not self._smartapi:
             return None
         token = await self._throttled_search_scrip(exchange, tradingsymbol)
-        self._scrip_cache[cache_key] = token or ""
         if token:
-            self._token_meta[token] = (underlying, strike, opt_type, expiry)
-        return token or None
+            self._scrip_cache[cache_key] = token
+            self._scrip_cache_fail_ts.pop(cache_key, None)
+        else:
+            import time as _time
+            self._scrip_cache_fail_ts[cache_key] = _time.monotonic()
+        return token
 
     async def _throttled_search_scrip(self, exchange: str, tradingsymbol: str) -> Optional[str]:
         """The actual searchScrip() call, factored out of _resolve_option_token
@@ -1555,13 +1596,7 @@ class AngelOneFeeder(BaseFeeder):
         tradingsymbol = SymbolTranslator.to_angelone_futures(underlying, expiry)
         exchange = "BFO" if underlying.upper() == "SENSEX" else "NFO"
         cache_key = f"FUT:{exchange}:{tradingsymbol}"
-        if cache_key in self._scrip_cache:
-            return self._scrip_cache[cache_key] or None
-        if not self._smartapi:
-            return None
-        token = await self._throttled_search_scrip(exchange, tradingsymbol)
-        self._scrip_cache[cache_key] = token or ""
-        return token or None
+        return await self._cached_or_search_scrip(cache_key, exchange, tradingsymbol)
 
     async def _resolve_any_token(self, token: str) -> Optional[Tuple[str, int]]:
         """Accept an Upstox key / Fyers symbol / internal canonical token

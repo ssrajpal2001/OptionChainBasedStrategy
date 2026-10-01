@@ -80,6 +80,52 @@ def test_resolve_option_token_none_smartapi_returns_none(bus):
     assert asyncio.run(f._resolve_option_token("NIFTY", 24000.0, "CE", date(2026, 9, 25))) is None
 
 
+def test_resolve_option_token_retries_a_failed_lookup_after_cooldown(feeder, monkeypatch):
+    """2026-10-01 CRITICAL FIX regression: a failed scrip search used to be
+    cached identically to a success, forever, with zero retry -- a single
+    transient miss (confirmed live: AngelOne's scrip master not yet warm
+    right at market open) permanently blinded every strategy sharing this
+    feeder for the rest of the day, with no further error logged since
+    nothing ever tried again. Real incident: SellStraddle AND Iron Fly both
+    sat with zero option ticks for 20+ minutes on 2026-10-01; only a full
+    process restart (which happens to clear this in-memory cache) restored
+    data flow. Now: a failed lookup is retried after _SCRIP_NEGATIVE_RETRY_SEC
+    instead of being trusted indefinitely."""
+    calls = {"n": 0}
+
+    def fake_search_scrip(exchange, tradingsymbol):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {"status": True, "data": []}  # first attempt: transient miss
+        return {"status": True, "data": [{"tradingsymbol": tradingsymbol, "symboltoken": "999"}]}
+
+    feeder._smartapi = type("FakeSmartApi", (), {"searchScrip": staticmethod(fake_search_scrip)})()
+
+    token1 = asyncio.run(feeder._resolve_option_token("NIFTY", 24000.0, "CE", date(2026, 9, 25)))
+    assert token1 is None
+    assert calls["n"] == 1
+
+    # Immediately retrying inside the cooldown window must NOT hit the API
+    # again (the old bug's inverse would be hammering it on every tick).
+    token2 = asyncio.run(feeder._resolve_option_token("NIFTY", 24000.0, "CE", date(2026, 9, 25)))
+    assert token2 is None
+    assert calls["n"] == 1
+
+    # Once the cooldown has elapsed, a fresh attempt is made and can succeed --
+    # this is the actual bug fix: the old code would return None forever here.
+    import time as _time
+    feeder._scrip_cache_fail_ts["NFO:NIFTY25SEP2624000CE"] = (
+        _time.monotonic() - feeder._SCRIP_NEGATIVE_RETRY_SEC - 1
+    )
+    token3 = asyncio.run(feeder._resolve_option_token("NIFTY", 24000.0, "CE", date(2026, 9, 25)))
+    assert token3 == "999"
+    assert calls["n"] == 2
+    # And it's now a permanent positive cache entry -- no further searches.
+    token4 = asyncio.run(feeder._resolve_option_token("NIFTY", 24000.0, "CE", date(2026, 9, 25)))
+    assert token4 == "999"
+    assert calls["n"] == 2
+
+
 # ── _resolve_any_token (cross-format acceptance) ───────────────────────────
 
 def test_resolve_any_token_accepts_upstox_key(feeder, monkeypatch):
