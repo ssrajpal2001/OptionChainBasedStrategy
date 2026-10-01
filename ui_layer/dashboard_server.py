@@ -6803,6 +6803,32 @@ pm2 save
                                                  "monitoring_state() failed for %s/%s",
                                                  c.client_id, d.get("binding_id", ""))
                                 break
+                    # 2026-10-01 fix, real user-found gap ("oi scanner is
+                    # showign profit but position header showign loss"):
+                    # oi_bias_rsi_exit's open positions were NEVER included
+                    # in the header/global running total at all -- this
+                    # strategy was simply missing from this elif chain
+                    # entirely (confirmed via direct code inspection; the
+                    # same class of gap already fixed once for oi_orb_screener
+                    # and once for cag_straddle above). Can hold several
+                    # concurrent stock positions at once (like OI-ORB), so
+                    # sum across all of them. monitoring_state()'s own
+                    # "unrealized_pnl" per position is already in real rupees
+                    # (qty * live_ltp-vs-entry diff, qty is the real share
+                    # count) -- no _lot() multiplier needed here.
+                    elif sname == "oi_bias_rsi_exit" and self._oi_bias_rsi_exit_manager is not None:
+                        for b in (getattr(self._oi_bias_rsi_exit_manager, "books", None) or []):
+                            if (getattr(b, "_client_id", None) == c.client_id
+                                    and getattr(b, "_binding_id", None) == d.get("binding_id", "")):
+                                try:
+                                    ms = b.monitoring_state()
+                                    for pos in (ms.get("positions") or {}).values():
+                                        running += float(pos.get("unrealized_pnl") or 0.0)
+                                except Exception:
+                                    logger.debug("_compute_live_pnls: oi_bias_rsi_exit "
+                                                 "monitoring_state() failed for %s/%s",
+                                                 c.client_id, d.get("binding_id", ""))
+                                break
                     # 2026-09-06: d1_trap_bear_only P&L branch removed along with
                     # D1 Trap -- fully stopped, direct user decision.
                 try:
