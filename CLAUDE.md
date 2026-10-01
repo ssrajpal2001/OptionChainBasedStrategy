@@ -2,22 +2,53 @@
 
 Complete codebase reference for Claude Code. Updated after each major phase.
 
-> **CURRENT FOCUS (2026-09-06):** This project's core work is now exactly **three
-> strategies** — direct user decision, superseding every prior "current focus" framing
-> below. **D1 Trap FnO/Index, FVG, OI-Flow Pre-Breakout, Liquidity Sweep, and Liquidity
-> Trap were all removed entirely** (code, execution bridges, dedicated Topics, tests,
-> backtest scripts) — all five were fully stopped and are not coming back without a new
-> explicit decision to rebuild them. Their own sections further down are kept as
+> **CURRENT FOCUS (updated 2026-10-01):** direct user decision, superseding every prior
+> "current focus" framing below, including the 2026-09-06 "exactly three strategies"
+> framing itself (now stale — the real live lineup has moved on twice since). **D1 Trap
+> FnO/Index, FVG, OI-Flow Pre-Breakout, Liquidity Sweep, and Liquidity Trap were all
+> removed entirely** (code, execution bridges, dedicated Topics, tests, backtest
+> scripts) on 2026-09-06 — all five were fully stopped and are not coming back without a
+> new explicit decision to rebuild them. Their own sections further down are kept as
 > historical reference/rationale only (each is flagged "REMOVED 2026-09-06" at the top)
 > — do not treat them as current, do not suggest resurrecting them.
-> 1. **SellStraddle** — theta-decay option seller (mature, live in production)
-> 2. **OI-ORB Screener** — OI-Spurt + ORB breakout option buyer on individual F&O **STOCKS**. Uses real S&R + trap-zone-detection primitives (rescued into `strategies/core/support_resistance.py` and `strategies/core/trap_zone_utils.py` during the removal above, since this strategy depends on them directly — see "OI-ORB Screener Strategy" section below).
-> 3. **CAG Long Straddle** — R1/S1 phase-breach option buyer on NIFTY/SENSEX, active only 15:00-15:35 IST. See "CAG Long Straddle Strategy" section below.
 >
-> Do NOT suggest, implement, or discuss any other strategies beyond these three unless
-> the user explicitly reopens that door. When starting a new session, read the OI-ORB
-> Screener and CAG Long Straddle sections below first (SellStraddle's own section is
-> long-established and mature).
+> **Live strategies as of 2026-10-01** (the actual `--strategies` flag used in
+> production): `sell_straddle,oi_bias_rsi_exit,cag_straddle,iron_fly`
+> 1. **SellStraddle** — theta-decay option seller (mature, live in production).
+> 2. **OI-Bias-RSI-Exit** — OI-spurt stock selection + combined-OI bias + StochRSI
+>    entry(3m)/exit(75m), validated against 20 real trading days
+>    (`scripts/oi_bias_rsi_exit_backtest.py`/`_optimize.py`). Replaced OI-ORB Screener
+>    on 2026-09-29 (see next line) — see `strategies/oi_bias_rsi_exit/`.
+> 3. **CAG Long Straddle** — R1/S1 phase-breach option buyer on NIFTY/SENSEX, active
+>    only 15:00-15:35 IST. See "CAG Long Straddle Strategy" section below.
+> 4. **Iron Fly** — NIFTY Weekly Iron Condor → Iron Fly, added 2026-09-14, live/
+>    paper_route. See `strategies/iron_fly/`.
+>
+> **OI-ORB Screener: REMOVED from the live `--strategies` list, "NOT REQUIRED AS OFF
+> NOW" (direct user confirmation, 2026-10-01).** Removed from production 2026-09-29
+> after a real mistrade (POLICYBZR fired a CALL on a -4.24% pChange day — no pChange
+> direction gate, no futures-OI breach confirmation), replaced by OI-Bias-RSI-Exit
+> above. Its code/tests are NOT deleted from the repo (unlike the 2026-09-06 removals)
+> — treat it the same as the 2026-09-06-removed strategies: historical reference only,
+> do not suggest resurrecting or redeploying it without an explicit new decision. Its
+> own "OI-ORB Screener Strategy" section further down is now stale in this same way.
+>
+> **Delta Exchange (BTC/ETH crypto options) is a SEPARATE, live, actively-maintained
+> subsystem** that this document never documented until now — found 2026-09-30 while
+> investigating a new BTC expiry-rotation idea. NOT part of the "N strategies" count
+> above (crypto, not NSE/BSE). Files: `data_layer/delta_feeder.py`,
+> `delta_chain_manager.py`, `delta_rollover.py`, `execution_bridge/broker_delta.py`;
+> `is_crypto()` branches already exist in `strategies/sell_straddle/rolling.py`/
+> `selection.py`/`config.py`/`engine.py`. A prior memory note claiming this was
+> "removed, decision made 2026-08-06" was WRONG — the code was actively extended well
+> past that date and is still live today. Do not trust that memory note; this doc's
+> word is now authoritative on this point.
+>
+> Do NOT suggest, implement, or discuss any other strategies beyond the 4 live ones
+> above (plus the separate Delta/crypto subsystem) unless the user explicitly reopens
+> that door. When starting a new session, read the OI-Bias-RSI-Exit, CAG Long Straddle,
+> and Iron Fly sections below first (SellStraddle's own section is long-established and
+> mature).
 >
 > **MCX REMOVED (2026-09-06), direct user decision — this application now targets ONLY
 > NSE and BSE.** All MCX-specific code was deleted: `ExchangeConfig.mcx_market_open/
@@ -1209,6 +1240,14 @@ section above for their own status).
 ---
 
 ### OI-ORB Screener Strategy (`strategies/oi_orb_screener/`)
+> ⚠️ **REMOVED FROM THE LIVE `--strategies` LINEUP 2026-09-29, "NOT REQUIRED AS OFF
+> NOW" (direct user confirmation 2026-10-01)** — replaced by OI-Bias-RSI-Exit after a
+> real mistrade (POLICYBZR fired a CALL on a -4.24% pChange day). Code/tests are still
+> in the repo (not deleted, unlike the 2026-09-06 removals elsewhere in this doc), but
+> treat this section as historical reference only — do not suggest resurrecting or
+> redeploying it without an explicit new decision. See the top-of-document "CURRENT
+> FOCUS" banner for the real current strategy lineup.
+
 
 Option **buyer** strategy trading individual F&O **STOCKS** (not an index) — a
 different composite signal from every other strategy above: NSE OI-Spurt list
