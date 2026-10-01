@@ -688,6 +688,31 @@ def test_monitoring_state_shows_live_ltp_and_unrealized_pnl():
     assert state["positions"]["SYM"]["unrealized_pnl"] == (60.0 - 50.0) * 75
 
 
+def test_monitoring_state_scanned_row_exposes_entry_ts_for_open_position():
+    """2026-10-01 direct user request ("UI NOT SHOWIGN ENTRY TIM") -- the
+    scanned row for an open position must carry its own real entry
+    timestamp (ISO string, JSON-safe) so the dashboard can show exactly
+    when the trade fired."""
+    s = _strategy()
+    s._candidates = ["SYM"]
+    s._bias = {"SYM": "bullish"}
+    pos = _pos()
+    s._positions["SYM"] = pos
+    state = s.monitoring_state()
+    row = next(r for r in state["scanned"] if r["symbol"] == "SYM")
+    assert row["entry_ts"] == pos["entry_ts"].isoformat()
+
+    other = s.monitoring_state()
+    other_row = next(r for r in other["scanned"] if r["symbol"] == "SYM")
+    assert isinstance(other_row["entry_ts"], str)  # JSON-serializable, not a raw datetime
+
+    s2 = _strategy()
+    s2._candidates = ["FLAT"]
+    s2._bias = {"FLAT": "bullish"}
+    flat_row = next(r for r in s2.monitoring_state()["scanned"] if r["symbol"] == "FLAT")
+    assert flat_row["entry_ts"] is None
+
+
 def test_monitoring_state_ltp_none_when_no_live_tick_yet():
     s = _strategy()
     s._candidates = ["SYM"]

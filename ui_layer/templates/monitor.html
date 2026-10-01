@@ -8901,6 +8901,9 @@ function amoTest() {
                                      + OI-bias-flip progress. -->
                                 <div class="flex items-center justify-between" style="color:var(--t-muted)">
                                   <span x-text="row.position_summary"></span>
+                                  <!-- 2026-10-01 direct user request ("UI NOT SHOWIGN ENTRY TIM") --
+                                       real entry timestamp, IST, from the position's own entry_ts. -->
+                                  <span x-text="'Entry: '+(row.entry_ts ? new Date(row.entry_ts).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false,timeZone:'Asia/Kolkata'}) : '—')"></span>
                                   <span>LTP: <span x-text="row.live_ltp!=null ? fmt(row.live_ltp) : '—'"></span></span>
                                   <span :style="(row.unrealized_pnl||0)>=0?'color:var(--t-green)':'color:var(--t-red)'"
                                         x-text="'P&amp;L: '+(row.unrealized_pnl!=null ? fmt(row.unrealized_pnl) : '—')"></span>

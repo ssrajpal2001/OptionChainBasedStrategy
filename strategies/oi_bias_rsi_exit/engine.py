@@ -1048,6 +1048,10 @@ class OiBiasRsiExitStrategy:
                 ),
                 "live_ltp": live_ltp,
                 "unrealized_pnl": unrealized_pnl,
+                # 2026-10-01 direct user request ("UI NOT SHOWIGN ENTRY TIM"):
+                # the position's own real entry timestamp, so the dashboard
+                # can show exactly when the trade fired, not just its price.
+                "entry_ts": pos["entry_ts"].isoformat() if pos else None,
                 # Entry-side snapshot (frozen once in a position -- the
                 # reading that actually fired the trade) kept separately
                 # for reference, distinct from the now-primary live k/d.
