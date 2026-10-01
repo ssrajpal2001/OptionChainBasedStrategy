@@ -40,10 +40,15 @@ _DEFAULT_PARAMS = {
     # well"): 0 disables and reverts to the original single-scan-at-09:25
     # behavior.
     "rescan_interval_sec": 60,
+    # 2026-10-01 direct user request, real live incident (4 consecutive
+    # KOTAKBANK whipsaw round-trips, net -Rs9,700, each an oi_bias_flip_twice
+    # exit immediately followed by a re-entry in the same direction) -- see
+    # engine.py's own sl_cooldown_minutes comment.
+    "sl_cooldown_minutes": 15,
 }
 _FLOAT_KEYS = ("oi_spurt_min_pct", "poll_seconds")
 _INT_KEYS = ("entry_timeframe_min", "exit_timeframe_min", "oi_recheck_minutes", "oi_bias_flip_count",
-             "rescan_interval_sec")
+             "rescan_interval_sec", "sl_cooldown_minutes")
 
 
 def _parse_params(raw: str) -> dict:
@@ -100,6 +105,7 @@ class OiBiasRsiExitBookManager(StrategyBookManager):
             oi_recheck_minutes=value["oi_recheck_minutes"],
             oi_bias_flip_count=value["oi_bias_flip_count"],
             rescan_interval_sec=value["rescan_interval_sec"],
+            sl_cooldown_minutes=value["sl_cooldown_minutes"],
         )
         logger.info(
             "OiBiasRsiExitBookManager: spawned %s/%s (lots=%d product=%s start=%s exit=%s).",
@@ -128,6 +134,7 @@ class OiBiasRsiExitBookManager(StrategyBookManager):
             or book._oi_recheck_minutes != value["oi_recheck_minutes"]
             or book._oi_bias_flip_count != value["oi_bias_flip_count"]
             or book._rescan_interval_sec != value["rescan_interval_sec"]
+            or book._sl_cooldown_minutes != value["sl_cooldown_minutes"]
         )
 
     def _log_spawned(self, key: tuple, value: dict) -> None:

@@ -12,6 +12,7 @@ the most recent REAL (>0) reading at-or-before 09:20, not an exact-minute
 match, applied uniformly to all three snapshot times."""
 import asyncio
 from datetime import date, datetime, time as dtime, timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from config.global_config import IST, GlobalConfig
@@ -434,6 +435,127 @@ def test_check_entry_tracks_kd_for_none_bias_without_firing():
     assert s._last_entry_kd["SYM"]["k"] is not None
     assert s._last_entry_kd["SYM"]["d"] is not None
     assert s._last_entry_kd["SYM"]["bias"] == "none"
+
+
+# ── Re-entry cooldown after oi_bias_flip_twice, 2026-10-01 real live incident
+# (4 consecutive KOTAKBANK whipsaw round-trips, net -Rs9,700 -- each exit was
+# immediately followed by a re-entry in the SAME direction one poll cycle
+# later, since self._bias[symbol] is never invalidated by this exit).
+
+def test_close_position_arms_cooldown_only_for_oi_bias_flip_twice():
+    s = _strategy()
+    s._sl_cooldown_minutes = 15
+    s._positions["SYM"] = _pos()
+    with patch("strategies.oi_bias_rsi_exit.engine.fetch_upstox_intraday_1m",
+               new=AsyncMock(return_value=[])), \
+         patch("strategies.oi_bias_rsi_exit.engine.store.record_exit"):
+        asyncio.run(s._close_position("SYM", "oi_bias_flip_twice", "tok"))
+    assert "SYM" in s._cooldown_until
+    assert s._cooldown_until["SYM"] > datetime.now(IST) + timedelta(minutes=14)
+
+
+def test_close_position_does_not_arm_cooldown_for_normal_stoch_exit():
+    """The intended exit mechanism (stoch_exit_cross) is the strategy working
+    as designed, not a stop-out -- must never trigger the cooldown."""
+    s = _strategy()
+    s._positions["SYM"] = _pos()
+    with patch("strategies.oi_bias_rsi_exit.engine.fetch_upstox_intraday_1m",
+               new=AsyncMock(return_value=[])), \
+         patch("strategies.oi_bias_rsi_exit.engine.store.record_exit"):
+        asyncio.run(s._close_position("SYM", "stoch_exit_cross", "tok"))
+    assert "SYM" not in s._cooldown_until
+
+
+def test_check_entry_skipped_while_cooldown_active():
+    s = _strategy()
+    s._today = date(2026, 9, 30)
+    s._bias["SYM"] = "bullish"
+    s._cooldown_until["SYM"] = datetime.now(IST) + timedelta(minutes=10)
+    with patch("strategies.oi_bias_rsi_exit.engine.stock_resolve.resolve_contract") as _rc:
+        asyncio.run(s._check_entry("SYM", "tok"))
+        _rc.assert_not_called()
+    assert "SYM" in s._cooldown_until  # still active, not cleared early
+
+
+def test_check_entry_resumes_once_cooldown_clears():
+    s = _strategy()
+    s._today = date(2026, 9, 30)
+    s._bias["SYM"] = "bullish"
+    s._cooldown_until["SYM"] = datetime.now(IST) - timedelta(seconds=1)  # already expired
+    # Needs real non-empty bars to reach the cooldown-check line at all (an
+    # empty-bars early-return would never get there) -- content doesn't
+    # matter, just needs to exist.
+    hist_entries = [((9 * 60 + 15 + i) // 60, (9 * 60 + 15 + i) % 60, 100.0 + i)
+                    for i in range(200)]
+    hist_rows = _hist_rows("2026-09-29", hist_entries)
+    today_rows = _hist_rows("2026-09-30", [(9, 15, 200.0), (9, 18, 199.0)])
+    with patch("strategies.oi_bias_rsi_exit.engine.fetch_upstox_range_1m",
+               new=AsyncMock(return_value=hist_rows)), \
+         patch("strategies.oi_bias_rsi_exit.engine.fetch_upstox_intraday_1m",
+               new=AsyncMock(return_value=today_rows)), \
+         patch("strategies.oi_bias_rsi_exit.engine.stock_resolve.resolve_eq_instrument_key",
+               return_value="NSE_EQ|TEST"):
+        asyncio.run(s._check_entry("SYM", "tok"))
+    assert "SYM" not in s._cooldown_until  # cleared once expired
+
+
+def test_reset_session_clears_cooldowns_for_new_day():
+    s = _strategy()
+    s._cooldown_until["SYM"] = datetime.now(IST) + timedelta(minutes=10)
+    s._reset_session(date(2026, 10, 2))
+    assert s._cooldown_until == {}
+
+
+def test_wait_exit_log_uses_real_opposite_count_not_raw_history_length():
+    """2026-10-01 CRITICAL FIX, found during the KOTAKBANK review: the
+    WAIT-EXIT log line showed len(oi_bias_history) (every re-check,
+    including non-opposite readings), not the real opposite-reading count
+    _check_oi_bias_flip itself gates on -- confirmed live, the log showed
+    "OI-flip 9/2" while the real count was still well under the threshold.
+    History here has 5 entries, 2 of which are genuine opposites ("bullish"
+    is the opposite of a bearish entry bias, per count_opposite_bias_
+    readings' own contract) -- the old buggy code would have logged the raw
+    length (5), the fix must log the real count (2).
+
+    Mocks s._clog.info directly rather than using pytest's caplog, since
+    this logger has propagate=False (own dedicated file handler) and
+    caplog's root-logger handler never sees anything from it."""
+    s = _strategy()
+    _calls = []
+    s._clog = SimpleNamespace(info=lambda *a, **k: _calls.append(a),
+                               warning=lambda *a, **k: None, exception=lambda *a, **k: None)
+    s._today = date(2026, 9, 30)
+    s._bias["SYM"] = "bearish"
+    entry_ts = datetime(2026, 9, 30, 9, 30, tzinfo=IST)
+    s._positions["SYM"] = {
+        "option_type": "PE", "strike": 100, "qty": 75, "entry_price": 50.0,
+        "entry_ts": entry_ts, "upstox_key": "NSE_FO|1",
+        "prev_oi": {"atm_call": 1.0, "otm_call": 1.0, "atm_put": 1.0, "otm_put": 1.0},
+        "oi_bias_history": ["none", "bullish", "none", "none", "bullish"],  # 2 real "bullish" opposites
+        "next_oi_check": datetime.now(IST) + timedelta(minutes=10),
+    }
+    days = ["2026-09-18", "2026-09-19", "2026-09-22", "2026-09-23", "2026-09-24",
+            "2026-09-25", "2026-09-26", "2026-09-28", "2026-09-29"]
+    hist_rows = []
+    for di, day_str in enumerate(days):
+        day_entries = [((9 * 60 + 15 + m) // 60, (9 * 60 + 15 + m) % 60, 100.0 + di + m * 0.01)
+                       for m in range(0, 375, 3)]
+        hist_rows.extend(_exit_bars(day_str, day_entries))
+    today_rows = _exit_bars("2026-09-30", [(9, 15, 200.0), (11, 0, 199.0)])
+    with patch("strategies.oi_bias_rsi_exit.engine.fetch_upstox_range_1m",
+               new=AsyncMock(return_value=hist_rows)), \
+         patch("strategies.oi_bias_rsi_exit.engine.fetch_upstox_intraday_1m",
+               new=AsyncMock(return_value=today_rows)), \
+         patch("strategies.oi_bias_rsi_exit.engine.stock_resolve.resolve_eq_instrument_key",
+               return_value="NSE_EQ|TEST"):
+        asyncio.run(s._check_exit("SYM", "tok"))
+
+    wait_exit_calls = [c for c in _calls if "WAIT-EXIT" in c[0]]
+    assert wait_exit_calls, "expected a WAIT-EXIT log call"
+    last_args = wait_exit_calls[-1]
+    # format string, symbol, bias, need, k_s, d_s, flip_count, flip_threshold
+    assert last_args[-2] == 2, f"expected the real opposite count (2), not raw history length (5): {last_args!r}"
+    assert last_args[-1] == s._oi_bias_flip_count
 
 
 # ── monitoring_state, 2026-09-30 direct user request ────────────────────────

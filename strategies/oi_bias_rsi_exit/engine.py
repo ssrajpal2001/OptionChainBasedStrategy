@@ -172,6 +172,19 @@ class OiBiasRsiExitStrategy:
         # TTL cache (screener.py's _cached_nse_fetch) across every caller, so
         # a 60s rescan cadence does not mean a fresh real NSE hit every 60s.
         rescan_interval_sec: int = 60,
+        # 2026-10-01 direct user request, after a real live incident: four
+        # consecutive KOTAKBANK whipsaw round-trips (net -Rs9,700) traced to
+        # an oi_bias_flip_twice exit being immediately followed by a
+        # re-entry in the EXACT SAME direction one poll cycle later -- self.
+        # _bias[symbol] never gets invalidated by this exit, so the very
+        # next check re-entered the same thesis the real OI data had just
+        # twice confirmed wrong. Same category of gap already fixed once in
+        # this codebase for OI-Flow's own sl_cooldown_minutes ("defeating
+        # the whole point of resting after a loss"). Scoped PER-SYMBOL here
+        # (not book-wide like OI-Flow's) since this book can hold several
+        # concurrent stock positions at once -- a cooldown on KOTAKBANK must
+        # never block an unrelated BAJAJ-AUTO entry.
+        sl_cooldown_minutes: int = 15,
     ) -> None:
         self._bus = bus
         self._cfg = cfg
@@ -191,6 +204,7 @@ class OiBiasRsiExitStrategy:
         self._oi_recheck_minutes = oi_recheck_minutes
         self._oi_bias_flip_count = oi_bias_flip_count
         self._rescan_interval_sec = rescan_interval_sec
+        self._sl_cooldown_minutes = sl_cooldown_minutes
 
         self._clog = _make_strategy_logger(client_id, binding_id)
         self._running = False
@@ -239,6 +253,10 @@ class OiBiasRsiExitStrategy:
         # restore anywhere, so a still-open real position was silently
         # forgotten and re-entered on top of. See _restore_positions().
         self._positions_restored = False
+        # 2026-10-01 direct user request: per-symbol cooldown after an
+        # oi_bias_flip_twice exit -- see __init__'s own sl_cooldown_minutes
+        # comment for the real incident this fixes.
+        self._cooldown_until: Dict[str, datetime] = {}
 
     def start(self) -> None:
         if self._running:
@@ -306,6 +324,7 @@ class OiBiasRsiExitStrategy:
         self._last_entry_kd = {}
         self._last_exit_kd = {}
         self._positions_restored = False
+        self._cooldown_until = {}
         self._clog.info("session reset for new trading day %s.", today)
 
     async def _restore_positions(self, token: str) -> None:
@@ -731,6 +750,17 @@ class OiBiasRsiExitStrategy:
         # wrong, not merely moot. Stop here for "none" after tracking.
         if bias not in ("bullish", "bearish"):
             return
+        # 2026-10-01 direct user request: a per-symbol cooldown after an
+        # oi_bias_flip_twice exit (see _close_position's own comment) --
+        # K/D tracking above still runs so the dashboard keeps showing live
+        # progress, but no new entry can fire until the cooldown clears.
+        _cd_until = self._cooldown_until.get(symbol)
+        if _cd_until is not None:
+            if datetime.now(IST) < _cd_until:
+                self._clog.info("%s: entry skipped -- re-entry cooldown active until %s.",
+                                 symbol, _cd_until.strftime("%H:%M:%S"))
+                return
+            del self._cooldown_until[symbol]
         # 2026-09-30 CRITICAL FIX: now that bars_e can include PRIOR DAYS'
         # bars (needed to warm up k/d above), the entry-time gate must also
         # require the bar's DATE is genuinely today -- b.ts.time() alone
@@ -960,10 +990,23 @@ class OiBiasRsiExitStrategy:
                 _need = "K crosses above D" if bias == "bearish" else "D crosses above K"
                 _k_s = f"{_k_last:.2f}" if isinstance(_k_last, float) else "N/A"
                 _d_s = f"{_d_last:.2f}" if isinstance(_d_last, float) else "N/A"
+                # 2026-10-01 CRITICAL FIX, real live incident found during a
+                # KOTAKBANK trade review: this logged the RAW LENGTH of
+                # oi_bias_history (every re-check, including "none" readings
+                # that never count toward the flip-twice exit), not the real
+                # opposite-reading count _check_oi_bias_flip itself actually
+                # gates on -- confirmed live, the log showed "OI-flip 9/2"
+                # (implying the exit should have fired long before) while the
+                # real gate correctly hadn't reached 2 genuine bearish
+                # readings yet. Same class of bug already fixed once for this
+                # exact field's SOLARINDS incident (2026-09-30) -- that fix
+                # covered the dashboard's oi_flip_count, this log line was
+                # missed.
+                _real_flip_count = count_opposite_bias_readings(pos.get("oi_bias_history", []), bias)
                 self._clog.info(
                     "%s: WAIT-EXIT bias=%s need %s -- K=%s D=%s (not yet; OI-flip %d/%d opposite readings)",
                     symbol, bias, _need, _k_s, _d_s,
-                    len(pos.get("oi_bias_history", [])), self._oi_bias_flip_count,
+                    _real_flip_count, self._oi_bias_flip_count,
                 )
             return
         await self._close_position(symbol, "stoch_exit_cross", token)
@@ -991,6 +1034,19 @@ class OiBiasRsiExitStrategy:
         self._live_ltp.pop(symbol, None)
         self._option_key_subscribed.pop(symbol, None)
         self._last_exit_kd.pop(symbol, None)
+        # 2026-10-01 direct user request, real live incident: an
+        # oi_bias_flip_twice exit means real OI data just confirmed the
+        # entry thesis wrong (twice) -- arm a per-symbol cooldown so the very
+        # next poll cycle can't immediately re-enter the same direction
+        # (self._bias[symbol] is NOT invalidated by this exit, so without a
+        # cooldown it would). EOD/force-exit are explicitly excluded, same as
+        # OI-Flow's own precedent -- those aren't loss signals. stoch_exit_
+        # cross (the normal, intended exit) is also excluded -- that's the
+        # strategy working as designed, not a stop-out.
+        if reason == "oi_bias_flip_twice":
+            self._cooldown_until[symbol] = datetime.now(IST) + timedelta(minutes=self._sl_cooldown_minutes)
+            self._clog.info("%s: re-entry cooldown armed for %d min (until %s) after oi_bias_flip_twice exit.",
+                             symbol, self._sl_cooldown_minutes, self._cooldown_until[symbol].strftime("%H:%M:%S"))
 
     async def _square_off_all(self, reason: str) -> None:
         token = await self._get_token()
