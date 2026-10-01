@@ -404,6 +404,38 @@ def test_check_entry_ignores_prior_day_bar_even_if_time_of_day_matches():
         _rc.assert_not_called()
 
 
+def test_check_entry_tracks_kd_for_none_bias_without_firing():
+    """2026-10-01 CRITICAL FIX, direct user report ("ENRIN stocks is being
+    scanned but its d and k r n/a"): a candidate whose OI bias hasn't
+    resolved to a direction yet (bias="none") used to never have
+    _check_entry called for it at all, so its scan-panel K/D stayed
+    permanently N/A even though it's genuinely being scanned. _check_entry
+    must now track K/D for a "none"-bias symbol too, while never resolving
+    a contract or firing an entry for it (check_entry_state has no sane
+    answer for "none")."""
+    s = _strategy()
+    s._today = date(2026, 9, 30)
+    s._bias["SYM"] = "none"
+    hist_entries = [((9 * 60 + 15 + i) // 60, (9 * 60 + 15 + i) % 60, 100.0 + i)
+                    for i in range(200)]
+    hist_rows = _hist_rows("2026-09-29", hist_entries)
+    today_rows = _hist_rows("2026-09-30", [(9, 15, 200.0), (9, 18, 199.0)])
+    with patch("strategies.oi_bias_rsi_exit.engine.fetch_upstox_range_1m",
+               new=AsyncMock(return_value=hist_rows)), \
+         patch("strategies.oi_bias_rsi_exit.engine.fetch_upstox_intraday_1m",
+               new=AsyncMock(return_value=today_rows)), \
+         patch("strategies.oi_bias_rsi_exit.engine.stock_resolve.resolve_eq_instrument_key",
+               return_value="NSE_EQ|TEST"), \
+         patch("strategies.oi_bias_rsi_exit.engine.stock_resolve.resolve_contract") as _rc:
+        asyncio.run(s._check_entry("SYM", "tok"))
+        _rc.assert_not_called()  # never fires an entry for an unresolved bias
+
+    assert "SYM" in s._last_entry_kd
+    assert s._last_entry_kd["SYM"]["k"] is not None
+    assert s._last_entry_kd["SYM"]["d"] is not None
+    assert s._last_entry_kd["SYM"]["bias"] == "none"
+
+
 # ── monitoring_state, 2026-09-30 direct user request ────────────────────────
 # "position not showing anything that which all stocks were scanned and
 # what r they doing now" -- every candidate's live bias/K/D, plus a fully
@@ -701,6 +733,8 @@ def test_restore_positions_repopulates_from_db_without_reentering():
          patch("strategies.oi_bias_rsi_exit.engine.stock_resolve.resolve_eq_instrument_key",
                return_value="NSE_EQ|COFORGE"), \
          patch("strategies.oi_bias_rsi_exit.engine.fetch_upstox_intraday_1m",
+               new=AsyncMock(return_value=[])), \
+         patch("strategies.oi_bias_rsi_exit.engine.fetch_upstox_range_1m",
                new=AsyncMock(return_value=[])):
         asyncio.run(s._restore_positions("tok"))
 
@@ -713,6 +747,42 @@ def test_restore_positions_repopulates_from_db_without_reentering():
     assert pos["db_row_id"] == 42
     assert s._bias["COFORGE"] == "bearish"  # PE -> bearish, deterministic from option_type
     assert "COFORGE" in s._candidates
+
+
+def test_restore_positions_backfills_entry_kd_from_current_history():
+    """2026-10-01 CRITICAL FIX, direct user report: the dashboard's "Entry
+    K/D" permanently showed N/A for an already-open position after ANY
+    restart, since _check_entry (the only thing that normally keeps
+    _last_entry_kd fresh) is permanently skipped once a symbol is in
+    self._positions. _restore_positions must now backfill a real value
+    using current history, not leave it blank for the rest of the day."""
+    s = _strategy()
+    s._today = date(2026, 9, 30)
+    db_row = {
+        "id": 42, "symbol": "COFORGE", "option_type": "PE", "strike": 1760.0,
+        "expiry": "2026-10-27", "qty": 475, "entry_price": 54.90,
+        "entry_ts": "2026-09-30T11:19:13+05:30",
+    }
+    hist_entries = [((9 * 60 + 15 + i) // 60, (9 * 60 + 15 + i) % 60, 100.0 + i)
+                    for i in range(200)]
+    hist_rows = _hist_rows("2026-09-29", hist_entries)
+    today_rows = _hist_rows("2026-09-30", [(9, 15, 200.0), (9, 18, 199.0)])
+    with patch("strategies.oi_bias_rsi_exit.engine.store.get_open_positions",
+               return_value=[db_row]), \
+         patch("strategies.oi_bias_rsi_exit.engine.stock_resolve.resolve_contract",
+               return_value=_FakeContract()), \
+         patch("strategies.oi_bias_rsi_exit.engine.stock_resolve.resolve_eq_instrument_key",
+               return_value="NSE_EQ|COFORGE"), \
+         patch("strategies.oi_bias_rsi_exit.engine.fetch_upstox_intraday_1m",
+               new=AsyncMock(return_value=today_rows)), \
+         patch("strategies.oi_bias_rsi_exit.engine.fetch_upstox_range_1m",
+               new=AsyncMock(return_value=hist_rows)):
+        asyncio.run(s._restore_positions("tok"))
+
+    assert "COFORGE" in s._last_entry_kd
+    assert s._last_entry_kd["COFORGE"]["k"] is not None
+    assert s._last_entry_kd["COFORGE"]["d"] is not None
+    assert s._last_entry_kd["COFORGE"]["bias"] == "bearish"
 
 
 def test_restore_positions_is_idempotent_and_does_not_duplicate():

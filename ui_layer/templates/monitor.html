@@ -8869,53 +8869,74 @@ function amoTest() {
                       <template x-if="!_bk">
                         <div class="text-center" style="color:var(--t-dim)">Loading OI-Bias RSI Exit state…</div>
                       </template>
+                      <!-- 2026-10-01 direct user request: split into two separate panels --
+                           POSITIONS (open trades, exit-side K/D) and SCANNING (not yet in a
+                           position, entry-side K/D) -- previously one combined list made it
+                           easy to miss which rows were actually open vs still being watched. -->
                       <template x-if="_bk">
                         <div>
-                          <div class="flex items-center justify-between mb-2">
-                            <span style="color:var(--t-muted)">SCANNED</span>
-                            <span class="px-1.5 py-0.5 rounded" style="background:rgba(var(--t-cyan-rgb),0.15);color:var(--t-cyan)"
-                                  x-text="(_bk.scanned||[]).length+' stocks'"></span>
+                          <div class="flex items-center justify-between mb-1">
+                            <span style="color:var(--t-muted)">POSITIONS</span>
+                            <span class="px-1.5 py-0.5 rounded" style="background:rgba(var(--t-green-rgb),0.15);color:var(--t-green)"
+                                  x-text="(_bk.scanned||[]).filter(r=>r.in_position).length+' open'"></span>
                           </div>
-                          <div style="max-height:260px;overflow-y:auto">
-                            <template x-for="row in (_bk.scanned||[])" :key="row.symbol">
+                          <div style="max-height:160px;overflow-y:auto" class="mb-3">
+                            <template x-for="row in (_bk.scanned||[]).filter(r=>r.in_position)" :key="'pos-'+row.symbol">
                               <div class="mb-1 pb-1" style="border-bottom:1px solid var(--t-border)">
                                 <div class="flex items-center justify-between">
-                                  <span :style="row.in_position?'color:var(--t-green);font-weight:600':'color:var(--t-muted)'"
-                                        x-text="row.symbol+(row.in_position?' ●':'')"></span>
+                                  <span style="color:var(--t-green);font-weight:600" x-text="row.symbol+' ●'"></span>
                                   <span :style="{
                                       'bullish':'color:var(--t-green)', 'bearish':'color:var(--t-red)',
                                     }[row.bias]||'color:var(--t-dim)'" x-text="row.bias"></span>
-                                  <!-- 2026-09-30 CRITICAL FIX, direct user correction ("u need to
-                                       check for d and k every 5 min ... and keep changign that in
-                                       posiiton section"): row.k/row.d is now ALWAYS the still-live
-                                       reading for this symbol's current state -- entry-side while
-                                       scanning, exit-side once in a position (entry-side freezes
-                                       forever the instant a position opens, since _check_entry
-                                       never runs again for it). Refreshes every poll cycle
-                                       (admin-configurable poll_seconds) on whichever timeframe is
-                                       active (entry_timeframe_min/exit_timeframe_min, both
-                                       admin-configurable) -- never a stale snapshot. -->
+                                  <!-- row.k/row.d is the EXIT-side StochRSI reading (75m default),
+                                       continuously warmed from prior-day history -- see
+                                       strategies/oi_bias_rsi_exit/engine.py's _check_exit, 2026-10-01
+                                       fix (display no longer waits for the first post-entry bar to
+                                       close before showing a real value). -->
                                   <span x-text="'K:'+(row.k!=null?fmt(row.k):'N/A')+' D:'+(row.d!=null?fmt(row.d):'N/A')"></span>
                                 </div>
                                 <!-- Open-position detail: entry, live LTP, running P&L, and the
-                                     frozen entry-time K/D (the reading that actually fired the
-                                     trade, kept for reference since the main K/D above has since
-                                     moved on to live exit tracking) + OI-bias-flip progress --
-                                     2026-09-30 direct user request ("ltp of option shoudl eb shown
-                                     in position ... it is nto showign proper pnl"). -->
-                                <div x-show="row.in_position" class="flex items-center justify-between" style="color:var(--t-muted)">
+                                     entry-time K/D (the reading that fired the trade; backfilled
+                                     from current history on a restart too, see _restore_positions)
+                                     + OI-bias-flip progress. -->
+                                <div class="flex items-center justify-between" style="color:var(--t-muted)">
                                   <span x-text="row.position_summary"></span>
                                   <span>LTP: <span x-text="row.live_ltp!=null ? fmt(row.live_ltp) : '—'"></span></span>
                                   <span :style="(row.unrealized_pnl||0)>=0?'color:var(--t-green)':'color:var(--t-red)'"
                                         x-text="'P&amp;L: '+(row.unrealized_pnl!=null ? fmt(row.unrealized_pnl) : '—')"></span>
                                 </div>
-                                <div x-show="row.in_position" style="color:var(--t-dim);font-size:10px">
+                                <div style="color:var(--t-dim);font-size:10px">
                                   <span x-text="'Entry K:'+(row.entry_k!=null?fmt(row.entry_k):'N/A')+' D:'+(row.entry_d!=null?fmt(row.entry_d):'N/A')"></span>
                                   <span x-text="' | OI-flip: '+(row.oi_flip_count!=null?row.oi_flip_count:0)+'/'+(row.oi_flip_threshold!=null?row.oi_flip_threshold:'?')"></span>
                                 </div>
                               </div>
                             </template>
-                            <div x-show="(_bk.scanned||[]).length===0" class="text-center" style="color:var(--t-dim)">
+                            <div x-show="(_bk.scanned||[]).filter(r=>r.in_position).length===0" class="text-center" style="color:var(--t-dim)">
+                              No open positions right now.
+                            </div>
+                          </div>
+
+                          <div class="flex items-center justify-between mb-1" style="border-top:1px solid var(--t-border);padding-top:6px">
+                            <span style="color:var(--t-muted)">SCANNING</span>
+                            <span class="px-1.5 py-0.5 rounded" style="background:rgba(var(--t-cyan-rgb),0.15);color:var(--t-cyan)"
+                                  x-text="(_bk.scanned||[]).filter(r=>!r.in_position).length+' stocks'"></span>
+                          </div>
+                          <div style="max-height:200px;overflow-y:auto">
+                            <template x-for="row in (_bk.scanned||[]).filter(r=>!r.in_position)" :key="'scan-'+row.symbol">
+                              <div class="mb-1 pb-1 flex items-center justify-between" style="border-bottom:1px solid var(--t-border)">
+                                <span style="color:var(--t-muted)" x-text="row.symbol"></span>
+                                <span :style="{
+                                    'bullish':'color:var(--t-green)', 'bearish':'color:var(--t-red)',
+                                  }[row.bias]||'color:var(--t-dim)'" x-text="row.bias"></span>
+                                <!-- 2026-10-01 CRITICAL FIX, direct user report ("ENRIN stocks is
+                                     being scanned but its d and k r n/a"): K/D is now tracked for
+                                     EVERY scanned candidate including bias="none" (engine.py's
+                                     _check_entry no longer skips tracking just because a direction
+                                     hasn't resolved yet -- it only skips the entry-firing logic). -->
+                                <span x-text="'K:'+(row.k!=null?fmt(row.k):'N/A')+' D:'+(row.d!=null?fmt(row.d):'N/A')"></span>
+                              </div>
+                            </template>
+                            <div x-show="(_bk.scanned||[]).filter(r=>!r.in_position).length===0" class="text-center" style="color:var(--t-dim)">
                               No candidates scanned yet today.
                             </div>
                           </div>

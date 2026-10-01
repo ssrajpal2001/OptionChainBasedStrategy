@@ -393,6 +393,37 @@ class OiBiasRsiExitStrategy:
                              "-- resuming exit tracking, no re-entry.",
                              symbol, option_type, strike, row["qty"], row["entry_price"], entry_ts, bias)
 
+            # 2026-10-01 CRITICAL FIX, direct user report: the dashboard's
+            # "Entry K/D" field (self._last_entry_kd, read by
+            # monitoring_state()) is normally kept live by _check_entry() --
+            # but _check_entry is permanently skipped once a symbol is in
+            # self._positions (line ~441, "sym not in self._positions"), by
+            # design, since there's nothing left to decide. That's fine while
+            # the process keeps running (the dict just holds whatever it was
+            # right before entry), but reset_session() clears
+            # self._last_entry_kd to {} on every restart -- and since
+            # _check_entry never runs again for an already-open position,
+            # nothing ever refills it, so a restart permanently blanked
+            # "Entry K/D" to N/A for every already-open position for the rest
+            # of the day. Best-effort backfill here using the SAME
+            # entry-timeframe computation _check_entry itself uses, against
+            # current history -- not byte-identical to the literal original
+            # entry-instant reading (that was never persisted), but a real,
+            # current value instead of a permanent N/A.
+            try:
+                ebars = await self._bars_with_history(symbol, token)
+                if ebars:
+                    ebars_e = to_n_min_bars_market_anchored(ebars, self._entry_timeframe_min)
+                    ek, ed = compute_stoch_rsi_double_smoothed(
+                        [b.close for b in ebars_e], *self._entry_stoch_rsi_lengths)
+                    self._last_entry_kd[symbol] = {
+                        "k": ek[-1] if ek else None, "d": ed[-1] if ed else None,
+                        "bias": bias, "bars": len(ebars_e),
+                    }
+            except Exception:
+                self._clog.exception("%s: restore could not backfill Entry K/D "
+                                      "(non-fatal, dashboard shows N/A until next natural update).", symbol)
+
     async def _loop(self) -> None:
         while self._running:
             try:
@@ -438,7 +469,17 @@ class OiBiasRsiExitStrategy:
             self._next_rescan_at = now + timedelta(seconds=self._rescan_interval_sec)
 
         for sym in list(self._bias):
-            if self._bias[sym] in ("bullish", "bearish") and sym not in self._positions:
+            # 2026-10-01 CRITICAL FIX, direct user correction ("ENRIN stocks
+            # is being scanned but its d and k r n/a"): this used to gate the
+            # call itself on bias in (bullish/bearish), so a candidate whose
+            # OI bias hadn't resolved to a direction yet (bias="none", e.g.
+            # thin/missing OI data) never had _check_entry called for it at
+            # all -- meaning _last_entry_kd never got populated and the scan
+            # panel showed permanent N/A, even though the stock is genuinely
+            # being scanned. _check_entry itself now tracks K/D for every
+            # candidate unconditionally and only gates the actual
+            # entry-firing logic on bias internally -- see its own comment.
+            if sym not in self._positions:
                 await self._check_entry(sym, token)
 
         for sym in list(self._positions):
@@ -675,6 +716,21 @@ class OiBiasRsiExitStrategy:
         bars_e = to_n_min_bars_market_anchored(bars, self._entry_timeframe_min)
         closes_e = [b.close for b in bars_e]
         k, d = compute_stoch_rsi_double_smoothed(closes_e, *self._entry_stoch_rsi_lengths)
+        # 2026-09-30, direct user request: track the latest K/D for every
+        # scanned candidate (not just open positions) so monitoring_state()
+        # can show "what are they doing now" for the whole scan list.
+        self._last_entry_kd[symbol] = {
+            "k": k[-1] if k else None, "d": d[-1] if d else None,
+            "bias": bias, "bars": len(bars_e),
+        }
+        # 2026-10-01 CRITICAL FIX, direct user correction: K/D tracking above
+        # must happen for EVERY scanned candidate including bias="none" (see
+        # the caller's own comment), but an entry can never legitimately fire
+        # without a resolved direction -- check_entry_state("none") would
+        # silently fall through to its bullish branch (k > d), which is
+        # wrong, not merely moot. Stop here for "none" after tracking.
+        if bias not in ("bullish", "bearish"):
+            return
         # 2026-09-30 CRITICAL FIX: now that bars_e can include PRIOR DAYS'
         # bars (needed to warm up k/d above), the entry-time gate must also
         # require the bar's DATE is genuinely today -- b.ts.time() alone
@@ -685,13 +741,6 @@ class OiBiasRsiExitStrategy:
              if b.ts.date() == self._today and b.ts.time() >= self._start_time
              and check_entry_state(k[i], d[i], bias)),
             None)
-        # 2026-09-30, direct user request: track the latest K/D for every
-        # scanned candidate (not just open positions) so monitoring_state()
-        # can show "what are they doing now" for the whole scan list.
-        self._last_entry_kd[symbol] = {
-            "k": k[-1] if k else None, "d": d[-1] if d else None,
-            "bias": bias, "bars": len(bars_e),
-        }
         if idx is None:
             # 2026-09-30, direct user request (same visibility gap already
             # fixed for sell_straddle's SELECT trace and OI-ORB's selection
