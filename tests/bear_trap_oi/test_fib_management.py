@@ -5,6 +5,9 @@ from scripts.bear_trap_oi_backtest import (
     manage_fib_trade, run_dynamic_side_backtest, compute_running_excursions,
     format_trade_audit, compute_performance_metrics, apply_execution_costs,
     compute_oi_trend, sum_oi_band, check_oi_filter,
+    VolBar, compute_volume_profile, classify_rollover,
+    is_strike_oi_significant, check_hard_wall, check_directional_matrix,
+    check_price_acceptance,
 )
 
 
@@ -284,6 +287,97 @@ def test_check_oi_filter_passes_only_when_target_falling_and_opposing_rising():
     both_falling = check_oi_filter(target_oi_now=80, target_oi_base=100,
                                     opposing_oi_now=80, opposing_oi_base=100)
     assert both_falling["passed"] is False
+
+
+def _volbar(minute, o, h, l, c, v):
+    base = datetime(2026, 10, 1, 9, 0, tzinfo=timezone.utc)
+    return VolBar(ts=base + timedelta(minutes=minute), open=o, high=h, low=l,
+                  close=c, volume=v)
+
+
+def test_compute_volume_profile_finds_poc_vah_val_and_lvns():
+    # Price oscillates 100-104 in bin 102 heavily (POC), thin volume at
+    # 106-108 (an LVN gap) before a second, smaller cluster at 110.
+    bars = [
+        _volbar(0, 100, 102, 99, 101, 500),
+        _volbar(5, 101, 103, 100, 102, 900),   # heavy volume around 102 -> POC
+        _volbar(10, 102, 104, 101, 103, 800),
+        _volbar(15, 103, 107, 102, 106, 50),   # thin -- LVN zone
+        _volbar(20, 106, 109, 105, 108, 40),   # thin -- LVN zone
+        _volbar(25, 108, 111, 107, 110, 300),
+    ]
+    profile = compute_volume_profile(bars, price_bin_size=1.0, value_area_pct=0.70)
+    assert 101 <= profile["poc"] <= 103
+    assert profile["val"] <= profile["poc"] <= profile["vah"]
+    assert any(106 <= lvn <= 108 for lvn in profile["lvns"])
+
+
+def test_classify_rollover_detects_similar_magnitude_opposite_moves():
+    # Current month OI falls ~20%, next month OI rises by a similar
+    # absolute amount -> rollover, not a genuine directional signal.
+    result = classify_rollover(curr_oi_now=800_000, curr_oi_base=1_000_000,
+                                 next_oi_now=420_000, next_oi_base=200_000,
+                                 similarity_tol=0.3)
+    assert result is True
+
+
+def test_classify_rollover_rejects_dissimilar_magnitude_moves():
+    # Current month barely moves, next month surges -- not a rollover
+    # pattern (no offsetting unwind on the current contract).
+    result = classify_rollover(curr_oi_now=990_000, curr_oi_base=1_000_000,
+                                 next_oi_now=500_000, next_oi_base=200_000,
+                                 similarity_tol=0.3)
+    assert result is False
+
+
+def test_is_strike_oi_significant_below_15pct_of_peak_is_noise():
+    assert is_strike_oi_significant(abs_oi_at_strike=10_000, peak_oi=100_000,
+                                     min_pct=0.15) is False
+    assert is_strike_oi_significant(abs_oi_at_strike=20_000, peak_oi=100_000,
+                                     min_pct=0.15) is True
+
+
+def test_check_hard_wall_blocks_minor_moves_near_a_wall_without_momentum_override():
+    # Price 50pts from the wall, OI change only 10% -- blocked (no override).
+    blocked = check_hard_wall(price=22550, wall_strike=22600, distance_pts=50,
+                               oi_change_pct=0.10, override_pct=0.30)
+    assert blocked is True
+    # Same distance, but OI change of 35% clears the momentum override.
+    allowed = check_hard_wall(price=22550, wall_strike=22600, distance_pts=50,
+                               oi_change_pct=0.35, override_pct=0.30)
+    assert allowed is False
+    # Far from any wall -- never blocked regardless of OI change.
+    far = check_hard_wall(price=22300, wall_strike=22600, distance_pts=50,
+                           oi_change_pct=0.0, override_pct=0.30)
+    assert far is False
+
+
+def test_check_directional_matrix_pe_and_ce_configurations():
+    # PE: Future RISING + Put FALLING + Call RISING -> high-conviction bearish
+    assert check_directional_matrix("RISING", "FALLING", "RISING", side="PE") is True
+    # PE: Future FALLING + Put FALLING + Call RISING -> also valid
+    assert check_directional_matrix("FALLING", "FALLING", "RISING", side="PE") is True
+    # PE: anything else fails
+    assert check_directional_matrix("RISING", "RISING", "RISING", side="PE") is False
+    # CE: Future RISING + Put RISING + Call FALLING -> high-conviction bullish
+    assert check_directional_matrix("RISING", "RISING", "FALLING", side="CE") is True
+    # CE: Future FALLING + Put RISING + Call FALLING -> also valid
+    assert check_directional_matrix("FALLING", "RISING", "FALLING", side="CE") is True
+    assert check_directional_matrix("RISING", "RISING", "RISING", side="CE") is False
+
+
+def test_check_price_acceptance_requires_breakout_beyond_value_area_and_lvn_touch():
+    # Bullish breakout: close above VAH, AND the bar's own range overlapped
+    # an LVN zone (volume "accepted" through the thin zone).
+    accepted = check_price_acceptance(close=109.0, val=101.0, vah=103.0,
+                                       lvns=[106.5, 107.5], bar_low=105.5,
+                                       bar_high=109.5, direction="bullish")
+    assert accepted is True
+    # Close beyond VAH but never touched any LVN zone -- not accepted.
+    not_accepted = check_price_acceptance(close=109.0, val=101.0, vah=103.0,
+                                            lvns=[106.5, 107.5], bar_low=108.8,
+                                            bar_high=109.5, direction="bullish")
+    assert not_accepted is False
 
 
 def test_run_dynamic_side_backtest_allows_entry_before_1445_cutoff():

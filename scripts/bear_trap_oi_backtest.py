@@ -709,6 +709,157 @@ def check_oi_filter(target_oi_now: int, target_oi_base: int,
     }
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# Stage 3 (2026-10-03, direct user spec): institutional OI + Volume
+# Profile confirmation matrix -- rollover guard, OI wall/noise filters,
+# directional OI matrix, and Session Volume Profile structural
+# acceptance. Volume Profile built on NIFTY FUTURES price (confirmed via
+# real fetch: spot index 1-min candles carry volume=0, futures carries
+# real non-zero volume AND OI -- the same contract "Future OI" in the
+# directional matrix already refers to).
+# ─────────────────────────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class VolBar:
+    ts: datetime
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: int
+
+
+def compute_volume_profile(bars: list[VolBar], price_bin_size: float = 5.0,
+                            value_area_pct: float = 0.70,
+                            lvn_threshold_pct: float = 0.20) -> dict:
+    """Session Volume Profile: POC (price bin with the most volume), VAH/
+    VAL (the narrowest price band containing `value_area_pct` of total
+    volume, built outward from POC bin-by-bin -- always includes POC),
+    and LVNs (bins whose volume is below `lvn_threshold_pct` of the POC
+    bin's volume AND are a local minimum vs both neighbors -- a real gap
+    in traded volume, not just "somewhat thin")."""
+    volume_by_bin: dict[float, int] = {}
+    for b in bars:
+        lo_bin = (b.low // price_bin_size) * price_bin_size
+        hi_bin = (b.high // price_bin_size) * price_bin_size
+        bin_count = max(1, int(round((hi_bin - lo_bin) / price_bin_size)) + 1)
+        per_bin_vol = b.volume / bin_count
+        bn = lo_bin
+        while bn <= hi_bin + 1e-9:
+            volume_by_bin[bn] = volume_by_bin.get(bn, 0) + per_bin_vol
+            bn += price_bin_size
+
+    if not volume_by_bin:
+        return {"poc": None, "vah": None, "val": None, "lvns": []}
+
+    sorted_bins = sorted(volume_by_bin.keys())
+    poc_bin = max(sorted_bins, key=lambda bn: volume_by_bin[bn])
+    poc_idx = sorted_bins.index(poc_bin)
+    total_volume = sum(volume_by_bin.values())
+
+    lo_idx = hi_idx = poc_idx
+    captured = volume_by_bin[poc_bin]
+    while captured < value_area_pct * total_volume and (lo_idx > 0 or hi_idx < len(sorted_bins) - 1):
+        lo_vol = volume_by_bin[sorted_bins[lo_idx - 1]] if lo_idx > 0 else -1
+        hi_vol = volume_by_bin[sorted_bins[hi_idx + 1]] if hi_idx < len(sorted_bins) - 1 else -1
+        if hi_vol >= lo_vol:
+            hi_idx += 1
+            captured += hi_vol
+        else:
+            lo_idx -= 1
+            captured += lo_vol
+
+    poc_volume = volume_by_bin[poc_bin]
+    lvns = []
+    for i, bn in enumerate(sorted_bins):
+        vol = volume_by_bin[bn]
+        if vol >= lvn_threshold_pct * poc_volume:
+            continue
+        left = volume_by_bin[sorted_bins[i - 1]] if i > 0 else float("inf")
+        right = volume_by_bin[sorted_bins[i + 1]] if i < len(sorted_bins) - 1 else float("inf")
+        if vol <= left and vol <= right:
+            lvns.append(bn + price_bin_size / 2)  # report the bin's midpoint
+
+    return {
+        "poc": poc_bin + price_bin_size / 2,
+        "vah": sorted_bins[hi_idx] + price_bin_size,
+        "val": sorted_bins[lo_idx],
+        "lvns": lvns,
+    }
+
+
+def classify_rollover(curr_oi_now: int, curr_oi_base: int, next_oi_now: int,
+                       next_oi_base: int, similarity_tol: float = 0.3) -> bool:
+    """Spec guidelines 8-11: during expiry week, a sharp fall in the
+    current-month contract's OI alongside a SIMILAR-MAGNITUDE rise in the
+    next-month contract's OI is a rollover (positions migrating to the
+    new contract), not a genuine directional signal -- block it."""
+    curr_delta = curr_oi_now - curr_oi_base
+    next_delta = next_oi_now - next_oi_base
+    if curr_delta >= 0 or next_delta <= 0:
+        return False  # not even a fall-then-rise shape
+    magnitude_diff = abs(abs(curr_delta) - abs(next_delta))
+    larger_magnitude = max(abs(curr_delta), abs(next_delta))
+    return (magnitude_diff / larger_magnitude) <= similarity_tol if larger_magnitude else False
+
+
+def is_strike_oi_significant(abs_oi_at_strike: int, peak_oi: int,
+                              min_pct: float = 0.15) -> bool:
+    """Spec guideline 4 (noise filter): a strike's absolute OI below
+    `min_pct` of the session's peak absolute OI is too thin to treat its
+    5m OI change as meaningful."""
+    if peak_oi <= 0:
+        return False
+    return (abs_oi_at_strike / peak_oi) >= min_pct
+
+
+def check_hard_wall(price: float, wall_strike: float, distance_pts: float,
+                     oi_change_pct: float, override_pct: float = 0.30) -> bool:
+    """Spec guidelines 5-7: returns True (BLOCKED) if price sits within
+    `distance_pts` of a peak-OI wall and the OI move at that wall is NOT
+    big enough to count as a momentum override (`oi_change_pct` must
+    clear `override_pct`, i.e. >30% intraday change at that strike, to
+    let a breakout through this close to the wall)."""
+    if abs(price - wall_strike) > distance_pts:
+        return False  # far from any wall -- never blocked by this rule
+    return oi_change_pct < override_pct
+
+
+def check_directional_matrix(fut_trend: str, put_trend: str, call_trend: str,
+                              side: Side) -> bool:
+    """Spec guideline set (strict directional OI confirmation matrix).
+    PE/downside: (Fut RISING, Put FALLING, Call RISING) OR
+                 (Fut FALLING, Put FALLING, Call RISING).
+    CE/upside:   (Fut RISING, Put RISING, Call FALLING) OR
+                 (Fut FALLING, Put RISING, Call FALLING)."""
+    if side == "PE":
+        return ((fut_trend == "RISING" and put_trend == "FALLING" and call_trend == "RISING") or
+                (fut_trend == "FALLING" and put_trend == "FALLING" and call_trend == "RISING"))
+    return ((fut_trend == "RISING" and put_trend == "RISING" and call_trend == "FALLING") or
+            (fut_trend == "FALLING" and put_trend == "RISING" and call_trend == "FALLING"))
+
+
+def check_price_acceptance(close: float, val: float, vah: float,
+                            lvns: list[float], bar_low: float, bar_high: float,
+                            direction: str, lvn_tolerance: float = 1.0) -> bool:
+    """Spec guideline 5 (structural price acceptance): a breakout only
+    counts if price closed beyond VAH (bullish) / VAL (bearish) AND the
+    triggering bar's own range overlapped at least one LVN zone (volume
+    genuinely traded/"accepted" through a prior low-volume gap, not a
+    single-tick spike past it). Disclosed interpretation: "touched" means
+    the bar's [low, high] range came within `lvn_tolerance` of any
+    reported LVN price -- the spec does not give an exact mechanical
+    definition of "shows volume acceptance", so this is the most literal
+    reading of "breaks VAL/VAH and shows acceptance in the LVN"."""
+    if direction == "bullish":
+        if close <= vah:
+            return False
+    else:
+        if close >= val:
+            return False
+    return any(bar_low - lvn_tolerance <= lvn <= bar_high + lvn_tolerance for lvn in lvns)
+
+
 def compute_performance_metrics(pnls: list[float]) -> dict:
     """Profit Factor, Expectancy, and Maximum Drawdown (peak-to-trough on
     CUMULATIVE P&L, in trade sequence order) for a list of per-trade net
