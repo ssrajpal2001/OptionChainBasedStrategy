@@ -4,6 +4,7 @@ from scripts.bear_trap_oi_backtest import (
     fib_extension_levels, compute_itm_strike, compute_roll_schedule,
     manage_fib_trade, run_dynamic_side_backtest, compute_running_excursions,
     format_trade_audit, compute_performance_metrics, apply_execution_costs,
+    compute_oi_trend, sum_oi_band, check_oi_filter,
 )
 
 
@@ -247,6 +248,42 @@ def test_apply_execution_costs_deducts_slippage_and_flat_fees():
     assert abs(result["lot2_net_pnl"] - lot2_net) < 1e-9
     assert abs(result["total_net_pnl"] - (lot1_net + lot2_net)) < 1e-9
     assert result["total_net_pnl"] < (110.0 - 100.0 + 120.0 - 100.0) * 75  # strictly worse than gross
+
+
+def test_compute_oi_trend_rising_falling_flat():
+    assert compute_oi_trend(now=100, baseline=80) == "RISING"
+    assert compute_oi_trend(now=80, baseline=100) == "FALLING"
+    assert compute_oi_trend(now=100, baseline=100) == "FLAT"
+
+
+def test_sum_oi_band_ce_is_atm_plus_4_strikes_below():
+    oi_by_strike = {22400: 10, 22450: 20, 22500: 30, 22550: 40, 22600: 50,
+                     22650: 999}  # above ATM, must NOT be included for CE
+    total = sum_oi_band(oi_by_strike, atm_strike=22600, step=50, side="CE", depth=5)
+    assert total == 10 + 20 + 30 + 40 + 50  # 22400,22450,22500,22550,22600
+
+
+def test_sum_oi_band_pe_is_atm_plus_4_strikes_above():
+    oi_by_strike = {22600: 50, 22650: 40, 22700: 30, 22750: 20, 22800: 10,
+                     22550: 999}  # below ATM, must NOT be included for PE
+    total = sum_oi_band(oi_by_strike, atm_strike=22600, step=50, side="PE", depth=5)
+    assert total == 50 + 40 + 30 + 20 + 10
+
+
+def test_check_oi_filter_passes_only_when_target_falling_and_opposing_rising():
+    passing = check_oi_filter(target_oi_now=80, target_oi_base=100,
+                               opposing_oi_now=120, opposing_oi_base=100)
+    assert passing["passed"] is True
+    assert passing["target_trend"] == "FALLING"
+    assert passing["opposing_trend"] == "RISING"
+
+    both_rising = check_oi_filter(target_oi_now=120, target_oi_base=100,
+                                   opposing_oi_now=120, opposing_oi_base=100)
+    assert both_rising["passed"] is False
+
+    both_falling = check_oi_filter(target_oi_now=80, target_oi_base=100,
+                                    opposing_oi_now=80, opposing_oi_base=100)
+    assert both_falling["passed"] is False
 
 
 def test_run_dynamic_side_backtest_allows_entry_before_1445_cutoff():

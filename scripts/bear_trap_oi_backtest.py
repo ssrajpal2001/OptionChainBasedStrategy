@@ -665,6 +665,50 @@ def run_dynamic_side_backtest(bars_by_strike: dict[int, dict[datetime, Bar]],
     }
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# Multi-strike OI confirmation filter (spec Section 5). Originally
+# documented as un-backtestable (Upstox historical option candles assumed
+# to carry oi=0, same as other strategies elsewhere in this codebase) --
+# empirically DISPROVEN for this contract on 2026-10-03: real, varying OI
+# IS present in fetch_upstox_range_1m's 1-min rows for NIFTY options.
+# ─────────────────────────────────────────────────────────────────────────
+
+def compute_oi_trend(now: int, baseline: int) -> str:
+    if now > baseline:
+        return "RISING"
+    if now < baseline:
+        return "FALLING"
+    return "FLAT"
+
+
+def sum_oi_band(oi_by_strike: dict[int, int], atm_strike: int, step: int,
+                side: Side, depth: int = 5) -> int:
+    """Sum of OI across `depth` strikes: ATM + (depth-1) strikes ITM for
+    `side` (below ATM for CE, above ATM for PE) -- spec Section 5's
+    "ATM + 4 strikes ITM" (depth=5 total strikes)."""
+    if side == "CE":
+        strikes = [atm_strike - i * step for i in range(depth)]
+    else:
+        strikes = [atm_strike + i * step for i in range(depth)]
+    return sum(oi_by_strike.get(s, 0) for s in strikes)
+
+
+def check_oi_filter(target_oi_now: int, target_oi_base: int,
+                     opposing_oi_now: int, opposing_oi_base: int) -> dict:
+    """Spec Section 5 pass condition: the traded side's own OI band must
+    be FALLING vs session start, AND the opposing side's OI band over the
+    SAME strikes must be RISING."""
+    target_trend = compute_oi_trend(target_oi_now, target_oi_base)
+    opposing_trend = compute_oi_trend(opposing_oi_now, opposing_oi_base)
+    passed = target_trend == "FALLING" and opposing_trend == "RISING"
+    return {
+        "target_trend": target_trend, "opposing_trend": opposing_trend,
+        "passed": passed,
+        "detail": (f"target {target_trend} ({target_oi_base}->{target_oi_now}), "
+                   f"opposing {opposing_trend} ({opposing_oi_base}->{opposing_oi_now})"),
+    }
+
+
 def compute_performance_metrics(pnls: list[float]) -> dict:
     """Profit Factor, Expectancy, and Maximum Drawdown (peak-to-trough on
     CUMULATIVE P&L, in trade sequence order) for a list of per-trade net
