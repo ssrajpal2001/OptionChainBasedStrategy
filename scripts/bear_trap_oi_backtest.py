@@ -1222,6 +1222,8 @@ async def main() -> None:
         expiry = REGISTRY.get_active_expiry_strict("NIFTY", from_date=day)
         oi_now = {"CE": {}, "PE": {}}
         oi_base = {"CE": {}, "PE": {}}
+        ltp_now = {"CE": {}, "PE": {}}
+        ltp_base = {"CE": {}, "PE": {}}
         for strike in band_strikes:
             for opt in ("CE", "PE"):
                 key = REGISTRY.get_upstox_key("NIFTY", expiry, strike, opt)
@@ -1232,7 +1234,10 @@ async def main() -> None:
                 if not rows:
                     continue
                 oi_base[opt][strike] = rows[0].get("oi", 0)
-                oi_now[opt][strike] = _nearest_row_at_or_before(rows, trade.entry_ts).get("oi", 0)
+                ltp_base[opt][strike] = rows[0].get("close", 0.0)
+                nearest = _nearest_row_at_or_before(rows, trade.entry_ts)
+                oi_now[opt][strike] = nearest.get("oi", 0)
+                ltp_now[opt][strike] = nearest.get("close", 0.0)
 
         target_opt = trade.side
         opposing_opt = "PE" if trade.side == "CE" else "CE"
@@ -1250,7 +1255,8 @@ async def main() -> None:
 
         oi_contexts.append({
             "trade": trade, "atm": atm, "band_strikes": band_strikes,
-            "oi_now": oi_now, "oi_base": oi_base, "expiry": expiry, "day": day,
+            "oi_now": oi_now, "oi_base": oi_base, "ltp_now": ltp_now,
+            "ltp_base": ltp_base, "expiry": expiry, "day": day,
             "oi_filter_result": result,
         })
 
@@ -1276,6 +1282,7 @@ async def main() -> None:
     matrix_surviving: list[BacktestTrade] = []
     buyer_gate_results: list[tuple[BacktestTrade, bool]] = []
     velocity_gate_results: list[tuple[BacktestTrade, bool]] = []
+    ltp_calc_results: list[tuple[BacktestTrade, bool]] = []
     for ctx in oi_contexts:
         if not ctx["oi_filter_result"]["passed"]:
             continue  # Section 1c only refines Section 1b's own survivors
@@ -1403,6 +1410,38 @@ async def main() -> None:
         print(f"[{trade.entry_ts}] {trade.side} {trade.strike}: "
               f"VELOCITY GATE {'OPEN' if velocity_open else 'CLOSED'} -- pnl={trade.pnl:.2f}")
 
+        # --- Section 1f: LTP-Calculator style dynamic S/R shift + writer
+        # panic gate. Reuses this iteration's already-fetched OI band
+        # (now also carrying LTP) -- no new fetches. ---
+        ltp_now_ctx, ltp_base_ctx = ctx["ltp_now"], ctx["ltp_base"]
+        resistance_now = max(oi_now["CE"], key=oi_now["CE"].get, default=atm)
+        resistance_base = max(oi_base["CE"], key=oi_base["CE"].get, default=atm)
+        support_now = max(oi_now["PE"], key=oi_now["PE"].get, default=atm)
+        support_base = max(oi_base["PE"], key=oi_base["PE"].get, default=atm)
+
+        if trade.side == "CE":
+            shift = peak_strike_shift(resistance_base, resistance_now, args.strike_step)
+            sr_favorable = shift == "DOWN"  # resistance caving -- bullish fuel
+            panic_strike, panic_opt = resistance_now, "CE"
+        else:
+            shift = peak_strike_shift(support_base, support_now, args.strike_step)
+            sr_favorable = shift == "DOWN"  # support caving -- bearish fuel
+            panic_strike, panic_opt = support_now, "PE"
+
+        writer_panic = detect_writer_panic(
+            ltp_now=ltp_now_ctx[panic_opt].get(panic_strike, 0.0),
+            ltp_base=ltp_base_ctx[panic_opt].get(panic_strike, 0.0),
+            oi_now=oi_now[panic_opt].get(panic_strike, 0),
+            oi_base=oi_base[panic_opt].get(panic_strike, 0),
+        )
+        price_tests_level = price_accepted  # reuse Section 1c's own breakout-level test
+        ltp_calc_open = check_ltp_calc_gate(price_tests_level, sr_favorable, writer_panic)
+        ltp_calc_results.append((trade, ltp_calc_open))
+        print(f"[{trade.entry_ts}] {trade.side} {trade.strike}: "
+              f"LTP-CALC GATE {'OPEN' if ltp_calc_open else 'CLOSED'} -- "
+              f"shift={shift} sr_favorable={sr_favorable} writer_panic={writer_panic} "
+              f"(panic_strike={panic_strike}) -- pnl={trade.pnl:.2f}")
+
     matrix_metrics = compute_performance_metrics([t.pnl for t in matrix_surviving])
     print(f"\n=== Institutional Matrix: {len(matrix_surviving)}/{len(oi_surviving)} "
           f"of Section 1b's survivors also pass Section 1c ===")
@@ -1425,6 +1464,15 @@ async def main() -> None:
           f"volume/EMA confirmation ===")
     print(f"  Win/Loss: {velocity_metrics.get('win_count', 0)}W/{velocity_metrics.get('loss_count', 0)}L")
     print(f"  Total P&L: {velocity_metrics.get('total_pnl', 0.0):.2f}")
+
+    ltp_calc_surviving = [t for t, open_ in ltp_calc_results if open_]
+    ltp_calc_metrics = compute_performance_metrics([t.pnl for t in ltp_calc_surviving])
+    print(f"\n=== SECTION 1f (LTP-Calculator S/R-Shift + Writer-Panic Gate): "
+          f"{len(ltp_calc_surviving)}/{len(oi_surviving)} of Section 1b's "
+          f"survivors clear price-tests-level + S/R-shift-favorable + "
+          f"writer-panic ===")
+    print(f"  Win/Loss: {ltp_calc_metrics.get('win_count', 0)}W/{ltp_calc_metrics.get('loss_count', 0)}L")
+    print(f"  Total P&L: {ltp_calc_metrics.get('total_pnl', 0.0):.2f}")
 
     print("\n" + "=" * 78)
     print("SECTION 2 (EXPERIMENTAL): simultaneous CE+PE, dynamic 100-pt ITM "
