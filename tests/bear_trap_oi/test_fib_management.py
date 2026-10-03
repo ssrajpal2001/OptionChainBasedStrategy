@@ -58,6 +58,29 @@ def test_manage_fib_trade_uses_fallback_fixed_r_when_impulse_too_small():
     assert result["lot1_exit_price"] == bars[-1].close
 
 
+def test_manage_fib_trade_floors_risk_to_1pct_for_a_razor_thin_zone():
+    # Real incident: CE 22600 (2026-10-01) had zone_lo=113.25, entry=113.3
+    # -- a 0.05-point trap zone -- producing a near-useless 113.375 target.
+    # Floored risk = max(113.3-113.25, 113.3*0.01) = max(0.05, 1.133) = 1.133.
+    entry_price, zone_lo = 113.3, 113.25
+    floored_risk = max(entry_price - zone_lo, entry_price * 0.01)
+    expected_target1 = entry_price + 1.5 * floored_risk
+    expected_target2 = entry_price + 2.0 * floored_risk
+    bars = [
+        _bar(0, entry_price, entry_price + 0.5, entry_price - 0.5, entry_price),
+        _bar(5, entry_price, expected_target1 + 1, entry_price - 1, expected_target1),
+        _bar(10, expected_target1, expected_target2 + 1, expected_target1 - 1, expected_target2),
+        _bar(315, expected_target2, expected_target2 + 0.5, expected_target2 - 0.5, expected_target2),
+    ]
+    result = manage_fib_trade(bars, entry_price=entry_price, zone_lo=zone_lo,
+                               lot_qty_each=75)
+    assert result["target1"] == expected_target1
+    assert result["target2"] == expected_target2
+    # the floored target must be well clear of the razor-thin raw-zone target
+    # (113.375) that caused the original real-money-relevant complaint
+    assert result["target1"] > 113.375 + 1.0
+
+
 def test_manage_fib_trade_switches_to_dynamic_peak_mode_once_impulse_qualifies():
     # entry=100, zone_lo=90 -> risk=10. First bar's high (103) clears the
     # 2% impulse gate ((103-100)/100=3%), so from the FOLLOWING bar onward

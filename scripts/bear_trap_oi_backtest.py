@@ -388,7 +388,11 @@ def manage_fib_trade(bars_after_entry: list[Bar], entry_price: float,
                           "total_pnl": 0.0},
         }
 
-    risk = entry_price - zone_lo
+    # Floored risk (2026-10-03 fix, real incident: CE 22600 had a 0.05-pt
+    # trap zone, producing a 113.375 fallback target indistinguishable
+    # from entry 113.3) -- never smaller than 1% of entry_price, however
+    # thin the actual trap zone was.
+    risk = max(entry_price - zone_lo, entry_price * 0.01)
     eod_bar = bars_after_entry[-1]
     peak = entry_price
     lot1_idx = None
