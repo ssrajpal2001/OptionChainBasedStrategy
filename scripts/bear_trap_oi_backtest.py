@@ -22,6 +22,7 @@ import argparse
 import asyncio
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
+from collections import Counter
 from itertools import groupby
 from typing import Callable, Literal, Optional
 
@@ -1097,6 +1098,7 @@ async def main() -> None:
           "(locked spec baseline)")
     print("=" * 78)
 
+    funnel_counts: Counter = Counter()
     for trading_day, ce_strike, pe_strike in daily_strikes:
         expiry = REGISTRY.get_active_expiry_strict("NIFTY", from_date=trading_day)
         if expiry is None:
@@ -1132,6 +1134,17 @@ async def main() -> None:
         all_trades += run_side_backtest(pe_bars, "PE", pe_strike, args.lot_qty,
                                          logger=print)
         print()
+
+        funnel_counts["CE:" + diagnose_trap_funnel(ce_bars)] += 1
+        funnel_counts["PE:" + diagnose_trap_funnel(pe_bars)] += 1
+
+    print("=== Section 1 Funnel Diagnostic (where signals die before entry) ===")
+    for stage in ("BREAKDOWN_WATCH", "TRAP_WATCH", "ARMED_WAIT_REENTRY", "ENTERED"):
+        ce_n, pe_n = funnel_counts[f"CE:{stage}"], funnel_counts[f"PE:{stage}"]
+        print(f"  {stage:<20} CE={ce_n:<3} PE={pe_n:<3} total={ce_n + pe_n}")
+    total_days = len(daily_strikes)
+    print(f"  (out of {total_days} trading day(s) x 2 sides = {total_days * 2} "
+          f"side-days total)\n")
 
     _print_report("CE", [t for t in all_trades if t.side == "CE"])
     _print_report("PE", [t for t in all_trades if t.side == "PE"])
