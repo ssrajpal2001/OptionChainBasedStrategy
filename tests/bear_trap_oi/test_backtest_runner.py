@@ -54,6 +54,28 @@ def test_entry_requires_bar_close_inside_zone_not_just_range_overlap():
     assert trades[0].entry_price == 100.0
 
 
+def test_trade_tracks_mfe_and_mae_after_entry_until_eod():
+    bars = [
+        _bar(15, 100, 105, 98, 102),   # c1
+        _bar(20, 97, 99, 90, 94),      # c2 breakdown, zone [90,102]
+        _bar(25, 95, 110, 95, 108),    # trap confirmed
+        _bar(30, 108, 112, 96, 97),    # re-entry @ 97 (close=97, inside [90,102])
+        _bar(35, 97, 150, 95, 120),    # post-entry: high=150 (MFE candidate)
+        _bar(40, 120, 130, 60, 110),   # post-entry: low=60 (MAE candidate)
+        _bar(45, 110, 115, 100, 105),  # post-entry: nothing new
+        _bar(315, 105, 108, 102, 104),  # EOD close @ 104
+    ]
+    trades = run_side_backtest(bars, side="CE", strike=24500, lot_qty=75)
+    assert len(trades) == 1
+    trade = trades[0]
+    assert trade.entry_price == 97.0
+    assert trade.mfe_price == 150.0
+    assert trade.mfe_ts == bars[4].ts
+    assert trade.mae_price == 60.0
+    assert trade.mae_ts == bars[5].ts
+    assert trade.exit_price == 104.0
+
+
 def test_run_side_backtest_emits_verbose_audit_log_when_logger_given():
     bars = [
         _bar(15, 100, 105, 98, 102),   # c1

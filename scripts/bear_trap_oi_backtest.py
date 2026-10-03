@@ -45,6 +45,10 @@ class BacktestTrade:
     pnl_pct: float
     c1: Bar
     c2: Bar
+    mfe_price: float   # Maximum Favorable Excursion: highest premium reached after entry, before EOD
+    mfe_ts: datetime
+    mae_price: float   # Maximum Adverse Excursion: lowest premium reached after entry, before EOD
+    mae_ts: datetime
 
 
 def _fresh_zone() -> TrapZone:
@@ -67,6 +71,7 @@ def run_side_backtest(bars: list[Bar], side: Side, strike: int,
     trades: list[BacktestTrade] = []
     zone = _fresh_zone()
     open_entry: tuple[float, datetime, Bar, Bar] | None = None  # price, ts, c1, c2
+    mfe_price = mfe_ts = mae_price = mae_ts = None
 
     def log(msg: str) -> None:
         if logger is not None:
@@ -85,6 +90,8 @@ def run_side_backtest(bars: list[Bar], side: Side, strike: int,
             if check_zone_reentry(zone, bar.close):
                 entry_price = bar.close
                 open_entry = (entry_price, bar.ts, zone.c1, zone.c2)
+                mfe_price, mfe_ts = entry_price, bar.ts
+                mae_price, mae_ts = entry_price, bar.ts
                 log(f"ZONE RE-ENTRY & ENTRY @{bar.ts} price={entry_price} "
                     f"(zone was [{zone.zone_lo}, {zone.zone_hi}])")
                 zone = TrapZone(state=TrapZoneState.IN_POSITION, c1=zone.c1,
@@ -92,6 +99,13 @@ def run_side_backtest(bars: list[Bar], side: Side, strike: int,
                                  zone_hi=zone.zone_hi,
                                  confirmed_ts=zone.confirmed_ts)
                 continue  # don't also run on_bar_close on the entry bar
+
+        if zone.state == TrapZoneState.IN_POSITION and open_entry is not None:
+            # Post-entry excursion tracking (MFE/MAE), every bar through EOD.
+            if bar.high > mfe_price:
+                mfe_price, mfe_ts = bar.high, bar.ts
+            if bar.low < mae_price:
+                mae_price, mae_ts = bar.low, bar.ts
 
         if zone.state not in (TrapZoneState.IN_POSITION,):
             prev_state = zone.state
@@ -117,12 +131,17 @@ def run_side_backtest(bars: list[Bar], side: Side, strike: int,
             pnl_pct = ((exit_price - entry_price) / entry_price) * 100 if entry_price else 0.0
             log(f"EXIT (EOD) @{bar.ts} price={exit_price} "
                 f"pnl_pts={pnl:.2f} pnl_pct={pnl_pct:.2f}%")
+            log(f"  MFE (highest after entry) = {mfe_price} @{mfe_ts}")
+            log(f"  MAE (lowest after entry)  = {mae_price} @{mae_ts}")
             trades.append(BacktestTrade(
                 side=side, strike=strike, entry_price=entry_price,
                 entry_ts=entry_ts, exit_price=exit_price, exit_ts=bar.ts,
                 pnl=pnl, pnl_pct=pnl_pct, c1=c1, c2=c2,
+                mfe_price=mfe_price, mfe_ts=mfe_ts,
+                mae_price=mae_price, mae_ts=mae_ts,
             ))
             open_entry = None
+            mfe_price = mfe_ts = mae_price = mae_ts = None
             zone = close_position(zone)
 
     return trades
@@ -257,6 +276,20 @@ def _print_report(side: str, trades: list[BacktestTrade]) -> None:
               f"pnl={t.pnl:.2f} ({t.pnl_pct:.2f}%)")
 
 
+def _print_mfe_mae_table(all_trades: list[BacktestTrade]) -> None:
+    print("\n=== MFE / MAE Summary (for stop-loss & target design) ===")
+    header = (f"{'Side':<4} {'Strike':<7} {'Entry Price':<12} {'Entry Time':<22} "
+               f"{'MFE Price':<10} {'MFE Time':<22} {'MAE Price':<10} "
+               f"{'MAE Time':<22} {'EOD Exit':<9} {'P&L (pts)':<10} {'P&L %':<8}")
+    print(header)
+    print("-" * len(header))
+    for t in sorted(all_trades, key=lambda t: t.entry_ts):
+        print(f"{t.side:<4} {t.strike:<7} {t.entry_price:<12} "
+              f"{str(t.entry_ts):<22} {t.mfe_price:<10} {str(t.mfe_ts):<22} "
+              f"{t.mae_price:<10} {str(t.mae_ts):<22} {t.exit_price:<9} "
+              f"{t.pnl:<10.2f} {t.pnl_pct:<8.2f}")
+
+
 async def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--days", type=int, default=7)
@@ -333,6 +366,7 @@ async def main() -> None:
     _print_report("PE", [t for t in all_trades if t.side == "PE"])
     print(f"\n=== Combined: {len(all_trades)} trade(s), "
           f"Total P&L: {sum(t.pnl for t in all_trades):.2f} ===")
+    _print_mfe_mae_table(all_trades)
 
 
 if __name__ == "__main__":
