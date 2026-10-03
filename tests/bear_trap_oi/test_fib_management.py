@@ -7,7 +7,7 @@ from scripts.bear_trap_oi_backtest import (
     compute_oi_trend, sum_oi_band, check_oi_filter,
     VolBar, compute_volume_profile, classify_rollover,
     is_strike_oi_significant, check_hard_wall, check_directional_matrix,
-    check_price_acceptance,
+    check_price_acceptance, svp_ready,
 )
 
 
@@ -378,6 +378,15 @@ def test_check_price_acceptance_requires_breakout_beyond_value_area_and_lvn_touc
                                             lvns=[106.5, 107.5], bar_low=108.8,
                                             bar_high=109.5, direction="bullish")
     assert not_accepted is False
+
+
+def test_svp_ready_false_before_0945_true_at_or_after():
+    before = datetime(2026, 10, 1, 9, 40, tzinfo=timezone.utc)
+    at = datetime(2026, 10, 1, 9, 45, tzinfo=timezone.utc)
+    after = datetime(2026, 10, 1, 10, 0, tzinfo=timezone.utc)
+    assert svp_ready(before) is False
+    assert svp_ready(at) is True
+    assert svp_ready(after) is True
 
 
 def test_run_dynamic_side_backtest_allows_entry_before_1445_cutoff():

@@ -839,6 +839,13 @@ def check_directional_matrix(fut_trend: str, put_trend: str, call_trend: str,
             (fut_trend == "FALLING" and put_trend == "RISING" and call_trend == "FALLING"))
 
 
+SVP_WARMUP_TIME = time(9, 45)  # calibration, 2026-10-03: 09:40/09:50 entries had too few bars for a real Value Area
+
+
+def svp_ready(ts: datetime) -> bool:
+    return ts.time() >= SVP_WARMUP_TIME
+
+
 def check_price_acceptance(close: float, val: float, vah: float,
                             lvns: list[float], bar_low: float, bar_high: float,
                             direction: str, lvn_tolerance: float = 1.0) -> bool:
@@ -1112,7 +1119,7 @@ async def main() -> None:
                            key=lambda s: oi_now["CE"].get(s, 0) + oi_now["PE"].get(s, 0),
                            default=atm)
         own_strike_abs_oi = oi_now[trade.side].get(trade.strike, 0)
-        significant = is_strike_oi_significant(own_strike_abs_oi, peak_oi, min_pct=0.15)
+        significant = is_strike_oi_significant(own_strike_abs_oi, peak_oi, min_pct=0.05)
 
         wall_oi_base = oi_base["CE"].get(wall_strike, 0) + oi_base["PE"].get(wall_strike, 0)
         wall_oi_now = oi_now["CE"].get(wall_strike, 0) + oi_now["PE"].get(wall_strike, 0)
@@ -1155,17 +1162,23 @@ async def main() -> None:
                                 close=b.close, volume=vol_by_5m_ts.get(b.ts, 0))
                         for b in fut_bars_5m]
         entry_idx_fut = next((i for i, b in enumerate(fut_bars_vol) if b.ts == trade.entry_ts), None)
-        price_accepted = False
-        if entry_idx_fut is not None and entry_idx_fut > 0:
-            profile = compute_volume_profile(fut_bars_vol[:entry_idx_fut])
-            entry_bar = fut_bars_vol[entry_idx_fut]
-            direction = "bullish" if trade.side == "CE" else "bearish"
-            if profile["poc"] is not None:
-                price_accepted = check_price_acceptance(
-                    close=entry_bar.close, val=profile["val"], vah=profile["vah"],
-                    lvns=profile["lvns"], bar_low=entry_bar.low, bar_high=entry_bar.high,
-                    direction=direction,
-                )
+        if not svp_ready(trade.entry_ts):
+            # Calibration, 2026-10-03: before 09:45 the SVP hasn't had
+            # enough bars to form a real Value Area -- don't penalize an
+            # early entry for a profile that was never going to be ready.
+            price_accepted = True
+        else:
+            price_accepted = False
+            if entry_idx_fut is not None and entry_idx_fut > 0:
+                profile = compute_volume_profile(fut_bars_vol[:entry_idx_fut])
+                entry_bar = fut_bars_vol[entry_idx_fut]
+                direction = "bullish" if trade.side == "CE" else "bearish"
+                if profile["poc"] is not None:
+                    price_accepted = check_price_acceptance(
+                        close=entry_bar.close, val=profile["val"], vah=profile["vah"],
+                        lvns=profile["lvns"], bar_low=entry_bar.low, bar_high=entry_bar.high,
+                        direction=direction,
+                    )
 
         passed_matrix = significant and not blocked_by_wall and matrix_ok and price_accepted
         verdict = "PASS" if passed_matrix else "REJECT"
