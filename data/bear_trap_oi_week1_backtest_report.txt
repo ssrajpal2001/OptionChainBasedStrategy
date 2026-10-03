@@ -1,46 +1,50 @@
 InstrumentRegistry [NIFTY] expiry=2026-10-06: (401)
 Reason: Unauthorized
-HTTP response headers: HTTPHeaderDict({'Date': 'Sat, 03 Oct 2026 15:19:30 GMT', 'Content-Type': 'application/json', 'Content-Length': '211', 'Connection': 'keep-alive', 'reqid': '565aae02-8732-43b4-8651-5487bff663f2', 'vary': 'Origin, Access-Control-Request-Method, Access-Control-Request-Headers', 'message': 'request failed', 'requestid': '8857a831-6683-476a-85a9-e0b067b61d36', 'x-content-type-options': 'nosniff', 'x-xss-protection': '0', 'Cache-Control': 'no-cache, no-store, max-age=0, must-revalidate', 'pragma': 'no-cache', 'expires': '0', 'strict-transport-security': 'max-age=0; includeSubDomains', 'x-frame-options': 'DENY', 'set-cookie': '__cf_bm=CzW4JVU.Fdg0cBgNev6LGovbuc7NN7S4niIwEw7elXs-1791040770.1248085-1.0.1.1-zUHIXXJl8BSezcBOvY54a4QQnKgpC5oUAec4Xn0QHDFuRD7ywXLJdZYEnDtz5RhCd0L5DVF.VLRlcroyAZvLssRSKsRMquWn.e1udooeSojkRGlgUVJTyoFvJQ4Mi.mg; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com; Expires=Sat, 03 Oct 2026 15:49:30 GMT, _cfuvid=Qk9XJ2XT4QUSYO5GTqUqJ4.T5EuiVAQzrCwhjdMsXUo-1791040770.1248085-1.0.1.1-nkx6brCgX0.oNO1qwVYrbWjbItmObdc6kJpW2v_zORY; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com', 'cf-cache-status': 'DYNAMIC', 'Server': 'cloudflare', 'CF-RAY': 'a44ceced4cf7339c-DEL', 'alt-svc': 'h3=":443"; ma=86400'})
+HTTP response headers: HTTPHeaderDict({'Date': 'Sat, 03 Oct 2026 15:33:50 GMT', 'Content-Type': 'application/json', 'Content-Length': '211', 'Connection': 'keep-alive', 'reqid': 'f82d91d3-303b-4071-95ce-6e8339f79880', 'vary': 'Origin, Access-Control-Request-Method, Access-Control-Request-Headers', 'message': 'request failed', 'requestid': '8edb188f-3f4d-425c-9b40-32e7f93807da', 'x-content-type-options': 'nosniff', 'x-xss-protection': '0', 'Cache-Control': 'no-cache, no-store, max-age=0, must-revalidate', 'pragma': 'no-cache', 'expires': '0', 'strict-transport-security': 'max-age=0; includeSubDomains', 'x-frame-options': 'DENY', 'set-cookie': '__cf_bm=_2cfc5FOs27ICuxxT9zGebewpddTDHCLit3HLqNdrWk-1791041630.1441185-1.0.1.1-syJg0yyo6CxoyEcxDT4IYKa0K3VXiAC57jjD6NehrVSQGEesnLXnMJ2spzTMUEf3kgyJ9i5Mk2VkCgCN2FUeo.PDvKBXPr2YlcwOkQRoDrAvpd1EXbepidP6SfOBnLTV; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com; Expires=Sat, 03 Oct 2026 16:03:50 GMT, _cfuvid=3u1Kipz9BWSR7BoS2EKB9rQpdslrxgbPaOGdu8kfGJk-1791041630.1441185-1.0.1.1-zVnowgvrw3blCATMbFTzpsI_DEhArAIYbRNh9gTuMSo; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com', 'cf-cache-status': 'DYNAMIC', 'Server': 'cloudflare', 'CF-RAY': 'a44d01ec68f270aa-NAG', 'alt-svc': 'h3=":443"; ma=86400'})
 HTTP response body: b'{"status":"error","errors":[{"errorCode":"UDAPI100050","message":"Invalid token used to access API","propertyPath":null,"invalidValue":null,"error_code":"UDAPI100050","property_path":null,"invalid_value":null}]}'
 
 InstrumentRegistry [NIFTY] expiry=2026-10-13: (401)
 Reason: Unauthorized
-HTTP response headers: HTTPHeaderDict({'Date': 'Sat, 03 Oct 2026 15:19:30 GMT', 'Content-Type': 'application/json', 'Content-Length': '211', 'Connection': 'keep-alive', 'reqid': '8a8074f6-245c-4f14-afa6-2ee4fdf5eb6a', 'vary': 'Origin, Access-Control-Request-Method, Access-Control-Request-Headers', 'message': 'request failed', 'requestid': 'bf2a0599-dfca-45d0-ae04-893b809920ab', 'x-content-type-options': 'nosniff', 'x-xss-protection': '0', 'Cache-Control': 'no-cache, no-store, max-age=0, must-revalidate', 'pragma': 'no-cache', 'expires': '0', 'strict-transport-security': 'max-age=0; includeSubDomains', 'x-frame-options': 'DENY', 'set-cookie': '__cf_bm=ByVQgGiMCFkCKgw8XC4kuATcvcs1Rqrwr_iBR99PYNs-1791040770.2009733-1.0.1.1-2jkIMr3gUg7gAzXpD0iJrf8V_owTHjKEPdvGIy0VWOQC38GkvUVuiOuGsjpUaSq5OsOnG7oBTT7QR58Eogdn43DOzye.QRG6ywu9SrN82KeAFn3BN1FcQPebmdAprpwk; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com; Expires=Sat, 03 Oct 2026 15:49:30 GMT, _cfuvid=sGqDyJspm_qabGpbxMnEw5GQGuck6wk1B.llIb5nc3A-1791040770.2009733-1.0.1.1-147n6AT1wcW796upwZky6uxbGK1hmzPFwQBfKU9Sgfo; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com', 'cf-cache-status': 'DYNAMIC', 'Server': 'cloudflare', 'CF-RAY': 'a44cecedbdc8339c-DEL', 'alt-svc': 'h3=":443"; ma=86400'})
+HTTP response headers: HTTPHeaderDict({'Date': 'Sat, 03 Oct 2026 15:33:50 GMT', 'Content-Type': 'application/json', 'Content-Length': '211', 'Connection': 'keep-alive', 'reqid': '3498fe68-f907-4da7-ab23-88e0603bf236', 'vary': 'Origin, Access-Control-Request-Method, Access-Control-Request-Headers', 'message': 'request failed', 'requestid': 'cfd8870f-c29c-49ee-b4a0-02d6ff2e7f61', 'x-content-type-options': 'nosniff', 'x-xss-protection': '0', 'Cache-Control': 'no-cache, no-store, max-age=0, must-revalidate', 'pragma': 'no-cache', 'expires': '0', 'strict-transport-security': 'max-age=0; includeSubDomains', 'x-frame-options': 'DENY', 'cf-cache-status': 'DYNAMIC', 'set-cookie': '__cf_bm=Wt4Y9DrtWtJ14LVrBdCq1TOdSOEIBSWexjpKw9ON3UI-1791041630.1992946-1.0.1.1-7sQjt74oMFGWLO1ez.QHC.5ZpK5bwECVzOwNirKHvYookmOdtRkwe4wE6o5yJaYj9vlphIAl7OuwgGuvTrTBgUp_lV.S1kCtu2UEQ1BRc4X_w7shhvzz8xzBtGtrP35e; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com; Expires=Sat, 03 Oct 2026 16:03:50 GMT, _cfuvid=Qo9fdClCayBwFDBzgAL6ApPwdh3vA6rAcGSoEhZjztk-1791041630.1992946-1.0.1.1-sz7aOYrZxt9d1F.At3JpT5cvm.emwDDzsLVu5qPzPHo; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com', 'Server': 'cloudflare', 'CF-RAY': 'a44d01ecba8970aa-NAG', 'alt-svc': 'h3=":443"; ma=86400'})
 HTTP response body: b'{"status":"error","errors":[{"errorCode":"UDAPI100050","message":"Invalid token used to access API","propertyPath":null,"invalidValue":null,"error_code":"UDAPI100050","property_path":null,"invalid_value":null}]}'
 
 InstrumentRegistry [NIFTY] expiry=2026-10-20: (401)
 Reason: Unauthorized
-HTTP response headers: HTTPHeaderDict({'Date': 'Sat, 03 Oct 2026 15:19:30 GMT', 'Content-Type': 'application/json', 'Content-Length': '211', 'Connection': 'keep-alive', 'reqid': 'a90231f1-47cc-4dd6-ac93-8d66d7773489', 'vary': 'Origin, Access-Control-Request-Method, Access-Control-Request-Headers', 'message': 'request failed', 'requestid': '5e2d503a-a542-4dd8-a7f0-c34b4bac8cec', 'x-content-type-options': 'nosniff', 'x-xss-protection': '0', 'Cache-Control': 'no-cache, no-store, max-age=0, must-revalidate', 'pragma': 'no-cache', 'expires': '0', 'strict-transport-security': 'max-age=0; includeSubDomains', 'x-frame-options': 'DENY', 'set-cookie': '__cf_bm=WbwYOGXAtYx67Fm5RpxVrcR4nnZN5d_Hf5P_AdWonkE-1791040770.2767308-1.0.1.1-6X_SVz.VVcMu0Y5EDxEQpyRzIvvg6JGGLlQm2HRT_dRcppg_FyyZmygR3E3JVXHYl_PvEPF0bIeZ.qeI0DnWkav3Qm3gC1RglU6CbgMVsj7hZbji9feX1xF4qr9wLAr0; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com; Expires=Sat, 03 Oct 2026 15:49:30 GMT, _cfuvid=Vt5b_TM23ZkC6ZnVKrCoZvca7M53gUv78mikf1fTQmU-1791040770.2767308-1.0.1.1-_kiSoTOrxU11_usKC5budJsvxU6k12g.MLzmHT4swXY; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com', 'cf-cache-status': 'DYNAMIC', 'Server': 'cloudflare', 'CF-RAY': 'a44cecee3e76339c-DEL', 'alt-svc': 'h3=":443"; ma=86400'})
+HTTP response headers: HTTPHeaderDict({'Date': 'Sat, 03 Oct 2026 15:33:50 GMT', 'Content-Type': 'application/json', 'Content-Length': '211', 'Connection': 'keep-alive', 'reqid': 'f335552d-11de-4287-816c-449e6054d0ae', 'vary': 'Origin, Access-Control-Request-Method, Access-Control-Request-Headers', 'message': 'request failed', 'requestid': '2d2536e4-1c88-4e84-a6e9-82524f7f0d0c', 'x-content-type-options': 'nosniff', 'x-xss-protection': '0', 'Cache-Control': 'no-cache, no-store, max-age=0, must-revalidate', 'pragma': 'no-cache', 'expires': '0', 'strict-transport-security': 'max-age=0; includeSubDomains', 'x-frame-options': 'DENY', 'cf-cache-status': 'DYNAMIC', 'set-cookie': '__cf_bm=7u8KsRH0UuyRDDhr5UcbX_OjsZzzYZK17pMrW_D2nhY-1791041630.2796624-1.0.1.1-kMw33S6xFmfCXVsAJWFMPMD1bIVTLjRnNK1do8BYgbTihS3l9tXWkFQkdU8ZZr23x2eMPZILvyCLD0gPabsUAS7cbBTM10owSdfTvqFUYbM3qf8vD_8y8dFzL5IchUX7; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com; Expires=Sat, 03 Oct 2026 16:03:50 GMT, _cfuvid=efMdBFBkIcBnRB3VyZonjSQgDZi.xqSYumFQyI672eE-1791041630.2796624-1.0.1.1-UyWqjvk1X6Nz0sL4ika..4tR6iORMrH0jae68VL.o1s; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com', 'Server': 'cloudflare', 'CF-RAY': 'a44d01ed3d1b70aa-NAG', 'alt-svc': 'h3=":443"; ma=86400'})
 HTTP response body: b'{"status":"error","errors":[{"errorCode":"UDAPI100050","message":"Invalid token used to access API","propertyPath":null,"invalidValue":null,"error_code":"UDAPI100050","property_path":null,"invalid_value":null}]}'
 
 InstrumentRegistry [NIFTY] expiry=2026-10-27: (401)
 Reason: Unauthorized
-HTTP response headers: HTTPHeaderDict({'Date': 'Sat, 03 Oct 2026 15:19:30 GMT', 'Content-Type': 'application/json', 'Content-Length': '211', 'Connection': 'keep-alive', 'reqid': '92bf2eb1-554e-45ac-8bec-1193ad79f1ea', 'vary': 'Origin, Access-Control-Request-Method, Access-Control-Request-Headers', 'message': 'request failed', 'requestid': '891298b5-0a39-4a41-bbcf-336caf7e4b80', 'x-content-type-options': 'nosniff', 'x-xss-protection': '0', 'Cache-Control': 'no-cache, no-store, max-age=0, must-revalidate', 'pragma': 'no-cache', 'expires': '0', 'strict-transport-security': 'max-age=0; includeSubDomains', 'x-frame-options': 'DENY', 'set-cookie': '__cf_bm=mUkZJe3oCjmJY67ROyaF9MpiGGsES2pLQv6hYs5aMYI-1791040770.3634636-1.0.1.1-7TssqgClzcc8RwQi1CKOaKd4W0hxmhnlLukFiuEbklG9tL_cofpRX5XAwKpFNU6WZ4nkRVhCQvqQOONIoqF3zSb6MtdXqmNdZdrI9V5rOsLciOIKWoDGyruYx5waD3aK; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com; Expires=Sat, 03 Oct 2026 15:49:30 GMT, _cfuvid=0cQ9OmZfswpTA5j0FHC000ApEorvtPf7KPVS0Kg4P9M-1791040770.3634636-1.0.1.1-bW0lT8TAFlMePPELhVvysS123QcoYwIerOT0d2P6tZg; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com', 'cf-cache-status': 'DYNAMIC', 'Server': 'cloudflare', 'CF-RAY': 'a44ceceecf36339c-DEL', 'alt-svc': 'h3=":443"; ma=86400'})
+HTTP response headers: HTTPHeaderDict({'Date': 'Sat, 03 Oct 2026 15:33:50 GMT', 'Content-Type': 'application/json', 'Content-Length': '211', 'Connection': 'keep-alive', 'reqid': '2cec4fb0-4495-4631-b1ff-9dc54fa5b12a', 'vary': 'Origin, Access-Control-Request-Method, Access-Control-Request-Headers', 'message': 'request failed', 'requestid': '07086122-b643-4e18-b2f6-6ac374808966', 'x-content-type-options': 'nosniff', 'x-xss-protection': '0', 'Cache-Control': 'no-cache, no-store, max-age=0, must-revalidate', 'pragma': 'no-cache', 'expires': '0', 'strict-transport-security': 'max-age=0; includeSubDomains', 'x-frame-options': 'DENY', 'set-cookie': '__cf_bm=Gey_kM79YrpExWxg53bvjZl7QbZLcoSkpZMYOzS2l5Q-1791041630.3601136-1.0.1.1-nNfKB64H7pHxyPIW1GtUaIPXXsHCNNw0tqUIEsfUIvGvEg8seYt_vnb0UI4hIE9nrftBPwEuVM53F21bwgfcdX7txwof9X.yQBW7wRzV0FOqobogFDfMrxNPYmDsJheP; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com; Expires=Sat, 03 Oct 2026 16:03:50 GMT, _cfuvid=inhoqm3FE4Hii2sT5UI3_wztIxPBjtOvttekbBCC7T8-1791041630.3601136-1.0.1.1-XpA1dLnHWInSvlvA8XcaoYdoO.hPJ84a_4TZV0lcWsM; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com', 'cf-cache-status': 'DYNAMIC', 'Server': 'cloudflare', 'CF-RAY': 'a44d01edbfb670aa-NAG', 'alt-svc': 'h3=":443"; ma=86400'})
 HTTP response body: b'{"status":"error","errors":[{"errorCode":"UDAPI100050","message":"Invalid token used to access API","propertyPath":null,"invalidValue":null,"error_code":"UDAPI100050","property_path":null,"invalid_value":null}]}'
 
 InstrumentRegistry [NIFTY] expiry=2026-11-03: (401)
 Reason: Unauthorized
-HTTP response headers: HTTPHeaderDict({'Date': 'Sat, 03 Oct 2026 15:19:30 GMT', 'Content-Type': 'application/json', 'Content-Length': '211', 'Connection': 'keep-alive', 'reqid': '7f9fed5f-a606-4165-b950-465fe46f3b50', 'vary': 'Origin, Access-Control-Request-Method, Access-Control-Request-Headers', 'message': 'request failed', 'requestid': 'ba6310fc-671a-47cc-9082-97d1ae5696a1', 'x-content-type-options': 'nosniff', 'x-xss-protection': '0', 'Cache-Control': 'no-cache, no-store, max-age=0, must-revalidate', 'pragma': 'no-cache', 'expires': '0', 'strict-transport-security': 'max-age=0; includeSubDomains', 'x-frame-options': 'DENY', 'set-cookie': '__cf_bm=umA8go1NqV7e.92AnecIguTcVJBTUkgX7jfFNnmVvZU-1791040770.4387856-1.0.1.1-6ToasgJCusd8BsAAzvn5PC3hmkDTfcEfgZbL5jrd3yr9CLltDuWEDW9Sfi2EdHZL1xgCLWKKZBXQO_aQOPhSNbRzyQjSCp6eQ51gaV5zALrM048P2vKeO_YnbjeLgGIm; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com; Expires=Sat, 03 Oct 2026 15:49:30 GMT, _cfuvid=WlsOobtXdwLWF0wm5Uw407pugyGtqP6zODyUfFKmHSs-1791040770.4387856-1.0.1.1-0PGdP8G6rvnxgkWuOAazGuI053No.3xM64qaKc9zQQs; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com', 'cf-cache-status': 'DYNAMIC', 'Server': 'cloudflare', 'CF-RAY': 'a44cecef3ffb339c-DEL', 'alt-svc': 'h3=":443"; ma=86400'})
+HTTP response headers: HTTPHeaderDict({'Date': 'Sat, 03 Oct 2026 15:33:50 GMT', 'Content-Type': 'application/json', 'Content-Length': '211', 'Connection': 'keep-alive', 'reqid': 'd5c4ca85-0661-4f43-bdc7-ab6d2d715fb7', 'vary': 'Origin, Access-Control-Request-Method, Access-Control-Request-Headers', 'message': 'request failed', 'requestid': '755ccf27-6952-4800-8701-abbf09c1efe6', 'x-content-type-options': 'nosniff', 'x-xss-protection': '0', 'Cache-Control': 'no-cache, no-store, max-age=0, must-revalidate', 'pragma': 'no-cache', 'expires': '0', 'strict-transport-security': 'max-age=0; includeSubDomains', 'x-frame-options': 'DENY', 'set-cookie': '__cf_bm=sPX75YI.OgmF_s_cxbynR_qrQhGLvN6suJdIUUXJL54-1791041630.4150937-1.0.1.1-v8zgZ7BXn6suNqLL4Ndyj7egjYG5mK2MozINqU4X9wj_yzPz6sXeWgpmAdvCZV9p32RA89WfKmYW7BIcgBJZEp51fLtBnUaLVXU9Ut1JujPPVn6XzTn3NttHx6We4xyr; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com; Expires=Sat, 03 Oct 2026 16:03:50 GMT, _cfuvid=3ZLvACFhmycM5tbC36wnkzgJtK_vT_vDl0EUTnm2B_k-1791041630.4150937-1.0.1.1-qDOA1XhHi23JthS0agsGJxRW9Tw.1TSvB2BIALSGGSU; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com', 'cf-cache-status': 'DYNAMIC', 'Server': 'cloudflare', 'CF-RAY': 'a44d01ee195170aa-NAG', 'alt-svc': 'h3=":443"; ma=86400'})
 HTTP response body: b'{"status":"error","errors":[{"errorCode":"UDAPI100050","message":"Invalid token used to access API","propertyPath":null,"invalidValue":null,"error_code":"UDAPI100050","property_path":null,"invalid_value":null}]}'
 
 InstrumentRegistry [NIFTY] expiry=2026-11-10: (401)
 Reason: Unauthorized
-HTTP response headers: HTTPHeaderDict({'Date': 'Sat, 03 Oct 2026 15:19:30 GMT', 'Content-Type': 'application/json', 'Content-Length': '211', 'Connection': 'keep-alive', 'reqid': 'dc9f5c89-fca2-4ea0-bbde-ab59eb0083ae', 'vary': 'Origin, Access-Control-Request-Method, Access-Control-Request-Headers', 'message': 'request failed', 'requestid': '19a7aa0e-2985-4e03-b619-da16c7a58575', 'x-content-type-options': 'nosniff', 'x-xss-protection': '0', 'Cache-Control': 'no-cache, no-store, max-age=0, must-revalidate', 'pragma': 'no-cache', 'expires': '0', 'strict-transport-security': 'max-age=0; includeSubDomains', 'x-frame-options': 'DENY', 'set-cookie': '__cf_bm=0Ju3lU1yamVt3blqQUlUk8jLzahokgXAYba8zSVuEIw-1791040770.5198934-1.0.1.1-qD5daY7SeRoEpyHU9JB9h9dXs6K6nplavOivuak5k.kzIS_yl77z9r3EM98WD.LCUuJxgTxD4SU1Tm.nP5N7cjyZaK2ef3GR7uS6cIN79x8nImEYgnTJVgLmZAKriwW_; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com; Expires=Sat, 03 Oct 2026 15:49:30 GMT, _cfuvid=d2FjLOyHFt9qcOFaeMJJaTzTcQIbH3kecESGb2QFX40-1791040770.5198934-1.0.1.1-41h4zmRfW3vKvdZomX2pI4iAEGN.aaAx5BkyiMgD5FQ; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com', 'cf-cache-status': 'DYNAMIC', 'Server': 'cloudflare', 'CF-RAY': 'a44cecefb8ce339c-DEL', 'alt-svc': 'h3=":443"; ma=86400'})
+HTTP response headers: HTTPHeaderDict({'Date': 'Sat, 03 Oct 2026 15:33:50 GMT', 'Content-Type': 'application/json', 'Content-Length': '211', 'Connection': 'keep-alive', 'reqid': '82f5fe3e-578d-465b-8142-0f87c33e916e', 'vary': 'Origin, Access-Control-Request-Method, Access-Control-Request-Headers', 'message': 'request failed', 'requestid': '97b3386e-7488-4b07-b0ea-7912f9df4e41', 'x-content-type-options': 'nosniff', 'x-xss-protection': '0', 'Cache-Control': 'no-cache, no-store, max-age=0, must-revalidate', 'pragma': 'no-cache', 'expires': '0', 'strict-transport-security': 'max-age=0; includeSubDomains', 'x-frame-options': 'DENY', 'set-cookie': '__cf_bm=AsP2UTF.CaYrjZscQdQt8BXCZHfTOWaEh9XaOQ7eciI-1791041630.4684427-1.0.1.1-u2nIwjJt5LhEzglDsYY5TO9.Znt58wuNTKdOFcMnJ4xo_EaogCVU0u4mfB.ttxhRFUPvUpFuc83.jLlAydbhbg_A0QHUlh02JaSQBL.Ff3y46mBOcQdYFzBnDyM0TL_.; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com; Expires=Sat, 03 Oct 2026 16:03:50 GMT, _cfuvid=pvyr8nh2x9OcSu5x37b1xVuaPFOaB3aYSDdHWNsT9uU-1791041630.4684427-1.0.1.1-XS0hqFpoPZudJYhGbNbBHMGymvlG26EdN6H44UH5dvc; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com', 'cf-cache-status': 'DYNAMIC', 'Server': 'cloudflare', 'CF-RAY': 'a44d01ee6ae970aa-NAG', 'alt-svc': 'h3=":443"; ma=86400'})
 HTTP response body: b'{"status":"error","errors":[{"errorCode":"UDAPI100050","message":"Invalid token used to access API","propertyPath":null,"invalidValue":null,"error_code":"UDAPI100050","property_path":null,"invalid_value":null}]}'
 
 InstrumentRegistry [NIFTY] expiry=2026-11-17: (401)
 Reason: Unauthorized
-HTTP response headers: HTTPHeaderDict({'Date': 'Sat, 03 Oct 2026 15:19:30 GMT', 'Content-Type': 'application/json', 'Content-Length': '211', 'Connection': 'keep-alive', 'reqid': '9e4b67c2-a676-4ffe-9eff-e6e4bc688558', 'vary': 'Origin, Access-Control-Request-Method, Access-Control-Request-Headers', 'message': 'request failed', 'requestid': '71ae532d-62da-48f2-a54d-33b16e68c7e8', 'x-content-type-options': 'nosniff', 'x-xss-protection': '0', 'Cache-Control': 'no-cache, no-store, max-age=0, must-revalidate', 'pragma': 'no-cache', 'expires': '0', 'strict-transport-security': 'max-age=0; includeSubDomains', 'x-frame-options': 'DENY', 'set-cookie': '__cf_bm=oq8IGCYfVz8BsOlmsfyY9p_LfxRLmliOg2QdB5GPhZs-1791040770.5928748-1.0.1.1-p8TiXlIefr.We68ECVHhINBellPENEG9vE5ePC2AyNb5LlU5NrvswE7SUTze2sUAwO1Q8yR4np7hNhF_GeNqA3oN0ZxcvliEL0C3JkqyV8NPX5Zp93bCStVMLDif2B9m; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com; Expires=Sat, 03 Oct 2026 15:49:30 GMT, _cfuvid=6jA6LdxKUK_VWIumIB2cP58qwisf0z2jrrc9lbmxFdI-1791040770.5928748-1.0.1.1-fjcXT0CTVAynqpws2nRJth1eVV6WjK7mvYJIEjCMm9Q; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com', 'cf-cache-status': 'DYNAMIC', 'Server': 'cloudflare', 'CF-RAY': 'a44cecf03981339c-DEL', 'alt-svc': 'h3=":443"; ma=86400'})
+HTTP response headers: HTTPHeaderDict({'Date': 'Sat, 03 Oct 2026 15:33:50 GMT', 'Content-Type': 'application/json', 'Content-Length': '211', 'Connection': 'keep-alive', 'reqid': 'a06c0e1a-cfff-4598-8032-5902e088f73c', 'vary': 'Origin, Access-Control-Request-Method, Access-Control-Request-Headers', 'message': 'request failed', 'requestid': 'b406f30e-362a-42ba-88c5-b9949dbf9eb0', 'x-content-type-options': 'nosniff', 'x-xss-protection': '0', 'Cache-Control': 'no-cache, no-store, max-age=0, must-revalidate', 'pragma': 'no-cache', 'expires': '0', 'strict-transport-security': 'max-age=0; includeSubDomains', 'x-frame-options': 'DENY', 'set-cookie': '__cf_bm=UnBz3kvnRfscEcb9OKrwFV.ji_DfblDoJbD7R2kvOe0-1791041630.5175903-1.0.1.1-d3Coo0_mvO6Raen9upgrGIl99YTU2hc6MOkfq.xvyqmmnjwrS5XJr3041JwhGygAh9IaFk0drDaAekcXgA983Mnw5qQyuuTbjNyhUVdaQbONEVrYZUOVVouifRPKvFej; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com; Expires=Sat, 03 Oct 2026 16:03:50 GMT, _cfuvid=BhUypbjC9EkY.1G0CEdPwkPMqKVOxoPoqZMd9qUGGdI-1791041630.5175903-1.0.1.1-12Lxz44VF751s6YLjQckYMDqzYmkEgzsGO.uT3WqK7o; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com', 'cf-cache-status': 'DYNAMIC', 'Server': 'cloudflare', 'CF-RAY': 'a44d01eebc6370aa-NAG', 'alt-svc': 'h3=":443"; ma=86400'})
 HTTP response body: b'{"status":"error","errors":[{"errorCode":"UDAPI100050","message":"Invalid token used to access API","propertyPath":null,"invalidValue":null,"error_code":"UDAPI100050","property_path":null,"invalid_value":null}]}'
 
 InstrumentRegistry [NIFTY] expiry=2026-11-24: (401)
 Reason: Unauthorized
-HTTP response headers: HTTPHeaderDict({'Date': 'Sat, 03 Oct 2026 15:19:30 GMT', 'Content-Type': 'application/json', 'Content-Length': '211', 'Connection': 'keep-alive', 'reqid': '829cd6b6-fdf0-4e20-9573-03e87f2a0acd', 'vary': 'Origin, Access-Control-Request-Method, Access-Control-Request-Headers', 'message': 'request failed', 'requestid': 'e5658d0e-6ee0-4f38-9f22-7b5fd8d8a1ee', 'x-content-type-options': 'nosniff', 'x-xss-protection': '0', 'Cache-Control': 'no-cache, no-store, max-age=0, must-revalidate', 'pragma': 'no-cache', 'expires': '0', 'strict-transport-security': 'max-age=0; includeSubDomains', 'x-frame-options': 'DENY', 'set-cookie': '__cf_bm=xoMgFS7p7xH6lSjXLS3o.ba9up49TiAu9l9.AXjZABQ-1791040770.6692905-1.0.1.1-khVmwmqjLZ0etAZK7RclTvxqJjhqlYAQsJGXj4w84Aaqflmc8p7Q.LpSsYR4Q.GkD7Q9R3Sv5l7UuqqYHmpfylMhwnL9zrrllTpvD.VPqLgjbKjtU0G9FTvKhCbsa7jU; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com; Expires=Sat, 03 Oct 2026 15:49:30 GMT, _cfuvid=zLmZBeJ9hKkvXe8CBjxEPkKnd37ARApWrWZgrodL5H8-1791040770.6692905-1.0.1.1-aQZHMNd.kX7oJlfqEciiF.L0B1bt_bORAhK_x6YGGgE; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com', 'cf-cache-status': 'DYNAMIC', 'Server': 'cloudflare', 'CF-RAY': 'a44cecf0aa4e339c-DEL', 'alt-svc': 'h3=":443"; ma=86400'})
+HTTP response headers: HTTPHeaderDict({'Date': 'Sat, 03 Oct 2026 15:33:50 GMT', 'Content-Type': 'application/json', 'Content-Length': '211', 'Connection': 'keep-alive', 'reqid': '8c5fe264-d352-4c2d-86e2-6d317c7da658', 'vary': 'Origin, Access-Control-Request-Method, Access-Control-Request-Headers', 'message': 'request failed', 'requestid': 'e50342b1-fca0-4d2f-88b0-f12aa2cdb691', 'x-content-type-options': 'nosniff', 'x-xss-protection': '0', 'Cache-Control': 'no-cache, no-store, max-age=0, must-revalidate', 'pragma': 'no-cache', 'expires': '0', 'strict-transport-security': 'max-age=0; includeSubDomains', 'x-frame-options': 'DENY', 'set-cookie': '__cf_bm=_OYtsAQWY1xc_3JIPhuKRmLV3.IMqD0e042Z5ECwknI-1791041630.5687225-1.0.1.1-9wLvoNcloqaKFxzcxt.TCB_wub7o766R18q5vnTZohwysTOIg.216wiZi_w544v72PrapYZqRHYKFF4fB.7iVjFlO8d.6kwNscjP_mSHxt7lZOY8GUd4F0HJqmnnn2in; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com; Expires=Sat, 03 Oct 2026 16:03:50 GMT, _cfuvid=mapHB6srnQi0jVr.OsgOUctE63TosYJU1Y4asbleWVY-1791041630.5687225-1.0.1.1-sPEbWctzksZHCcYAQDphUka7VU2GIlaY_fEAoZvIKcA; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com', 'cf-cache-status': 'DYNAMIC', 'Server': 'cloudflare', 'CF-RAY': 'a44d01ef0dc170aa-NAG', 'alt-svc': 'h3=":443"; ma=86400'})
 HTTP response body: b'{"status":"error","errors":[{"errorCode":"UDAPI100050","message":"Invalid token used to access API","propertyPath":null,"invalidValue":null,"error_code":"UDAPI100050","property_path":null,"invalid_value":null}]}'
 
 InstrumentRegistry [NIFTY]: 0 from API, trying master JSON
 === Bear Trap OI backtest: 4 trading day(s) in window, daily strikes recomputed per spec Section 3 ===
 
+
+==============================================================================
+SECTION 1: FIXED daily PDH/PDL strike, single-lot, EOD-only (locked spec baseline)
+==============================================================================
 [2026-09-28] DAY START: expiry=2026-10-06 ce_strike=23000 pe_strike=23150
 [2026-09-28] fetched 385 CE 1-min bars (73 5-min), 385 PE 1-min bars (73 5-min)
 [CE 23000] C1 (CANDLE 1 / REFERENCE) @2026-09-28 09:15:00+05:30 O=250.0 H=257.7 L=167.5 C=168.65
@@ -129,3 +133,119 @@ Side Strike  Entry Price  Entry Time             MFE Price  MFE Time            
 PE   23150   330.45       2026-09-28 10:55:00+05:30 401.0      2026-09-28 14:35:00+05:30 318.4      2026-09-28 12:25:00+05:30 364.55    2557.50    10.32   
 CE   22550   279.55       2026-09-30 10:35:00+05:30 352.85     2026-09-30 12:45:00+05:30 186.4      2026-09-30 14:40:00+05:30 192.6     -6521.25   -31.10  
 CE   22600   113.3        2026-10-01 11:25:00+05:30 127.75     2026-10-01 11:40:00+05:30 41.7       2026-10-01 14:05:00+05:30 70.6      -3202.50   -37.69  
+
+==============================================================================
+SECTION 2 (EXPERIMENTAL): simultaneous CE+PE, dynamic 100-pt ITM strike rolling, Fib 1.272/1.618 dual-lot management (2 lots in, 1 lot @1.272, remaining lot: Variant A = TSL->breakeven, Variant B = no TSL, runs to 1.618/EOD)
+==============================================================================
+[2026-09-28] spot open=23064.9, 2 roll event(s): [('2026-09-28 09:15:00+05:30', 22850, 23050), ('2026-09-28 10:20:00+05:30', 22750, 22950)]
+[CE dyn] ROLL (flat) @2026-09-28 09:15:00+05:30 23000 -> 22850 (detector reset -- new contract, old candle refs invalid)
+[CE dyn] C1 @2026-09-28 09:15:00+05:30 strike=22850 O=297.3 H=297.3 L=255.05 C=255.25
+[CE dyn] C2 (BREAKDOWN) @2026-09-28 09:20:00+05:30 strike=22850 low=249.5 -> zone_lo=249.5
+[CE dyn] ROLL (flat) @2026-09-28 10:20:00+05:30 22850 -> 22750 (detector reset -- new contract, old candle refs invalid)
+[CE dyn] C1 @2026-09-28 10:20:00+05:30 strike=22750 O=277.8 H=281.15 L=270.5 C=272.0
+[CE dyn] C2 (BREAKDOWN) @2026-09-28 10:25:00+05:30 strike=22750 low=270.0 -> zone_lo=270.0
+[PE dyn] ROLL (flat) @2026-09-28 09:15:00+05:30 23150 -> 23050 (detector reset -- new contract, old candle refs invalid)
+[PE dyn] C1 @2026-09-28 09:15:00+05:30 strike=23050 O=138.0 H=208.6 L=138.0 C=207.2
+[PE dyn] C2 (BREAKDOWN) @2026-09-28 09:45:00+05:30 strike=23050 low=246.7 -> zone_lo=246.7
+[PE dyn] ROLL (flat) @2026-09-28 10:20:00+05:30 23050 -> 22950 (detector reset -- new contract, old candle refs invalid)
+[PE dyn] C1 @2026-09-28 10:20:00+05:30 strike=22950 O=205.6 H=214.6 L=202.1 C=213.25
+[PE dyn] C2 (BREAKDOWN) @2026-09-28 10:30:00+05:30 strike=22950 low=207.25 -> zone_lo=207.25
+[PE dyn] TRAP CONFIRMED @2026-09-28 10:35:00+05:30 strike=22950 close=216.1 -> zone_hi=210.4
+[PE dyn] ZONE ACTIVE [207.25, 210.4]
+[PE dyn] ZONE RE-ENTRY & ENTRY @2026-09-28 11:35:00+05:30 strike=22950 price=209.95 (zone was [207.25, 210.4])
+[PE dyn] SWING HIGH = 226.4 @2026-09-28 11:55:00+05:30 FIB_1272=230.8744 FIB_1618=236.5661
+[PE dyn] LOT1 EXIT @2026-09-28 14:15:00+05:30 price=230.8744 reason=target_1272
+[PE dyn] VARIANT A LOT2 EXIT @2026-09-28 14:20:00+05:30 price=236.5661 reason=target_1618 total_pnl=3565.537500000003
+[PE dyn] VARIANT B LOT2 EXIT @2026-09-28 14:20:00+05:30 price=236.5661 reason=target_1618 total_pnl=3565.537500000003
+
+[2026-09-29] spot open=22732.45, 2 roll event(s): [('2026-09-29 09:25:00+05:30', 22550, 22750), ('2026-09-29 11:55:00+05:30', 22650, 22850)]
+[CE dyn] C1 @2026-09-29 09:15:00+05:30 strike=22750 O=235.15 H=235.15 L=177.0 C=177.6
+[CE dyn] C2 (BREAKDOWN) @2026-09-29 09:20:00+05:30 strike=22750 low=169.05 -> zone_lo=169.05
+[CE dyn] ROLL (flat) @2026-09-29 09:25:00+05:30 22750 -> 22550 (detector reset -- new contract, old candle refs invalid)
+[CE dyn] C1 @2026-09-29 09:25:00+05:30 strike=22550 O=300.0 H=300.0 L=271.15 C=274.55
+[CE dyn] C2 (BREAKDOWN) @2026-09-29 09:30:00+05:30 strike=22550 low=267.0 -> zone_lo=267.0
+[CE dyn] TRAP CONFIRMED @2026-09-29 11:10:00+05:30 strike=22550 close=309.7 -> zone_hi=274.55
+[CE dyn] ZONE ACTIVE [267.0, 274.55]
+[CE dyn] ROLL (flat) @2026-09-29 11:55:00+05:30 22550 -> 22650 (detector reset -- new contract, old candle refs invalid)
+[CE dyn] C1 @2026-09-29 11:55:00+05:30 strike=22650 O=258.4 H=270.0 L=257.7 C=268.5
+[CE dyn] C2 (BREAKDOWN) @2026-09-29 12:10:00+05:30 strike=22650 low=272.3 -> zone_lo=272.3
+[PE dyn] C1 @2026-09-29 09:15:00+05:30 strike=23100 O=408.25 H=408.25 L=356.1 C=392.05
+[PE dyn] ROLL (flat) @2026-09-29 09:25:00+05:30 23100 -> 22750 (detector reset -- new contract, old candle refs invalid)
+[PE dyn] C1 @2026-09-29 09:25:00+05:30 strike=22750 O=172.2 H=198.85 L=171.5 C=197.25
+[PE dyn] C2 (BREAKDOWN) @2026-09-29 09:40:00+05:30 strike=22750 low=196.85 -> zone_lo=196.85
+[PE dyn] ROLL (flat) @2026-09-29 11:55:00+05:30 22750 -> 22850 (detector reset -- new contract, old candle refs invalid)
+[PE dyn] C1 @2026-09-29 11:55:00+05:30 strike=22850 O=206.4 H=206.7 L=194.65 C=194.75
+[PE dyn] C2 (BREAKDOWN) @2026-09-29 12:00:00+05:30 strike=22850 low=181.35 -> zone_lo=181.35
+[PE dyn] TRAP CONFIRMED @2026-09-29 12:25:00+05:30 strike=22850 close=222.45 -> zone_hi=194.75
+[PE dyn] ZONE ACTIVE [181.35, 194.75]
+[PE dyn] ZONE RE-ENTRY & ENTRY @2026-09-29 15:05:00+05:30 strike=22850 price=191.35 (zone was [181.35, 194.75])
+[PE dyn] SWING HIGH = 192.1 @2026-09-29 15:10:00+05:30 FIB_1272=192.304 FIB_1618=192.5635
+[PE dyn] LOT1 EXIT @2026-09-29 15:15:00+05:30 price=177.65 reason=eod_target_not_reached
+[PE dyn] VARIANT A LOT2 EXIT @2026-09-29 15:15:00+05:30 price=177.65 reason=eod_target_not_reached total_pnl=-2054.999999999998
+[PE dyn] VARIANT B LOT2 EXIT @2026-09-29 15:15:00+05:30 price=177.65 reason=eod_target_not_reached total_pnl=-2054.999999999998
+
+[2026-09-30] spot open=22665.0, 2 roll event(s): [('2026-09-30 12:30:00+05:30', 22650, 22850), ('2026-09-30 14:20:00+05:30', 22550, 22750)]
+[CE dyn] C1 @2026-09-30 09:15:00+05:30 strike=22550 O=314.6 H=315.3 L=268.9 C=286.75
+[CE dyn] C2 (BREAKDOWN) @2026-09-30 09:30:00+05:30 strike=22550 low=274.2 -> zone_lo=274.2
+[CE dyn] TRAP CONFIRMED @2026-09-30 10:10:00+05:30 strike=22550 close=310.9 -> zone_hi=295.6
+[CE dyn] ZONE ACTIVE [274.2, 295.6]
+[CE dyn] ZONE RE-ENTRY & ENTRY @2026-09-30 10:35:00+05:30 strike=22550 price=279.55 (zone was [274.2, 295.6])
+[CE dyn] ROLL (in-position, target-tracking only) @2026-09-30 12:30:00+05:30 22550 -> 22650
+[CE dyn] ROLL (in-position, target-tracking only) @2026-09-30 14:20:00+05:30 22650 -> 22550
+[CE dyn] SWING HIGH = 282.0 @2026-09-30 10:40:00+05:30 FIB_1272=282.6664 FIB_1618=283.5141
+[CE dyn] LOT1 EXIT @2026-09-30 11:00:00+05:30 price=282.6664 reason=target_1272
+[CE dyn] VARIANT A LOT2 EXIT @2026-09-30 11:05:00+05:30 price=279.55 reason=tsl_breakeven total_pnl=233.7299999999999
+[CE dyn] VARIANT B LOT2 EXIT @2026-09-30 11:55:00+05:30 price=283.5141 reason=target_1618 total_pnl=531.0374999999979
+[PE dyn] C1 @2026-09-30 09:15:00+05:30 strike=22750 O=154.95 H=171.0 L=140.35 C=143.4
+[PE dyn] C2 (BREAKDOWN) @2026-09-30 09:20:00+05:30 strike=22750 low=131.15 -> zone_lo=131.15
+[PE dyn] ROLL (flat) @2026-09-30 12:30:00+05:30 22750 -> 22850 (detector reset -- new contract, old candle refs invalid)
+[PE dyn] C1 @2026-09-30 12:30:00+05:30 strike=22850 O=173.4 H=176.25 L=157.75 C=158.3
+[PE dyn] C2 (BREAKDOWN) @2026-09-30 12:35:00+05:30 strike=22850 low=147.85 -> zone_lo=147.85
+[PE dyn] TRAP CONFIRMED @2026-09-30 13:40:00+05:30 strike=22850 close=182.95 -> zone_hi=158.3
+[PE dyn] ZONE ACTIVE [147.85, 158.3]
+[PE dyn] ROLL (flat) @2026-09-30 14:20:00+05:30 22850 -> 22750 (detector reset -- new contract, old candle refs invalid)
+[PE dyn] C1 @2026-09-30 14:20:00+05:30 strike=22750 O=137.05 H=165.8 L=135.5 C=163.05
+[PE dyn] C2 (BREAKDOWN) @2026-09-30 14:45:00+05:30 strike=22750 low=177.5 -> zone_lo=177.5
+
+[2026-10-01] spot open=22543.7, 4 roll event(s): [('2026-10-01 12:40:00+05:30', 22350, 22550), ('2026-10-01 12:55:00+05:30', 22200, 22400), ('2026-10-01 14:00:00+05:30', 22100, 22300), ('2026-10-01 14:30:00+05:30', 22250, 22450)]
+[CE dyn] C1 @2026-10-01 09:15:00+05:30 strike=22600 O=123.9 H=137.0 L=101.9 C=122.9
+[CE dyn] C2 (BREAKDOWN) @2026-10-01 09:35:00+05:30 strike=22600 low=113.25 -> zone_lo=113.25
+[CE dyn] TRAP CONFIRMED @2026-10-01 10:00:00+05:30 strike=22600 close=142.75 -> zone_hi=115.8
+[CE dyn] ZONE ACTIVE [113.25, 115.8]
+[CE dyn] ZONE RE-ENTRY & ENTRY @2026-10-01 11:25:00+05:30 strike=22600 price=113.3 (zone was [113.25, 115.8])
+[CE dyn] ROLL (in-position, target-tracking only) @2026-10-01 12:40:00+05:30 22600 -> 22350
+[CE dyn] ROLL (in-position, target-tracking only) @2026-10-01 12:55:00+05:30 22350 -> 22200
+[CE dyn] ROLL (in-position, target-tracking only) @2026-10-01 14:00:00+05:30 22200 -> 22100
+[CE dyn] ROLL (in-position, target-tracking only) @2026-10-01 14:30:00+05:30 22100 -> 22250
+[CE dyn] SWING HIGH = 127.75 @2026-10-01 11:40:00+05:30 FIB_1272=131.6804 FIB_1618=136.6801
+[CE dyn] LOT1 EXIT @2026-10-01 12:40:00+05:30 price=131.6804 reason=target_1272
+[CE dyn] VARIANT A LOT2 EXIT @2026-10-01 12:45:00+05:30 price=136.6801 reason=target_1618 total_pnl=3132.0375000000004
+[CE dyn] VARIANT B LOT2 EXIT @2026-10-01 12:45:00+05:30 price=136.6801 reason=target_1618 total_pnl=3132.0375000000004
+[PE dyn] C1 @2026-10-01 09:15:00+05:30 strike=22800 O=298.5 H=300.0 L=242.75 C=262.6
+[PE dyn] C2 (BREAKDOWN) @2026-10-01 09:30:00+05:30 strike=22800 low=245.65 -> zone_lo=245.65
+[PE dyn] TRAP CONFIRMED @2026-10-01 12:15:00+05:30 strike=22800 close=314.7 -> zone_hi=272.0
+[PE dyn] ZONE ACTIVE [245.65, 272.0]
+[PE dyn] ROLL (flat) @2026-10-01 12:40:00+05:30 22800 -> 22550 (detector reset -- new contract, old candle refs invalid)
+[PE dyn] C1 @2026-10-01 12:40:00+05:30 strike=22550 O=156.7 H=193.85 L=152.0 C=192.85
+[PE dyn] ROLL (flat) @2026-10-01 12:55:00+05:30 22550 -> 22400 (detector reset -- new contract, old candle refs invalid)
+[PE dyn] C1 @2026-10-01 12:55:00+05:30 strike=22400 O=161.1 H=200.95 L=160.5 C=180.25
+[PE dyn] C2 (BREAKDOWN) @2026-10-01 13:00:00+05:30 strike=22400 low=135.65 -> zone_lo=135.65
+[PE dyn] TRAP CONFIRMED @2026-10-01 13:55:00+05:30 strike=22400 close=214.2 -> zone_hi=180.25
+[PE dyn] ZONE ACTIVE [135.65, 180.25]
+[PE dyn] ROLL (flat) @2026-10-01 14:00:00+05:30 22400 -> 22300 (detector reset -- new contract, old candle refs invalid)
+[PE dyn] C1 @2026-10-01 14:00:00+05:30 strike=22300 O=158.85 H=180.6 L=152.0 C=176.55
+[PE dyn] C2 (BREAKDOWN) @2026-10-01 14:05:00+05:30 strike=22300 low=135.1 -> zone_lo=135.1
+[PE dyn] ROLL (flat) @2026-10-01 14:30:00+05:30 22300 -> 22450 (detector reset -- new contract, old candle refs invalid)
+[PE dyn] C1 @2026-10-01 14:30:00+05:30 strike=22450 O=199.5 H=199.55 L=157.7 C=163.9
+[PE dyn] C2 (BREAKDOWN) @2026-10-01 14:35:00+05:30 strike=22450 low=151.0 -> zone_lo=151.0
+
+
+=== Dynamic/Fib Summary ===
+Side EntryStrike Entry    EntryTime              SwingHi  Fib1272   Fib1618   VarA Exit  VarA Reason      VarA PnL   VarB Exit  VarB Reason      VarB PnL  
+-----------------------------------------------------------------------------------------------------------------------------------------------------------
+PE   22950       209.95   2026-09-28 11:35:00+05:30 226.4    230.8744  236.5661  236.5661   target_1618      3565.54    236.5661   target_1618      3565.54   
+PE   22850       191.35   2026-09-29 15:05:00+05:30 192.1    192.304   192.5635  177.65     eod_target_not_reached -2055.00   177.65     eod_target_not_reached -2055.00  
+CE   22550       279.55   2026-09-30 10:35:00+05:30 282.0    282.6664  283.5141  279.55     tsl_breakeven    233.73     283.5141   target_1618      531.04    
+CE   22600       113.3    2026-10-01 11:25:00+05:30 127.75   131.6804  136.6801  136.6801   target_1618      3132.04    136.6801   target_1618      3132.04   
+
+=== Dynamic/Fib Combined: 4 trade(s) -- Variant A total P&L: 4876.31  |  Variant B total P&L: 5173.61 ===
