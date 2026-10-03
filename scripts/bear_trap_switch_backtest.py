@@ -7,8 +7,13 @@ wall logic. Mechanic:
      instead of re-entering), jump to the OPPOSITE side's 1-minute chart.
   3. Find that side's latest/freshest 1-min trap cycle and fire the
      moment price re-enters it -- immediately, no further confirmation.
+  4. SL = that fresh zone's own zone_lo. If SL is hit, the position
+     closes, but the SAME side keeps watching: a later close back above
+     the SAME reference candle's (C1) high re-enters on the same side
+     with the SAME SL (never recalculated). Repeats for as many
+     SL-hit/reclaim cycles as the remaining session contains.
 
-Reuses detect_5m_zone_invalidation/enter_on_1m_trap from
+Reuses detect_5m_zone_invalidation/enter_on_1m_trap_with_sl from
 scripts/bear_trap_oi_backtest.py (never reimplements the detector).
 
 Usage:
@@ -23,7 +28,7 @@ from datetime import date, datetime, timedelta
 from scripts.bear_trap_oi_backtest import (
     _candle_dicts_to_bars, _get_upstox_access_token, _resample_1m_to_5m,
     _truncate_to_eod, compute_daily_strikes, detect_5m_zone_invalidation,
-    enter_on_1m_trap,
+    enter_on_1m_trap_with_sl,
 )
 
 
@@ -82,28 +87,25 @@ async def main() -> None:
             print(f"[{trading_day}] {side} {strike}: 5m ZONE INVALIDATED @{inv_ts} "
                   f"-> switching to {other_side} {other_strike} 1m chart")
             later_1m = [b for b in other_bars_1m if b.ts > inv_ts]
-            entry = enter_on_1m_trap(later_1m, args.lot_qty)
-            if entry is None:
+            leg_trades = enter_on_1m_trap_with_sl(later_1m, args.lot_qty)
+            if not leg_trades:
                 print(f"[{trading_day}] {other_side} {other_strike}: no fresh 1m trap "
                       f"re-entry found after {inv_ts}")
                 continue
-            exit_bar = later_1m[-1]
-            if exit_bar.ts <= entry["entry_ts"]:
-                print(f"[{trading_day}] {other_side} {other_strike}: entry fired on "
-                      f"the last available bar -- no room for an EOD exit")
-                continue
-            exit_price = exit_bar.close
-            pnl = (exit_price - entry["entry_price"]) * args.lot_qty
-            print(f"[{trading_day}] {other_side} {other_strike}: 1m RE-ENTRY "
-                  f"@{entry['entry_ts']} price={entry['entry_price']} "
-                  f"(zone=[{entry['zone_lo']}, {entry['zone_hi']}]) -> "
-                  f"EOD exit @{exit_bar.ts} price={exit_price} pnl={pnl:.2f}")
-            all_trades.append({
-                "day": trading_day, "side": other_side, "strike": other_strike,
-                "triggered_by": side, "entry_ts": entry["entry_ts"],
-                "entry_price": entry["entry_price"], "exit_ts": exit_bar.ts,
-                "exit_price": exit_price, "pnl": pnl,
-            })
+            for lt in leg_trades:
+                pnl = (lt["exit_price"] - lt["entry_price"]) * args.lot_qty
+                print(f"[{trading_day}] {other_side} {other_strike}: 1m "
+                      f"{'RE-' if lt is not leg_trades[0] else ''}ENTRY "
+                      f"@{lt['entry_ts']} price={lt['entry_price']} SL={lt['zone_lo']} -> "
+                      f"exit({lt['exit_reason']}) @{lt['exit_ts']} price={lt['exit_price']} "
+                      f"pnl={pnl:.2f}")
+                all_trades.append({
+                    "day": trading_day, "side": other_side, "strike": other_strike,
+                    "triggered_by": side, "entry_ts": lt["entry_ts"],
+                    "entry_price": lt["entry_price"], "exit_ts": lt["exit_ts"],
+                    "exit_price": lt["exit_price"], "exit_reason": lt["exit_reason"],
+                    "pnl": pnl,
+                })
         print()
 
     print("=== Summary ===")
@@ -113,7 +115,7 @@ async def main() -> None:
     for t in all_trades:
         print(f"  [{t['day']}] {t['side']} {t['strike']} (triggered by {t['triggered_by']} "
               f"invalidation) entry @{t['entry_ts']} {t['entry_price']} -> "
-              f"exit @{t['exit_ts']} {t['exit_price']} pnl={t['pnl']:.2f}")
+              f"exit({t['exit_reason']}) @{t['exit_ts']} {t['exit_price']} pnl={t['pnl']:.2f}")
     print(f"\nTotal P&L: {sum(t['pnl'] for t in all_trades):.2f}")
 
 
