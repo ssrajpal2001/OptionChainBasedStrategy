@@ -8,7 +8,7 @@ from scripts.bear_trap_oi_backtest import (
     VolBar, compute_volume_profile, classify_rollover,
     is_strike_oi_significant, check_hard_wall, check_directional_matrix,
     check_price_acceptance, svp_ready, compute_ema, check_momentum_acceptance,
-    check_buyer_gate,
+    check_buyer_gate, compute_roc, check_velocity_gate,
 )
 
 
@@ -449,6 +449,42 @@ def test_check_buyer_gate_combines_directional_matrix_and_momentum():
         ema_prev=100.0, ema_curr=99.0,
     )
     assert gate_closed is False
+
+
+def test_compute_roc_over_lookback_bars():
+    closes = [100.0, 100.5, 101.0, 102.0]  # entry bar is the LAST close
+    roc = compute_roc(closes, lookback=3)
+    assert roc == (102.0 - 100.0) / 100.0
+
+
+def test_check_velocity_gate_requires_matrix_velocity_and_momentum():
+    # CE: matrix passes (Fut RISING+Put RISING+Call FALLING), velocity
+    # clears threshold upward, volume confirms -- gate open.
+    open_gate = check_velocity_gate(
+        fut_trend="RISING", put_trend="RISING", call_trend="FALLING", side="CE",
+        roc_pct=0.006, roc_threshold=0.003, bar_volume=2000, avg_volume=1000,
+        ema_prev=100.0, ema_curr=100.1,
+    )
+    assert open_gate is True
+
+
+def test_check_velocity_gate_rejects_weak_velocity():
+    closed = check_velocity_gate(
+        fut_trend="RISING", put_trend="RISING", call_trend="FALLING", side="CE",
+        roc_pct=0.001, roc_threshold=0.003, bar_volume=2000, avg_volume=1000,
+        ema_prev=100.0, ema_curr=100.1,
+    )
+    assert closed is False
+
+
+def test_check_velocity_gate_rejects_wrong_direction_velocity():
+    # CE needs upward velocity -- a negative roc fails even if matrix passes.
+    closed = check_velocity_gate(
+        fut_trend="RISING", put_trend="RISING", call_trend="FALLING", side="CE",
+        roc_pct=-0.006, roc_threshold=0.003, bar_volume=2000, avg_volume=1000,
+        ema_prev=100.0, ema_curr=100.1,
+    )
+    assert closed is False
 
 
 def test_run_dynamic_side_backtest_allows_entry_before_1445_cutoff():

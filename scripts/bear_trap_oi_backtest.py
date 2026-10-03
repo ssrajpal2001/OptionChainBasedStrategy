@@ -934,6 +934,53 @@ def check_buyer_gate(fut_trend: str, put_trend: str, call_trend: str, side: Side
                                       avg_volume, ema_prev, ema_curr)
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# Velocity gate (2026-10-03, "use your own expert judgment" pivot): drops
+# Volume Profile/VAH-VAL entirely from entry gating -- VAH/VAL is still a
+# structural RANGE concept (mean-reversion/seller-flavored), not something
+# an option buyer chasing a genuine directional move needs to wait for.
+# Real quant option-buying principles applied instead:
+#   - OI directional confirmation (kept -- this is positioning data, not a
+#     seller-specific construct; smart money flow matters to a buyer too).
+#   - VELOCITY: underlying must have actually moved a minimum % over a
+#     short lookback (rate of change), in the trade's own direction --
+#     the single most standard momentum/breakout-trader filter: don't buy
+#     options on a underlying that hasn't actually started moving yet.
+#   - Volume surge OR EMA slope as a second, independent momentum
+#     confirmation (kept from check_momentum_acceptance's own logic).
+# Known, disclosed gap: IV percentile/rank (the single most standard real
+# option-buyer filter against paying a premium about to get IV-crushed)
+# is NOT implemented -- this backtest has no options Greeks/IV data
+# fetched anywhere in this script; adding it needs a new data source.
+# ─────────────────────────────────────────────────────────────────────────
+
+def compute_roc(closes: list[float], lookback: int = 3) -> float:
+    """Rate of change of the LAST close vs the close `lookback` bars
+    earlier. closes[-1] is "now"."""
+    if len(closes) <= lookback or closes[-1 - lookback] == 0:
+        return 0.0
+    base = closes[-1 - lookback]
+    return (closes[-1] - base) / base
+
+
+def check_velocity_gate(fut_trend: str, put_trend: str, call_trend: str,
+                         side: Side, roc_pct: float, roc_threshold: float,
+                         bar_volume: float, avg_volume: float,
+                         ema_prev: float, ema_curr: float) -> bool:
+    """OI directional confirmation AND the underlying has genuinely
+    already moved `roc_threshold` in the trade's own direction AND a
+    second momentum confirmation (volume surge or EMA slope) -- no
+    Volume Profile / VAH-VAL dependency at all."""
+    if not check_directional_matrix(fut_trend, put_trend, call_trend, side):
+        return False
+    velocity_ok = roc_pct >= roc_threshold if side == "CE" else roc_pct <= -roc_threshold
+    if not velocity_ok:
+        return False
+    volume_surge = avg_volume > 0 and bar_volume >= 1.5 * avg_volume
+    ema_confirms = (ema_curr > ema_prev) if side == "CE" else (ema_curr < ema_prev)
+    return volume_surge or ema_confirms
+
+
 def compute_performance_metrics(pnls: list[float]) -> dict:
     """Profit Factor, Expectancy, and Maximum Drawdown (peak-to-trough on
     CUMULATIVE P&L, in trade sequence order) for a list of per-trade net
