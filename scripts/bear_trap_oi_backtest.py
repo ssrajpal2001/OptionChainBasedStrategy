@@ -570,6 +570,7 @@ async def main() -> None:
     parser.add_argument("--lot-qty", type=int, default=75)
     args = parser.parse_args()
 
+    from config.global_config import IST
     from data_layer.historical_candles import fetch_upstox_daily, fetch_upstox_range_1m
     from data_layer.instrument_registry import REGISTRY
 
@@ -598,6 +599,12 @@ async def main() -> None:
           f"window, daily strikes recomputed per spec Section 3 ===\n")
 
     all_trades: list[BacktestTrade] = []
+    all_dynamic_trades: list[dict] = []
+
+    print("\n" + "=" * 78)
+    print("SECTION 1: FIXED daily PDH/PDL strike, single-lot, EOD-only "
+          "(locked spec baseline)")
+    print("=" * 78)
 
     for trading_day, ce_strike, pe_strike in daily_strikes:
         expiry = REGISTRY.get_active_expiry_strict("NIFTY", from_date=trading_day)
@@ -640,6 +647,89 @@ async def main() -> None:
     print(f"\n=== Combined: {len(all_trades)} trade(s), "
           f"Total P&L: {sum(t.pnl for t in all_trades):.2f} ===")
     _print_mfe_mae_table(all_trades)
+
+    print("\n" + "=" * 78)
+    print("SECTION 2 (EXPERIMENTAL): simultaneous CE+PE, dynamic 100-pt ITM "
+          "strike rolling, Fib 1.272/1.618 dual-lot management (2 lots in, "
+          "1 lot @1.272, remaining lot: Variant A = TSL->breakeven, "
+          "Variant B = no TSL, runs to 1.618/EOD)")
+    print("=" * 78)
+
+    for trading_day, ce_strike, pe_strike in daily_strikes:
+        expiry = REGISTRY.get_active_expiry_strict("NIFTY", from_date=trading_day)
+        if expiry is None:
+            continue
+
+        spot_rows = await fetch_upstox_range_1m(index_key, access_token,
+                                                  trading_day, trading_day)
+        if not spot_rows:
+            print(f"[{trading_day}] SKIP (dynamic) -- no spot history returned")
+            continue
+        spot_bars = _truncate_to_eod(_resample_1m_to_5m(_candle_dicts_to_bars(spot_rows)))
+        if not spot_bars:
+            continue
+        initial_spot = spot_bars[0].open
+        roll_schedule = compute_roll_schedule(spot_bars, initial_spot,
+                                               args.strike_step, roll_points=100)
+        print(f"[{trading_day}] spot open={initial_spot}, "
+              f"{len(roll_schedule)} roll event(s): "
+              f"{[(str(ts), ce, pe) for ts, ce, pe in roll_schedule]}")
+
+        ce_strikes_needed = {ce_strike} | {ce for _, ce, _ in roll_schedule}
+        pe_strikes_needed = {pe_strike} | {pe for _, _, pe in roll_schedule}
+
+        async def _fetch_strike_bars(strike: int, opt_type: str) -> dict[datetime, Bar]:
+            key = REGISTRY.get_upstox_key("NIFTY", expiry, strike, opt_type)
+            if not key:
+                return {}
+            rows = await fetch_upstox_range_1m(key, access_token, trading_day,
+                                                trading_day)
+            bars = _truncate_to_eod(_resample_1m_to_5m(_candle_dicts_to_bars(rows)))
+            return {b.ts: b for b in bars}
+
+        ce_bars_by_strike = {s: await _fetch_strike_bars(s, "CE") for s in ce_strikes_needed}
+        pe_bars_by_strike = {s: await _fetch_strike_bars(s, "PE") for s in pe_strikes_needed}
+
+        master_ts = sorted({ts for bars in ce_bars_by_strike.values() for ts in bars} |
+                            {ts for bars in pe_bars_by_strike.values() for ts in bars})
+        if not master_ts:
+            continue
+
+        ce_roll_sched = [(ts, ce) for ts, ce, _ in roll_schedule]
+        pe_roll_sched = [(ts, pe) for ts, _, pe in roll_schedule]
+
+        ce_dyn = run_dynamic_side_backtest(ce_bars_by_strike, master_ts, ce_strike,
+                                            ce_roll_sched, "CE", args.lot_qty,
+                                            logger=print)
+        pe_dyn = run_dynamic_side_backtest(pe_bars_by_strike, master_ts, pe_strike,
+                                            pe_roll_sched, "PE", args.lot_qty,
+                                            logger=print)
+        for t in (ce_dyn, pe_dyn):
+            if t is not None:
+                all_dynamic_trades.append(t)
+        print()
+
+    print("\n=== Dynamic/Fib Summary ===")
+    header = (f"{'Side':<4} {'EntryStrike':<11} {'Entry':<8} {'EntryTime':<22} "
+               f"{'SwingHi':<8} {'Fib1272':<9} {'Fib1618':<9} "
+               f"{'VarA Exit':<10} {'VarA Reason':<16} {'VarA PnL':<10} "
+               f"{'VarB Exit':<10} {'VarB Reason':<16} {'VarB PnL':<10}")
+    print(header)
+    print("-" * len(header))
+    total_a = total_b = 0.0
+    for t in sorted(all_dynamic_trades, key=lambda t: t["entry_ts"]):
+        va, vb = t["variant_a"], t["variant_b"]
+        total_a += va["total_pnl"]
+        total_b += vb["total_pnl"]
+        print(f"{t['side']:<4} {t['entry_strike']:<11} {t['entry_price']:<8} "
+              f"{str(t['entry_ts']):<22} {str(t['swing_high']):<8} "
+              f"{str(t['fib_1272']):<9} {str(t['fib_1618']):<9} "
+              f"{va['lot2_exit_price']:<10} {va['lot2_exit_reason']:<16} "
+              f"{va['total_pnl']:<10.2f} {vb['lot2_exit_price']:<10} "
+              f"{vb['lot2_exit_reason']:<16} {vb['total_pnl']:<10.2f}")
+    print(f"\n=== Dynamic/Fib Combined: {len(all_dynamic_trades)} trade(s) -- "
+          f"Variant A total P&L: {total_a:.2f}  |  "
+          f"Variant B total P&L: {total_b:.2f} ===")
 
 
 if __name__ == "__main__":
