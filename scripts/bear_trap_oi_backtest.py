@@ -1157,6 +1157,7 @@ async def main() -> None:
 
     futures_key = REGISTRY.get_futures_upstox("NIFTY")
     matrix_surviving: list[BacktestTrade] = []
+    buyer_gate_results: list[tuple[BacktestTrade, bool]] = []
     for ctx in oi_contexts:
         if not ctx["oi_filter_result"]["passed"]:
             continue  # Section 1c only refines Section 1b's own survivors
@@ -1247,11 +1248,41 @@ async def main() -> None:
         if passed_matrix:
             matrix_surviving.append(trade)
 
+        # --- Section 1d: option-buyer momentum gate (no wall/noise/LVN
+        # maturation wait -- see check_buyer_gate's own docstring). Reuses
+        # this iteration's already-fetched futures bars/OI trends. ---
+        gate_open = False
+        if entry_idx_fut is not None and entry_idx_fut > 0:
+            pre_entry = fut_bars_vol[:entry_idx_fut]
+            buyer_profile = compute_volume_profile(pre_entry)
+            entry_bar = fut_bars_vol[entry_idx_fut]
+            avg_volume = sum(b.volume for b in pre_entry) / len(pre_entry)
+            closes = [b.close for b in pre_entry] + [entry_bar.close]
+            ema = compute_ema(closes, period=9)
+            if buyer_profile["poc"] is not None:
+                gate_open = check_buyer_gate(
+                    fut_trend, put_trend, call_trend, trade.side,
+                    close=entry_bar.close, val=buyer_profile["val"],
+                    vah=buyer_profile["vah"], bar_volume=entry_bar.volume,
+                    avg_volume=avg_volume, ema_prev=ema[-2], ema_curr=ema[-1],
+                )
+        buyer_gate_results.append((trade, gate_open))
+        print(f"[{trade.entry_ts}] {trade.side} {trade.strike}: "
+              f"BUYER GATE {'OPEN' if gate_open else 'CLOSED'} -- pnl={trade.pnl:.2f}")
+
     matrix_metrics = compute_performance_metrics([t.pnl for t in matrix_surviving])
     print(f"\n=== Institutional Matrix: {len(matrix_surviving)}/{len(oi_surviving)} "
           f"of Section 1b's survivors also pass Section 1c ===")
     print(f"  Win/Loss: {matrix_metrics.get('win_count', 0)}W/{matrix_metrics.get('loss_count', 0)}L")
     print(f"  Total P&L: {matrix_metrics.get('total_pnl', 0.0):.2f}")
+
+    buyer_surviving = [t for t, open_ in buyer_gate_results if open_]
+    buyer_metrics = compute_performance_metrics([t.pnl for t in buyer_surviving])
+    print(f"\n=== SECTION 1d (Option-Buyer Momentum Gate): "
+          f"{len(buyer_surviving)}/{len(oi_surviving)} of Section 1b's "
+          f"survivors clear the fast gate (no wall/noise/LVN-maturation) ===")
+    print(f"  Win/Loss: {buyer_metrics.get('win_count', 0)}W/{buyer_metrics.get('loss_count', 0)}L")
+    print(f"  Total P&L: {buyer_metrics.get('total_pnl', 0.0):.2f}")
 
     print("\n" + "=" * 78)
     print("SECTION 2 (EXPERIMENTAL): simultaneous CE+PE, dynamic 100-pt ITM "
