@@ -1,50 +1,572 @@
 InstrumentRegistry [NIFTY] expiry=2026-10-06: (401)
 Reason: Unauthorized
-HTTP response headers: HTTPHeaderDict({'Date': 'Sat, 03 Oct 2026 15:46:19 GMT', 'Content-Type': 'application/json', 'Content-Length': '211', 'Connection': 'keep-alive', 'reqid': '161765fb-5ed0-44e5-b5a3-b65f0c167db0', 'vary': 'Origin, Access-Control-Request-Method, Access-Control-Request-Headers', 'message': 'request failed', 'requestid': 'a24b3486-5adc-4241-9b07-957544d15a9d', 'x-content-type-options': 'nosniff', 'x-xss-protection': '0', 'Cache-Control': 'no-cache, no-store, max-age=0, must-revalidate', 'pragma': 'no-cache', 'expires': '0', 'strict-transport-security': 'max-age=0; includeSubDomains', 'x-frame-options': 'DENY', 'set-cookie': '__cf_bm=25KFBOQwxhSznoyjekm1vAAdpxs1C0Uwo5SLsvWaO7Q-1791042379.6719508-1.0.1.1-Lhdg9XhPMzLhIkVQ_H.YNg0vIUGV7NlXFdA8BeD6cJFxacMkmnnM3zdJO8SM8sASioiSREgSv0tnxp4aA4cQlFMQ2dobKUlzoeIGu_vCWLBx.kHac61DO63cLDzN6hpS; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com; Expires=Sat, 03 Oct 2026 16:16:19 GMT, _cfuvid=v803Gbt.UmU02aeKgNzD5.AGwKXhBWkm8aqV1zBhU9g-1791042379.6719508-1.0.1.1-lBUiOpC8LlXVg9NedE_UrmGz3vSbjls3zYlEtZeF_os; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com', 'cf-cache-status': 'DYNAMIC', 'Server': 'cloudflare', 'CF-RAY': 'a44d1438fe899aa2-NAG', 'alt-svc': 'h3=":443"; ma=86400'})
+HTTP response headers: HTTPHeaderDict({'Date': 'Sat, 03 Oct 2026 15:54:05 GMT', 'Content-Type': 'application/json', 'Content-Length': '211', 'Connection': 'keep-alive', 'reqid': '28710542-6bf0-4875-913a-7cb08cc11297', 'vary': 'Origin, Access-Control-Request-Method, Access-Control-Request-Headers', 'message': 'request failed', 'requestid': 'ac2de312-83bc-4c8e-a429-fba48402fbdb', 'x-content-type-options': 'nosniff', 'x-xss-protection': '0', 'Cache-Control': 'no-cache, no-store, max-age=0, must-revalidate', 'pragma': 'no-cache', 'expires': '0', 'strict-transport-security': 'max-age=0; includeSubDomains', 'x-frame-options': 'DENY', 'set-cookie': '__cf_bm=gsV4hhG_RJPwbIyRj7.6byASuBxcouDRSy.W8ter10c-1791042845.455546-1.0.1.1-RtV4ETqfHKOtGRFzkn3DJZpSHpufEMhK8421LVBkfahN0.OKng4ruFnUyI16jyxKICxtg78Ee6iJWvVPPQsK26E9gI0cQWO9NKF5wpMkdXhJEDY0iTZ0qIAnBF_0GeNj; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com; Expires=Sat, 03 Oct 2026 16:24:05 GMT, _cfuvid=vfwCsMBZ94OcTKn_JT1JZNjp.oyKoqy.oDNY6lSKBqw-1791042845.455546-1.0.1.1-fUqMySXjUSFv5AaKH1xhZ21o00aDMHoYm_30X6nj9Ak; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com', 'cf-cache-status': 'DYNAMIC', 'Server': 'cloudflare', 'CF-RAY': 'a44d1f981d0633d2-DEL', 'alt-svc': 'h3=":443"; ma=86400'})
 HTTP response body: b'{"status":"error","errors":[{"errorCode":"UDAPI100050","message":"Invalid token used to access API","propertyPath":null,"invalidValue":null,"error_code":"UDAPI100050","property_path":null,"invalid_value":null}]}'
 
 InstrumentRegistry [NIFTY] expiry=2026-10-13: (401)
 Reason: Unauthorized
-HTTP response headers: HTTPHeaderDict({'Date': 'Sat, 03 Oct 2026 15:46:19 GMT', 'Content-Type': 'application/json', 'Content-Length': '211', 'Connection': 'keep-alive', 'reqid': '831bff58-5764-4c60-aa16-a152536b9866', 'vary': 'Origin, Access-Control-Request-Method, Access-Control-Request-Headers', 'message': 'request failed', 'requestid': 'bc56f69c-7b2d-49f6-9d9a-91ad3299dde4', 'x-content-type-options': 'nosniff', 'x-xss-protection': '0', 'Cache-Control': 'no-cache, no-store, max-age=0, must-revalidate', 'pragma': 'no-cache', 'expires': '0', 'strict-transport-security': 'max-age=0; includeSubDomains', 'x-frame-options': 'DENY', 'set-cookie': '__cf_bm=7xsJVKafw.SMjObSrGbZhb6FMxw3_ly5Oq5Zvvft5lY-1791042379.7316587-1.0.1.1-x_VgGv5nX164sZPgpihRLhPn60W89WgraEF2N4Zrc8qKO5hgu.OID3eq3.do7Y1TYVGgh8F8sxMWXZ3b2uRLtiP0ViRc1T8Hh1kXyevQYuz6ernIXgH8Gp4Tl3AX_lSH; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com; Expires=Sat, 03 Oct 2026 16:16:19 GMT, _cfuvid=N6QmNBHuicv8.iufzSiAGhav8sOY14.yiS1OiRTuSag-1791042379.7316587-1.0.1.1-XxgslEKg5to5A199uXt0arkBWkBZQdlI9K76NNdfUWE; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com', 'cf-cache-status': 'DYNAMIC', 'Server': 'cloudflare', 'CF-RAY': 'a44d14395f019aa2-NAG', 'alt-svc': 'h3=":443"; ma=86400'})
+HTTP response headers: HTTPHeaderDict({'Date': 'Sat, 03 Oct 2026 15:54:05 GMT', 'Content-Type': 'application/json', 'Content-Length': '211', 'Connection': 'keep-alive', 'reqid': '05782485-0c1f-4e38-abf4-edd9145c0f58', 'vary': 'Origin, Access-Control-Request-Method, Access-Control-Request-Headers', 'message': 'request failed', 'requestid': 'd595f1f6-7990-498e-a1e6-e2ffdd3b7846', 'x-content-type-options': 'nosniff', 'x-xss-protection': '0', 'Cache-Control': 'no-cache, no-store, max-age=0, must-revalidate', 'pragma': 'no-cache', 'expires': '0', 'strict-transport-security': 'max-age=0; includeSubDomains', 'x-frame-options': 'DENY', 'set-cookie': '__cf_bm=D2KM14_hi7YtNqjbvTY1rJwnnnpPNk6zU1YeItV9_ds-1791042845.532237-1.0.1.1-s95unLjEJ8aGYoByiIU2.vrQd.299BIf1DAZE8ibm61EUc0owdBR_0btIhWmF_TcTg2JCeePDsEdnIPscSI8V_XUoVJmxYbo9PqTQqn6wmrWJJ2M9stlI.thmExzdIYm; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com; Expires=Sat, 03 Oct 2026 16:24:05 GMT, _cfuvid=.3orc7n_WnZXCUTKWz4CmTCDslxbTmQKUeH6R24v394-1791042845.532237-1.0.1.1-ft5_er2TQwAZD1trEkKsQySvbDhSf..23zDou_WAFN0; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com', 'cf-cache-status': 'DYNAMIC', 'Server': 'cloudflare', 'CF-RAY': 'a44d1f989db233d2-DEL', 'alt-svc': 'h3=":443"; ma=86400'})
 HTTP response body: b'{"status":"error","errors":[{"errorCode":"UDAPI100050","message":"Invalid token used to access API","propertyPath":null,"invalidValue":null,"error_code":"UDAPI100050","property_path":null,"invalid_value":null}]}'
 
 InstrumentRegistry [NIFTY] expiry=2026-10-20: (401)
 Reason: Unauthorized
-HTTP response headers: HTTPHeaderDict({'Date': 'Sat, 03 Oct 2026 15:46:19 GMT', 'Content-Type': 'application/json', 'Content-Length': '211', 'Connection': 'keep-alive', 'reqid': 'ad5589a2-26da-40fc-8624-c952aee6cede', 'vary': 'Origin, Access-Control-Request-Method, Access-Control-Request-Headers', 'message': 'request failed', 'requestid': '9ccf3555-a2e8-4c1a-98fd-c430848c8221', 'x-content-type-options': 'nosniff', 'x-xss-protection': '0', 'Cache-Control': 'no-cache, no-store, max-age=0, must-revalidate', 'pragma': 'no-cache', 'expires': '0', 'strict-transport-security': 'max-age=0; includeSubDomains', 'x-frame-options': 'DENY', 'set-cookie': '__cf_bm=4sDPGDfvZOhgsUnT5woD2KZFHnyfZnFz4CH_20e7Gx0-1791042379.7925065-1.0.1.1-D.z4n95m7xR.LUgTlHv1TcIl2lxFAD.eTvjdNthub2TjiJV_yQTrbLHr8OwyBgM.fbD9QqSJcH0TmOUVSr2Pj3ZhJkoGE5DAnrFAPQcMYuMOWrHFo0tNCWn8wd1TsXeH; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com; Expires=Sat, 03 Oct 2026 16:16:19 GMT, _cfuvid=4mmIbYohTZAeqHhp7uzf9lxH9DpaoWJh0m6y6uFNEA8-1791042379.7925065-1.0.1.1-1oSXrBPr2M6fGWFI62vWsOUPZR1aA1jg1MzvQ8K0H80; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com', 'cf-cache-status': 'DYNAMIC', 'Server': 'cloudflare', 'CF-RAY': 'a44d1439bfb89aa2-NAG', 'alt-svc': 'h3=":443"; ma=86400'})
+HTTP response headers: HTTPHeaderDict({'Date': 'Sat, 03 Oct 2026 15:54:05 GMT', 'Content-Type': 'application/json', 'Content-Length': '211', 'Connection': 'keep-alive', 'reqid': '1b44b434-d252-4109-b5cd-c4acb2011f7a', 'vary': 'Origin, Access-Control-Request-Method, Access-Control-Request-Headers', 'message': 'request failed', 'requestid': '89f63536-e8a5-4a7e-87cd-45e6f4eaf3e2', 'x-content-type-options': 'nosniff', 'x-xss-protection': '0', 'Cache-Control': 'no-cache, no-store, max-age=0, must-revalidate', 'pragma': 'no-cache', 'expires': '0', 'strict-transport-security': 'max-age=0; includeSubDomains', 'x-frame-options': 'DENY', 'set-cookie': '__cf_bm=JsY8cjS8OpnZ3eOl7fwqOR3rHHc0rAAT8CU_ncHY5t0-1791042845.6048062-1.0.1.1-W1yEaiPacMsf9fz_QcRiUuDbUKUtvJJquDYNwS2Y5tTR_1H6QymrOznrXUliM8tz9da1PB9vA4XYu8UdZfX4wjO7FphO8NHeLYiB6bJ3BdSrp3igUbCqiAYJrGro2qjh; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com; Expires=Sat, 03 Oct 2026 16:24:05 GMT, _cfuvid=VTGCpkFaqoyOPXeoD8W_lB2R5TcrGnlxWyltAiESKeA-1791042845.6048062-1.0.1.1-smizlZivysloz2Ht7cuFegUxIZa6UnR.GsA40YxtN7g; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com', 'cf-cache-status': 'DYNAMIC', 'Server': 'cloudflare', 'CF-RAY': 'a44d1f990e6133d2-DEL', 'alt-svc': 'h3=":443"; ma=86400'})
 HTTP response body: b'{"status":"error","errors":[{"errorCode":"UDAPI100050","message":"Invalid token used to access API","propertyPath":null,"invalidValue":null,"error_code":"UDAPI100050","property_path":null,"invalid_value":null}]}'
 
 InstrumentRegistry [NIFTY] expiry=2026-10-27: (401)
 Reason: Unauthorized
-HTTP response headers: HTTPHeaderDict({'Date': 'Sat, 03 Oct 2026 15:46:19 GMT', 'Content-Type': 'application/json', 'Content-Length': '211', 'Connection': 'keep-alive', 'reqid': '81d6efe9-887e-4b19-9a37-1d474556f3ee', 'vary': 'Origin, Access-Control-Request-Method, Access-Control-Request-Headers', 'message': 'request failed', 'requestid': '596af074-4e73-49d3-b6a7-7b3c80d0806b', 'x-content-type-options': 'nosniff', 'x-xss-protection': '0', 'Cache-Control': 'no-cache, no-store, max-age=0, must-revalidate', 'pragma': 'no-cache', 'expires': '0', 'strict-transport-security': 'max-age=0; includeSubDomains', 'x-frame-options': 'DENY', 'set-cookie': '__cf_bm=aZ9Ye.ZrZMurCNZFwm394_Q2ODN4NvrX9IlIMl4TcXM-1791042379.8522747-1.0.1.1-i88WaZnPJXKQ_rw3l8R0Cubznw.T0FaDJwMQ4PBS.wGNJYs_TLeuJRpkS_zy4209A3Ib8vgqkQXr6aitTMUQO5_ZTI9KuHlpW0EjQCuZQ_VhyEVc1L5C.fxZgJvo6QCr; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com; Expires=Sat, 03 Oct 2026 16:16:19 GMT, _cfuvid=e54Z4pCD_df064OipfcajSuwuGKcBw3amf9fexHagpw-1791042379.8522747-1.0.1.1-8Mz8NLkNWuVJvMlCymFkO4OntjgrlEMpcFi2phEAaHM; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com', 'cf-cache-status': 'DYNAMIC', 'Server': 'cloudflare', 'CF-RAY': 'a44d143a083f9aa2-NAG', 'alt-svc': 'h3=":443"; ma=86400'})
+HTTP response headers: HTTPHeaderDict({'Date': 'Sat, 03 Oct 2026 15:54:05 GMT', 'Content-Type': 'application/json', 'Content-Length': '211', 'Connection': 'keep-alive', 'reqid': 'af3f6ea9-b419-4b70-b0fb-745fed40c42a', 'vary': 'Origin, Access-Control-Request-Method, Access-Control-Request-Headers', 'message': 'request failed', 'requestid': '21550d29-2896-4f59-aca0-dcdc4e6e70cf', 'x-content-type-options': 'nosniff', 'x-xss-protection': '0', 'Cache-Control': 'no-cache, no-store, max-age=0, must-revalidate', 'pragma': 'no-cache', 'expires': '0', 'strict-transport-security': 'max-age=0; includeSubDomains', 'x-frame-options': 'DENY', 'cf-cache-status': 'DYNAMIC', 'set-cookie': '__cf_bm=KX5B9RrEMSZFpCjbovsCsiYIO2AwR98hcFIrMElWYlw-1791042845.682551-1.0.1.1-ys5y8ODj1H54AkJ3N2EQAOh13PGn9oeP2rkuLOdk_DjFPLYTHPXLlZOXU0XyMx1G4l_Vbz4RVfFFlT_Uqd6mNjzuZ80Br3cL6h_ujEaXIue5d.4eTnhPCFPXSoNqp_eE; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com; Expires=Sat, 03 Oct 2026 16:24:05 GMT, _cfuvid=5m7gKwmaln7LzXA63JUKFMKK.OmMc6SNDKApx6VD8CI-1791042845.682551-1.0.1.1-juvLYIG0JgIDA8m6fshQdZC3_ptde.yVYX1NAWDuAGM; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com', 'Server': 'cloudflare', 'CF-RAY': 'a44d1f998f2f33d2-DEL', 'alt-svc': 'h3=":443"; ma=86400'})
 HTTP response body: b'{"status":"error","errors":[{"errorCode":"UDAPI100050","message":"Invalid token used to access API","propertyPath":null,"invalidValue":null,"error_code":"UDAPI100050","property_path":null,"invalid_value":null}]}'
 
 InstrumentRegistry [NIFTY] expiry=2026-11-03: (401)
 Reason: Unauthorized
-HTTP response headers: HTTPHeaderDict({'Date': 'Sat, 03 Oct 2026 15:46:19 GMT', 'Content-Type': 'application/json', 'Content-Length': '211', 'Connection': 'keep-alive', 'reqid': 'e4ed13d8-d5e1-451c-9009-1a365e563607', 'vary': 'Origin, Access-Control-Request-Method, Access-Control-Request-Headers', 'message': 'request failed', 'requestid': 'e99b9457-1f64-46b7-a3f9-7fdcf12c4da5', 'x-content-type-options': 'nosniff', 'x-xss-protection': '0', 'Cache-Control': 'no-cache, no-store, max-age=0, must-revalidate', 'pragma': 'no-cache', 'expires': '0', 'strict-transport-security': 'max-age=0; includeSubDomains', 'x-frame-options': 'DENY', 'set-cookie': '__cf_bm=x_kdEv7Pp6R2R8ZwP_JQtR9GSxxZQnHKdzvgJZuWHak-1791042379.9106295-1.0.1.1-EHuuwQ.6v.nV5ZVd11vJnKudxG.HfjD_XeGJDZP8vPJiI4gN0ODYl789JsP7Z38ZdVIje.8kSxckbyNolyDLfoJzq.tBIzVoTZrJbd5eCjkJMGenleP94osA8LS.FQ0d; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com; Expires=Sat, 03 Oct 2026 16:16:19 GMT, _cfuvid=.hWmqDnG8z.m7O8KPjTbUlnDK9XiiL_55REAuEtQBAg-1791042379.9106295-1.0.1.1-13HPRGhog_9_UMINwnuMS4f561loO3oWt1PG7n5E7SM; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com', 'cf-cache-status': 'DYNAMIC', 'Server': 'cloudflare', 'CF-RAY': 'a44d143a68a99aa2-NAG', 'alt-svc': 'h3=":443"; ma=86400'})
+HTTP response headers: HTTPHeaderDict({'Date': 'Sat, 03 Oct 2026 15:54:05 GMT', 'Content-Type': 'application/json', 'Content-Length': '211', 'Connection': 'keep-alive', 'reqid': '2b128481-a491-4302-a50e-871d59a6c2b7', 'vary': 'Origin, Access-Control-Request-Method, Access-Control-Request-Headers', 'message': 'request failed', 'requestid': 'b301352f-cc06-4c68-8b07-5fadc1ea27f1', 'x-content-type-options': 'nosniff', 'x-xss-protection': '0', 'Cache-Control': 'no-cache, no-store, max-age=0, must-revalidate', 'pragma': 'no-cache', 'expires': '0', 'strict-transport-security': 'max-age=0; includeSubDomains', 'x-frame-options': 'DENY', 'set-cookie': '__cf_bm=nax9MRRQDUMaAr0ruEj.KUNieK0n4yR3DhoxGZTZ8Ko-1791042845.8667336-1.0.1.1-HZ8lEFCZLUQ.QfSf5LuAiHFeRF_zM4SlBLWNU3IqU3g8gi8jUK26TMOCDeNHXQj8C8bjJwFXJvy1mlguOxufIQIg..Kq_ah6.3Vmh2yzuzGHdMi0Vfp3hEstMGjg7dar; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com; Expires=Sat, 03 Oct 2026 16:24:05 GMT, _cfuvid=0eO7PSEYQ7591gH6IcEESODowy3aO._GtvcK73PVTRI-1791042845.8667336-1.0.1.1-qqOYETYhY9KSo.T.2dh856f524eh2uOLgMn_tx0HTgo; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com', 'cf-cache-status': 'DYNAMIC', 'Server': 'cloudflare', 'CF-RAY': 'a44d1f9aa8eb33d2-DEL', 'alt-svc': 'h3=":443"; ma=86400'})
 HTTP response body: b'{"status":"error","errors":[{"errorCode":"UDAPI100050","message":"Invalid token used to access API","propertyPath":null,"invalidValue":null,"error_code":"UDAPI100050","property_path":null,"invalid_value":null}]}'
 
 InstrumentRegistry [NIFTY] expiry=2026-11-10: (401)
 Reason: Unauthorized
-HTTP response headers: HTTPHeaderDict({'Date': 'Sat, 03 Oct 2026 15:46:20 GMT', 'Content-Type': 'application/json', 'Content-Length': '211', 'Connection': 'keep-alive', 'reqid': '6dc10b11-2cee-4a9b-9de0-f0a9391931ff', 'vary': 'Origin, Access-Control-Request-Method, Access-Control-Request-Headers', 'message': 'request failed', 'requestid': '54e1970b-458c-4ffc-a880-a8bc75601bbe', 'x-content-type-options': 'nosniff', 'x-xss-protection': '0', 'Cache-Control': 'no-cache, no-store, max-age=0, must-revalidate', 'pragma': 'no-cache', 'expires': '0', 'strict-transport-security': 'max-age=0; includeSubDomains', 'x-frame-options': 'DENY', 'set-cookie': '__cf_bm=RpmkOgSJFkD4WtEG5mTbnO09dRFRVDLCw5_OwmbegBA-1791042379.97517-1.0.1.1-OxZoWrqtC6GVmbjEDrtI4Crbl3tLtb2Y_Yru4_VUlGRoqqjvSL0StT6y8YuGEgx4d0i7D9PC.weI_aIG_2h76NWcCEP2fCIPhYfNUhp22r3bmn9N599ZU0jQDh6vWEOV; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com; Expires=Sat, 03 Oct 2026 16:16:20 GMT, _cfuvid=gQMVvE6RZ4mtCY5Hi7uZ7PXCRBN.c.JejopWv3DSXus-1791042379.97517-1.0.1.1-sgCwCYxtNphZOhzm4e4BaD4jLy9sRo8BUpV2o44De1Y; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com', 'cf-cache-status': 'DYNAMIC', 'Server': 'cloudflare', 'CF-RAY': 'a44d143ad9329aa2-NAG', 'alt-svc': 'h3=":443"; ma=86400'})
+HTTP response headers: HTTPHeaderDict({'Date': 'Sat, 03 Oct 2026 15:54:05 GMT', 'Content-Type': 'application/json', 'Content-Length': '211', 'Connection': 'keep-alive', 'reqid': '314e438f-97b3-47f8-9972-6e63b2cb54ee', 'vary': 'Origin, Access-Control-Request-Method, Access-Control-Request-Headers', 'message': 'request failed', 'requestid': '857ea561-2ef6-46ff-8787-d9512b95178d', 'x-content-type-options': 'nosniff', 'x-xss-protection': '0', 'Cache-Control': 'no-cache, no-store, max-age=0, must-revalidate', 'pragma': 'no-cache', 'expires': '0', 'strict-transport-security': 'max-age=0; includeSubDomains', 'x-frame-options': 'DENY', 'set-cookie': '__cf_bm=TTuL6FlIuhZRKDsRJR72BjD_t8Wsj9NjD5VL3b1vrlw-1791042845.9369938-1.0.1.1-96jnnkknlqImkY..sTbNnDgmjmISAeSDK0Rcl74oSEeG8wMzc9lfWRBbDwNM.5gTKTsSpzxQveB7.GldD8d8Ux89yvIJasNg6upCQyRfFlZa8lZxydZSk5RK03erBbih; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com; Expires=Sat, 03 Oct 2026 16:24:05 GMT, _cfuvid=wHBXk_O3lEWMwKaDwxze.NqRrdanFbYW1o1JmQSo1ac-1791042845.9369938-1.0.1.1-EpECpUhTeMWUNgauBptIchyh3a.zIxDRmICP1PBeV8Y; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com', 'cf-cache-status': 'DYNAMIC', 'Server': 'cloudflare', 'CF-RAY': 'a44d1f9b19a233d2-DEL', 'alt-svc': 'h3=":443"; ma=86400'})
 HTTP response body: b'{"status":"error","errors":[{"errorCode":"UDAPI100050","message":"Invalid token used to access API","propertyPath":null,"invalidValue":null,"error_code":"UDAPI100050","property_path":null,"invalid_value":null}]}'
 
 InstrumentRegistry [NIFTY] expiry=2026-11-17: (401)
 Reason: Unauthorized
-HTTP response headers: HTTPHeaderDict({'Date': 'Sat, 03 Oct 2026 15:46:20 GMT', 'Content-Type': 'application/json', 'Content-Length': '211', 'Connection': 'keep-alive', 'reqid': 'ed21fab3-db73-4d21-ab67-eeb83943a671', 'vary': 'Origin, Access-Control-Request-Method, Access-Control-Request-Headers', 'message': 'request failed', 'requestid': '329e19d7-7357-4383-905e-9515c962142d', 'x-content-type-options': 'nosniff', 'x-xss-protection': '0', 'Cache-Control': 'no-cache, no-store, max-age=0, must-revalidate', 'pragma': 'no-cache', 'expires': '0', 'strict-transport-security': 'max-age=0; includeSubDomains', 'x-frame-options': 'DENY', 'set-cookie': '__cf_bm=0y9ZPrVTO3cskt_acUEq4wj1uqTraSJRk3Iv3J7VsMY-1791042380.0308053-1.0.1.1-dJBnAH7JxyipzR9CyCJMLvYZhxSnER6AwNtJ19_1xSS.BJ7Cw9SdYRxZZNjdvye2K2XHMjSnTn3Fc6TTZyO.6U7DsWEhOA5a7cgvN.2u6DtZ7XKfkw5xvu9FgraC8Ig2; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com; Expires=Sat, 03 Oct 2026 16:16:20 GMT, _cfuvid=TPKkkhyfX2VmaqtcUG3pzIx080Mx1Kc8xtJONkaYOjc-1791042380.0308053-1.0.1.1-xDhpnNxttIKRLjOHn.5E1hriORMkZCpzS_vcp9LqHLs; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com', 'cf-cache-status': 'DYNAMIC', 'Server': 'cloudflare', 'CF-RAY': 'a44d143b298c9aa2-NAG', 'alt-svc': 'h3=":443"; ma=86400'})
+HTTP response headers: HTTPHeaderDict({'Date': 'Sat, 03 Oct 2026 15:54:06 GMT', 'Content-Type': 'application/json', 'Content-Length': '211', 'Connection': 'keep-alive', 'reqid': 'bd0fbe3a-6ef5-4fc2-b69c-64085cc7e7c9', 'vary': 'Origin, Access-Control-Request-Method, Access-Control-Request-Headers', 'message': 'request failed', 'requestid': 'b383c55a-b4e5-418b-8d98-d359a289f15c', 'x-content-type-options': 'nosniff', 'x-xss-protection': '0', 'Cache-Control': 'no-cache, no-store, max-age=0, must-revalidate', 'pragma': 'no-cache', 'expires': '0', 'strict-transport-security': 'max-age=0; includeSubDomains', 'x-frame-options': 'DENY', 'set-cookie': '__cf_bm=gQwxgtvslerUsYO9xetDVXLWfxhWrHHnOQxoVxcHZi8-1791042846.0137575-1.0.1.1-n_TWU_r2wzDSQXGWqnTGwDpEB6oSgDy57.uDg.hdRJao7Gxv7mdTSinyyOKWbnXwz117HANhf236M6fK5mSfo9VagCfmksqLu333NTPPc81wzGOBEybyhCaG2kzaunhJ; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com; Expires=Sat, 03 Oct 2026 16:24:06 GMT, _cfuvid=9rmvnfLmwmQg.fh4EhOlfCAwwjdvQBX3RBkn95LHO70-1791042846.0137575-1.0.1.1-Dxba8_ADwD1o.TKO1GWaVU3Pu8VJ0R7mJhYuSGSRkdI; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com', 'cf-cache-status': 'DYNAMIC', 'Server': 'cloudflare', 'CF-RAY': 'a44d1f9b9a5233d2-DEL', 'alt-svc': 'h3=":443"; ma=86400'})
 HTTP response body: b'{"status":"error","errors":[{"errorCode":"UDAPI100050","message":"Invalid token used to access API","propertyPath":null,"invalidValue":null,"error_code":"UDAPI100050","property_path":null,"invalid_value":null}]}'
 
 InstrumentRegistry [NIFTY] expiry=2026-11-24: (401)
 Reason: Unauthorized
-HTTP response headers: HTTPHeaderDict({'Date': 'Sat, 03 Oct 2026 15:46:20 GMT', 'Content-Type': 'application/json', 'Content-Length': '211', 'Connection': 'keep-alive', 'reqid': 'e0a64a50-2cbb-4efd-8cd4-fc8ebf605d2e', 'vary': 'Origin, Access-Control-Request-Method, Access-Control-Request-Headers', 'message': 'request failed', 'requestid': 'd217c124-8a00-47d1-90de-f0e82dd29b0e', 'x-content-type-options': 'nosniff', 'x-xss-protection': '0', 'Cache-Control': 'no-cache, no-store, max-age=0, must-revalidate', 'pragma': 'no-cache', 'expires': '0', 'strict-transport-security': 'max-age=0; includeSubDomains', 'x-frame-options': 'DENY', 'set-cookie': '__cf_bm=p9Q9al7_ySVg3GKCXjK3H0d_pf3S89E3Y5zWR0lZNJo-1791042380.0854156-1.0.1.1-.Hj2_NAEi35uS0bQmnVYawPxHBH6DON796evU6b4miz8UaWMrEFIk4zevWYEozChlAyHic7PSWPU.eLdUlduI1noXHN6NohA42Eadd9tptFVjoswFbViD8fwD9XmMKC0; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com; Expires=Sat, 03 Oct 2026 16:16:20 GMT, _cfuvid=3.7OyC3NunSMfoCVFxrZULEi825tciGPvMEr3qevBDE-1791042380.0854156-1.0.1.1-XGoL8MEs95WluEs1FFgU6qpMtC2fi.27uCo7_j..AAQ; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com', 'cf-cache-status': 'DYNAMIC', 'Server': 'cloudflare', 'CF-RAY': 'a44d143b89e79aa2-NAG', 'alt-svc': 'h3=":443"; ma=86400'})
+HTTP response headers: HTTPHeaderDict({'Date': 'Sat, 03 Oct 2026 15:54:06 GMT', 'Content-Type': 'application/json', 'Content-Length': '211', 'Connection': 'keep-alive', 'reqid': '4baaa2f2-3d95-4d81-8998-3df796c4bd3b', 'vary': 'Origin, Access-Control-Request-Method, Access-Control-Request-Headers', 'message': 'request failed', 'requestid': 'e60298d2-0c91-4671-82ae-c73bf7120a07', 'x-content-type-options': 'nosniff', 'x-xss-protection': '0', 'Cache-Control': 'no-cache, no-store, max-age=0, must-revalidate', 'pragma': 'no-cache', 'expires': '0', 'strict-transport-security': 'max-age=0; includeSubDomains', 'x-frame-options': 'DENY', 'cf-cache-status': 'DYNAMIC', 'set-cookie': '__cf_bm=7rPzpZ_zuNJtSYGGuMH5MdAqy1iezcqgQKx3s_phD1I-1791042846.0808327-1.0.1.1-Yq_Hv2.Ms9BCFY1GUZZ1L2d1zFLz6tbCmWjYkMwZFaAKVg_cDZxkVlPGD73zv6Y2rLOVlVFHsdFeirF5GVqUbDtDyaG5_ZwcyPeru81hq2TNHaLBzMwYS5JJf9UDRzgO; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com; Expires=Sat, 03 Oct 2026 16:24:06 GMT, _cfuvid=CkhTmQz4pap1ozGB.q_DXPgpigqBGgJHKSmNTF_AGjk-1791042846.0808327-1.0.1.1-pWHPodn10XqT5EnUKK5avwCkiFr01hJjYaU25mig2uU; HttpOnly; SameSite=None; Secure; Path=/; Domain=upstox.com', 'Server': 'cloudflare', 'CF-RAY': 'a44d1f9bfae733d2-DEL', 'alt-svc': 'h3=":443"; ma=86400'})
 HTTP response body: b'{"status":"error","errors":[{"errorCode":"UDAPI100050","message":"Invalid token used to access API","propertyPath":null,"invalidValue":null,"error_code":"UDAPI100050","property_path":null,"invalid_value":null}]}'
 
 InstrumentRegistry [NIFTY]: 0 from API, trying master JSON
-=== Bear Trap OI backtest: 4 trading day(s) in window, daily strikes recomputed per spec Section 3 ===
+=== Bear Trap OI backtest: 247 trading day(s) in window, daily strikes recomputed per spec Section 3 ===
 
 
 ==============================================================================
 SECTION 1: FIXED daily PDH/PDL strike, single-lot, EOD-only (locked spec baseline)
 ==============================================================================
+[2025-10-03] SKIP -- could not resolve active expiry
+[2025-10-06] SKIP -- could not resolve active expiry
+[2025-10-07] SKIP -- could not resolve active expiry
+[2025-10-08] SKIP -- could not resolve active expiry
+[2025-10-09] SKIP -- could not resolve active expiry
+[2025-10-10] SKIP -- could not resolve active expiry
+[2025-10-13] SKIP -- could not resolve active expiry
+[2025-10-14] SKIP -- could not resolve active expiry
+[2025-10-15] SKIP -- could not resolve active expiry
+[2025-10-16] SKIP -- could not resolve active expiry
+[2025-10-17] SKIP -- could not resolve active expiry
+[2025-10-20] SKIP -- could not resolve active expiry
+[2025-10-21] SKIP -- could not resolve active expiry
+[2025-10-23] SKIP -- could not resolve active expiry
+[2025-10-24] SKIP -- could not resolve active expiry
+[2025-10-27] SKIP -- could not resolve active expiry
+[2025-10-28] SKIP -- could not resolve active expiry
+[2025-10-29] SKIP -- could not resolve active expiry
+[2025-10-30] SKIP -- could not resolve active expiry
+[2025-10-31] SKIP -- could not resolve active expiry
+[2025-11-03] SKIP -- could not resolve active expiry
+[2025-11-04] SKIP -- could not resolve active expiry
+[2025-11-06] SKIP -- could not resolve active expiry
+[2025-11-07] SKIP -- could not resolve active expiry
+[2025-11-10] SKIP -- could not resolve active expiry
+[2025-11-11] SKIP -- could not resolve active expiry
+[2025-11-12] SKIP -- could not resolve active expiry
+[2025-11-13] SKIP -- could not resolve active expiry
+[2025-11-14] SKIP -- could not resolve active expiry
+[2025-11-17] SKIP -- could not resolve active expiry
+[2025-11-18] SKIP -- could not resolve active expiry
+[2025-11-19] SKIP -- could not resolve active expiry
+[2025-11-20] SKIP -- could not resolve active expiry
+[2025-11-21] SKIP -- could not resolve active expiry
+[2025-11-24] SKIP -- could not resolve active expiry
+[2025-11-25] SKIP -- could not resolve active expiry
+[2025-11-26] SKIP -- could not resolve active expiry
+[2025-11-27] SKIP -- could not resolve active expiry
+[2025-11-28] SKIP -- could not resolve active expiry
+[2025-12-01] SKIP -- could not resolve active expiry
+[2025-12-02] SKIP -- could not resolve active expiry
+[2025-12-03] SKIP -- could not resolve active expiry
+[2025-12-04] SKIP -- could not resolve active expiry
+[2025-12-05] SKIP -- could not resolve active expiry
+[2025-12-08] SKIP -- could not resolve active expiry
+[2025-12-09] SKIP -- could not resolve active expiry
+[2025-12-10] SKIP -- could not resolve active expiry
+[2025-12-11] SKIP -- could not resolve active expiry
+[2025-12-12] SKIP -- could not resolve active expiry
+[2025-12-15] SKIP -- could not resolve active expiry
+[2025-12-16] SKIP -- could not resolve active expiry
+[2025-12-17] SKIP -- could not resolve active expiry
+[2025-12-18] SKIP -- could not resolve active expiry
+[2025-12-19] SKIP -- could not resolve active expiry
+[2025-12-22] SKIP -- could not resolve active expiry
+[2025-12-23] SKIP -- could not resolve active expiry
+[2025-12-24] SKIP -- could not resolve active expiry
+[2025-12-26] SKIP -- could not resolve active expiry
+[2025-12-29] SKIP -- could not resolve active expiry
+[2025-12-30] SKIP -- could not resolve active expiry
+[2025-12-31] SKIP -- could not resolve active expiry
+[2026-01-01] SKIP -- could not resolve active expiry
+[2026-01-02] SKIP -- could not resolve active expiry
+[2026-01-05] SKIP -- could not resolve active expiry
+[2026-01-06] SKIP -- could not resolve active expiry
+[2026-01-07] SKIP -- could not resolve active expiry
+[2026-01-08] SKIP -- could not resolve active expiry
+[2026-01-09] SKIP -- could not resolve active expiry
+[2026-01-12] SKIP -- could not resolve active expiry
+[2026-01-13] SKIP -- could not resolve active expiry
+[2026-01-14] SKIP -- could not resolve active expiry
+[2026-01-16] SKIP -- could not resolve active expiry
+[2026-01-19] SKIP -- could not resolve active expiry
+[2026-01-20] SKIP -- could not resolve active expiry
+[2026-01-21] SKIP -- could not resolve active expiry
+[2026-01-22] SKIP -- could not resolve active expiry
+[2026-01-23] SKIP -- could not resolve active expiry
+[2026-01-27] SKIP -- could not resolve active expiry
+[2026-01-28] SKIP -- could not resolve active expiry
+[2026-01-29] SKIP -- could not resolve active expiry
+[2026-01-30] SKIP -- could not resolve active expiry
+[2026-02-01] SKIP -- could not resolve active expiry
+[2026-02-02] SKIP -- could not resolve active expiry
+[2026-02-03] SKIP -- could not resolve active expiry
+[2026-02-04] SKIP -- could not resolve active expiry
+[2026-02-05] SKIP -- could not resolve active expiry
+[2026-02-06] SKIP -- could not resolve active expiry
+[2026-02-09] SKIP -- could not resolve active expiry
+[2026-02-10] SKIP -- could not resolve active expiry
+[2026-02-11] SKIP -- could not resolve active expiry
+[2026-02-12] SKIP -- could not resolve active expiry
+[2026-02-13] SKIP -- could not resolve active expiry
+[2026-02-16] SKIP -- could not resolve active expiry
+[2026-02-17] SKIP -- could not resolve active expiry
+[2026-02-18] SKIP -- could not resolve active expiry
+[2026-02-19] SKIP -- could not resolve active expiry
+[2026-02-20] SKIP -- could not resolve active expiry
+[2026-02-23] SKIP -- could not resolve active expiry
+[2026-02-24] SKIP -- could not resolve active expiry
+[2026-02-25] SKIP -- could not resolve active expiry
+[2026-02-26] SKIP -- could not resolve active expiry
+[2026-02-27] SKIP -- could not resolve active expiry
+[2026-03-02] SKIP -- could not resolve active expiry
+[2026-03-04] SKIP -- could not resolve active expiry
+[2026-03-05] SKIP -- could not resolve active expiry
+[2026-03-06] SKIP -- could not resolve active expiry
+[2026-03-09] SKIP -- could not resolve active expiry
+[2026-03-10] SKIP -- could not resolve active expiry
+[2026-03-11] SKIP -- could not resolve active expiry
+[2026-03-12] SKIP -- could not resolve active expiry
+[2026-03-13] SKIP -- could not resolve active expiry
+[2026-03-16] SKIP -- could not resolve active expiry
+[2026-03-17] SKIP -- could not resolve active expiry
+[2026-03-18] SKIP -- could not resolve active expiry
+[2026-03-19] SKIP -- could not resolve active expiry
+[2026-03-20] SKIP -- could not resolve active expiry
+[2026-03-23] SKIP -- could not resolve active expiry
+[2026-03-24] SKIP -- could not resolve active expiry
+[2026-03-25] SKIP -- could not resolve active expiry
+[2026-03-27] SKIP -- could not resolve active expiry
+[2026-03-30] SKIP -- could not resolve active expiry
+[2026-04-01] SKIP -- could not resolve active expiry
+[2026-04-02] SKIP -- could not resolve active expiry
+[2026-04-06] SKIP -- could not resolve active expiry
+[2026-04-07] SKIP -- could not resolve active expiry
+[2026-04-08] SKIP -- could not resolve active expiry
+[2026-04-09] SKIP -- could not resolve active expiry
+[2026-04-10] SKIP -- could not resolve active expiry
+[2026-04-13] SKIP -- could not resolve active expiry
+[2026-04-15] SKIP -- could not resolve active expiry
+[2026-04-16] SKIP -- could not resolve active expiry
+[2026-04-17] SKIP -- could not resolve active expiry
+[2026-04-20] SKIP -- could not resolve active expiry
+[2026-04-21] SKIP -- could not resolve active expiry
+[2026-04-22] SKIP -- could not resolve active expiry
+[2026-04-23] SKIP -- could not resolve active expiry
+[2026-04-24] SKIP -- could not resolve active expiry
+[2026-04-27] SKIP -- could not resolve active expiry
+[2026-04-28] SKIP -- could not resolve active expiry
+[2026-04-29] SKIP -- could not resolve active expiry
+[2026-04-30] SKIP -- could not resolve active expiry
+[2026-05-04] SKIP -- could not resolve active expiry
+[2026-05-05] SKIP -- could not resolve active expiry
+[2026-05-06] SKIP -- could not resolve active expiry
+[2026-05-07] SKIP -- could not resolve active expiry
+[2026-05-08] SKIP -- could not resolve active expiry
+[2026-05-11] SKIP -- could not resolve active expiry
+[2026-05-12] SKIP -- could not resolve active expiry
+[2026-05-13] SKIP -- could not resolve active expiry
+[2026-05-14] SKIP -- could not resolve active expiry
+[2026-05-15] SKIP -- could not resolve active expiry
+[2026-05-18] SKIP -- could not resolve active expiry
+[2026-05-19] SKIP -- could not resolve active expiry
+[2026-05-20] SKIP -- could not resolve active expiry
+[2026-05-21] SKIP -- could not resolve active expiry
+[2026-05-22] SKIP -- could not resolve active expiry
+[2026-05-25] SKIP -- could not resolve active expiry
+[2026-05-26] SKIP -- could not resolve active expiry
+[2026-05-27] SKIP -- could not resolve active expiry
+[2026-05-29] SKIP -- could not resolve active expiry
+[2026-06-01] SKIP -- could not resolve active expiry
+[2026-06-02] SKIP -- could not resolve active expiry
+[2026-06-03] SKIP -- could not resolve active expiry
+[2026-06-04] SKIP -- could not resolve active expiry
+[2026-06-05] SKIP -- could not resolve active expiry
+[2026-06-08] SKIP -- could not resolve active expiry
+[2026-06-09] SKIP -- could not resolve active expiry
+[2026-06-10] SKIP -- could not resolve active expiry
+[2026-06-11] SKIP -- could not resolve active expiry
+[2026-06-12] SKIP -- could not resolve active expiry
+[2026-06-15] SKIP -- could not resolve active expiry
+[2026-06-16] SKIP -- could not resolve active expiry
+[2026-06-17] SKIP -- could not resolve active expiry
+[2026-06-18] SKIP -- could not resolve active expiry
+[2026-06-19] SKIP -- could not resolve active expiry
+[2026-06-22] SKIP -- could not resolve active expiry
+[2026-06-23] SKIP -- could not resolve active expiry
+[2026-06-24] SKIP -- could not resolve active expiry
+[2026-06-25] SKIP -- could not resolve active expiry
+[2026-06-29] SKIP -- could not resolve active expiry
+[2026-06-30] SKIP -- could not resolve active expiry
+[2026-07-01] SKIP -- could not resolve active expiry
+[2026-07-02] SKIP -- could not resolve active expiry
+[2026-07-03] SKIP -- could not resolve active expiry
+[2026-07-06] SKIP -- could not resolve active expiry
+[2026-07-07] SKIP -- could not resolve active expiry
+[2026-07-08] SKIP -- could not resolve active expiry
+[2026-07-09] SKIP -- could not resolve active expiry
+[2026-07-10] SKIP -- could not resolve active expiry
+[2026-07-13] SKIP -- could not resolve active expiry
+[2026-07-14] SKIP -- could not resolve active expiry
+[2026-07-15] SKIP -- could not resolve active expiry
+[2026-07-16] SKIP -- could not resolve active expiry
+[2026-07-17] SKIP -- could not resolve active expiry
+[2026-07-20] SKIP -- could not resolve active expiry
+[2026-07-21] SKIP -- could not resolve active expiry
+[2026-07-22] SKIP -- could not resolve active expiry
+[2026-07-23] SKIP -- could not resolve active expiry
+[2026-07-24] SKIP -- could not resolve active expiry
+[2026-07-27] SKIP -- could not resolve active expiry
+[2026-07-28] SKIP -- could not resolve active expiry
+[2026-07-29] SKIP -- could not resolve active expiry
+[2026-07-30] SKIP -- could not resolve active expiry
+[2026-07-31] SKIP -- could not resolve active expiry
+[2026-08-03] SKIP -- could not resolve active expiry
+[2026-08-04] SKIP -- could not resolve active expiry
+[2026-08-05] SKIP -- could not resolve active expiry
+[2026-08-06] SKIP -- could not resolve active expiry
+[2026-08-07] SKIP -- could not resolve active expiry
+[2026-08-10] SKIP -- could not resolve active expiry
+[2026-08-11] SKIP -- could not resolve active expiry
+[2026-08-12] SKIP -- could not resolve active expiry
+[2026-08-13] SKIP -- could not resolve active expiry
+[2026-08-14] SKIP -- could not resolve active expiry
+[2026-08-17] SKIP -- could not resolve active expiry
+[2026-08-18] SKIP -- could not resolve active expiry
+[2026-08-19] SKIP -- could not resolve active expiry
+[2026-08-20] SKIP -- could not resolve active expiry
+[2026-08-21] SKIP -- could not resolve active expiry
+[2026-08-24] SKIP -- could not resolve active expiry
+[2026-08-25] SKIP -- could not resolve active expiry
+[2026-08-26] SKIP -- could not resolve active expiry
+[2026-08-27] SKIP -- could not resolve active expiry
+[2026-08-28] SKIP -- could not resolve active expiry
+[2026-08-31] SKIP -- could not resolve active expiry
+[2026-09-01] DAY START: expiry=2026-10-06 ce_strike=24000 pe_strike=24150
+[2026-09-01] SKIP -- no premium history returned for either leg (holiday or no data)
+[2026-09-02] DAY START: expiry=2026-10-06 ce_strike=23950 pe_strike=24150
+[2026-09-02] fetched 177 CE 1-min bars (32 5-min), 0 PE 1-min bars (0 5-min)
+[CE 23950] C1 (CANDLE 1 / REFERENCE) @2026-09-02 12:40:00+05:30 O=345.6 H=345.6 L=345.6 C=345.6
+[CE 23950] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-02 12:45:00+05:30 O=345.6 H=345.6 L=345.6 C=345.6
+[CE 23950] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-02 12:50:00+05:30 O=345.6 H=345.6 L=345.6 C=345.6
+[CE 23950] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-02 12:55:00+05:30 O=348.2 H=348.2 L=348.2 C=348.2
+[CE 23950] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-02 13:00:00+05:30 O=348.2 H=348.2 L=348.2 C=348.2
+[CE 23950] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-02 13:05:00+05:30 O=348.2 H=348.2 L=348.2 C=348.2
+[CE 23950] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-02 13:10:00+05:30 O=348.2 H=348.2 L=348.2 C=348.2
+[CE 23950] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-02 13:15:00+05:30 O=348.2 H=348.2 L=348.2 C=348.2
+[CE 23950] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-02 13:20:00+05:30 O=348.2 H=348.2 L=348.2 C=348.2
+[CE 23950] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-02 13:25:00+05:30 O=348.2 H=348.2 L=348.2 C=348.2
+[CE 23950] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-02 13:30:00+05:30 O=348.2 H=348.2 L=348.2 C=348.2
+[CE 23950] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-02 13:35:00+05:30 O=348.2 H=348.2 L=348.2 C=348.2
+[CE 23950] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-02 13:40:00+05:30 O=348.2 H=348.2 L=348.2 C=348.2
+[CE 23950] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-02 13:45:00+05:30 O=348.2 H=348.2 L=348.2 C=348.2
+[CE 23950] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-02 13:50:00+05:30 O=348.2 H=348.2 L=348.2 C=348.2
+[CE 23950] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-02 13:55:00+05:30 O=348.2 H=348.2 L=348.2 C=348.2
+[CE 23950] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-02 14:00:00+05:30 O=348.2 H=348.2 L=348.2 C=348.2
+[CE 23950] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-02 14:05:00+05:30 O=348.2 H=348.2 L=348.2 C=348.2
+[CE 23950] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-02 14:10:00+05:30 O=348.2 H=348.2 L=348.2 C=348.2
+[CE 23950] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-02 14:15:00+05:30 O=348.2 H=348.2 L=348.2 C=348.2
+[CE 23950] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-02 14:20:00+05:30 O=348.2 H=348.2 L=348.2 C=348.2
+[CE 23950] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-02 14:25:00+05:30 O=348.2 H=348.2 L=348.2 C=348.2
+[CE 23950] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-02 14:30:00+05:30 O=348.2 H=348.2 L=348.2 C=348.2
+[CE 23950] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-02 14:35:00+05:30 O=348.2 H=348.2 L=348.2 C=348.2
+[CE 23950] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-02 14:40:00+05:30 O=348.2 H=348.2 L=348.2 C=348.2
+[CE 23950] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-02 14:45:00+05:30 O=348.2 H=348.2 L=348.2 C=348.2
+[CE 23950] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-02 14:50:00+05:30 O=348.2 H=348.2 L=348.2 C=348.2
+[CE 23950] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-02 14:55:00+05:30 O=348.2 H=348.2 L=348.2 C=348.2
+[CE 23950] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-02 15:00:00+05:30 O=348.2 H=348.2 L=348.2 C=348.2
+[CE 23950] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-02 15:05:00+05:30 O=348.2 H=348.2 L=348.2 C=348.2
+[CE 23950] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-02 15:10:00+05:30 O=348.2 H=348.2 L=348.2 C=348.2
+[CE 23950] C2 (CANDLE 2 / BREAKDOWN) @2026-09-02 15:15:00+05:30 low=346.65 -> zone_lo=346.65
+
+[2026-09-03] DAY START: expiry=2026-10-06 ce_strike=23800 pe_strike=23900
+[2026-09-03] fetched 250 CE 1-min bars (46 5-min), 0 PE 1-min bars (0 5-min)
+[CE 23800] C1 (CANDLE 1 / REFERENCE) @2026-09-03 11:30:00+05:30 O=485.6 H=488.2 L=485.6 C=488.2
+[CE 23800] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-03 11:35:00+05:30 O=488.2 H=488.2 L=488.2 C=488.2
+[CE 23800] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-03 11:40:00+05:30 O=488.2 H=488.2 L=488.2 C=488.2
+[CE 23800] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-03 11:45:00+05:30 O=488.2 H=488.2 L=488.2 C=488.2
+[CE 23800] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-03 11:50:00+05:30 O=488.2 H=488.2 L=488.2 C=488.2
+[CE 23800] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-03 11:55:00+05:30 O=488.2 H=488.2 L=488.2 C=488.2
+[CE 23800] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-03 12:00:00+05:30 O=488.2 H=488.2 L=488.2 C=488.2
+[CE 23800] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-03 12:05:00+05:30 O=488.2 H=488.2 L=488.2 C=488.2
+[CE 23800] C2 (CANDLE 2 / BREAKDOWN) @2026-09-03 12:10:00+05:30 low=455.6 -> zone_lo=455.6
+
+[2026-09-04] DAY START: expiry=2026-10-06 ce_strike=23850 pe_strike=24050
+[2026-09-04] fetched 0 CE 1-min bars (0 5-min), 128 PE 1-min bars (22 5-min)
+[PE 24050] C1 (CANDLE 1 / REFERENCE) @2026-09-04 13:30:00+05:30 O=407.6 H=407.6 L=267.2 C=267.2
+[PE 24050] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-04 13:35:00+05:30 O=267.2 H=267.2 L=267.2 C=267.2
+[PE 24050] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-04 13:40:00+05:30 O=267.2 H=267.2 L=267.2 C=267.2
+[PE 24050] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-04 13:45:00+05:30 O=267.2 H=267.2 L=267.2 C=267.2
+[PE 24050] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-04 13:50:00+05:30 O=267.2 H=267.2 L=267.2 C=267.2
+[PE 24050] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-04 13:55:00+05:30 O=267.2 H=267.2 L=267.2 C=267.2
+[PE 24050] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-04 14:00:00+05:30 O=267.2 H=267.2 L=267.2 C=267.2
+[PE 24050] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-04 14:05:00+05:30 O=267.2 H=267.2 L=267.2 C=267.2
+[PE 24050] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-04 14:10:00+05:30 O=267.2 H=267.2 L=267.2 C=267.2
+[PE 24050] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-04 14:15:00+05:30 O=267.2 H=267.2 L=267.2 C=267.2
+[PE 24050] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-04 14:20:00+05:30 O=267.2 H=267.2 L=267.2 C=267.2
+[PE 24050] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-04 14:25:00+05:30 O=267.2 H=267.2 L=267.2 C=267.2
+[PE 24050] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-04 14:30:00+05:30 O=267.2 H=267.2 L=267.2 C=267.2
+[PE 24050] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-04 14:35:00+05:30 O=267.2 H=267.2 L=267.2 C=267.2
+[PE 24050] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-04 14:40:00+05:30 O=267.2 H=267.2 L=267.2 C=267.2
+[PE 24050] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-04 14:45:00+05:30 O=267.2 H=267.2 L=267.2 C=267.2
+[PE 24050] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-04 14:50:00+05:30 O=267.2 H=267.2 L=267.2 C=267.2
+[PE 24050] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-04 14:55:00+05:30 O=267.2 H=267.2 L=267.2 C=267.2
+[PE 24050] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-04 15:00:00+05:30 O=267.2 H=267.2 L=267.2 C=267.2
+[PE 24050] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-04 15:05:00+05:30 O=267.2 H=267.2 L=267.2 C=267.2
+[PE 24050] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-04 15:10:00+05:30 O=267.2 H=267.2 L=267.2 C=267.2
+[PE 24050] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-04 15:15:00+05:30 O=267.2 H=267.2 L=267.2 C=267.2
+
+[2026-09-07] DAY START: expiry=2026-10-06 ce_strike=23900 pe_strike=24000
+[2026-09-07] fetched 385 CE 1-min bars (73 5-min), 385 PE 1-min bars (73 5-min)
+[CE 23900] C1 (CANDLE 1 / REFERENCE) @2026-09-07 09:15:00+05:30 O=360.0 H=360.0 L=307.35 C=307.35
+[CE 23900] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-07 09:20:00+05:30 O=307.35 H=310.39 L=307.35 C=310.39
+[CE 23900] C2 (CANDLE 2 / BREAKDOWN) @2026-09-07 09:25:00+05:30 low=307.0 -> zone_lo=307.0
+[CE 23900] TRAP CONFIRMED @2026-09-07 09:35:00+05:30 close=311.2 -> zone_hi=310.39
+[CE 23900] ZONE ACTIVE [307.0, 310.39]
+[CE 23900] ZONE RE-ENTRY & ENTRY @2026-09-07 09:40:00+05:30 price=309.0 (zone was [307.0, 310.39])
+[CE 23900] EXIT (EOD) @2026-09-07 15:15:00+05:30 price=262.0 pnl_pts=-3525.00 pnl_pct=-15.21%
+[CE 23900]   MFE (highest after entry) = 309.0 @2026-09-07 09:40:00+05:30
+[CE 23900]   MAE (lowest after entry)  = 262.0 @2026-09-07 15:15:00+05:30
+[PE 24000] C1 (CANDLE 1 / REFERENCE) @2026-09-07 09:15:00+05:30 O=269.64 H=282.5 L=269.64 C=280.1
+[PE 24000] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-07 09:20:00+05:30 O=273.39 H=281.5 L=273.39 C=281.5
+[PE 24000] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-07 09:25:00+05:30 O=284.85 H=285.0 L=284.85 C=285.0
+[PE 24000] C2 (CANDLE 2 / BREAKDOWN) @2026-09-07 09:30:00+05:30 low=283.7 -> zone_lo=283.7
+[PE 24000] TRAP CONFIRMED @2026-09-07 09:55:00+05:30 close=286.0 -> zone_hi=285.0
+[PE 24000] ZONE ACTIVE [283.7, 285.0]
+
+[2026-09-08] DAY START: expiry=2026-10-06 ce_strike=23750 pe_strike=23900
+[2026-09-08] fetched 320 CE 1-min bars (60 5-min), 384 PE 1-min bars (73 5-min)
+[CE 23750] C1 (CANDLE 1 / REFERENCE) @2026-09-08 10:20:00+05:30 O=305.0 H=305.0 L=305.0 C=305.0
+[CE 23750] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-08 10:25:00+05:30 O=305.0 H=305.0 L=305.0 C=305.0
+[CE 23750] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-08 10:30:00+05:30 O=305.0 H=305.0 L=305.0 C=305.0
+[CE 23750] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-08 10:35:00+05:30 O=305.0 H=305.0 L=305.0 C=305.0
+[CE 23750] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-08 10:40:00+05:30 O=305.0 H=305.0 L=305.0 C=305.0
+[CE 23750] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-08 10:45:00+05:30 O=305.0 H=305.0 L=305.0 C=305.0
+[CE 23750] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-08 10:50:00+05:30 O=305.0 H=305.0 L=305.0 C=305.0
+[CE 23750] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-08 10:55:00+05:30 O=305.0 H=305.0 L=305.0 C=305.0
+[CE 23750] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-08 11:00:00+05:30 O=305.0 H=305.0 L=305.0 C=305.0
+[CE 23750] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-08 11:05:00+05:30 O=305.0 H=305.0 L=305.0 C=305.0
+[CE 23750] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-08 11:10:00+05:30 O=305.0 H=305.0 L=305.0 C=305.0
+[CE 23750] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-08 11:15:00+05:30 O=305.0 H=305.0 L=305.0 C=305.0
+[CE 23750] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-08 11:20:00+05:30 O=305.0 H=305.0 L=305.0 C=305.0
+[CE 23750] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-08 11:25:00+05:30 O=305.0 H=305.0 L=305.0 C=305.0
+[CE 23750] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-08 11:30:00+05:30 O=305.0 H=305.0 L=305.0 C=305.0
+[CE 23750] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-08 11:35:00+05:30 O=305.0 H=305.0 L=305.0 C=305.0
+[CE 23750] C2 (CANDLE 2 / BREAKDOWN) @2026-09-08 11:40:00+05:30 low=297.45 -> zone_lo=297.45
+[PE 23900] C1 (CANDLE 1 / REFERENCE) @2026-09-08 09:15:00+05:30 O=306.05 H=306.1 L=304.0 C=304.0
+[PE 23900] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-08 09:20:00+05:30 O=304.0 H=308.3 L=304.0 C=308.3
+[PE 23900] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-08 09:25:00+05:30 O=308.3 H=308.3 L=308.3 C=308.3
+[PE 23900] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-08 09:30:00+05:30 O=308.3 H=308.3 L=308.3 C=308.3
+[PE 23900] C2 (CANDLE 2 / BREAKDOWN) @2026-09-08 09:35:00+05:30 low=303.8 -> zone_lo=303.8
+[PE 23900] TRAP CONFIRMED @2026-09-08 10:35:00+05:30 close=312.95 -> zone_hi=308.3
+[PE 23900] ZONE ACTIVE [303.8, 308.3]
+[PE 23900] ZONE RE-ENTRY & ENTRY @2026-09-08 11:30:00+05:30 price=308.0 (zone was [303.8, 308.3])
+[PE 23900] EXIT (EOD) @2026-09-08 15:15:00+05:30 price=321.3 pnl_pts=997.50 pnl_pct=4.32%
+[PE 23900]   MFE (highest after entry) = 325.15 @2026-09-08 12:05:00+05:30
+[PE 23900]   MAE (lowest after entry)  = 308.0 @2026-09-08 11:30:00+05:30
+
+[2026-09-09] DAY START: expiry=2026-10-06 ce_strike=23600 pe_strike=23750
+[2026-09-09] fetched 385 CE 1-min bars (73 5-min), 326 PE 1-min bars (62 5-min)
+[CE 23600] C1 (CANDLE 1 / REFERENCE) @2026-09-09 09:15:00+05:30 O=314.55 H=314.55 L=288.4 C=295.15
+[CE 23600] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-09 09:20:00+05:30 O=293.2 H=299.0 L=293.2 C=295.35
+[CE 23600] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-09 09:25:00+05:30 O=299.0 H=300.0 L=298.75 C=298.75
+[CE 23600] C2 (CANDLE 2 / BREAKDOWN) @2026-09-09 09:30:00+05:30 low=298.6 -> zone_lo=298.6
+[CE 23600] TRAP CONFIRMED @2026-09-09 09:35:00+05:30 close=307.75 -> zone_hi=298.75
+[CE 23600] ZONE ACTIVE [298.6, 298.75]
+[PE 23750] C1 (CANDLE 1 / REFERENCE) @2026-09-09 10:10:00+05:30 O=340.0 H=340.0 L=334.85 C=334.85
+[PE 23750] C2 (CANDLE 2 / BREAKDOWN) @2026-09-09 10:15:00+05:30 low=318.55 -> zone_lo=318.55
+[PE 23750] TRAP CONFIRMED @2026-09-09 12:05:00+05:30 close=342.85 -> zone_hi=334.85
+[PE 23750] ZONE ACTIVE [318.55, 334.85]
+[PE 23750] ZONE RE-ENTRY & ENTRY @2026-09-09 14:35:00+05:30 price=325.0 (zone was [318.55, 334.85])
+[PE 23750] EXIT (EOD) @2026-09-09 15:15:00+05:30 price=344.75 pnl_pts=1481.25 pnl_pct=6.08%
+[PE 23750]   MFE (highest after entry) = 344.75 @2026-09-09 15:05:00+05:30
+[PE 23750]   MAE (lowest after entry)  = 325.0 @2026-09-09 14:35:00+05:30
+
+[2026-09-10] DAY START: expiry=2026-10-06 ce_strike=23450 pe_strike=23550
+[2026-09-10] fetched 384 CE 1-min bars (73 5-min), 384 PE 1-min bars (73 5-min)
+[CE 23450] C1 (CANDLE 1 / REFERENCE) @2026-09-10 09:15:00+05:30 O=338.0 H=347.25 L=325.7 C=347.25
+[CE 23450] C2 (CANDLE 2 / BREAKDOWN) @2026-09-10 09:20:00+05:30 low=323.0 -> zone_lo=323.0
+[PE 23550] C1 (CANDLE 1 / REFERENCE) @2026-09-10 09:15:00+05:30 O=262.95 H=263.0 L=262.95 C=263.0
+[PE 23550] C2 (CANDLE 2 / BREAKDOWN) @2026-09-10 09:20:00+05:30 low=253.7 -> zone_lo=253.7
+[PE 23550] TRAP CONFIRMED @2026-09-10 09:30:00+05:30 close=269.4 -> zone_hi=263.0
+[PE 23550] ZONE ACTIVE [253.7, 263.0]
+[PE 23550] ZONE RE-ENTRY & ENTRY @2026-09-10 09:50:00+05:30 price=257.7 (zone was [253.7, 263.0])
+[PE 23550] EXIT (EOD) @2026-09-10 15:15:00+05:30 price=286.65 pnl_pts=2171.25 pnl_pct=11.23%
+[PE 23550]   MFE (highest after entry) = 292.45 @2026-09-10 15:00:00+05:30
+[PE 23550]   MAE (lowest after entry)  = 242.95 @2026-09-10 12:10:00+05:30
+
+[2026-09-11] DAY START: expiry=2026-10-06 ce_strike=23400 pe_strike=23500
+[2026-09-11] fetched 385 CE 1-min bars (73 5-min), 385 PE 1-min bars (73 5-min)
+[CE 23400] C1 (CANDLE 1 / REFERENCE) @2026-09-11 09:15:00+05:30 O=250.0 H=250.0 L=238.15 C=249.1
+[CE 23400] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-11 09:20:00+05:30 O=247.0 H=250.75 L=247.0 C=249.3
+[CE 23400] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-11 09:25:00+05:30 O=250.35 H=252.95 L=247.8 C=247.8
+[CE 23400] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-11 09:30:00+05:30 O=247.8 H=248.0 L=247.8 C=248.0
+[CE 23400] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-11 09:35:00+05:30 O=250.85 H=253.15 L=250.85 C=253.15
+[CE 23400] C2 (CANDLE 2 / BREAKDOWN) @2026-09-11 09:40:00+05:30 low=246.35 -> zone_lo=246.35
+[CE 23400] TRAP CONFIRMED @2026-09-11 10:00:00+05:30 close=254.95 -> zone_hi=253.15
+[CE 23400] ZONE ACTIVE [246.35, 253.15]
+[PE 23500] C1 (CANDLE 1 / REFERENCE) @2026-09-11 09:15:00+05:30 O=359.95 H=366.95 L=356.25 C=356.25
+[PE 23500] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-11 09:20:00+05:30 O=358.75 H=363.05 L=356.75 C=359.95
+[PE 23500] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-11 09:25:00+05:30 O=360.75 H=362.1 L=358.5 C=362.1
+[PE 23500] C2 (CANDLE 2 / BREAKDOWN) @2026-09-11 09:30:00+05:30 low=355.2 -> zone_lo=355.2
+[PE 23500] TRAP CONFIRMED @2026-09-11 09:40:00+05:30 close=363.5 -> zone_hi=362.1
+[PE 23500] ZONE ACTIVE [355.2, 362.1]
+
+[2026-09-15] DAY START: expiry=2026-10-06 ce_strike=23250 pe_strike=23450
+[2026-09-15] fetched 383 CE 1-min bars (73 5-min), 385 PE 1-min bars (73 5-min)
+[CE 23250] C1 (CANDLE 1 / REFERENCE) @2026-09-15 09:15:00+05:30 O=438.8 H=438.8 L=438.8 C=438.8
+[CE 23250] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-15 09:20:00+05:30 O=445.95 H=446.0 L=445.95 C=446.0
+[CE 23250] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-15 09:25:00+05:30 O=446.0 H=446.0 L=446.0 C=446.0
+[CE 23250] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-15 09:30:00+05:30 O=446.0 H=446.0 L=446.0 C=446.0
+[CE 23250] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-15 09:35:00+05:30 O=446.0 H=446.0 L=446.0 C=446.0
+[CE 23250] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-15 09:40:00+05:30 O=446.0 H=446.0 L=446.0 C=446.0
+[CE 23250] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-15 09:45:00+05:30 O=446.0 H=446.0 L=446.0 C=446.0
+[CE 23250] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-15 09:50:00+05:30 O=446.0 H=446.0 L=446.0 C=446.0
+[CE 23250] C2 (CANDLE 2 / BREAKDOWN) @2026-09-15 09:55:00+05:30 low=372.3 -> zone_lo=372.3
+[PE 23450] C1 (CANDLE 1 / REFERENCE) @2026-09-15 09:15:00+05:30 O=206.45 H=217.0 L=204.2 C=213.8
+[PE 23450] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-15 09:20:00+05:30 O=213.05 H=221.0 L=213.0 C=221.0
+[PE 23450] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-15 09:25:00+05:30 O=224.9 H=228.65 L=222.85 C=222.85
+[PE 23450] C2 (CANDLE 2 / BREAKDOWN) @2026-09-15 09:30:00+05:30 low=219.85 -> zone_lo=219.85
+[PE 23450] TRAP CONFIRMED @2026-09-15 09:45:00+05:30 close=234.75 -> zone_hi=222.85
+[PE 23450] ZONE ACTIVE [219.85, 222.85]
+
+[2026-09-16] DAY START: expiry=2026-10-06 ce_strike=23100 pe_strike=23600
+[2026-09-16] fetched 382 CE 1-min bars (73 5-min), 385 PE 1-min bars (73 5-min)
+[CE 23100] C1 (CANDLE 1 / REFERENCE) @2026-09-16 09:15:00+05:30 O=424.6 H=424.6 L=409.55 C=409.55
+[CE 23100] C2 (CANDLE 2 / BREAKDOWN) @2026-09-16 09:20:00+05:30 low=407.4 -> zone_lo=407.4
+[PE 23600] C1 (CANDLE 1 / REFERENCE) @2026-09-16 09:15:00+05:30 O=422.0 H=426.65 L=395.0 C=411.05
+[PE 23600] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-16 09:20:00+05:30 O=411.05 H=416.85 L=411.05 C=414.9
+[PE 23600] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-16 09:25:00+05:30 O=414.9 H=448.05 L=414.9 C=448.05
+[PE 23600] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-16 09:30:00+05:30 O=441.2 H=451.6 L=441.2 C=451.6
+[PE 23600] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-16 09:35:00+05:30 O=451.6 H=465.0 L=451.6 C=465.0
+[PE 23600] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-16 09:40:00+05:30 O=465.0 H=465.0 L=465.0 C=465.0
+[PE 23600] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-16 09:45:00+05:30 O=465.0 H=481.0 L=465.0 C=472.95
+[PE 23600] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-16 09:50:00+05:30 O=472.95 H=472.95 L=472.95 C=472.95
+[PE 23600] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-16 09:55:00+05:30 O=472.95 H=472.95 L=472.95 C=472.95
+[PE 23600] C2 (CANDLE 2 / BREAKDOWN) @2026-09-16 10:00:00+05:30 low=438.05 -> zone_lo=438.05
+
+[2026-09-17] DAY START: expiry=2026-10-06 ce_strike=23100 pe_strike=23300
+[2026-09-17] fetched 385 CE 1-min bars (73 5-min), 385 PE 1-min bars (73 5-min)
+[CE 23100] C1 (CANDLE 1 / REFERENCE) @2026-09-17 09:15:00+05:30 O=381.2 H=400.0 L=370.6 C=400.0
+[CE 23100] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-17 09:20:00+05:30 O=397.55 H=397.55 L=397.55 C=397.55
+[CE 23100] C2 (CANDLE 2 / BREAKDOWN) @2026-09-17 09:25:00+05:30 low=375.9 -> zone_lo=375.9
+[CE 23100] TRAP CONFIRMED @2026-09-17 09:30:00+05:30 close=402.95 -> zone_hi=397.55
+[CE 23100] ZONE ACTIVE [375.9, 397.55]
+[CE 23100] ZONE RE-ENTRY & ENTRY @2026-09-17 09:40:00+05:30 price=377.3 (zone was [375.9, 397.55])
+[CE 23100] EXIT (EOD) @2026-09-17 15:15:00+05:30 price=404.0 pnl_pts=2002.50 pnl_pct=7.08%
+[CE 23100]   MFE (highest after entry) = 453.55 @2026-09-17 12:40:00+05:30
+[CE 23100]   MAE (lowest after entry)  = 353.85 @2026-09-17 11:05:00+05:30
+[PE 23300] C1 (CANDLE 1 / REFERENCE) @2026-09-17 09:15:00+05:30 O=264.95 H=277.4 L=235.6 C=239.4
+[PE 23300] C2 (CANDLE 2 / BREAKDOWN) @2026-09-17 09:20:00+05:30 low=233.9 -> zone_lo=233.9
+
+[2026-09-18] DAY START: expiry=2026-10-06 ce_strike=23200 pe_strike=23350
+[2026-09-18] fetched 385 CE 1-min bars (73 5-min), 384 PE 1-min bars (73 5-min)
+[CE 23200] C1 (CANDLE 1 / REFERENCE) @2026-09-18 09:15:00+05:30 O=335.55 H=360.7 L=332.55 C=341.4
+[CE 23200] C2 (CANDLE 2 / BREAKDOWN) @2026-09-18 09:20:00+05:30 low=330.05 -> zone_lo=330.05
+[PE 23350] C1 (CANDLE 1 / REFERENCE) @2026-09-18 09:15:00+05:30 O=213.25 H=218.35 L=204.2 C=216.2
+[PE 23350] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-18 09:20:00+05:30 O=220.9 H=224.65 L=214.0 C=215.3
+[PE 23350] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-18 09:25:00+05:30 O=217.2 H=230.0 L=217.2 C=230.0
+[PE 23350] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-18 09:30:00+05:30 O=232.35 H=235.0 L=228.7 C=232.05
+[PE 23350] C2 (CANDLE 2 / BREAKDOWN) @2026-09-18 09:35:00+05:30 low=221.45 -> zone_lo=221.45
+
+[2026-09-21] DAY START: expiry=2026-10-06 ce_strike=23300 pe_strike=23400
+[2026-09-21] fetched 385 CE 1-min bars (73 5-min), 385 PE 1-min bars (73 5-min)
+[CE 23300] C1 (CANDLE 1 / REFERENCE) @2026-09-21 09:15:00+05:30 O=272.8 H=279.95 L=257.7 C=273.55
+[CE 23300] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-21 09:20:00+05:30 O=274.45 H=277.0 L=268.45 C=269.8
+[CE 23300] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-21 09:25:00+05:30 O=268.45 H=281.4 L=268.45 C=279.35
+[CE 23300] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-21 09:30:00+05:30 O=280.1 H=283.25 L=276.0 C=277.2
+[CE 23300] C2 (CANDLE 2 / BREAKDOWN) @2026-09-21 09:35:00+05:30 low=273.3 -> zone_lo=273.3
+[CE 23300] TRAP CONFIRMED @2026-09-21 12:00:00+05:30 close=283.65 -> zone_hi=277.2
+[CE 23300] ZONE ACTIVE [273.3, 277.2]
+[CE 23300] ZONE RE-ENTRY & ENTRY @2026-09-21 13:00:00+05:30 price=274.85 (zone was [273.3, 277.2])
+[CE 23300] EXIT (EOD) @2026-09-21 15:15:00+05:30 price=293.7 pnl_pts=1413.75 pnl_pct=6.86%
+[CE 23300]   MFE (highest after entry) = 311.15 @2026-09-21 13:55:00+05:30
+[CE 23300]   MAE (lowest after entry)  = 271.0 @2026-09-21 13:10:00+05:30
+[PE 23400] C1 (CANDLE 1 / REFERENCE) @2026-09-21 09:15:00+05:30 O=197.9 H=210.2 L=187.0 C=193.45
+[PE 23400] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-21 09:20:00+05:30 O=192.85 H=197.1 L=190.35 C=194.35
+[PE 23400] C2 (CANDLE 2 / BREAKDOWN) @2026-09-21 09:25:00+05:30 low=183.8 -> zone_lo=183.8
+
+[2026-09-22] DAY START: expiry=2026-10-06 ce_strike=23300 pe_strike=23450
+[2026-09-22] fetched 385 CE 1-min bars (73 5-min), 385 PE 1-min bars (73 5-min)
+[CE 23300] C1 (CANDLE 1 / REFERENCE) @2026-09-22 09:15:00+05:30 O=308.65 H=308.65 L=283.0 C=285.0
+[CE 23300] C2 (CANDLE 2 / BREAKDOWN) @2026-09-22 09:20:00+05:30 low=281.3 -> zone_lo=281.3
+[PE 23450] C1 (CANDLE 1 / REFERENCE) @2026-09-22 09:15:00+05:30 O=160.9 H=175.8 L=160.9 C=169.0
+[PE 23450] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-22 09:20:00+05:30 O=172.0 H=174.5 L=165.5 C=166.9
+[PE 23450] C2 (CANDLE 2 / BREAKDOWN) @2026-09-22 09:25:00+05:30 low=164.6 -> zone_lo=164.6
+[PE 23450] TRAP CONFIRMED @2026-09-22 10:35:00+05:30 close=177.35 -> zone_hi=166.9
+[PE 23450] ZONE ACTIVE [164.6, 166.9]
+
+[2026-09-23] DAY START: expiry=2026-10-06 ce_strike=23300 pe_strike=23500
+[2026-09-23] fetched 385 CE 1-min bars (73 5-min), 385 PE 1-min bars (73 5-min)
+[CE 23300] C1 (CANDLE 1 / REFERENCE) @2026-09-23 09:15:00+05:30 O=213.0 H=260.45 L=213.0 C=259.0
+[CE 23300] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-23 09:20:00+05:30 O=260.0 H=267.65 L=254.0 C=256.55
+[CE 23300] C2 (CANDLE 2 / BREAKDOWN) @2026-09-23 09:25:00+05:30 low=237.5 -> zone_lo=237.5
+[CE 23300] TRAP CONFIRMED @2026-09-23 11:10:00+05:30 close=267.85 -> zone_hi=256.55
+[CE 23300] ZONE ACTIVE [237.5, 256.55]
+[CE 23300] ZONE RE-ENTRY & ENTRY @2026-09-23 15:00:00+05:30 price=255.3 (zone was [237.5, 256.55])
+[CE 23300] EXIT (EOD) @2026-09-23 15:15:00+05:30 price=264.15 pnl_pts=663.75 pnl_pct=3.47%
+[CE 23300]   MFE (highest after entry) = 266.7 @2026-09-23 15:15:00+05:30
+[CE 23300]   MAE (lowest after entry)  = 255.3 @2026-09-23 15:00:00+05:30
+[PE 23500] C1 (CANDLE 1 / REFERENCE) @2026-09-23 09:15:00+05:30 O=216.7 H=222.0 L=192.15 C=192.15
+[PE 23500] C2 (CANDLE 2 / BREAKDOWN) @2026-09-23 09:20:00+05:30 low=188.15 -> zone_lo=188.15
+
+[2026-09-24] DAY START: expiry=2026-10-06 ce_strike=23350 pe_strike=23450
+[2026-09-24] fetched 385 CE 1-min bars (73 5-min), 385 PE 1-min bars (73 5-min)
+[CE 23350] C1 (CANDLE 1 / REFERENCE) @2026-09-24 09:15:00+05:30 O=148.05 H=155.0 L=125.25 C=127.0
+[CE 23350] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-24 09:20:00+05:30 O=127.0 H=133.0 L=126.55 C=130.05
+[CE 23350] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-24 09:25:00+05:30 O=130.0 H=133.15 L=126.85 C=132.85
+[CE 23350] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-24 09:30:00+05:30 O=132.4 H=135.6 L=129.35 C=130.85
+[CE 23350] C2 (CANDLE 2 / BREAKDOWN) @2026-09-24 09:35:00+05:30 low=127.3 -> zone_lo=127.3
+[PE 23450] C1 (CANDLE 1 / REFERENCE) @2026-09-24 09:15:00+05:30 O=195.0 H=265.95 L=190.0 C=265.6
+[PE 23450] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-24 09:20:00+05:30 O=266.55 H=269.05 L=249.85 C=254.4
+[PE 23450] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-24 09:25:00+05:30 O=255.0 H=262.0 L=254.1 C=254.1
+[PE 23450] C2 (CANDLE 2 / BREAKDOWN) @2026-09-24 09:30:00+05:30 low=248.75 -> zone_lo=248.75
+[PE 23450] TRAP CONFIRMED @2026-09-24 09:35:00+05:30 close=265.7 -> zone_hi=254.1
+[PE 23450] ZONE ACTIVE [248.75, 254.1]
+
+[2026-09-25] DAY START: expiry=2026-10-06 ce_strike=23050 pe_strike=23300
+[2026-09-25] fetched 385 CE 1-min bars (73 5-min), 385 PE 1-min bars (73 5-min)
+[CE 23050] C1 (CANDLE 1 / REFERENCE) @2026-09-25 09:15:00+05:30 O=232.95 H=252.2 L=227.0 C=233.35
+[CE 23050] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-25 09:20:00+05:30 O=233.15 H=244.95 L=228.55 C=239.15
+[CE 23050] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-25 09:25:00+05:30 O=239.85 H=250.1 L=235.0 C=249.4
+[CE 23050] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-25 09:30:00+05:30 O=250.1 H=250.4 L=241.9 C=241.9
+[CE 23050] C2 (CANDLE 2 / BREAKDOWN) @2026-09-25 09:35:00+05:30 low=221.35 -> zone_lo=221.35
+[CE 23050] TRAP CONFIRMED @2026-09-25 14:00:00+05:30 close=286.15 -> zone_hi=241.9
+[CE 23050] ZONE ACTIVE [221.35, 241.9]
+[PE 23300] C1 (CANDLE 1 / REFERENCE) @2026-09-25 09:15:00+05:30 O=319.85 H=319.9 L=251.6 C=267.0
+[PE 23300] C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) @2026-09-25 09:20:00+05:30 O=267.85 H=269.7 L=253.85 C=260.2
+[PE 23300] C2 (CANDLE 2 / BREAKDOWN) @2026-09-25 09:25:00+05:30 low=248.0 -> zone_lo=248.0
+[PE 23300] TRAP CONFIRMED @2026-09-25 09:35:00+05:30 close=281.45 -> zone_hi=260.2
+[PE 23300] ZONE ACTIVE [248.0, 260.2]
+
 [2026-09-28] DAY START: expiry=2026-10-06 ce_strike=23000 pe_strike=23150
 [2026-09-28] fetched 385 CE 1-min bars (73 5-min), 385 PE 1-min bars (73 5-min)
 [CE 23000] C1 (CANDLE 1 / REFERENCE) @2026-09-28 09:15:00+05:30 O=250.0 H=257.7 L=167.5 C=168.65
@@ -112,31 +634,286 @@ SECTION 1: FIXED daily PDH/PDL strike, single-lot, EOD-only (locked spec baselin
 [PE 22800] ZONE ACTIVE [245.65, 272.0]
 
 
-=== CE side: 2 trade(s) ===
-Win/Loss: 0W / 2L
-Win rate: 0.0%  Avg win: 0.00  Avg loss: -4861.88
-Total P&L: -9723.75
+=== CE side: 6 trade(s) ===
+Win/Loss: 3W / 3L
+Win rate: 50.0%  Avg win: 1360.00  Avg loss: -4416.25
+Total P&L: -9168.75
+  [2026-09-07 09:40:00+05:30] strike=23900 C1(close=310.39, high=310.39, low=307.35) C2(low=307.0) entry=309.0 -> exit(2026-09-07 15:15:00+05:30)=262.0 pnl=-3525.00 (-15.21%)
+  [2026-09-17 09:40:00+05:30] strike=23100 C1(close=397.55, high=397.55, low=397.55) C2(low=375.9) entry=377.3 -> exit(2026-09-17 15:15:00+05:30)=404.0 pnl=2002.50 (7.08%)
+  [2026-09-21 13:00:00+05:30] strike=23300 C1(close=277.2, high=283.25, low=276.0) C2(low=273.3) entry=274.85 -> exit(2026-09-21 15:15:00+05:30)=293.7 pnl=1413.75 (6.86%)
+  [2026-09-23 15:00:00+05:30] strike=23300 C1(close=256.55, high=267.65, low=254.0) C2(low=237.5) entry=255.3 -> exit(2026-09-23 15:15:00+05:30)=264.15 pnl=663.75 (3.47%)
   [2026-09-30 10:35:00+05:30] strike=22550 C1(close=295.6, high=308.6, low=291.75) C2(low=274.2) entry=279.55 -> exit(2026-09-30 15:15:00+05:30)=192.6 pnl=-6521.25 (-31.10%)
   [2026-10-01 11:25:00+05:30] strike=22600 C1(close=115.8, high=134.7, low=115.35) C2(low=113.25) entry=113.3 -> exit(2026-10-01 15:15:00+05:30)=70.6 pnl=-3202.50 (-37.69%)
 
-=== PE side: 1 trade(s) ===
-Win/Loss: 1W / 0L
-Win rate: 100.0%  Avg win: 2557.50  Avg loss: 0.00
-Total P&L: 2557.50
+=== PE side: 4 trade(s) ===
+Win/Loss: 4W / 0L
+Win rate: 100.0%  Avg win: 1801.88  Avg loss: 0.00
+Total P&L: 7207.50
+  [2026-09-08 11:30:00+05:30] strike=23900 C1(close=308.3, high=308.3, low=308.3) C2(low=303.8) entry=308.0 -> exit(2026-09-08 15:15:00+05:30)=321.3 pnl=997.50 (4.32%)
+  [2026-09-09 14:35:00+05:30] strike=23750 C1(close=334.85, high=340.0, low=334.85) C2(low=318.55) entry=325.0 -> exit(2026-09-09 15:15:00+05:30)=344.75 pnl=1481.25 (6.08%)
+  [2026-09-10 09:50:00+05:30] strike=23550 C1(close=263.0, high=263.0, low=262.95) C2(low=253.7) entry=257.7 -> exit(2026-09-10 15:15:00+05:30)=286.65 pnl=2171.25 (11.23%)
   [2026-09-28 10:55:00+05:30] strike=23150 C1(close=330.55, high=335.4, low=317.75) C2(low=309.15) entry=330.45 -> exit(2026-09-28 15:15:00+05:30)=364.55 pnl=2557.50 (10.32%)
 
-=== Combined: 3 trade(s), Total P&L: -7166.25 ===
+=== Combined: 10 trade(s), Total P&L: -1961.25 ===
 
 === MFE / MAE Summary (for stop-loss & target design) ===
 Side Strike  Entry Price  Entry Time             MFE Price  MFE Time               MAE Price  MAE Time               EOD Exit  P&L (pts)  P&L %   
 --------------------------------------------------------------------------------------------------------------------------------------------------
+CE   23900   309.0        2026-09-07 09:40:00+05:30 309.0      2026-09-07 09:40:00+05:30 262.0      2026-09-07 15:15:00+05:30 262.0     -3525.00   -15.21  
+PE   23900   308.0        2026-09-08 11:30:00+05:30 325.15     2026-09-08 12:05:00+05:30 308.0      2026-09-08 11:30:00+05:30 321.3     997.50     4.32    
+PE   23750   325.0        2026-09-09 14:35:00+05:30 344.75     2026-09-09 15:05:00+05:30 325.0      2026-09-09 14:35:00+05:30 344.75    1481.25    6.08    
+PE   23550   257.7        2026-09-10 09:50:00+05:30 292.45     2026-09-10 15:00:00+05:30 242.95     2026-09-10 12:10:00+05:30 286.65    2171.25    11.23   
+CE   23100   377.3        2026-09-17 09:40:00+05:30 453.55     2026-09-17 12:40:00+05:30 353.85     2026-09-17 11:05:00+05:30 404.0     2002.50    7.08    
+CE   23300   274.85       2026-09-21 13:00:00+05:30 311.15     2026-09-21 13:55:00+05:30 271.0      2026-09-21 13:10:00+05:30 293.7     1413.75    6.86    
+CE   23300   255.3        2026-09-23 15:00:00+05:30 266.7      2026-09-23 15:15:00+05:30 255.3      2026-09-23 15:00:00+05:30 264.15    663.75     3.47    
 PE   23150   330.45       2026-09-28 10:55:00+05:30 401.0      2026-09-28 14:35:00+05:30 318.4      2026-09-28 12:25:00+05:30 364.55    2557.50    10.32   
 CE   22550   279.55       2026-09-30 10:35:00+05:30 352.85     2026-09-30 12:45:00+05:30 186.4      2026-09-30 14:40:00+05:30 192.6     -6521.25   -31.10  
 CE   22600   113.3        2026-10-01 11:25:00+05:30 127.75     2026-10-01 11:40:00+05:30 41.7       2026-10-01 14:05:00+05:30 70.6      -3202.50   -37.69  
 
 ==============================================================================
-SECTION 2 (EXPERIMENTAL): simultaneous CE+PE, dynamic 100-pt ITM strike rolling, Fib 1.272/1.618 dual-lot management (2 lots in, 1 lot @1.272, remaining lot: Variant A = TSL->breakeven, Variant B = no TSL, runs to 1.618/EOD)
+SECTION 2 (EXPERIMENTAL): simultaneous CE+PE, dynamic 100-pt ITM strike rolling, Fib 1.618/2.618 dual-lot management (2 lots in, 1 lot @1.618, remaining lot: Variant A = TSL trails 3-bar low, Variant B = no TSL, runs to 2.618/EOD)
 ==============================================================================
+[2026-09-01] spot open=24077.55, 1 roll event(s): [('2026-09-01 14:05:00+05:30', 23850, 24050)]
+[2026-09-02] spot open=23858.0, 0 roll event(s): []
+[CE dyn] C1 @2026-09-02 12:40:00+05:30 strike=23950 O=345.6 H=345.6 L=345.6 C=345.6
+[CE dyn] C2 (BREAKDOWN) @2026-09-02 15:15:00+05:30 strike=23950 low=346.65 -> zone_lo=346.65
+
+[2026-09-03] spot open=23997.95, 1 roll event(s): [('2026-09-03 14:55:00+05:30', 23800, 24000)]
+[CE dyn] C1 @2026-09-03 11:30:00+05:30 strike=23800 O=485.6 H=488.2 L=485.6 C=488.2
+[CE dyn] C2 (BREAKDOWN) @2026-09-03 12:10:00+05:30 strike=23800 low=455.6 -> zone_lo=455.6
+[PE dyn] ROLL (flat) @2026-09-03 14:55:00+05:30 23900 -> 24000 (detector reset -- new contract, old candle refs invalid)
+[PE dyn] C1 @2026-09-03 14:55:00+05:30 strike=24000 O=252.5 H=257.0 L=252.5 C=257.0
+[PE dyn] C2 (BREAKDOWN) @2026-09-03 15:15:00+05:30 strike=24000 low=202.75 -> zone_lo=202.75
+
+[2026-09-04] spot open=23910.9, 0 roll event(s): []
+[PE dyn] C1 @2026-09-04 13:30:00+05:30 strike=24050 O=407.6 H=407.6 L=267.2 C=267.2
+
+[2026-09-07] spot open=23883.15, 1 roll event(s): [('2026-09-07 11:00:00+05:30', 23650, 23850)]
+[CE dyn] C1 @2026-09-07 09:15:00+05:30 strike=23900 O=360.0 H=360.0 L=307.35 C=307.35
+[CE dyn] C2 (BREAKDOWN) @2026-09-07 09:25:00+05:30 strike=23900 low=307.0 -> zone_lo=307.0
+[CE dyn] TRAP CONFIRMED @2026-09-07 09:35:00+05:30 strike=23900 close=311.2 -> zone_hi=310.39
+[CE dyn] ZONE ACTIVE [307.0, 310.39]
+[CE dyn] ZONE RE-ENTRY & ENTRY @2026-09-07 09:40:00+05:30 strike=23900 price=309.0 (zone was [307.0, 310.39])
+[CE dyn] ROLL (in-position, target-tracking only) @2026-09-07 11:00:00+05:30 23900 -> 23650
+[CE dyn] MODE=fallback_fixed_R (zone_lo=307.0) TARGET1=315.18 TARGET2=318.27
+[CE dyn] LOT1 EXIT @2026-09-07 10:55:00+05:30 price=295.6 reason=eod_target1_not_reached
+[CE dyn] VARIANT A LOT2 EXIT @2026-09-07 10:55:00+05:30 price=295.6 reason=eod_target1_not_reached total_pnl=-2009.9999999999966
+[CE dyn] VARIANT B LOT2 EXIT @2026-09-07 10:55:00+05:30 price=295.6 reason=eod_target1_not_reached total_pnl=-2009.9999999999966
+[PE dyn] C1 @2026-09-07 09:15:00+05:30 strike=24000 O=269.64 H=282.5 L=269.64 C=280.1
+[PE dyn] C2 (BREAKDOWN) @2026-09-07 09:30:00+05:30 strike=24000 low=283.7 -> zone_lo=283.7
+[PE dyn] TRAP CONFIRMED @2026-09-07 09:55:00+05:30 strike=24000 close=286.0 -> zone_hi=285.0
+[PE dyn] ZONE ACTIVE [283.7, 285.0]
+[PE dyn] ROLL (flat) @2026-09-07 11:00:00+05:30 24000 -> 23850 (detector reset -- new contract, old candle refs invalid)
+[PE dyn] C1 @2026-09-07 11:00:00+05:30 strike=23850 O=212.05 H=212.05 L=212.05 C=212.05
+[PE dyn] C2 (BREAKDOWN) @2026-09-07 12:00:00+05:30 strike=23850 low=235.5 -> zone_lo=235.5
+[PE dyn] TRAP CONFIRMED @2026-09-07 12:45:00+05:30 strike=23850 close=242.6 -> zone_hi=238.2
+[PE dyn] ZONE ACTIVE [235.5, 238.2]
+[PE dyn] ZONE RE-ENTRY & ENTRY @2026-09-07 13:30:00+05:30 strike=23850 price=237.8 (zone was [235.5, 238.2])
+[PE dyn] MODE=fallback_fixed_R (zone_lo=235.5) TARGET1=242.556 TARGET2=244.93400000000003
+[PE dyn] LOT1 EXIT @2026-09-07 15:15:00+05:30 price=242.556 reason=target1_hit
+[PE dyn] VARIANT A LOT2 EXIT @2026-09-07 15:15:00+05:30 price=242.556 reason=target1_same_bar total_pnl=713.4000000000001
+[PE dyn] VARIANT B LOT2 EXIT @2026-09-07 15:15:00+05:30 price=242.556 reason=target1_same_bar total_pnl=713.4000000000001
+
+[2026-09-08] spot open=23743.1, 1 roll event(s): [('2026-09-08 13:30:00+05:30', 23550, 23750)]
+[CE dyn] C1 @2026-09-08 10:20:00+05:30 strike=23750 O=305.0 H=305.0 L=305.0 C=305.0
+[CE dyn] C2 (BREAKDOWN) @2026-09-08 11:40:00+05:30 strike=23750 low=297.45 -> zone_lo=297.45
+[CE dyn] ROLL (flat) @2026-09-08 13:30:00+05:30 23750 -> 23550 (detector reset -- new contract, old candle refs invalid)
+[PE dyn] C1 @2026-09-08 09:15:00+05:30 strike=23900 O=306.05 H=306.1 L=304.0 C=304.0
+[PE dyn] C2 (BREAKDOWN) @2026-09-08 09:35:00+05:30 strike=23900 low=303.8 -> zone_lo=303.8
+[PE dyn] TRAP CONFIRMED @2026-09-08 10:35:00+05:30 strike=23900 close=312.95 -> zone_hi=308.3
+[PE dyn] ZONE ACTIVE [303.8, 308.3]
+[PE dyn] ZONE RE-ENTRY & ENTRY @2026-09-08 11:30:00+05:30 strike=23900 price=308.0 (zone was [303.8, 308.3])
+[PE dyn] ROLL (in-position, target-tracking only) @2026-09-08 13:30:00+05:30 23900 -> 23750
+[PE dyn] MODE=fallback_fixed_R (zone_lo=303.8) TARGET1=316.4 TARGET2=320.59999999999997
+[PE dyn] LOT1 EXIT @2026-09-08 12:05:00+05:30 price=316.4 reason=target1_hit
+[PE dyn] VARIANT A LOT2 EXIT @2026-09-08 12:10:00+05:30 price=320.59999999999997 reason=target2_hit total_pnl=1574.999999999996
+[PE dyn] VARIANT B LOT2 EXIT @2026-09-08 12:10:00+05:30 price=320.59999999999997 reason=target2_hit total_pnl=1574.999999999996
+
+[2026-09-09] spot open=23522.05, 0 roll event(s): []
+[CE dyn] C1 @2026-09-09 09:15:00+05:30 strike=23600 O=314.55 H=314.55 L=288.4 C=295.15
+[CE dyn] C2 (BREAKDOWN) @2026-09-09 09:30:00+05:30 strike=23600 low=298.6 -> zone_lo=298.6
+[CE dyn] TRAP CONFIRMED @2026-09-09 09:35:00+05:30 strike=23600 close=307.75 -> zone_hi=298.75
+[CE dyn] ZONE ACTIVE [298.6, 298.75]
+[PE dyn] C1 @2026-09-09 10:10:00+05:30 strike=23750 O=340.0 H=340.0 L=334.85 C=334.85
+[PE dyn] C2 (BREAKDOWN) @2026-09-09 10:15:00+05:30 strike=23750 low=318.55 -> zone_lo=318.55
+[PE dyn] TRAP CONFIRMED @2026-09-09 12:05:00+05:30 strike=23750 close=342.85 -> zone_hi=334.85
+[PE dyn] ZONE ACTIVE [318.55, 334.85]
+[PE dyn] ZONE RE-ENTRY & ENTRY @2026-09-09 14:35:00+05:30 strike=23750 price=325.0 (zone was [318.55, 334.85])
+[PE dyn] MODE=fallback_fixed_R (zone_lo=318.55) TARGET1=337.9 TARGET2=344.34999999999997
+[PE dyn] LOT1 EXIT @2026-09-09 15:00:00+05:30 price=337.9 reason=target1_hit
+[PE dyn] VARIANT A LOT2 EXIT @2026-09-09 15:05:00+05:30 price=344.34999999999997 reason=target2_hit total_pnl=2418.749999999996
+[PE dyn] VARIANT B LOT2 EXIT @2026-09-09 15:05:00+05:30 price=344.34999999999997 reason=target2_hit total_pnl=2418.749999999996
+
+[2026-09-10] spot open=23446.6, 0 roll event(s): []
+[CE dyn] C1 @2026-09-10 09:15:00+05:30 strike=23450 O=338.0 H=347.25 L=325.7 C=347.25
+[CE dyn] C2 (BREAKDOWN) @2026-09-10 09:20:00+05:30 strike=23450 low=323.0 -> zone_lo=323.0
+[PE dyn] C1 @2026-09-10 09:15:00+05:30 strike=23550 O=262.95 H=263.0 L=262.95 C=263.0
+[PE dyn] C2 (BREAKDOWN) @2026-09-10 09:20:00+05:30 strike=23550 low=253.7 -> zone_lo=253.7
+[PE dyn] TRAP CONFIRMED @2026-09-10 09:30:00+05:30 strike=23550 close=269.4 -> zone_hi=263.0
+[PE dyn] ZONE ACTIVE [253.7, 263.0]
+[PE dyn] ZONE RE-ENTRY & ENTRY @2026-09-10 09:50:00+05:30 strike=23550 price=257.7 (zone was [253.7, 263.0])
+[PE dyn] MODE=fallback_fixed_R (zone_lo=253.7) TARGET1=265.7 TARGET2=269.7
+[PE dyn] LOT1 EXIT @2026-09-10 10:10:00+05:30 price=265.7 reason=target1_hit
+[PE dyn] VARIANT A LOT2 EXIT @2026-09-10 10:15:00+05:30 price=257.7 reason=tsl_3bar_low total_pnl=600.0
+[PE dyn] VARIANT B LOT2 EXIT @2026-09-10 14:05:00+05:30 price=269.7 reason=target2_hit total_pnl=1500.0
+
+[2026-09-11] spot open=23270.3, 1 roll event(s): [('2026-09-11 13:55:00+05:30', 23300, 23500)]
+[CE dyn] C1 @2026-09-11 09:15:00+05:30 strike=23400 O=250.0 H=250.0 L=238.15 C=249.1
+[CE dyn] C2 (BREAKDOWN) @2026-09-11 09:40:00+05:30 strike=23400 low=246.35 -> zone_lo=246.35
+[CE dyn] TRAP CONFIRMED @2026-09-11 10:00:00+05:30 strike=23400 close=254.95 -> zone_hi=253.15
+[CE dyn] ZONE ACTIVE [246.35, 253.15]
+[CE dyn] ROLL (flat) @2026-09-11 13:55:00+05:30 23400 -> 23300 (detector reset -- new contract, old candle refs invalid)
+[CE dyn] C1 @2026-09-11 13:55:00+05:30 strike=23300 O=362.55 H=376.7 L=362.55 C=376.7
+[CE dyn] C2 (BREAKDOWN) @2026-09-11 14:15:00+05:30 strike=23300 low=392.25 -> zone_lo=392.25
+[CE dyn] TRAP CONFIRMED @2026-09-11 14:20:00+05:30 strike=23300 close=400.0 -> zone_hi=395.0
+[CE dyn] ZONE ACTIVE [392.25, 395.0]
+[PE dyn] C1 @2026-09-11 09:15:00+05:30 strike=23500 O=359.95 H=366.95 L=356.25 C=356.25
+[PE dyn] C2 (BREAKDOWN) @2026-09-11 09:30:00+05:30 strike=23500 low=355.2 -> zone_lo=355.2
+[PE dyn] TRAP CONFIRMED @2026-09-11 09:40:00+05:30 strike=23500 close=363.5 -> zone_hi=362.1
+[PE dyn] ZONE ACTIVE [355.2, 362.1]
+
+[2026-09-15] spot open=23576.15, 3 roll event(s): [('2026-09-15 09:20:00+05:30', 23350, 23550), ('2026-09-15 10:25:00+05:30', 23250, 23450), ('2026-09-15 14:05:00+05:30', 23150, 23350)]
+[CE dyn] C1 @2026-09-15 09:15:00+05:30 strike=23250 O=438.8 H=438.8 L=438.8 C=438.8
+[CE dyn] ROLL (flat) @2026-09-15 09:20:00+05:30 23250 -> 23350 (detector reset -- new contract, old candle refs invalid)
+[CE dyn] C1 @2026-09-15 09:20:00+05:30 strike=23350 O=367.15 H=367.15 L=367.15 C=367.15
+[CE dyn] C2 (BREAKDOWN) @2026-09-15 09:25:00+05:30 strike=23350 low=355.85 -> zone_lo=355.85
+[CE dyn] ROLL (flat) @2026-09-15 10:25:00+05:30 23350 -> 23250 (detector reset -- new contract, old candle refs invalid)
+[CE dyn] C1 @2026-09-15 10:25:00+05:30 strike=23250 O=390.0 H=390.0 L=390.0 C=390.0
+[CE dyn] C2 (BREAKDOWN) @2026-09-15 10:30:00+05:30 strike=23250 low=381.1 -> zone_lo=381.1
+[CE dyn] ROLL (flat) @2026-09-15 14:05:00+05:30 23250 -> 23150 (detector reset -- new contract, old candle refs invalid)
+[CE dyn] C1 @2026-09-15 15:15:00+05:30 strike=23150 O=476.0 H=476.0 L=343.25 C=343.25
+[PE dyn] C1 @2026-09-15 09:15:00+05:30 strike=23450 O=206.45 H=217.0 L=204.2 C=213.8
+[PE dyn] ROLL (flat) @2026-09-15 09:20:00+05:30 23450 -> 23550 (detector reset -- new contract, old candle refs invalid)
+[PE dyn] C1 @2026-09-15 09:20:00+05:30 strike=23550 O=247.6 H=260.25 L=247.6 C=260.25
+[PE dyn] C2 (BREAKDOWN) @2026-09-15 10:05:00+05:30 strike=23550 low=310.8 -> zone_lo=310.8
+[PE dyn] TRAP CONFIRMED @2026-09-15 10:10:00+05:30 strike=23550 close=321.5 -> zone_hi=319.55
+[PE dyn] ZONE ACTIVE [310.8, 319.55]
+[PE dyn] ROLL (flat) @2026-09-15 10:25:00+05:30 23550 -> 23450 (detector reset -- new contract, old candle refs invalid)
+[PE dyn] C1 @2026-09-15 10:25:00+05:30 strike=23450 O=268.65 H=269.7 L=264.05 C=264.05
+[PE dyn] C2 (BREAKDOWN) @2026-09-15 11:00:00+05:30 strike=23450 low=286.2 -> zone_lo=286.2
+[PE dyn] TRAP CONFIRMED @2026-09-15 11:25:00+05:30 strike=23450 close=304.2 -> zone_hi=299.0
+[PE dyn] ZONE ACTIVE [286.2, 299.0]
+[PE dyn] ZONE RE-ENTRY & ENTRY @2026-09-15 11:30:00+05:30 strike=23450 price=296.3 (zone was [286.2, 299.0])
+[PE dyn] ROLL (in-position, target-tracking only) @2026-09-15 14:05:00+05:30 23450 -> 23350
+[PE dyn] MODE=fib_dynamic_peak (zone_lo=286.2) TARGET1=320.6634 TARGET2=341.96340000000004
+[PE dyn] LOT1 EXIT @2026-09-15 13:20:00+05:30 price=320.6634 reason=target1_hit
+[PE dyn] VARIANT A LOT2 EXIT @2026-09-15 14:05:00+05:30 price=330.4 reason=tsl_3bar_low total_pnl=4384.754999999998
+[PE dyn] VARIANT B LOT2 EXIT @2026-09-15 14:45:00+05:30 price=341.96340000000004 reason=target2_hit total_pnl=5252.010000000003
+
+[2026-09-16] spot open=23201.6, 0 roll event(s): []
+[CE dyn] C1 @2026-09-16 09:15:00+05:30 strike=23100 O=424.6 H=424.6 L=409.55 C=409.55
+[CE dyn] C2 (BREAKDOWN) @2026-09-16 09:20:00+05:30 strike=23100 low=407.4 -> zone_lo=407.4
+[PE dyn] C1 @2026-09-16 09:15:00+05:30 strike=23600 O=422.0 H=426.65 L=395.0 C=411.05
+[PE dyn] C2 (BREAKDOWN) @2026-09-16 10:00:00+05:30 strike=23600 low=438.05 -> zone_lo=438.05
+
+[2026-09-17] spot open=23195.25, 1 roll event(s): [('2026-09-17 10:05:00+05:30', 23200, 23400)]
+[CE dyn] C1 @2026-09-17 09:15:00+05:30 strike=23100 O=381.2 H=400.0 L=370.6 C=400.0
+[CE dyn] C2 (BREAKDOWN) @2026-09-17 09:25:00+05:30 strike=23100 low=375.9 -> zone_lo=375.9
+[CE dyn] TRAP CONFIRMED @2026-09-17 09:30:00+05:30 strike=23100 close=402.95 -> zone_hi=397.55
+[CE dyn] ZONE ACTIVE [375.9, 397.55]
+[CE dyn] ZONE RE-ENTRY & ENTRY @2026-09-17 09:40:00+05:30 strike=23100 price=377.3 (zone was [375.9, 397.55])
+[CE dyn] ROLL (in-position, target-tracking only) @2026-09-17 10:05:00+05:30 23100 -> 23200
+[CE dyn] MODE=fallback_fixed_R (zone_lo=375.9) TARGET1=384.846 TARGET2=388.619
+[CE dyn] LOT1 EXIT @2026-09-17 09:50:00+05:30 price=384.846 reason=target1_hit
+[CE dyn] VARIANT A LOT2 EXIT @2026-09-17 09:55:00+05:30 price=388.619 reason=target2_hit total_pnl=1414.8750000000007
+[CE dyn] VARIANT B LOT2 EXIT @2026-09-17 09:55:00+05:30 price=388.619 reason=target2_hit total_pnl=1414.8750000000007
+[PE dyn] C1 @2026-09-17 09:15:00+05:30 strike=23300 O=264.95 H=277.4 L=235.6 C=239.4
+[PE dyn] C2 (BREAKDOWN) @2026-09-17 09:20:00+05:30 strike=23300 low=233.9 -> zone_lo=233.9
+[PE dyn] ROLL (flat) @2026-09-17 10:05:00+05:30 23300 -> 23400 (detector reset -- new contract, old candle refs invalid)
+[PE dyn] C1 @2026-09-17 10:05:00+05:30 strike=23400 O=263.0 H=264.0 L=256.05 C=256.05
+[PE dyn] C2 (BREAKDOWN) @2026-09-17 10:10:00+05:30 strike=23400 low=247.35 -> zone_lo=247.35
+[PE dyn] TRAP CONFIRMED @2026-09-17 10:30:00+05:30 strike=23400 close=267.45 -> zone_hi=256.05
+[PE dyn] ZONE ACTIVE [247.35, 256.05]
+[PE dyn] ZONE RE-ENTRY & ENTRY @2026-09-17 11:55:00+05:30 strike=23400 price=250.0 (zone was [247.35, 256.05])
+[PE dyn] MODE=fallback_fixed_R (zone_lo=247.35) TARGET1=255.3 TARGET2=257.95000000000005
+[PE dyn] LOT1 EXIT @2026-09-17 13:25:00+05:30 price=255.3 reason=target1_hit
+[PE dyn] VARIANT A LOT2 EXIT @2026-09-17 13:30:00+05:30 price=257.95000000000005 reason=target2_hit total_pnl=993.7500000000043
+[PE dyn] VARIANT B LOT2 EXIT @2026-09-17 13:30:00+05:30 price=257.95000000000005 reason=target2_hit total_pnl=993.7500000000043
+
+[2026-09-18] spot open=23334.7, 0 roll event(s): []
+[CE dyn] C1 @2026-09-18 09:15:00+05:30 strike=23200 O=335.55 H=360.7 L=332.55 C=341.4
+[CE dyn] C2 (BREAKDOWN) @2026-09-18 09:20:00+05:30 strike=23200 low=330.05 -> zone_lo=330.05
+[PE dyn] C1 @2026-09-18 09:15:00+05:30 strike=23350 O=213.25 H=218.35 L=204.2 C=216.2
+[PE dyn] C2 (BREAKDOWN) @2026-09-18 09:35:00+05:30 strike=23350 low=221.45 -> zone_lo=221.45
+
+[2026-09-21] spot open=23330.2, 1 roll event(s): [('2026-09-21 13:25:00+05:30', 23350, 23550)]
+[CE dyn] C1 @2026-09-21 09:15:00+05:30 strike=23300 O=272.8 H=279.95 L=257.7 C=273.55
+[CE dyn] C2 (BREAKDOWN) @2026-09-21 09:35:00+05:30 strike=23300 low=273.3 -> zone_lo=273.3
+[CE dyn] TRAP CONFIRMED @2026-09-21 12:00:00+05:30 strike=23300 close=283.65 -> zone_hi=277.2
+[CE dyn] ZONE ACTIVE [273.3, 277.2]
+[CE dyn] ZONE RE-ENTRY & ENTRY @2026-09-21 13:00:00+05:30 strike=23300 price=274.85 (zone was [273.3, 277.2])
+[CE dyn] ROLL (in-position, target-tracking only) @2026-09-21 13:25:00+05:30 23300 -> 23350
+[CE dyn] MODE=fallback_fixed_R (zone_lo=273.3) TARGET1=280.34700000000004 TARGET2=283.0955
+[CE dyn] LOT1 EXIT @2026-09-21 13:15:00+05:30 price=280.34700000000004 reason=target1_hit
+[CE dyn] VARIANT A LOT2 EXIT @2026-09-21 13:20:00+05:30 price=283.0955 reason=target2_hit total_pnl=1030.6875000000005
+[CE dyn] VARIANT B LOT2 EXIT @2026-09-21 13:20:00+05:30 price=283.0955 reason=target2_hit total_pnl=1030.6875000000005
+[PE dyn] C1 @2026-09-21 09:15:00+05:30 strike=23400 O=197.9 H=210.2 L=187.0 C=193.45
+[PE dyn] C2 (BREAKDOWN) @2026-09-21 09:25:00+05:30 strike=23400 low=183.8 -> zone_lo=183.8
+[PE dyn] ROLL (flat) @2026-09-21 13:25:00+05:30 23400 -> 23550 (detector reset -- new contract, old candle refs invalid)
+[PE dyn] C1 @2026-09-21 13:25:00+05:30 strike=23550 O=240.0 H=240.0 L=236.6 C=236.6
+[PE dyn] C2 (BREAKDOWN) @2026-09-21 13:30:00+05:30 strike=23550 low=231.95 -> zone_lo=231.95
+
+[2026-09-22] spot open=23454.05, 1 roll event(s): [('2026-09-22 11:50:00+05:30', 23250, 23450)]
+[CE dyn] C1 @2026-09-22 09:15:00+05:30 strike=23300 O=308.65 H=308.65 L=283.0 C=285.0
+[CE dyn] C2 (BREAKDOWN) @2026-09-22 09:20:00+05:30 strike=23300 low=281.3 -> zone_lo=281.3
+[CE dyn] ROLL (flat) @2026-09-22 11:50:00+05:30 23300 -> 23250 (detector reset -- new contract, old candle refs invalid)
+[CE dyn] C1 @2026-09-22 11:50:00+05:30 strike=23250 O=267.4 H=267.4 L=260.05 C=260.05
+[CE dyn] C2 (BREAKDOWN) @2026-09-22 11:55:00+05:30 strike=23250 low=255.0 -> zone_lo=255.0
+[CE dyn] TRAP CONFIRMED @2026-09-22 12:05:00+05:30 strike=23250 close=270.3 -> zone_hi=260.05
+[CE dyn] ZONE ACTIVE [255.0, 260.05]
+[CE dyn] ZONE RE-ENTRY & ENTRY @2026-09-22 12:50:00+05:30 strike=23250 price=256.6 (zone was [255.0, 260.05])
+[CE dyn] MODE=fallback_fixed_R (zone_lo=255.0) TARGET1=261.732 TARGET2=264.298
+[CE dyn] LOT1 EXIT @2026-09-22 14:10:00+05:30 price=261.732 reason=target1_hit
+[CE dyn] VARIANT A LOT2 EXIT @2026-09-22 14:15:00+05:30 price=264.298 reason=target2_hit total_pnl=962.2499999999989
+[CE dyn] VARIANT B LOT2 EXIT @2026-09-22 14:15:00+05:30 price=264.298 reason=target2_hit total_pnl=962.2499999999989
+[PE dyn] C1 @2026-09-22 09:15:00+05:30 strike=23450 O=160.9 H=175.8 L=160.9 C=169.0
+[PE dyn] C2 (BREAKDOWN) @2026-09-22 09:25:00+05:30 strike=23450 low=164.6 -> zone_lo=164.6
+[PE dyn] TRAP CONFIRMED @2026-09-22 10:35:00+05:30 strike=23450 close=177.35 -> zone_hi=166.9
+[PE dyn] ZONE ACTIVE [164.6, 166.9]
+
+[2026-09-23] spot open=23352.15, 1 roll event(s): [('2026-09-23 12:10:00+05:30', 23350, 23550)]
+[CE dyn] C1 @2026-09-23 09:15:00+05:30 strike=23300 O=213.0 H=260.45 L=213.0 C=259.0
+[CE dyn] C2 (BREAKDOWN) @2026-09-23 09:25:00+05:30 strike=23300 low=237.5 -> zone_lo=237.5
+[CE dyn] TRAP CONFIRMED @2026-09-23 11:10:00+05:30 strike=23300 close=267.85 -> zone_hi=256.55
+[CE dyn] ZONE ACTIVE [237.5, 256.55]
+[CE dyn] ROLL (flat) @2026-09-23 12:10:00+05:30 23300 -> 23350 (detector reset -- new contract, old candle refs invalid)
+[CE dyn] C1 @2026-09-23 12:10:00+05:30 strike=23350 O=245.0 H=257.0 L=245.0 C=254.0
+[CE dyn] C2 (BREAKDOWN) @2026-09-23 12:20:00+05:30 strike=23350 low=248.2 -> zone_lo=248.2
+[PE dyn] C1 @2026-09-23 09:15:00+05:30 strike=23500 O=216.7 H=222.0 L=192.15 C=192.15
+[PE dyn] C2 (BREAKDOWN) @2026-09-23 09:20:00+05:30 strike=23500 low=188.15 -> zone_lo=188.15
+[PE dyn] ROLL (flat) @2026-09-23 12:10:00+05:30 23500 -> 23550 (detector reset -- new contract, old candle refs invalid)
+[PE dyn] C1 @2026-09-23 12:10:00+05:30 strike=23550 O=189.0 H=189.4 L=185.0 C=186.95
+[PE dyn] C2 (BREAKDOWN) @2026-09-23 12:20:00+05:30 strike=23550 low=185.3 -> zone_lo=185.3
+[PE dyn] TRAP CONFIRMED @2026-09-23 12:25:00+05:30 strike=23550 close=191.6 -> zone_hi=185.65
+[PE dyn] ZONE ACTIVE [185.3, 185.65]
+
+[2026-09-24] spot open=23221.8, 1 roll event(s): [('2026-09-24 13:40:00+05:30', 23000, 23200)]
+[CE dyn] C1 @2026-09-24 09:15:00+05:30 strike=23350 O=148.05 H=155.0 L=125.25 C=127.0
+[CE dyn] C2 (BREAKDOWN) @2026-09-24 09:35:00+05:30 strike=23350 low=127.3 -> zone_lo=127.3
+[CE dyn] ROLL (flat) @2026-09-24 13:40:00+05:30 23350 -> 23000 (detector reset -- new contract, old candle refs invalid)
+[CE dyn] C1 @2026-09-24 13:40:00+05:30 strike=23000 O=289.65 H=291.15 L=274.55 C=276.3
+[CE dyn] C2 (BREAKDOWN) @2026-09-24 13:45:00+05:30 strike=23000 low=265.1 -> zone_lo=265.1
+[PE dyn] C1 @2026-09-24 09:15:00+05:30 strike=23450 O=195.0 H=265.95 L=190.0 C=265.6
+[PE dyn] C2 (BREAKDOWN) @2026-09-24 09:30:00+05:30 strike=23450 low=248.75 -> zone_lo=248.75
+[PE dyn] TRAP CONFIRMED @2026-09-24 09:35:00+05:30 strike=23450 close=265.7 -> zone_hi=254.1
+[PE dyn] ZONE ACTIVE [248.75, 254.1]
+[PE dyn] ROLL (flat) @2026-09-24 13:40:00+05:30 23450 -> 23200 (detector reset -- new contract, old candle refs invalid)
+[PE dyn] C1 @2026-09-24 13:40:00+05:30 strike=23200 O=195.5 H=225.15 L=195.1 C=224.25
+[PE dyn] C2 (BREAKDOWN) @2026-09-24 14:00:00+05:30 strike=23200 low=239.9 -> zone_lo=239.9
+
+[2026-09-25] spot open=23035.0, 1 roll event(s): [('2026-09-25 14:00:00+05:30', 23050, 23250)]
+[CE dyn] C1 @2026-09-25 09:15:00+05:30 strike=23050 O=232.95 H=252.2 L=227.0 C=233.35
+[CE dyn] C2 (BREAKDOWN) @2026-09-25 09:35:00+05:30 strike=23050 low=221.35 -> zone_lo=221.35
+[CE dyn] TRAP CONFIRMED @2026-09-25 14:00:00+05:30 strike=23050 close=286.15 -> zone_hi=241.9
+[CE dyn] ZONE ACTIVE [221.35, 241.9]
+[PE dyn] C1 @2026-09-25 09:15:00+05:30 strike=23300 O=319.85 H=319.9 L=251.6 C=267.0
+[PE dyn] C2 (BREAKDOWN) @2026-09-25 09:25:00+05:30 strike=23300 low=248.0 -> zone_lo=248.0
+[PE dyn] TRAP CONFIRMED @2026-09-25 09:35:00+05:30 strike=23300 close=281.45 -> zone_hi=260.2
+[PE dyn] ZONE ACTIVE [248.0, 260.2]
+[PE dyn] ROLL (flat) @2026-09-25 14:00:00+05:30 23300 -> 23250 (detector reset -- new contract, old candle refs invalid)
+[PE dyn] C1 @2026-09-25 14:00:00+05:30 strike=23250 O=241.6 H=241.6 L=174.05 C=179.8
+[PE dyn] C2 (BREAKDOWN) @2026-09-25 14:15:00+05:30 strike=23250 low=194.5 -> zone_lo=194.5
+
 [2026-09-28] spot open=23064.9, 2 roll event(s): [('2026-09-28 09:15:00+05:30', 22850, 23050), ('2026-09-28 10:20:00+05:30', 22750, 22950)]
 [CE dyn] ROLL (flat) @2026-09-28 09:15:00+05:30 23000 -> 22850 (detector reset -- new contract, old candle refs invalid)
 [CE dyn] C1 @2026-09-28 09:15:00+05:30 strike=22850 O=297.3 H=297.3 L=255.05 C=255.25
@@ -153,10 +930,10 @@ SECTION 2 (EXPERIMENTAL): simultaneous CE+PE, dynamic 100-pt ITM strike rolling,
 [PE dyn] TRAP CONFIRMED @2026-09-28 10:35:00+05:30 strike=22950 close=216.1 -> zone_hi=210.4
 [PE dyn] ZONE ACTIVE [207.25, 210.4]
 [PE dyn] ZONE RE-ENTRY & ENTRY @2026-09-28 11:35:00+05:30 strike=22950 price=209.95 (zone was [207.25, 210.4])
-[PE dyn] MODE=fallback_fixed_R (zone_lo=207.25) TARGET1=213.99999999999997 TARGET2=215.34999999999997
-[PE dyn] LOT1 EXIT @2026-09-28 11:50:00+05:30 price=213.99999999999997 reason=target1_hit
-[PE dyn] VARIANT A LOT2 EXIT @2026-09-28 11:55:00+05:30 price=215.34999999999997 reason=target2_hit total_pnl=708.749999999997
-[PE dyn] VARIANT B LOT2 EXIT @2026-09-28 11:55:00+05:30 price=215.34999999999997 reason=target2_hit total_pnl=708.749999999997
+[PE dyn] MODE=fallback_fixed_R (zone_lo=207.25) TARGET1=215.34999999999997 TARGET2=218.04999999999995
+[PE dyn] LOT1 EXIT @2026-09-28 11:50:00+05:30 price=215.34999999999997 reason=target1_hit
+[PE dyn] VARIANT A LOT2 EXIT @2026-09-28 11:55:00+05:30 price=218.04999999999995 reason=target2_hit total_pnl=1012.4999999999958
+[PE dyn] VARIANT B LOT2 EXIT @2026-09-28 11:55:00+05:30 price=218.04999999999995 reason=target2_hit total_pnl=1012.4999999999958
 
 [2026-09-29] spot open=22732.45, 2 roll event(s): [('2026-09-29 09:25:00+05:30', 22550, 22750), ('2026-09-29 11:55:00+05:30', 22650, 22850)]
 [CE dyn] C1 @2026-09-29 09:15:00+05:30 strike=22750 O=235.15 H=235.15 L=177.0 C=177.6
@@ -189,10 +966,10 @@ SECTION 2 (EXPERIMENTAL): simultaneous CE+PE, dynamic 100-pt ITM strike rolling,
 [CE dyn] ZONE RE-ENTRY & ENTRY @2026-09-30 10:35:00+05:30 strike=22550 price=279.55 (zone was [274.2, 295.6])
 [CE dyn] ROLL (in-position, target-tracking only) @2026-09-30 12:30:00+05:30 22550 -> 22650
 [CE dyn] ROLL (in-position, target-tracking only) @2026-09-30 14:20:00+05:30 22650 -> 22550
-[CE dyn] MODE=fib_dynamic_peak (zone_lo=274.2) TARGET1=289.464 TARGET2=293.616
-[CE dyn] LOT1 EXIT @2026-09-30 12:00:00+05:30 price=289.464 reason=target1_hit
-[CE dyn] VARIANT A LOT2 EXIT @2026-09-30 12:05:00+05:30 price=279.55 reason=tsl_breakeven total_pnl=743.549999999999
-[CE dyn] VARIANT B LOT2 EXIT @2026-09-30 12:20:00+05:30 price=293.616 reason=target2_hit total_pnl=1798.499999999997
+[CE dyn] MODE=fib_dynamic_peak (zone_lo=274.2) TARGET1=304.2139 TARGET2=322.76390000000004
+[CE dyn] LOT1 EXIT @2026-09-30 12:20:00+05:30 price=304.2139 reason=target1_hit
+[CE dyn] VARIANT A LOT2 EXIT @2026-09-30 12:30:00+05:30 price=258.75 reason=tsl_3bar_low total_pnl=289.7925
+[CE dyn] VARIANT B LOT2 EXIT @2026-09-30 15:15:00+05:30 price=192.6 reason=eod total_pnl=-4671.4575
 [PE dyn] C1 @2026-09-30 09:15:00+05:30 strike=22750 O=154.95 H=171.0 L=140.35 C=143.4
 [PE dyn] C2 (BREAKDOWN) @2026-09-30 09:20:00+05:30 strike=22750 low=131.15 -> zone_lo=131.15
 [PE dyn] ROLL (flat) @2026-09-30 12:30:00+05:30 22750 -> 22850 (detector reset -- new contract, old candle refs invalid)
@@ -214,10 +991,10 @@ SECTION 2 (EXPERIMENTAL): simultaneous CE+PE, dynamic 100-pt ITM strike rolling,
 [CE dyn] ROLL (in-position, target-tracking only) @2026-10-01 12:55:00+05:30 22350 -> 22200
 [CE dyn] ROLL (in-position, target-tracking only) @2026-10-01 14:00:00+05:30 22200 -> 22100
 [CE dyn] ROLL (in-position, target-tracking only) @2026-10-01 14:30:00+05:30 22100 -> 22250
-[CE dyn] MODE=fallback_fixed_R (zone_lo=113.25) TARGET1=114.9995 TARGET2=115.566
-[CE dyn] LOT1 EXIT @2026-10-01 11:30:00+05:30 price=114.9995 reason=target1_hit
-[CE dyn] VARIANT A LOT2 EXIT @2026-10-01 11:35:00+05:30 price=113.3 reason=tsl_breakeven total_pnl=127.46250000000003
-[CE dyn] VARIANT B LOT2 EXIT @2026-10-01 11:35:00+05:30 price=115.566 reason=target2_hit total_pnl=297.4125000000004
+[CE dyn] MODE=fallback_fixed_R (zone_lo=113.25) TARGET1=115.566 TARGET2=116.699
+[CE dyn] LOT1 EXIT @2026-10-01 11:30:00+05:30 price=115.566 reason=target1_hit
+[CE dyn] VARIANT A LOT2 EXIT @2026-10-01 11:35:00+05:30 price=116.699 reason=target2_hit total_pnl=424.87500000000045
+[CE dyn] VARIANT B LOT2 EXIT @2026-10-01 11:35:00+05:30 price=116.699 reason=target2_hit total_pnl=424.87500000000045
 [PE dyn] C1 @2026-10-01 09:15:00+05:30 strike=22800 O=298.5 H=300.0 L=242.75 C=262.6
 [PE dyn] C2 (BREAKDOWN) @2026-10-01 09:30:00+05:30 strike=22800 low=245.65 -> zone_lo=245.65
 [PE dyn] TRAP CONFIRMED @2026-10-01 12:15:00+05:30 strike=22800 close=314.7 -> zone_hi=272.0
@@ -240,10 +1017,20 @@ SECTION 2 (EXPERIMENTAL): simultaneous CE+PE, dynamic 100-pt ITM strike rolling,
 === Dynamic/Fib Summary ===
 Side EntryStrike Entry    EntryTime              Mode              Target1   Target2   VarA Exit  VarA Reason          VarA PnL   VarB Exit  VarB Reason          VarB PnL  
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-PE   22950       209.95   2026-09-28 11:35:00+05:30 fallback_fixed_R  213.99999999999997 215.34999999999997 215.34999999999997 target2_hit          708.75     215.34999999999997 target2_hit          708.75    
-CE   22550       279.55   2026-09-30 10:35:00+05:30 fib_dynamic_peak  289.464   293.616   279.55     tsl_breakeven        743.55     293.616    target2_hit          1798.50   
-CE   22600       113.3    2026-10-01 11:25:00+05:30 fallback_fixed_R  114.9995  115.566   113.3      tsl_breakeven        127.46     115.566    target2_hit          297.41    
+CE   23900       309.0    2026-09-07 09:40:00+05:30 fallback_fixed_R  315.18    318.27    295.6      eod_target1_not_reached -2010.00   295.6      eod_target1_not_reached -2010.00  
+PE   23850       237.8    2026-09-07 13:30:00+05:30 fallback_fixed_R  242.556   244.93400000000003 242.556    target1_same_bar     713.40     242.556    target1_same_bar     713.40    
+PE   23900       308.0    2026-09-08 11:30:00+05:30 fallback_fixed_R  316.4     320.59999999999997 320.59999999999997 target2_hit          1575.00    320.59999999999997 target2_hit          1575.00   
+PE   23750       325.0    2026-09-09 14:35:00+05:30 fallback_fixed_R  337.9     344.34999999999997 344.34999999999997 target2_hit          2418.75    344.34999999999997 target2_hit          2418.75   
+PE   23550       257.7    2026-09-10 09:50:00+05:30 fallback_fixed_R  265.7     269.7     257.7      tsl_3bar_low         600.00     269.7      target2_hit          1500.00   
+PE   23450       296.3    2026-09-15 11:30:00+05:30 fib_dynamic_peak  320.6634  341.96340000000004 330.4      tsl_3bar_low         4384.75    341.96340000000004 target2_hit          5252.01   
+CE   23100       377.3    2026-09-17 09:40:00+05:30 fallback_fixed_R  384.846   388.619   388.619    target2_hit          1414.88    388.619    target2_hit          1414.88   
+PE   23400       250.0    2026-09-17 11:55:00+05:30 fallback_fixed_R  255.3     257.95000000000005 257.95000000000005 target2_hit          993.75     257.95000000000005 target2_hit          993.75    
+CE   23300       274.85   2026-09-21 13:00:00+05:30 fallback_fixed_R  280.34700000000004 283.0955  283.0955   target2_hit          1030.69    283.0955   target2_hit          1030.69   
+CE   23250       256.6    2026-09-22 12:50:00+05:30 fallback_fixed_R  261.732   264.298   264.298    target2_hit          962.25     264.298    target2_hit          962.25    
+PE   22950       209.95   2026-09-28 11:35:00+05:30 fallback_fixed_R  215.34999999999997 218.04999999999995 218.04999999999995 target2_hit          1012.50    218.04999999999995 target2_hit          1012.50   
+CE   22550       279.55   2026-09-30 10:35:00+05:30 fib_dynamic_peak  304.2139  322.76390000000004 258.75     tsl_3bar_low         289.79     192.6      eod                  -4671.46  
+CE   22600       113.3    2026-10-01 11:25:00+05:30 fallback_fixed_R  115.566   116.699   116.699    target2_hit          424.88     116.699    target2_hit          424.88    
 
-=== Dynamic/Fib Combined: 3 trade(s) -- Variant A total P&L: 1579.76  |  Variant B total P&L: 2804.66 ===
+=== Dynamic/Fib Combined: 13 trade(s) -- Variant A total P&L: 13810.63  |  Variant B total P&L: 10616.64 ===
 
 Full candle-by-candle audit trail written to data/bear_trap_oi_audit_trail.txt
