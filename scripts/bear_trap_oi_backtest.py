@@ -1012,6 +1012,7 @@ async def main() -> None:
 
     oi_depth = 5
     oi_surviving: list[BacktestTrade] = []
+    oi_context_by_trade: dict[int, dict] = {}  # id(trade) -> reusable OI/ATM context for Section 1c
     for trade in all_trades:
         day = trade.entry_ts.date()
         spot_rows = await fetch_upstox_range_1m(index_key, access_token, day, day)
@@ -1066,12 +1067,122 @@ async def main() -> None:
         if result["passed"]:
             oi_surviving.append(trade)
 
+        oi_context_by_trade[id(trade)] = {
+            "atm": atm, "band_strikes": band_strikes, "oi_now": oi_now,
+            "oi_base": oi_base, "expiry": expiry, "day": day,
+            "oi_filter_result": result,
+        }
+
     oi_metrics = compute_performance_metrics([t.pnl for t in oi_surviving])
     print(f"\n=== OI-Gated Section 1: {len(oi_surviving)}/{len(all_trades)} "
           f"trade(s) survived the OI filter ===")
     print(f"  Win/Loss: {oi_metrics.get('win_count', 0)}W/{oi_metrics.get('loss_count', 0)}L")
     print(f"  Total P&L: {oi_metrics.get('total_pnl', 0.0):.2f} "
           f"(unfiltered Section 1 was {sum(t.pnl for t in all_trades):.2f})")
+
+    print("\n" + "=" * 78)
+    print("SECTION 1c: Stage 3 institutional OI + Volume Profile confirmation "
+          "matrix on top of Section 1b's survivors. KNOWN GAP: the rollover "
+          "guard (spec guidelines 8-11) is NOT evaluated -- InstrumentRegistry "
+          "only resolves the NEAR-month futures contract, with no next-month "
+          "key resolution available, so a real current-vs-next-month OI "
+          "comparison cannot be built without new registry work. Every other "
+          "filter (noise, hard wall, directional matrix, price acceptance) "
+          "runs for real.")
+    print("=" * 78)
+
+    futures_key = REGISTRY.get_futures_upstox("NIFTY")
+    matrix_surviving: list[BacktestTrade] = []
+    for trade in all_trades:
+        ctx = oi_context_by_trade.get(id(trade))
+        if ctx is None or not ctx["oi_filter_result"]["passed"]:
+            continue  # Section 1c only refines Section 1b's own survivors
+
+        day, atm, oi_now, oi_base = ctx["day"], ctx["atm"], ctx["oi_now"], ctx["oi_base"]
+
+        # Noise + hard-wall: peak absolute OI across the fetched band
+        # (rolling-since-09:15 proxy -- the max of whatever this trade's
+        # entry-instant band fetch already pulled).
+        all_abs_oi_now = list(oi_now["CE"].values()) + list(oi_now["PE"].values())
+        peak_oi = max(all_abs_oi_now) if all_abs_oi_now else 0
+        wall_strike = max({**oi_now["CE"], **oi_now["PE"]},
+                           key=lambda s: oi_now["CE"].get(s, 0) + oi_now["PE"].get(s, 0),
+                           default=atm)
+        own_strike_abs_oi = oi_now[trade.side].get(trade.strike, 0)
+        significant = is_strike_oi_significant(own_strike_abs_oi, peak_oi, min_pct=0.15)
+
+        wall_oi_base = oi_base["CE"].get(wall_strike, 0) + oi_base["PE"].get(wall_strike, 0)
+        wall_oi_now = oi_now["CE"].get(wall_strike, 0) + oi_now["PE"].get(wall_strike, 0)
+        wall_change_pct = (abs(wall_oi_now - wall_oi_base) / wall_oi_base) if wall_oi_base else 0.0
+        blocked_by_wall = check_hard_wall(float(trade.strike), float(wall_strike),
+                                           distance_pts=50, oi_change_pct=wall_change_pct,
+                                           override_pct=0.30)
+
+        # Directional matrix: needs a Futures OI trend too.
+        fut_rows = await fetch_upstox_range_1m(futures_key, access_token, day, day) if futures_key else []
+        await asyncio.sleep(0.35)
+        fut_trend = "FLAT"
+        if fut_rows:
+            fut_base = fut_rows[0].get("oi", 0)
+            fut_match = fut_rows[0]
+            for r in fut_rows:
+                if datetime.fromisoformat(r["ts"]) <= trade.entry_ts:
+                    fut_match = r
+                else:
+                    break
+            fut_trend = compute_oi_trend(fut_match.get("oi", 0), fut_base)
+
+        put_now = sum_oi_band(oi_now["PE"], atm, args.strike_step, "PE", oi_depth)
+        put_base = sum_oi_band(oi_base["PE"], atm, args.strike_step, "PE", oi_depth)
+        call_now = sum_oi_band(oi_now["CE"], atm, args.strike_step, "CE", oi_depth)
+        call_base = sum_oi_band(oi_base["CE"], atm, args.strike_step, "CE", oi_depth)
+        put_trend = compute_oi_trend(put_now, put_base)
+        call_trend = compute_oi_trend(call_now, call_base)
+        matrix_ok = check_directional_matrix(fut_trend, put_trend, call_trend, trade.side)
+
+        # Structural price acceptance: Volume Profile on NIFTY futures
+        # price, built from the day's bars UP TO the entry bar.
+        fut_bars_5m = _truncate_to_eod(_resample_1m_to_5m(_candle_dicts_to_bars(fut_rows))) if fut_rows else []
+        fut_bars_vol = [VolBar(ts=b.ts, open=b.open, high=b.high, low=b.low,
+                                close=b.close, volume=0) for b in fut_bars_5m]
+        # volume comes from the raw 1-min rows, not the resampled Bar (which
+        # drops it) -- approximate per-5m-bucket volume by summing the
+        # underlying 1-min rows in that window.
+        vol_by_5m_ts = {}
+        for r in fut_rows:
+            ts1 = datetime.fromisoformat(r["ts"])
+            bucket = ts1.replace(minute=(ts1.minute // 5) * 5, second=0, microsecond=0)
+            vol_by_5m_ts[bucket] = vol_by_5m_ts.get(bucket, 0) + r.get("volume", 0)
+        fut_bars_vol = [VolBar(ts=b.ts, open=b.open, high=b.high, low=b.low,
+                                close=b.close, volume=vol_by_5m_ts.get(b.ts, 0))
+                        for b in fut_bars_5m]
+        entry_idx_fut = next((i for i, b in enumerate(fut_bars_vol) if b.ts == trade.entry_ts), None)
+        price_accepted = False
+        if entry_idx_fut is not None and entry_idx_fut > 0:
+            profile = compute_volume_profile(fut_bars_vol[:entry_idx_fut])
+            entry_bar = fut_bars_vol[entry_idx_fut]
+            direction = "bullish" if trade.side == "CE" else "bearish"
+            if profile["poc"] is not None:
+                price_accepted = check_price_acceptance(
+                    close=entry_bar.close, val=profile["val"], vah=profile["vah"],
+                    lvns=profile["lvns"], bar_low=entry_bar.low, bar_high=entry_bar.high,
+                    direction=direction,
+                )
+
+        passed_matrix = significant and not blocked_by_wall and matrix_ok and price_accepted
+        verdict = "PASS" if passed_matrix else "REJECT"
+        print(f"[{trade.entry_ts}] {trade.side} {trade.strike}: {verdict} -- "
+              f"significant_oi={significant} blocked_by_wall={blocked_by_wall} "
+              f"(wall={wall_strike}) fut={fut_trend} put={put_trend} call={call_trend} "
+              f"matrix_ok={matrix_ok} price_accepted={price_accepted} -- pnl={trade.pnl:.2f}")
+        if passed_matrix:
+            matrix_surviving.append(trade)
+
+    matrix_metrics = compute_performance_metrics([t.pnl for t in matrix_surviving])
+    print(f"\n=== Institutional Matrix: {len(matrix_surviving)}/{len(oi_surviving)} "
+          f"of Section 1b's survivors also pass Section 1c ===")
+    print(f"  Win/Loss: {matrix_metrics.get('win_count', 0)}W/{matrix_metrics.get('loss_count', 0)}L")
+    print(f"  Total P&L: {matrix_metrics.get('total_pnl', 0.0):.2f}")
 
     print("\n" + "=" * 78)
     print("SECTION 2 (EXPERIMENTAL): simultaneous CE+PE, dynamic 100-pt ITM "
