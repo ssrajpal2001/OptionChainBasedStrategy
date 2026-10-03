@@ -157,7 +157,7 @@ def compute_daily_strikes(daily_candles: list[dict],
 
     Returns [(trading_day, ce_strike, pe_strike), ...] for every day from
     index 1 onward (index 0 has no preceding day and is not tradeable)."""
-    from strategies.bear_trap_oi.strike_selector import map_strikes
+    from strategies.bear_trap_oi.strike_selector import map_strikes, round_to_strike_step
 
     if len(daily_candles) < 2:
         return []
@@ -849,6 +849,77 @@ async def main() -> None:
     print(f"\n=== Combined: {len(all_trades)} trade(s), "
           f"Total P&L: {sum(t.pnl for t in all_trades):.2f} ===")
     _print_mfe_mae_table(all_trades)
+
+    print("\n" + "=" * 78)
+    print("SECTION 1b: Section 1 signals re-evaluated with the real "
+          "multi-strike OI confirmation filter (spec Section 5) -- "
+          "2026-10-03 correction: Upstox DOES carry real OI on historical "
+          "option candles for this contract, disproving the earlier "
+          "un-backtestable assumption.")
+    print("=" * 78)
+
+    oi_depth = 5
+    oi_surviving: list[BacktestTrade] = []
+    for trade in all_trades:
+        day = trade.entry_ts.date()
+        spot_rows = await fetch_upstox_range_1m(index_key, access_token, day, day)
+        spot_bars_oi = _truncate_to_eod(_resample_1m_to_5m(_candle_dicts_to_bars(spot_rows)))
+        spot_by_ts = {b.ts: b for b in spot_bars_oi}
+        entry_spot_bar = spot_by_ts.get(trade.entry_ts)
+        if entry_spot_bar is None or not spot_bars_oi:
+            print(f"[{trade.entry_ts}] {trade.side} {trade.strike}: SKIP OI check "
+                  f"-- no spot bar at entry timestamp")
+            continue
+        atm = round_to_strike_step(entry_spot_bar.close, args.strike_step)
+        band_strikes = ([atm - i * args.strike_step for i in range(oi_depth)]
+                         if trade.side == "CE" else
+                         [atm + i * args.strike_step for i in range(oi_depth)])
+
+        expiry = REGISTRY.get_active_expiry_strict("NIFTY", from_date=day)
+        oi_now = {"CE": {}, "PE": {}}
+        oi_base = {"CE": {}, "PE": {}}
+        for strike in band_strikes:
+            for opt in ("CE", "PE"):
+                key = REGISTRY.get_upstox_key("NIFTY", expiry, strike, opt)
+                if not key:
+                    continue
+                rows = await fetch_upstox_range_1m(key, access_token, day, day)
+                await asyncio.sleep(0.35)  # pacing, same budget as the roll-strike fetches
+                if not rows:
+                    continue
+                oi_base[opt][strike] = rows[0].get("oi", 0)
+                # rows are ascending by ts (fetch_upstox_range_1m's own
+                # contract) -- walk forward and keep the LAST row at or
+                # before entry_ts (the closest real reading without
+                # looking into the future).
+                match = rows[0]
+                for r in rows:
+                    if datetime.fromisoformat(r["ts"]) <= trade.entry_ts:
+                        match = r
+                    else:
+                        break
+                oi_now[opt][strike] = match.get("oi", 0)
+
+        target_opt = trade.side
+        opposing_opt = "PE" if trade.side == "CE" else "CE"
+        target_now = sum_oi_band(oi_now[target_opt], atm, args.strike_step, trade.side, oi_depth)
+        target_base = sum_oi_band(oi_base[target_opt], atm, args.strike_step, trade.side, oi_depth)
+        opposing_now = sum_oi_band(oi_now[opposing_opt], atm, args.strike_step, trade.side, oi_depth)
+        opposing_base = sum_oi_band(oi_base[opposing_opt], atm, args.strike_step, trade.side, oi_depth)
+        result = check_oi_filter(target_now, target_base, opposing_now, opposing_base)
+
+        verdict = "PASS" if result["passed"] else "REJECT"
+        print(f"[{trade.entry_ts}] {trade.side} {trade.strike} (atm={atm}): "
+              f"{verdict} -- {result['detail']} -- pnl={trade.pnl:.2f}")
+        if result["passed"]:
+            oi_surviving.append(trade)
+
+    oi_metrics = compute_performance_metrics([t.pnl for t in oi_surviving])
+    print(f"\n=== OI-Gated Section 1: {len(oi_surviving)}/{len(all_trades)} "
+          f"trade(s) survived the OI filter ===")
+    print(f"  Win/Loss: {oi_metrics.get('win_count', 0)}W/{oi_metrics.get('loss_count', 0)}L")
+    print(f"  Total P&L: {oi_metrics.get('total_pnl', 0.0):.2f} "
+          f"(unfiltered Section 1 was {sum(t.pnl for t in all_trades):.2f})")
 
     print("\n" + "=" * 78)
     print("SECTION 2 (EXPERIMENTAL): simultaneous CE+PE, dynamic 100-pt ITM "
