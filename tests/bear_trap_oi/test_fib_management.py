@@ -2,7 +2,8 @@ from datetime import datetime, timedelta, timezone
 from strategies.bear_trap_oi.models import Bar
 from scripts.bear_trap_oi_backtest import (
     fib_extension_levels, compute_itm_strike, compute_roll_schedule,
-    manage_fib_trade, run_dynamic_side_backtest,
+    manage_fib_trade, run_dynamic_side_backtest, compute_running_excursions,
+    format_trade_audit,
 )
 
 
@@ -99,6 +100,43 @@ def test_run_dynamic_side_backtest_blocks_new_entries_after_1445():
     assert trade is None  # armed correctly, but re-entry fired after the 14:45 cutoff -> blocked
 
 
+def test_compute_running_excursions_tracks_mfe_mae_per_bar():
+    entry_price = 100.0
+    bars = [
+        _bar(0, 100, 105, 98, 102),   # running MFE=105, MAE=98
+        _bar(5, 102, 103, 90, 95),    # MFE stays 105, MAE drops to 90
+        _bar(10, 95, 120, 94, 110),   # MFE jumps to 120, MAE stays 90
+    ]
+    rows = compute_running_excursions(bars, entry_price)
+    assert len(rows) == 3
+    assert rows[0]["mfe"] == 105.0 and rows[0]["mae"] == 98.0
+    assert rows[1]["mfe"] == 105.0 and rows[1]["mae"] == 90.0
+    assert rows[2]["mfe"] == 120.0 and rows[2]["mae"] == 90.0
+    assert rows[2]["open"] == 95 and rows[2]["close"] == 110
+
+
+def test_format_trade_audit_includes_entry_candle_table_and_fib_block():
+    entry_price, zone_lo = 100.0, 90.0
+    bars = [
+        _bar(0, 100, 103, 99, 102),
+        _bar(5, 102, 108, 101, 106),
+        _bar(10, 106, 115, 95, 110),
+        _bar(315, 110, 112, 108, 111),
+    ]
+    result = manage_fib_trade(bars, entry_price=entry_price, zone_lo=zone_lo,
+                               lot_qty_each=75)
+    trade = {"side": "CE", "entry_strike": 24500, "entry_price": entry_price,
+              "entry_ts": _bar(-5, 0, 0, 0, 0).ts, **result}
+    text = format_trade_audit(trade, bars)
+    assert "CE" in text and "24500" in text
+    assert "MFE" in text and "MAE" in text
+    assert "Target1" in text or "target1" in text.lower()
+    assert "Variant A" in text and "Variant B" in text
+    # every bar's own OHLC values must appear somewhere in the rendered table
+    for b in bars:
+        assert str(b.high) in text
+
+
 def test_run_dynamic_side_backtest_allows_entry_before_1445_cutoff():
     t0 = datetime(2026, 10, 1, 9, 15, tzinfo=timezone.utc)
     t1 = datetime(2026, 10, 1, 9, 20, tzinfo=timezone.utc)
@@ -116,3 +154,4 @@ def test_run_dynamic_side_backtest_allows_entry_before_1445_cutoff():
                                        side="CE", lot_qty_each=75)
     assert trade is not None
     assert trade["entry_price"] == 97.0
+    assert trade["post_entry_bars"] == []  # entry was on the last bar in master_ts

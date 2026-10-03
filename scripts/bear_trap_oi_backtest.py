@@ -463,6 +463,58 @@ def manage_fib_trade(bars_after_entry: list[Bar], entry_price: float,
     }
 
 
+def compute_running_excursions(bars_after_entry: list[Bar],
+                                entry_price: float) -> list[dict]:
+    """Per-bar OHLC plus the RUNNING MFE (max high seen so far, including
+    this bar) / MAE (min low seen so far, including this bar) since entry
+    -- for a candle-by-candle manual chart audit, not a single final
+    number."""
+    rows: list[dict] = []
+    mfe = mae = entry_price
+    for b in bars_after_entry:
+        mfe = max(mfe, b.high)
+        mae = min(mae, b.low)
+        rows.append({"ts": b.ts, "open": b.open, "high": b.high, "low": b.low,
+                     "close": b.close, "mfe": mfe, "mae": mae})
+    return rows
+
+
+def format_trade_audit(trade: dict, bars_after_entry: list[Bar]) -> str:
+    """Full candle-by-candle audit for ONE dynamic/Fib trade: trade
+    identification, a per-bar OHLC+running-MFE/MAE table, and the
+    Fibonacci/target validation block for both variants -- the complete
+    trail needed to manually re-check this trade against a real chart."""
+    lines: list[str] = []
+    lines.append(f"TRADE: {trade['side']} strike={trade['entry_strike']} "
+                 f"entry_ts={trade['entry_ts']} entry_price={trade['entry_price']}")
+    lines.append("")
+    lines.append("Candle-by-candle (post-entry, running MFE/MAE):")
+    header = f"{'Timestamp':<26} {'Open':<10} {'High':<10} {'Low':<10} {'Close':<10} {'MFE':<10} {'MAE':<10}"
+    lines.append(header)
+    lines.append("-" * len(header))
+    for row in compute_running_excursions(bars_after_entry, trade["entry_price"]):
+        lines.append(f"{str(row['ts']):<26} {row['open']:<10} {row['high']:<10} "
+                     f"{row['low']:<10} {row['close']:<10} {row['mfe']:<10} {row['mae']:<10}")
+    lines.append("")
+    lines.append("Fibonacci / Target validation:")
+    lines.append(f"  zone_lo (swing base, 0%)      = {trade.get('entry_zone_lo')}")
+    lines.append(f"  mode                           = {trade['mode']}")
+    lines.append(f"  Target1 (1.272 / fallback R1)  = {trade['target1']}")
+    lines.append(f"  Target2 (1.618 / fallback R2)  = {trade['target2']}")
+    lines.append(f"  Lot1 exit: @{trade['lot1_exit_ts']} price={trade['lot1_exit_price']} "
+                 f"reason={trade['lot1_exit_reason']} pnl={trade['lot1_pnl']:.2f}")
+    va, vb = trade["variant_a"], trade["variant_b"]
+    lines.append(f"  Variant A (TSL->breakeven after Lot1): "
+                 f"@{va['lot2_exit_ts']} price={va['lot2_exit_price']} "
+                 f"reason={va['lot2_exit_reason']} lot2_pnl={va['lot2_pnl']:.2f} "
+                 f"total_pnl={va['total_pnl']:.2f}")
+    lines.append(f"  Variant B (no TSL, runs to Target2/EOD): "
+                 f"@{vb['lot2_exit_ts']} price={vb['lot2_exit_price']} "
+                 f"reason={vb['lot2_exit_reason']} lot2_pnl={vb['lot2_pnl']:.2f} "
+                 f"total_pnl={vb['total_pnl']:.2f}")
+    return "\n".join(lines)
+
+
 # Direct user fix (2026-10-03): block any new entry this late, since a
 # post-entry swing has only ~30 min left before 15:15 EOD to develop into
 # anything meaningful -- the exact failure mode a 15:05 entry exposed.
@@ -559,6 +611,8 @@ def run_dynamic_side_backtest(bars_by_strike: dict[int, dict[datetime, Bar]],
             post_entry_bars.append(bar)
 
     result = manage_fib_trade(post_entry_bars, entry_price, entry_zone_lo, lot_qty_each)
+    result["post_entry_bars"] = post_entry_bars
+    result["entry_zone_lo"] = entry_zone_lo
     log(f"MODE={result['mode']} (zone_lo={entry_zone_lo}) "
         f"TARGET1={result['target1']} TARGET2={result['target2']}")
     log(f"LOT1 EXIT @{result['lot1_exit_ts']} price={result['lot1_exit_price']} "
@@ -745,6 +799,17 @@ async def main() -> None:
     print(f"\n=== Dynamic/Fib Combined: {len(all_dynamic_trades)} trade(s) -- "
           f"Variant A total P&L: {total_a:.2f}  |  "
           f"Variant B total P&L: {total_b:.2f} ===")
+
+    audit_path = "data/bear_trap_oi_audit_trail.txt"
+    with open(audit_path, "w", encoding="utf-8") as f:
+        f.write(f"Bear Trap OI -- Complete Trade & Bar Audit Report\n")
+        f.write(f"{len(all_dynamic_trades)} triggered trade(s) across all "
+                f"tested historical days\n")
+        f.write("=" * 78 + "\n\n")
+        for t in sorted(all_dynamic_trades, key=lambda t: t["entry_ts"]):
+            f.write(format_trade_audit(t, t["post_entry_bars"]))
+            f.write("\n\n" + "=" * 78 + "\n\n")
+    print(f"\nFull candle-by-candle audit trail written to {audit_path}")
 
 
 if __name__ == "__main__":
