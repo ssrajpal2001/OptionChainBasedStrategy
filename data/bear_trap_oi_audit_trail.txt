@@ -191,11 +191,11 @@ Timestamp                  Open       High       Low        Close      MFE      
 Fibonacci / Target validation:
   zone_lo (swing base, 0%)      = 113.25
   mode                           = fallback_fixed_R
-  Target1 (1.272 / fallback R1)  = 113.375
-  Target2 (1.618 / fallback R2)  = 113.39999999999999
-  Lot1 exit: @2026-10-01 11:30:00+05:30 price=113.375 reason=target1_hit pnl=5.63
-  Variant A (TSL->breakeven after Lot1): @2026-10-01 11:35:00+05:30 price=113.3 reason=tsl_breakeven lot2_pnl=0.00 total_pnl=5.63
-  Variant B (no TSL, runs to Target2/EOD): @2026-10-01 11:35:00+05:30 price=113.39999999999999 reason=target2_hit lot2_pnl=7.50 total_pnl=13.12
+  Target1 (1.272 / fallback R1)  = 114.9995
+  Target2 (1.618 / fallback R2)  = 115.566
+  Lot1 exit: @2026-10-01 11:30:00+05:30 price=114.9995 reason=target1_hit pnl=127.46
+  Variant A (TSL->breakeven after Lot1): @2026-10-01 11:35:00+05:30 price=113.3 reason=tsl_breakeven lot2_pnl=0.00 total_pnl=127.46
+  Variant B (no TSL, runs to Target2/EOD): @2026-10-01 11:35:00+05:30 price=115.566 reason=target2_hit lot2_pnl=169.95 total_pnl=297.41
 
 ==============================================================================
 
