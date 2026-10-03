@@ -9,6 +9,7 @@ from scripts.bear_trap_oi_backtest import (
     is_strike_oi_significant, check_hard_wall, check_directional_matrix,
     check_price_acceptance, svp_ready, compute_ema, check_momentum_acceptance,
     check_buyer_gate, compute_roc, check_velocity_gate, diagnose_trap_funnel,
+    peak_strike_shift, detect_writer_panic, check_ltp_calc_gate,
 )
 
 
@@ -510,6 +511,44 @@ def test_diagnose_trap_funnel_reports_each_terminal_stage():
         _bar(0, 100, 105, 98, 102), _bar(5, 102, 107, 101, 106),
     ]
     assert diagnose_trap_funnel(breakdown_watch_no_breakdown) == "BREAKDOWN_WATCH"
+
+
+def test_peak_strike_shift_direction():
+    assert peak_strike_shift(early=23900, late=23850, step=50) == "DOWN"
+    assert peak_strike_shift(early=23850, late=23900, step=50) == "UP"
+    assert peak_strike_shift(early=23900, late=23900, step=50) == "STABLE"
+
+
+def test_detect_writer_panic_ltp_surge_plus_oi_drop():
+    panic = detect_writer_panic(ltp_now=130.0, ltp_base=100.0,
+                                 oi_now=80_000, oi_base=100_000,
+                                 ltp_surge_pct=0.20, oi_drop_pct=0.10)
+    assert panic is True  # +30% LTP, -20% OI -- both clear
+
+
+def test_detect_writer_panic_rejects_ltp_surge_without_oi_drop():
+    panic = detect_writer_panic(ltp_now=130.0, ltp_base=100.0,
+                                 oi_now=105_000, oi_base=100_000,
+                                 ltp_surge_pct=0.20, oi_drop_pct=0.10)
+    assert panic is False  # LTP surged but OI actually rose -- no unwinding
+
+
+def test_detect_writer_panic_rejects_oi_drop_without_ltp_surge():
+    panic = detect_writer_panic(ltp_now=105.0, ltp_base=100.0,
+                                 oi_now=80_000, oi_base=100_000,
+                                 ltp_surge_pct=0.20, oi_drop_pct=0.10)
+    assert panic is False  # OI dropped but LTP barely moved -- not panic buying
+
+
+def test_check_ltp_calc_gate_requires_all_three_conditions():
+    assert check_ltp_calc_gate(price_tests_level=True, sr_shift_favorable=True,
+                                writer_panic=True) is True
+    assert check_ltp_calc_gate(price_tests_level=False, sr_shift_favorable=True,
+                                writer_panic=True) is False
+    assert check_ltp_calc_gate(price_tests_level=True, sr_shift_favorable=False,
+                                writer_panic=True) is False
+    assert check_ltp_calc_gate(price_tests_level=True, sr_shift_favorable=True,
+                                writer_panic=False) is False
 
 
 def test_run_dynamic_side_backtest_allows_entry_before_1445_cutoff():

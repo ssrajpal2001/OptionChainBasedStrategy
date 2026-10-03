@@ -998,6 +998,47 @@ def diagnose_trap_funnel(bars: list[Bar]) -> str:
     return zone.state.value
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# LTP-Calculator-style dynamic S/R shift + writer panic gate (2026-10-03,
+# direct user spec). Resistance/support treated as MOVING (the strike
+# currently carrying peak Call/Put OI), not static walls -- and the real
+# buyer fuel is writer unwinding (LTP surging while OI drops), not a
+# strike's absolute OI level.
+# ─────────────────────────────────────────────────────────────────────────
+
+def peak_strike_shift(early: int, late: int, step: int) -> str:
+    """Direction the peak-OI strike (resistance=call peak, support=put
+    peak) has moved between two snapshots."""
+    if late < early:
+        return "DOWN"
+    if late > early:
+        return "UP"
+    return "STABLE"
+
+
+def detect_writer_panic(ltp_now: float, ltp_base: float, oi_now: int,
+                         oi_base: int, ltp_surge_pct: float = 0.20,
+                         oi_drop_pct: float = 0.10) -> bool:
+    """Writers unwinding/short-covering: LTP has surged >= ltp_surge_pct
+    AND OI has dropped >= oi_drop_pct over the same window, at the SAME
+    strike -- an LTP rise with OI also rising is just fresh buying/selling
+    interest, not panic."""
+    if ltp_base <= 0 or oi_base <= 0:
+        return False
+    ltp_change = (ltp_now - ltp_base) / ltp_base
+    oi_change = (oi_now - oi_base) / oi_base
+    return ltp_change >= ltp_surge_pct and oi_change <= -oi_drop_pct
+
+
+def check_ltp_calc_gate(price_tests_level: bool, sr_shift_favorable: bool,
+                         writer_panic: bool) -> bool:
+    """Unified option-buyer execution gate: price must test a key level
+    AND the S/R peak must have shifted favorably (resistance caving for a
+    CE buyer, support caving for a PE buyer) AND writer panic must be
+    detected on the breakout side -- all three, not any one alone."""
+    return price_tests_level and sr_shift_favorable and writer_panic
+
+
 def compute_performance_metrics(pnls: list[float]) -> dict:
     """Profit Factor, Expectancy, and Maximum Drawdown (peak-to-trough on
     CUMULATIVE P&L, in trade sequence order) for a list of per-trade net
