@@ -1205,6 +1205,7 @@ async def main() -> None:
     futures_key = REGISTRY.get_futures_upstox("NIFTY")
     matrix_surviving: list[BacktestTrade] = []
     buyer_gate_results: list[tuple[BacktestTrade, bool]] = []
+    velocity_gate_results: list[tuple[BacktestTrade, bool]] = []
     for ctx in oi_contexts:
         if not ctx["oi_filter_result"]["passed"]:
             continue  # Section 1c only refines Section 1b's own survivors
@@ -1317,6 +1318,21 @@ async def main() -> None:
         print(f"[{trade.entry_ts}] {trade.side} {trade.strike}: "
               f"BUYER GATE {'OPEN' if gate_open else 'CLOSED'} -- pnl={trade.pnl:.2f}")
 
+        # --- Section 1e: velocity gate (no Volume Profile at all). Reuses
+        # the same pre_entry/avg_volume/ema/trends this iteration already
+        # built for Section 1d above. ---
+        velocity_open = False
+        if entry_idx_fut is not None and entry_idx_fut > 0:
+            roc = compute_roc(closes, lookback=min(3, len(pre_entry)))
+            velocity_open = check_velocity_gate(
+                fut_trend, put_trend, call_trend, trade.side, roc_pct=roc,
+                roc_threshold=0.003, bar_volume=entry_bar.volume,
+                avg_volume=avg_volume, ema_prev=ema[-2], ema_curr=ema[-1],
+            )
+        velocity_gate_results.append((trade, velocity_open))
+        print(f"[{trade.entry_ts}] {trade.side} {trade.strike}: "
+              f"VELOCITY GATE {'OPEN' if velocity_open else 'CLOSED'} -- pnl={trade.pnl:.2f}")
+
     matrix_metrics = compute_performance_metrics([t.pnl for t in matrix_surviving])
     print(f"\n=== Institutional Matrix: {len(matrix_surviving)}/{len(oi_surviving)} "
           f"of Section 1b's survivors also pass Section 1c ===")
@@ -1330,6 +1346,15 @@ async def main() -> None:
           f"survivors clear the fast gate (no wall/noise/LVN-maturation) ===")
     print(f"  Win/Loss: {buyer_metrics.get('win_count', 0)}W/{buyer_metrics.get('loss_count', 0)}L")
     print(f"  Total P&L: {buyer_metrics.get('total_pnl', 0.0):.2f}")
+
+    velocity_surviving = [t for t, open_ in velocity_gate_results if open_]
+    velocity_metrics = compute_performance_metrics([t.pnl for t in velocity_surviving])
+    print(f"\n=== SECTION 1e (Velocity Gate -- no Volume Profile at all): "
+          f"{len(velocity_surviving)}/{len(oi_surviving)} of Section 1b's "
+          f"survivors clear OI-matrix + underlying ROC velocity + "
+          f"volume/EMA confirmation ===")
+    print(f"  Win/Loss: {velocity_metrics.get('win_count', 0)}W/{velocity_metrics.get('loss_count', 0)}L")
+    print(f"  Total P&L: {velocity_metrics.get('total_pnl', 0.0):.2f}")
 
     print("\n" + "=" * 78)
     print("SECTION 2 (EXPERIMENTAL): simultaneous CE+PE, dynamic 100-pt ITM "
