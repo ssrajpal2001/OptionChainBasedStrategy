@@ -10,6 +10,7 @@ from scripts.bear_trap_oi_backtest import (
     check_price_acceptance, svp_ready, compute_ema, check_momentum_acceptance,
     check_buyer_gate, compute_roc, check_velocity_gate, diagnose_trap_funnel,
     peak_strike_shift, detect_writer_panic, check_ltp_calc_gate,
+    detect_5m_zone_invalidation, enter_on_1m_trap,
 )
 
 
@@ -549,6 +550,50 @@ def test_check_ltp_calc_gate_requires_all_three_conditions():
                                 writer_panic=True) is False
     assert check_ltp_calc_gate(price_tests_level=True, sr_shift_favorable=True,
                                 writer_panic=False) is False
+
+
+def test_detect_5m_zone_invalidation_fires_on_close_below_zone_low():
+    bars = [
+        _bar(0, 100, 105, 98, 102),   # c1
+        _bar(5, 97, 99, 90, 94),      # c2, zone=[90,102]
+        _bar(10, 95, 110, 95, 108),   # trap confirmed, armed, zone=[90,102]
+        _bar(15, 108, 109, 85, 88),   # closes BELOW zone_lo(90) -> invalidated
+    ]
+    ts = detect_5m_zone_invalidation(bars)
+    assert ts == bars[3].ts
+
+
+def test_detect_5m_zone_invalidation_returns_none_on_normal_reentry():
+    bars = [
+        _bar(0, 100, 105, 98, 102),
+        _bar(5, 97, 99, 90, 94),
+        _bar(10, 95, 110, 95, 108),
+        _bar(15, 108, 112, 96, 97),   # normal re-entry inside [90,102] -- not invalidation
+    ]
+    assert detect_5m_zone_invalidation(bars) is None
+
+
+def test_enter_on_1m_trap_fires_immediately_on_first_reentry():
+    bars_1m = [
+        _bar(0, 50, 55, 48, 52),    # 1m C1
+        _bar(1, 47, 49, 40, 44),    # 1m C2, zone=[40,52]
+        _bar(2, 45, 60, 45, 58),    # 1m trap confirmed, armed, zone=[40,52]
+        _bar(3, 58, 59, 39, 45),    # re-entry inside [40,52] -> immediate entry @45
+    ]
+    entry = enter_on_1m_trap(bars_1m, lot_qty=75)
+    assert entry is not None
+    assert entry["entry_price"] == 45.0
+    assert entry["entry_ts"] == bars_1m[3].ts
+    assert entry["zone_lo"] == 40.0 and entry["zone_hi"] == 52.0
+
+
+def test_enter_on_1m_trap_returns_none_if_no_reentry_yet():
+    bars_1m = [
+        _bar(0, 50, 55, 48, 52),
+        _bar(1, 47, 49, 40, 44),
+        _bar(2, 45, 60, 45, 58),  # armed, but never re-enters within these bars
+    ]
+    assert enter_on_1m_trap(bars_1m, lot_qty=75) is None
 
 
 def test_run_dynamic_side_backtest_allows_entry_before_1445_cutoff():

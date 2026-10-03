@@ -1039,6 +1039,44 @@ def check_ltp_calc_gate(price_tests_level: bool, sr_shift_favorable: bool,
     return price_tests_level and sr_shift_favorable and writer_panic
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# Cross-side 1-min trap switch (2026-10-04, direct user spec). Pure
+# price-action only -- no OI, no Volume Profile. When a side's 5-min trap
+# zone FAILS (armed, then a 5-min bar closes below zone_lo instead of
+# re-entering), jump to the OPPOSITE side's 1-minute chart, find its
+# latest/freshest 1-min trap cycle, and fire the moment price re-enters
+# that 1-min zone -- immediately, no further confirmation.
+# ─────────────────────────────────────────────────────────────────────────
+
+def detect_5m_zone_invalidation(bars_5m: list[Bar]) -> Optional[datetime]:
+    """Replays the real trap detector on 5-min bars. Returns the
+    timestamp of the bar whose CLOSE breaks below zone_lo while armed
+    (zone failure) -- or None if the zone instead re-enters normally (or
+    never arms at all)."""
+    zone = _fresh_zone()
+    for bar in bars_5m:
+        if zone.state == TrapZoneState.ARMED_WAIT_REENTRY:
+            if check_zone_reentry(zone, bar.close):
+                return None
+            if bar.close < zone.zone_lo:
+                return bar.ts
+        zone = on_bar_close(zone, bar)
+    return None
+
+
+def enter_on_1m_trap(bars_1m: list[Bar], lot_qty: int) -> Optional[dict]:
+    """Fresh trap cycle on 1-min bars (same real detector primitives, 1m
+    granularity) -- fires IMMEDIATELY the moment price re-enters the
+    first 1-min zone that confirms, no further checks."""
+    zone = _fresh_zone()
+    for bar in bars_1m:
+        if zone.state == TrapZoneState.ARMED_WAIT_REENTRY and check_zone_reentry(zone, bar.close):
+            return {"entry_price": bar.close, "entry_ts": bar.ts,
+                     "zone_lo": zone.zone_lo, "zone_hi": zone.zone_hi}
+        zone = on_bar_close(zone, bar)
+    return None
+
+
 def compute_performance_metrics(pnls: list[float]) -> dict:
     """Profit Factor, Expectancy, and Maximum Drawdown (peak-to-trough on
     CUMULATIVE P&L, in trade sequence order) for a list of per-trade net
