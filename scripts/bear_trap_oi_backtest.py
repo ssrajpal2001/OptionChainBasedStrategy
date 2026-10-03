@@ -290,6 +290,177 @@ def _print_mfe_mae_table(all_trades: list[BacktestTrade]) -> None:
               f"{t.pnl:<10.2f} {t.pnl_pct:<8.2f}")
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# EXPERIMENTAL: dynamic 100-pt ITM strike rolling + Fibonacci dual-lot
+# target/TSL management (direct user request, 2026-10-03). This is a
+# backtest-only exploratory mechanic layered on top of the locked
+# price-action trap detector -- it does NOT touch strategies/bear_trap_oi/
+# (the core, spec-locked package) and is not itself part of the approved
+# live spec (docs/superpowers/specs/2026-10-03-bear-trap-oi-design.md),
+# which still fixes one PDH/PDL strike per day, single-lot, EOD-only exit.
+# Kept self-contained here so the locked core stays stable while this
+# variation is explored.
+# ─────────────────────────────────────────────────────────────────────────
+
+def detect_first_local_high(bars: list[Bar]) -> tuple[float, datetime] | None:
+    """First local high after an impulse move: the first bar whose high is
+    immediately followed by a bar with a strictly lower high (a real
+    pullback). Returns (high_price, ts) of that first bar, or None if the
+    series never shows a pullback (still strictly ascending, or too short
+    to tell)."""
+    for i in range(len(bars) - 1):
+        if bars[i + 1].high < bars[i].high:
+            return bars[i].high, bars[i].ts
+    return None
+
+
+def fib_extension_levels(entry_price: float, swing_high: float) -> dict:
+    """1.272 / 1.618 Fibonacci extension targets off the Entry(0) ->
+    swing_high(100%) base."""
+    span = swing_high - entry_price
+    return {
+        "1.272": entry_price + span * 1.272,
+        "1.618": entry_price + span * 1.618,
+    }
+
+
+def compute_itm_strike(spot: float, points: int, step: int, side: Side) -> int:
+    """The strike `points` points in-the-money for `side` relative to
+    `spot`: below spot for CE, above spot for PE."""
+    from strategies.bear_trap_oi.strike_selector import round_to_strike_step
+    target = spot - points if side == "CE" else spot + points
+    return round_to_strike_step(target, step)
+
+
+def compute_roll_schedule(spot_bars: list[Bar], initial_spot: float, step: int,
+                           roll_points: int = 100,
+                           ) -> list[tuple[datetime, int, int]]:
+    """Walks spot bars (close-to-close) and emits a (ts, ce_strike,
+    pe_strike) event every time price has moved `roll_points` from the
+    last anchor, re-anchoring the reference spot to that bar's close each
+    time. Does not emit an initial event for `initial_spot` itself --
+    callers already have the 09:15 PDH/PDL-derived anchor strikes."""
+    events: list[tuple[datetime, int, int]] = []
+    anchor = initial_spot
+    for bar in spot_bars:
+        if abs(bar.close - anchor) >= roll_points:
+            ce_strike = compute_itm_strike(bar.close, roll_points, step, "CE")
+            pe_strike = compute_itm_strike(bar.close, roll_points, step, "PE")
+            events.append((bar.ts, ce_strike, pe_strike))
+            anchor = bar.close
+    return events
+
+
+def manage_fib_trade(bars_after_entry: list[Bar], entry_price: float,
+                      lot_qty_each: int) -> dict:
+    """Dual-lot Fib-extension trade management for ONE already-identified
+    entry (spec: 2 lots in, 1 lot booked at the 1.272 extension, remaining
+    lot managed two ways for comparison):
+
+    - Variant A: once lot 1 books at 1.272, TSL for lot 2 moves to
+      breakeven (entry_price); lot 2 exits at breakeven, 1.618, or EOD,
+      whichever comes first.
+    - Variant B: no TSL change after lot 1 books; lot 2 only exits at
+      1.618 or EOD.
+
+    `bars_after_entry` may be a STITCHED sequence spanning more than one
+    option contract (see run_dynamic_side_backtest) -- entry_price and the
+    resulting fib_1272/fib_1618 are plain numbers, so switching the bar
+    SOURCE mid-sequence (per the user's explicit instruction: an open
+    trade's target-tracking rolls onto the new 100-pt ITM strike's raw
+    premium, while entry_price/P&L basis stays on the original contract)
+    needs no special handling here -- the caller just hands over whichever
+    bars are "current" at each point in time."""
+    if not bars_after_entry:
+        return {
+            "swing_high": None, "swing_high_ts": None,
+            "fib_1272": None, "fib_1618": None,
+            "lot1_exit_price": entry_price, "lot1_exit_ts": None,
+            "lot1_exit_reason": "no_data", "lot1_pnl": 0.0,
+            "variant_a": {"lot2_exit_price": entry_price, "lot2_exit_ts": None,
+                          "lot2_exit_reason": "no_data", "lot2_pnl": 0.0,
+                          "total_pnl": 0.0},
+            "variant_b": {"lot2_exit_price": entry_price, "lot2_exit_ts": None,
+                          "lot2_exit_reason": "no_data", "lot2_pnl": 0.0,
+                          "total_pnl": 0.0},
+        }
+
+    eod_bar = bars_after_entry[-1]
+    swing = detect_first_local_high(bars_after_entry)
+
+    if swing is None:
+        eod_price = eod_bar.close
+        pnl = (eod_price - entry_price) * lot_qty_each
+        leg = {"lot2_exit_price": eod_price, "lot2_exit_ts": eod_bar.ts,
+               "lot2_exit_reason": "eod_no_swing_high", "lot2_pnl": pnl,
+               "total_pnl": pnl * 2}
+        return {
+            "swing_high": None, "swing_high_ts": None,
+            "fib_1272": None, "fib_1618": None,
+            "lot1_exit_price": eod_price, "lot1_exit_ts": eod_bar.ts,
+            "lot1_exit_reason": "eod_no_swing_high", "lot1_pnl": pnl,
+            "variant_a": dict(leg), "variant_b": dict(leg),
+        }
+
+    swing_high, swing_high_ts = swing
+    levels = fib_extension_levels(entry_price, swing_high)
+    fib_1272, fib_1618 = levels["1.272"], levels["1.618"]
+
+    lot1_idx = None
+    for i, b in enumerate(bars_after_entry):
+        if b.high >= fib_1272:
+            lot1_idx = i
+            break
+
+    if lot1_idx is None:
+        eod_price = eod_bar.close
+        pnl = (eod_price - entry_price) * lot_qty_each
+        leg = {"lot2_exit_price": eod_price, "lot2_exit_ts": eod_bar.ts,
+               "lot2_exit_reason": "eod_target_not_reached", "lot2_pnl": pnl,
+               "total_pnl": pnl * 2}
+        return {
+            "swing_high": swing_high, "swing_high_ts": swing_high_ts,
+            "fib_1272": fib_1272, "fib_1618": fib_1618,
+            "lot1_exit_price": eod_price, "lot1_exit_ts": eod_bar.ts,
+            "lot1_exit_reason": "eod_target_not_reached", "lot1_pnl": pnl,
+            "variant_a": dict(leg), "variant_b": dict(leg),
+        }
+
+    lot1_bar = bars_after_entry[lot1_idx]
+    lot1_exit_price = fib_1272
+    lot1_pnl = (lot1_exit_price - entry_price) * lot_qty_each
+    remaining = bars_after_entry[lot1_idx + 1:]
+
+    def _variant(use_tsl: bool) -> dict:
+        if not remaining:
+            return {"lot2_exit_price": lot1_exit_price, "lot2_exit_ts": lot1_bar.ts,
+                    "lot2_exit_reason": "target_1272_same_bar",
+                    "lot2_pnl": lot1_pnl, "total_pnl": lot1_pnl * 2}
+        for b in remaining:
+            if use_tsl and b.low <= entry_price:
+                return {"lot2_exit_price": entry_price, "lot2_exit_ts": b.ts,
+                        "lot2_exit_reason": "tsl_breakeven", "lot2_pnl": 0.0,
+                        "total_pnl": lot1_pnl}
+            if b.high >= fib_1618:
+                pnl2 = (fib_1618 - entry_price) * lot_qty_each
+                return {"lot2_exit_price": fib_1618, "lot2_exit_ts": b.ts,
+                        "lot2_exit_reason": "target_1618", "lot2_pnl": pnl2,
+                        "total_pnl": lot1_pnl + pnl2}
+        last = remaining[-1]
+        pnl2 = (last.close - entry_price) * lot_qty_each
+        return {"lot2_exit_price": last.close, "lot2_exit_ts": last.ts,
+                "lot2_exit_reason": "eod", "lot2_pnl": pnl2,
+                "total_pnl": lot1_pnl + pnl2}
+
+    return {
+        "swing_high": swing_high, "swing_high_ts": swing_high_ts,
+        "fib_1272": fib_1272, "fib_1618": fib_1618,
+        "lot1_exit_price": lot1_exit_price, "lot1_exit_ts": lot1_bar.ts,
+        "lot1_exit_reason": "target_1272", "lot1_pnl": lot1_pnl,
+        "variant_a": _variant(use_tsl=True), "variant_b": _variant(use_tsl=False),
+    }
+
+
 async def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--days", type=int, default=7)
