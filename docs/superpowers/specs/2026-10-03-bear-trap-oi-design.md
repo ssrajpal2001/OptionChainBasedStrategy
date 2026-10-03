@@ -1,7 +1,9 @@
 # Nifty Option Premium Bear Trap & OI Confirmation Engine — Design Spec
 
 Status: approved design, ready for implementation planning.
-Date: 2026-10-03
+Date: 2026-10-03 (revised same day — concurrent CE/PE execution + cross-side
+MTM telemetry added, superseding the original one-side-at-a-time
+constraint; see Sections 2, 4, 6, 7, 8, 8a, 10, 11)
 
 ## 1. Purpose
 
@@ -36,9 +38,12 @@ instrument registry, base broker interface, base strategy book/gate classes).
   are flushed out — that is the arming trigger for our buy.
 - CE and PE each run this pattern **independently** on their own strike's
   premium chart.
-- Only ONE side (CE or PE) may hold an open position at a time, platform-wide
-  for a given book. If one side is in a position, the other side's
-  arm/fire checks are skipped entirely until the open position closes.
+- **Both sides may hold open positions concurrently** (updated 2026-10-03,
+  direct user decision — supersedes the original "one side at a time"
+  constraint). CE and PE run fully independent state machines, order
+  events, and position tracking, with zero blocking between them. If PE
+  arms and fires while CE is already `IN_POSITION`, PE opens anyway — see
+  Section 8a for the cross-side MTM observability this requires.
 - After a side's position closes (always via EOD — no SL), that side's state
   machine resets and re-arms, looking for a fresh Candle-1/Candle-2/trap
   sequence again the same day. Multiple sequential trades per side per day
@@ -91,8 +96,13 @@ States: `WAITING → BREAKDOWN_WATCH → TRAP_WATCH → ARMED_WAIT_REENTRY → I
   completed bar (re-arm, per user decision).
 
 Each side's state machine is fully independent — a reset/arm/fire on CE
-never touches PE's own state, and vice versa (only the cross-side "one
-position at a time" execution gate couples them, at the order-firing step).
+never touches PE's own state, and vice versa. There is no cross-side
+blocking at all (updated 2026-10-03): both sides may be `IN_POSITION`
+simultaneously. The only cross-side coupling left is observational, not a
+gate — the instant a NEW entry fires on one side while the other side is
+already `IN_POSITION`, the engine computes and logs a cross-side MTM
+snapshot of the already-open side before/alongside firing the new entry
+(see Section 8a).
 
 ## 5. Multi-Strike OI Filter
 
@@ -126,18 +136,21 @@ Run only at the arming-instant (zone re-entry), not continuously:
 
 ## 6. Execution
 
-- One open position at a time for this book (CE or PE, never both
-  simultaneously).
-- Entry: BUY at the live option premium LTP, at the moment the OI filter
-  passes.
-- Quantity: `lot_size × lot_multiplier` (per-deployment override, same
-  pattern as every other strategy in this codebase).
-- Exit: EOD square-off at 3:15 PM IST. No stop-loss (explicit user
-  decision — see section 2).
+- **Both sides may hold open positions concurrently** (updated 2026-10-03 —
+  no platform-wide single-position gate). Each side's entry/exit/sizing
+  logic is otherwise unchanged and fully independent of the other:
+  - Entry: BUY at the live option premium LTP, at the moment that side's
+    own OI filter passes.
+  - Quantity: `lot_size × lot_multiplier` (per-deployment override, same
+    pattern as every other strategy in this codebase) — sized independently
+    per side.
+  - Exit: EOD square-off at 3:15 PM IST, independently per side. No
+    stop-loss on either side (explicit user decision — see section 2).
 - Modes: `paper` / `paper_route` / `live`, same contract as every other
   execution bridge in this codebase (paper_route genuinely routes the order
   to the real broker to verify routing/permissions, with a locally
-  simulated fill).
+  simulated fill) — applies independently to whichever side(s) are
+  currently open.
 
 ## 7. Module Breakdown
 
@@ -150,8 +163,11 @@ strategies/bear_trap_oi/
 ├── oi_filter.py        # Pure functions: multi-strike OI aggregation + rising/falling comparison
 ├── strike_selector.py # PDH/PDL fetch + CE-near-PDL / PE-near-PDH strike mapping
 ├── engine.py           # BearTrapOiStrategy: one book per (client,binding,underlying);
-│                       #   owns 2 independent side-trackers (CE, PE); wires ticks->bars->
-│                       #   detector->OI filter->orders; enforces one-position-at-a-time gate
+│                       #   owns 2 fully independent, concurrently-runnable side-trackers
+│                       #   (CE, PE) with no cross-side blocking; wires ticks->bars->
+│                       #   detector->OI filter->orders per side; computes and logs a
+│                       #   cross-side MTM snapshot whenever a new entry fires while the
+│                       #   other side is already open (see spec Section 8a)
 ├── book_manager.py     # BearTrapOiBookManager: spawn/stop books on deploy (reconcile loop,
 │                       #   same pattern as every other *BookManager in this codebase)
 ├── events.py           # BearTrapOrderEvent / BearTrapFillEvent,
@@ -161,7 +177,9 @@ strategies/bear_trap_oi/
 │                       #   restore state-machine phase) — same precedent as OI-ORB Screener's
 │                       #   store.py after its real position-loss-on-restart incident
 └── telemetry.py        # Structured per-evaluation JSONL log (arm/reject/fire + the real OI
-                          #   numbers) -> logs/bear_trap_oi/{underlying}_{date}.jsonl
+                          #   numbers), PLUS concurrent_entry_mtm_snapshot + periodic MTM
+                          #   events while both sides are open (see Section 8a)
+                          #   -> logs/bear_trap_oi/{underlying}_{date}.jsonl
 
 execution_bridge/
 └── bear_trap_oi_bridge.py   # confirm-then-finalize order routing (paper/paper_route/live),
@@ -192,7 +210,39 @@ resolution), `matrix_engine.option_matrix` (live `ChainSnapshot` OI data),
 | `TrapZone` | `state: WAITING\|BREAKDOWN_WATCH\|TRAP_WATCH\|ARMED_WAIT_REENTRY\|IN_POSITION`, `c1: Bar`, `c2: Bar \| None`, `zone_lo: float`, `zone_hi: float`, `confirmed_ts: datetime \| None` | one per side (CE, PE) |
 | `OiSnapshot` | `strike: int`, `side: "CE"\|"PE"`, `oi: int`, `ts: datetime` | refreshed on every `MATRIX_SNAPSHOT` |
 | `OiFilterResult` | `call_oi_total, put_oi_total_same_band: int`, `call_oi_trend, put_oi_trend: "RISING"\|"FALLING"\|"FLAT"`, `passed: bool`, `detail: str` | logged every evaluation, pass or fail |
-| `Position` | `side: "CE"\|"PE"`, `strike: int`, `qty: int`, `entry_price: float`, `entry_ts: datetime`, `status: "open"\|"closed"` | one at a time, platform-wide per book |
+| `Position` | `side: "CE"\|"PE"`, `strike: int`, `qty: int`, `entry_price: float`, `entry_ts: datetime`, `status: "open"\|"closed"` | **updated 2026-10-03**: two `Position` rows (one CE, one PE) may now coexist in `open` status simultaneously — no longer mutually exclusive |
+| `MtmSnapshot` | `side: "CE"\|"PE"` (the side being observed), `observed_entry_price, observed_qty, observed_strike: as above`, `current_ltp: float`, `running_mtm: float`, `elapsed_sec: int`, `trigger: "concurrent_entry"\|"periodic"`, `ts: datetime`, `other_side_event: str \| None` | new — see Section 8a |
+
+## 8a. Cross-Side MTM Snapshot on Concurrent Entry
+
+Since both sides can now be open at once and neither carries a stop-loss,
+the engine must give visibility into how far a still-open leg is running
+against the user whenever a second leg opens — this is the adverse-
+excursion data the user will review to pick an empirical SL for a future
+1-lot live deployment. This is purely observability: **no action is taken
+on this number, there is no auto-exit** — it exists only to be logged and
+reviewed later.
+
+- **Trigger**: the instant side B's OI filter passes and it is about to
+  fire a BUY, if side A currently has `status == "open"`, the engine
+  computes side A's live running MTM:
+  `running_mtm = (side_A.current_ltp - side_A.entry_price) * side_A.qty`.
+- This is logged as a `concurrent_entry_mtm_snapshot` telemetry event,
+  capturing side A's `entry_price`, `entry_ts`, `strike`, elapsed holding
+  time, and `running_mtm`, alongside side B's own about-to-fire details
+  (strike, entry price) in `other_side_event` (e.g. `"PE entry fired @
+  123.45"`). This is a distinct telemetry event type from the existing
+  per-evaluation arm/reject/fire rows already specified in Section 5/9.
+- **Periodic tracking, not just a single snapshot**: while both sides are
+  concurrently open, the engine also logs a `MtmSnapshot` with
+  `trigger="periodic"` for the already-running side on every completed
+  5-min bar (same bar-driven cadence the price-action state machine already
+  uses elsewhere in this spec) — so the user can review the full drawdown
+  path over time, not just the instant the second leg opened.
+- **Dashboard/terminal observability**: the live monitoring panel (Section
+  11) must render both sides' open positions simultaneously, each with its
+  own live MTM, whenever both are open — not a single "current position"
+  slot.
 
 ## 9. Known Limitation — OI Cannot Be Backtested (honest disclosure)
 
@@ -225,9 +275,15 @@ is correct-by-construction (unit-tested logic) but forward-validated only.
   baseline, pass/fail boundary cases.
 - `tests/bear_trap_oi/test_strike_selector.py` — PDL/PDH-to-strike rounding.
 - `tests/execution/test_bear_trap_oi_bridge.py` — paper/paper_route/live
-  fill paths, one-position-at-a-time gating, `_record_history()` calls.
+  fill paths, `_record_history()` calls, and a test confirming CE and PE
+  can both be `IN_POSITION` at the same time with no mutual blocking
+  (replaces any prior implicit single-position assumption).
+- `tests/bear_trap_oi/test_engine.py` — a test confirming a
+  `concurrent_entry_mtm_snapshot` telemetry event is emitted with the
+  correct running-MTM number when side B enters while side A is open, plus
+  the periodic MTM logging cadence while both sides are concurrently open.
 - `tests/bear_trap_oi/test_store.py` — restart-safe restore of zone state
-  and open positions.
+  and open positions (now potentially two concurrently-open positions).
 
 ## 11. Deployment
 
@@ -236,8 +292,10 @@ is correct-by-construction (unit-tested logic) but forward-validated only.
   running, same as every other strategy here).
 - Dashboard: deploy-form entry in `monitor.html` (underlying fixed to
   NIFTY), live panel via `GET /api/beartrapoi/status` showing both sides'
-  current zone state, the OI filter's last evaluation, and any open
-  position — same pattern as every other strategy's monitoring panel.
+  current zone state and the OI filter's last evaluation. **Updated
+  2026-10-03**: the panel must render both sides' open positions
+  concurrently, each with its own live MTM, whenever both are open — not a
+  single "current position" slot (see Section 8a).
 - First deployment: paper/paper_route only, per this codebase's established
   graduation discipline for every new strategy — no live capital until a
   real forward sample of OI-filter evaluations has been reviewed.
