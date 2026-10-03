@@ -8,7 +8,7 @@ from scripts.bear_trap_oi_backtest import (
     VolBar, compute_volume_profile, classify_rollover,
     is_strike_oi_significant, check_hard_wall, check_directional_matrix,
     check_price_acceptance, svp_ready, compute_ema, check_momentum_acceptance,
-    check_buyer_gate, compute_roc, check_velocity_gate,
+    check_buyer_gate, compute_roc, check_velocity_gate, diagnose_trap_funnel,
 )
 
 
@@ -485,6 +485,31 @@ def test_check_velocity_gate_rejects_wrong_direction_velocity():
         ema_prev=100.0, ema_curr=100.1,
     )
     assert closed is False
+
+
+def test_diagnose_trap_funnel_reports_each_terminal_stage():
+    entered = [
+        _bar(0, 100, 105, 98, 102), _bar(5, 97, 99, 90, 94),
+        _bar(10, 95, 110, 95, 108), _bar(15, 108, 112, 96, 97),
+    ]
+    assert diagnose_trap_funnel(entered) == "ENTERED"
+
+    armed_no_reentry = [
+        _bar(0, 100, 105, 98, 102), _bar(5, 97, 99, 90, 94),
+        _bar(10, 95, 110, 95, 108), _bar(15, 108, 160, 150, 155),
+    ]
+    assert diagnose_trap_funnel(armed_no_reentry) == "ARMED_WAIT_REENTRY"
+
+    trap_watch_no_confirm = [
+        _bar(0, 100, 105, 98, 102), _bar(5, 97, 99, 90, 94),
+        _bar(10, 94, 99, 92, 95),
+    ]
+    assert diagnose_trap_funnel(trap_watch_no_confirm) == "TRAP_WATCH"
+
+    breakdown_watch_no_breakdown = [
+        _bar(0, 100, 105, 98, 102), _bar(5, 102, 107, 101, 106),
+    ]
+    assert diagnose_trap_funnel(breakdown_watch_no_breakdown) == "BREAKDOWN_WATCH"
 
 
 def test_run_dynamic_side_backtest_allows_entry_before_1445_cutoff():

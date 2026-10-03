@@ -981,6 +981,22 @@ def check_velocity_gate(fut_trend: str, put_trend: str, call_trend: str,
     return volume_surge or ema_confirms
 
 
+def diagnose_trap_funnel(bars: list[Bar]) -> str:
+    """One trading day, one side: replays the REAL trap detector (same
+    primitives run_side_backtest uses) and reports the FINAL stage
+    reached by EOD, regardless of whether a trade fired -- the funnel
+    breakdown diagnostic: "ENTERED" or whichever TrapZoneState the day's
+    bars never got past (BREAKDOWN_WATCH = no C2 ever formed, TRAP_WATCH
+    = C2 formed but trap never confirmed, ARMED_WAIT_REENTRY = trap
+    confirmed but price never came back into the zone)."""
+    zone = _fresh_zone()
+    for bar in bars:
+        if zone.state == TrapZoneState.ARMED_WAIT_REENTRY and check_zone_reentry(zone, bar.close):
+            return "ENTERED"
+        zone = on_bar_close(zone, bar)
+    return zone.state.value
+
+
 def compute_performance_metrics(pnls: list[float]) -> dict:
     """Profit Factor, Expectancy, and Maximum Drawdown (peak-to-trough on
     CUMULATIVE P&L, in trade sequence order) for a list of per-trade net
