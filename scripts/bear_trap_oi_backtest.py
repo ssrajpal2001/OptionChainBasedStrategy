@@ -860,6 +860,19 @@ def check_price_acceptance(close: float, val: float, vah: float,
     return any(bar_low - lvn_tolerance <= lvn <= bar_high + lvn_tolerance for lvn in lvns)
 
 
+def _nearest_row_at_or_before(rows: list[dict], ts: datetime) -> dict:
+    """rows ascending by ts (fetch_upstox_range_1m's own contract) -- the
+    last row at or before `ts`, the closest real reading without looking
+    into the future."""
+    match = rows[0]
+    for r in rows:
+        if datetime.fromisoformat(r["ts"]) <= ts:
+            match = r
+        else:
+            break
+    return match
+
+
 def compute_performance_metrics(pnls: list[float]) -> dict:
     """Profit Factor, Expectancy, and Maximum Drawdown (peak-to-trough on
     CUMULATIVE P&L, in trade sequence order) for a list of per-trade net
@@ -1012,7 +1025,7 @@ async def main() -> None:
 
     oi_depth = 5
     oi_surviving: list[BacktestTrade] = []
-    oi_context_by_trade: dict[int, dict] = {}  # id(trade) -> reusable OI/ATM context for Section 1c
+    oi_contexts: list[dict] = []  # reusable OI/ATM context per trade, for Section 1c
     for trade in all_trades:
         day = trade.entry_ts.date()
         spot_rows = await fetch_upstox_range_1m(index_key, access_token, day, day)
@@ -1041,17 +1054,7 @@ async def main() -> None:
                 if not rows:
                     continue
                 oi_base[opt][strike] = rows[0].get("oi", 0)
-                # rows are ascending by ts (fetch_upstox_range_1m's own
-                # contract) -- walk forward and keep the LAST row at or
-                # before entry_ts (the closest real reading without
-                # looking into the future).
-                match = rows[0]
-                for r in rows:
-                    if datetime.fromisoformat(r["ts"]) <= trade.entry_ts:
-                        match = r
-                    else:
-                        break
-                oi_now[opt][strike] = match.get("oi", 0)
+                oi_now[opt][strike] = _nearest_row_at_or_before(rows, trade.entry_ts).get("oi", 0)
 
         target_opt = trade.side
         opposing_opt = "PE" if trade.side == "CE" else "CE"
@@ -1067,11 +1070,11 @@ async def main() -> None:
         if result["passed"]:
             oi_surviving.append(trade)
 
-        oi_context_by_trade[id(trade)] = {
-            "atm": atm, "band_strikes": band_strikes, "oi_now": oi_now,
-            "oi_base": oi_base, "expiry": expiry, "day": day,
+        oi_contexts.append({
+            "trade": trade, "atm": atm, "band_strikes": band_strikes,
+            "oi_now": oi_now, "oi_base": oi_base, "expiry": expiry, "day": day,
             "oi_filter_result": result,
-        }
+        })
 
     oi_metrics = compute_performance_metrics([t.pnl for t in oi_surviving])
     print(f"\n=== OI-Gated Section 1: {len(oi_surviving)}/{len(all_trades)} "
@@ -1093,11 +1096,11 @@ async def main() -> None:
 
     futures_key = REGISTRY.get_futures_upstox("NIFTY")
     matrix_surviving: list[BacktestTrade] = []
-    for trade in all_trades:
-        ctx = oi_context_by_trade.get(id(trade))
-        if ctx is None or not ctx["oi_filter_result"]["passed"]:
+    for ctx in oi_contexts:
+        if not ctx["oi_filter_result"]["passed"]:
             continue  # Section 1c only refines Section 1b's own survivors
 
+        trade = ctx["trade"]
         day, atm, oi_now, oi_base = ctx["day"], ctx["atm"], ctx["oi_now"], ctx["oi_base"]
 
         # Noise + hard-wall: peak absolute OI across the fetched band
@@ -1124,13 +1127,8 @@ async def main() -> None:
         fut_trend = "FLAT"
         if fut_rows:
             fut_base = fut_rows[0].get("oi", 0)
-            fut_match = fut_rows[0]
-            for r in fut_rows:
-                if datetime.fromisoformat(r["ts"]) <= trade.entry_ts:
-                    fut_match = r
-                else:
-                    break
-            fut_trend = compute_oi_trend(fut_match.get("oi", 0), fut_base)
+            fut_now = _nearest_row_at_or_before(fut_rows, trade.entry_ts).get("oi", 0)
+            fut_trend = compute_oi_trend(fut_now, fut_base)
 
         put_now = sum_oi_band(oi_now["PE"], atm, args.strike_step, "PE", oi_depth)
         put_base = sum_oi_band(oi_base["PE"], atm, args.strike_step, "PE", oi_depth)
