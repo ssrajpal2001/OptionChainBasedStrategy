@@ -27,7 +27,7 @@ from typing import Literal
 
 from strategies.bear_trap_oi.models import Bar, TrapZone, TrapZoneState
 from strategies.bear_trap_oi.trap_detector import (
-    on_bar_close, close_position,
+    on_bar_close, check_zone_reentry, close_position,
 )
 
 Side = Literal["CE", "PE"]
@@ -63,11 +63,13 @@ def run_side_backtest(bars: list[Bar], side: Side, strike: int,
         is_last_bar = i == len(bars) - 1
 
         if zone.state == TrapZoneState.ARMED_WAIT_REENTRY and open_entry is None:
-            # Check re-entry using this bar's own OHLC range (backtest has
-            # no sub-bar ticks) -- re-entry fires if the bar's range ever
-            # touched the zone.
-            touched = (zone.zone_lo <= bar.high and bar.low <= zone.zone_hi)
-            if touched:
+            # Drives the REAL check_zone_reentry() against the bar's CLOSE
+            # (backtest has no sub-bar ticks, so the bar close is the best
+            # available stand-in for "live price") -- matches the live
+            # engine's own semantics exactly: a bar whose range merely
+            # swept through the zone without closing inside it is NOT a
+            # valid re-entry.
+            if check_zone_reentry(zone, bar.close):
                 entry_price = bar.close
                 open_entry = (entry_price, bar.ts, zone.c1, zone.c2)
                 zone = TrapZone(state=TrapZoneState.IN_POSITION, c1=zone.c1,
@@ -99,6 +101,17 @@ def _group_by_trading_day(bars: list[Bar]) -> list[list[Bar]]:
     return [list(g) for _, g in groupby(bars, key=keyfunc)]
 
 
+def _truncate_to_eod(bars: list[Bar], eod_hour: int = 15,
+                      eod_minute: int = 15) -> list[Bar]:
+    """Drops any bar after the spec's EOD square-off time (3:15 PM IST,
+    spec Section 6) so run_side_backtest's own last-bar-is-EOD convention
+    force-closes at a bar the live engine would actually have been allowed
+    to still be open on -- not a post-close bar Upstox happens to supply
+    (e.g. 15:35) that the real strategy would never see."""
+    return [b for b in bars
+            if (b.ts.hour, b.ts.minute) <= (eod_hour, eod_minute)]
+
+
 def _candle_dicts_to_bars(rows: list[dict]) -> list[Bar]:
     """Converts historical_candles.py's raw {'ts','open','high','low',
     'close',...} dicts (ts = Upstox ISO-8601 string) into our Bar
@@ -128,17 +141,36 @@ async def _fetch_week_of_premium(ce_key: str, pe_key: str, access_token: str,
     return _candle_dicts_to_bars(ce_rows), _candle_dicts_to_bars(pe_rows)
 
 
-def _resample_1m_to_5m(bars_1m: list[Bar]) -> list[Bar]:
-    from strategies.bear_trap_oi.candle_tracker import BarAccumulator
-    acc = BarAccumulator(bucket_minutes=5)
+def _resample_1m_to_5m(bars_1m: list[Bar], bucket_minutes: int = 5) -> list[Bar]:
+    """Groups real 1-min OHLC bars into N-min buckets using each bar's own
+    high/low (not its close alone) -- feeding only closes through a
+    tick-style accumulator would silently discard any intra-bucket extreme
+    that never happened to be a 1-min bar's own closing price, corrupting
+    the trap detector's breakdown/zone/re-entry reads of bucket high/low."""
     out: list[Bar] = []
+    bucket_ts = None
+    o = h = l = c = None
+
+    def _bucket_start(ts: datetime) -> datetime:
+        floored_minute = (ts.minute // bucket_minutes) * bucket_minutes
+        return ts.replace(minute=floored_minute, second=0, microsecond=0)
+
     for b in bars_1m:
-        completed = acc.on_tick(b.ts, b.close)
-        if completed is not None:
-            out.append(completed)
-    partial = acc.current_partial()
-    if partial is not None:
-        out.append(partial)
+        this_bucket = _bucket_start(b.ts)
+        if bucket_ts is None:
+            bucket_ts, o, h, l, c = this_bucket, b.open, b.high, b.low, b.close
+            continue
+        if this_bucket != bucket_ts:
+            out.append(Bar(ts=bucket_ts, open=o, high=h, low=l, close=c))
+            bucket_ts, o, h, l, c = this_bucket, b.open, b.high, b.low, b.close
+            continue
+        h = max(h, b.high)
+        l = min(l, b.low)
+        c = b.close
+
+    if bucket_ts is not None:
+        out.append(Bar(ts=bucket_ts, open=o, high=h, low=l, close=c))
+
     return out
 
 
@@ -206,7 +238,9 @@ async def main() -> None:
             f"Only {len(daily)} daily candle(s) returned for {index_key}; "
             "need at least 2 to read the previous trading day's PDH/PDL."
         )
-    pdh, pdl = daily[-2]["high"], daily[-2]["low"]  # previous trading day
+    # fetch_upstox_daily already ends at yesterday (its own end=today-1), so
+    # daily[-1] IS the previous trading day -- daily[-2] would be two days back.
+    pdh, pdl = daily[-1]["high"], daily[-1]["low"]
 
     ce_strike, pe_strike = map_strikes(pdh, pdl, args.strike_step)
 
@@ -233,8 +267,10 @@ async def main() -> None:
 
     all_trades: list[BacktestTrade] = []
     for day_bars in _group_by_trading_day(ce_5m):
+        day_bars = _truncate_to_eod(day_bars)
         all_trades += run_side_backtest(day_bars, "CE", ce_strike, args.lot_qty)
     for day_bars in _group_by_trading_day(pe_5m):
+        day_bars = _truncate_to_eod(day_bars)
         all_trades += run_side_backtest(day_bars, "PE", pe_strike, args.lot_qty)
 
     _print_report("CE", [t for t in all_trades if t.side == "CE"])

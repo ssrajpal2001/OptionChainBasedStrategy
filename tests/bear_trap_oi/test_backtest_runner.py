@@ -35,6 +35,25 @@ def test_no_trap_ever_confirmed_produces_zero_trades():
     assert trades == []
 
 
+def test_entry_requires_bar_close_inside_zone_not_just_range_overlap():
+    # A bar whose RANGE touches the zone but whose CLOSE is outside it must
+    # NOT fire an entry -- the live engine's check_zone_reentry() tests the
+    # live price (here, the bar's close), not whether the bar merely swept
+    # through the zone. A later bar that actually CLOSES inside the zone
+    # must fire at that close.
+    bars = [
+        _bar(15, 100, 105, 98, 102),   # c1
+        _bar(20, 97, 99, 90, 94),      # c2 -> zone [90, 102]
+        _bar(25, 95, 110, 95, 108),    # trap confirmed, armed, zone [90,102]
+        _bar(30, 108, 112, 96, 109),   # range touches zone (low=96<=102) but CLOSES at 109, outside -> no entry
+        _bar(35, 109, 109, 97, 100),   # closes at 100, inside [90,102] -> entry @ 100
+        _bar(315, 100, 150, 100, 145),  # EOD force close
+    ]
+    trades = run_side_backtest(bars, side="CE", strike=24500, lot_qty=75)
+    assert len(trades) == 1
+    assert trades[0].entry_price == 100.0
+
+
 def test_armed_but_never_reentered_produces_zero_trades():
     bars = [
         _bar(15, 100, 105, 98, 102),   # c1
