@@ -880,6 +880,60 @@ def _nearest_row_at_or_before(rows: list[dict], ts: datetime) -> dict:
     return match
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# Option-buyer momentum gate (2026-10-03, direct user philosophical pivot):
+# walls/noise-floor/LVN-maturation are option-SELLER filters (built to
+# catch slow chop); a buyer needs velocity. This gate drops the wall and
+# noise-floor checks entirely and replaces price_acceptance's LVN-touch
+# wait with a fast breakout+volume-or-EMA-slope trigger.
+# ─────────────────────────────────────────────────────────────────────────
+
+def compute_ema(values: list[float], period: int = 9) -> list[float]:
+    """Standard EMA, seeded with the first value (no separate SMA
+    warm-up -- fine for a short backtest window, same convention most
+    simple EMA implementations use)."""
+    if not values:
+        return []
+    k = 2 / (period + 1)
+    ema = [values[0]]
+    for v in values[1:]:
+        ema.append(ema[-1] + k * (v - ema[-1]))
+    return ema
+
+
+def check_momentum_acceptance(close: float, val: float, vah: float, direction: str,
+                               bar_volume: float, avg_volume: float,
+                               ema_prev: float, ema_curr: float,
+                               volume_surge_mult: float = 1.5) -> bool:
+    """Fast momentum trigger replacing the slow LVN-touch wait: price
+    must break VAH (bullish) / VAL (bearish), AND either a volume surge
+    (bar_volume >= volume_surge_mult * avg_volume) or a 9-EMA slope in
+    the trade's own direction confirms it -- not both required."""
+    if direction == "bullish":
+        if close <= vah:
+            return False
+        ema_confirms = ema_curr > ema_prev
+    else:
+        if close >= val:
+            return False
+        ema_confirms = ema_curr < ema_prev
+    volume_surge = avg_volume > 0 and bar_volume >= volume_surge_mult * avg_volume
+    return volume_surge or ema_confirms
+
+
+def check_buyer_gate(fut_trend: str, put_trend: str, call_trend: str, side: Side,
+                      close: float, val: float, vah: float, bar_volume: float,
+                      avg_volume: float, ema_prev: float, ema_curr: float) -> bool:
+    """Clean option-buyer activation gate: (5m OI directional matrix
+    match) AND (momentum breakout). No wall, no noise floor -- a buyer
+    wants to catch a wall breaking, not be kept out by one."""
+    if not check_directional_matrix(fut_trend, put_trend, call_trend, side):
+        return False
+    direction = "bullish" if side == "CE" else "bearish"
+    return check_momentum_acceptance(close, val, vah, direction, bar_volume,
+                                      avg_volume, ema_prev, ema_curr)
+
+
 def compute_performance_metrics(pnls: list[float]) -> dict:
     """Profit Factor, Expectancy, and Maximum Drawdown (peak-to-trough on
     CUMULATIVE P&L, in trade sequence order) for a list of per-trade net

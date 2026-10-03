@@ -7,7 +7,8 @@ from scripts.bear_trap_oi_backtest import (
     compute_oi_trend, sum_oi_band, check_oi_filter,
     VolBar, compute_volume_profile, classify_rollover,
     is_strike_oi_significant, check_hard_wall, check_directional_matrix,
-    check_price_acceptance, svp_ready,
+    check_price_acceptance, svp_ready, compute_ema, check_momentum_acceptance,
+    check_buyer_gate,
 )
 
 
@@ -387,6 +388,67 @@ def test_svp_ready_false_before_0945_true_at_or_after():
     assert svp_ready(before) is False
     assert svp_ready(at) is True
     assert svp_ready(after) is True
+
+
+def test_compute_ema_matches_standard_formula():
+    values = [10, 11, 12, 13, 14, 15, 16, 17, 18, 20]
+    ema = compute_ema(values, period=9)
+    assert len(ema) == len(values)
+    k = 2 / (9 + 1)
+    expected_last = ema[-2] + k * (values[-1] - ema[-2])
+    assert abs(ema[-1] - expected_last) < 1e-9
+
+
+def test_check_momentum_acceptance_breakout_plus_volume_surge():
+    accepted = check_momentum_acceptance(
+        close=110.0, val=95.0, vah=105.0, direction="bullish",
+        bar_volume=2000, avg_volume=1000, ema_prev=100.0, ema_curr=100.5,
+        volume_surge_mult=1.5,
+    )
+    assert accepted is True  # breakout beyond VAH + volume surge, EMA irrelevant
+
+
+def test_check_momentum_acceptance_breakout_plus_ema_slope_no_volume():
+    accepted = check_momentum_acceptance(
+        close=110.0, val=95.0, vah=105.0, direction="bullish",
+        bar_volume=900, avg_volume=1000, ema_prev=100.0, ema_curr=102.0,
+        volume_surge_mult=1.5,
+    )
+    assert accepted is True  # no volume surge, but EMA sloping up confirms
+
+
+def test_check_momentum_acceptance_rejects_no_breakout():
+    accepted = check_momentum_acceptance(
+        close=102.0, val=95.0, vah=105.0, direction="bullish",
+        bar_volume=5000, avg_volume=1000, ema_prev=100.0, ema_curr=102.0,
+    )
+    assert accepted is False  # close never cleared VAH -- no breakout at all
+
+
+def test_check_momentum_acceptance_rejects_breakout_with_neither_confirmation():
+    accepted = check_momentum_acceptance(
+        close=110.0, val=95.0, vah=105.0, direction="bullish",
+        bar_volume=900, avg_volume=1000, ema_prev=100.0, ema_curr=99.0,
+        volume_surge_mult=1.5,
+    )
+    assert accepted is False  # breakout but no volume surge and EMA sloping DOWN
+
+
+def test_check_buyer_gate_combines_directional_matrix_and_momentum():
+    # Directional matrix passes (PE config) AND momentum breakout+volume -- gate open.
+    gate_open = check_buyer_gate(
+        fut_trend="RISING", put_trend="FALLING", call_trend="RISING", side="PE",
+        close=90.0, val=95.0, vah=105.0, bar_volume=2000, avg_volume=1000,
+        ema_prev=100.0, ema_curr=99.0,
+    )
+    assert gate_open is True
+    # Directional matrix fails -- gate closed regardless of momentum.
+    gate_closed = check_buyer_gate(
+        fut_trend="RISING", put_trend="RISING", call_trend="RISING", side="PE",
+        close=90.0, val=95.0, vah=105.0, bar_volume=2000, avg_volume=1000,
+        ema_prev=100.0, ema_curr=99.0,
+    )
+    assert gate_closed is False
 
 
 def test_run_dynamic_side_backtest_allows_entry_before_1445_cutoff():
