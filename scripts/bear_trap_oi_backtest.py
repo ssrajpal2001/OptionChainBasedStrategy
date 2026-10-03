@@ -461,6 +461,108 @@ def manage_fib_trade(bars_after_entry: list[Bar], entry_price: float,
     }
 
 
+def run_dynamic_side_backtest(bars_by_strike: dict[int, dict[datetime, Bar]],
+                               master_ts: list[datetime], initial_strike: int,
+                               side_roll_schedule: list[tuple[datetime, int]],
+                               side: Side, lot_qty_each: int,
+                               logger: Optional[Callable[[str], None]] = None,
+                               ) -> Optional[dict]:
+    """One trading day, one side: runs the real trap detector while FLAT,
+    switching the WATCHED strike (and resetting the detector) on every
+    scheduled roll -- then, once a position opens, keeps tracking the
+    SAME entry_price/fib levels but switches the post-entry bar SOURCE to
+    whichever strike is current at each later timestamp (direct user
+    spec: target-tracking rolls onto the new 100-pt ITM strike's raw
+    premium even for an already-open trade; the entry/P&L basis itself
+    does not move). Returns one trade result dict, or None if no entry
+    fired this day (still one trade per day per side, matching
+    run_side_backtest's own EOD-batch scope)."""
+
+    def log(msg: str) -> None:
+        if logger is not None:
+            logger(f"[{side} dyn] {msg}")
+
+    current_strike = initial_strike
+    roll_ptr = 0
+    zone = _fresh_zone()
+    entry_price = entry_ts = entry_strike = None
+    entry_idx = None
+
+    def _apply_pending_rolls(ts: datetime, flat: bool) -> None:
+        nonlocal current_strike, roll_ptr, zone
+        while roll_ptr < len(side_roll_schedule) and side_roll_schedule[roll_ptr][0] <= ts:
+            _, new_strike = side_roll_schedule[roll_ptr]
+            roll_ptr += 1
+            if new_strike == current_strike:
+                continue
+            if flat:
+                log(f"ROLL (flat) @{ts} {current_strike} -> {new_strike} "
+                    f"(detector reset -- new contract, old candle refs invalid)")
+                zone = _fresh_zone()
+            else:
+                log(f"ROLL (in-position, target-tracking only) @{ts} "
+                    f"{current_strike} -> {new_strike}")
+            current_strike = new_strike
+
+    # Phase 1: scan while flat for an entry.
+    for i, ts in enumerate(master_ts):
+        _apply_pending_rolls(ts, flat=True)
+        bar = bars_by_strike.get(current_strike, {}).get(ts)
+        if bar is None:
+            continue
+
+        if zone.state == TrapZoneState.ARMED_WAIT_REENTRY and check_zone_reentry(zone, bar.close):
+            entry_price, entry_ts, entry_strike = bar.close, bar.ts, current_strike
+            entry_idx = i
+            log(f"ZONE RE-ENTRY & ENTRY @{bar.ts} strike={current_strike} "
+                f"price={entry_price} (zone was [{zone.zone_lo}, {zone.zone_hi}])")
+            break
+
+        prev_state = zone.state
+        zone = on_bar_close(zone, bar)
+        if prev_state == TrapZoneState.WAITING and zone.state == TrapZoneState.BREAKDOWN_WATCH:
+            log(f"C1 @{bar.ts} strike={current_strike} O={bar.open} H={bar.high} "
+                f"L={bar.low} C={bar.close}")
+        elif prev_state == TrapZoneState.BREAKDOWN_WATCH and zone.state == TrapZoneState.TRAP_WATCH:
+            log(f"C2 (BREAKDOWN) @{bar.ts} strike={current_strike} low={bar.low} "
+                f"-> zone_lo={zone.zone_lo}")
+        elif prev_state == TrapZoneState.TRAP_WATCH and zone.state == TrapZoneState.ARMED_WAIT_REENTRY:
+            log(f"TRAP CONFIRMED @{bar.ts} strike={current_strike} "
+                f"close={bar.close} -> zone_hi={zone.zone_hi}")
+            log(f"ZONE ACTIVE [{zone.zone_lo}, {zone.zone_hi}]")
+
+    if entry_price is None:
+        return None
+
+    # Phase 2: accumulate post-entry bars, switching source strike on any
+    # later roll, through to the end of the day's master_ts.
+    post_entry_bars: list[Bar] = []
+    for ts in master_ts[entry_idx + 1:]:
+        _apply_pending_rolls(ts, flat=False)
+        bar = bars_by_strike.get(current_strike, {}).get(ts)
+        if bar is not None:
+            post_entry_bars.append(bar)
+
+    result = manage_fib_trade(post_entry_bars, entry_price, lot_qty_each)
+    log(f"SWING HIGH = {result['swing_high']} @{result['swing_high_ts']} "
+        f"FIB_1272={result['fib_1272']} FIB_1618={result['fib_1618']}")
+    log(f"LOT1 EXIT @{result['lot1_exit_ts']} price={result['lot1_exit_price']} "
+        f"reason={result['lot1_exit_reason']}")
+    log(f"VARIANT A LOT2 EXIT @{result['variant_a']['lot2_exit_ts']} "
+        f"price={result['variant_a']['lot2_exit_price']} "
+        f"reason={result['variant_a']['lot2_exit_reason']} "
+        f"total_pnl={result['variant_a']['total_pnl']}")
+    log(f"VARIANT B LOT2 EXIT @{result['variant_b']['lot2_exit_ts']} "
+        f"price={result['variant_b']['lot2_exit_price']} "
+        f"reason={result['variant_b']['lot2_exit_reason']} "
+        f"total_pnl={result['variant_b']['total_pnl']}")
+
+    return {
+        "side": side, "entry_strike": entry_strike, "entry_price": entry_price,
+        "entry_ts": entry_ts, **result,
+    }
+
+
 async def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--days", type=int, default=7)
