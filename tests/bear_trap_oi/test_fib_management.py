@@ -3,7 +3,7 @@ from strategies.bear_trap_oi.models import Bar
 from scripts.bear_trap_oi_backtest import (
     fib_extension_levels, compute_itm_strike, compute_roll_schedule,
     manage_fib_trade, run_dynamic_side_backtest, compute_running_excursions,
-    format_trade_audit,
+    format_trade_audit, compute_performance_metrics, apply_execution_costs,
 )
 
 
@@ -207,6 +207,46 @@ def test_format_trade_audit_includes_entry_candle_table_and_fib_block():
     # every bar's own OHLC values must appear somewhere in the rendered table
     for b in bars:
         assert str(b.high) in text
+
+
+def test_compute_performance_metrics_profit_factor_expectancy_max_drawdown():
+    # Sequence chosen so cumulative P&L has a real peak-to-trough:
+    # +100, +200 (cum 300, peak 300), -150 (cum 150, dd=150), +50 (cum 200).
+    pnls = [100.0, 200.0, -150.0, 50.0]
+    m = compute_performance_metrics(pnls)
+    assert m["gross_win"] == 350.0
+    assert m["gross_loss"] == 150.0
+    assert m["profit_factor"] == 350.0 / 150.0
+    assert m["expectancy"] == sum(pnls) / 4
+    assert m["max_drawdown"] == 150.0
+    assert m["total_pnl"] == 200.0
+    assert m["win_count"] == 3 and m["loss_count"] == 1
+
+
+def test_compute_performance_metrics_handles_no_losses():
+    m = compute_performance_metrics([100.0, 50.0])
+    assert m["gross_loss"] == 0.0
+    assert m["profit_factor"] == float("inf")
+    assert m["max_drawdown"] == 0.0  # cumulative never dips below its own peak
+
+
+def test_apply_execution_costs_deducts_slippage_and_flat_fees():
+    # entry=100, lot1 exits @110, lot2 exits @120, qty=75/lot.
+    # Slippage 0.05% works AGAINST us on every fill (pay more to buy,
+    # receive less to sell). Flat fee: 30/lot/leg, 2 legs per lot
+    # (its own entry + its own exit) -- 4 lot-legs total across both lots.
+    result = apply_execution_costs(entry_price=100.0, lot1_exit_price=110.0,
+                                    lot2_exit_price=120.0, lot_qty_each=75,
+                                    cost_per_lot_leg=30.0, slippage_pct=0.0005)
+    eff_entry = 100.0 * 1.0005
+    eff_lot1_exit = 110.0 * 0.9995
+    eff_lot2_exit = 120.0 * 0.9995
+    lot1_net = (eff_lot1_exit - eff_entry) * 75 - 2 * 30.0
+    lot2_net = (eff_lot2_exit - eff_entry) * 75 - 2 * 30.0
+    assert abs(result["lot1_net_pnl"] - lot1_net) < 1e-9
+    assert abs(result["lot2_net_pnl"] - lot2_net) < 1e-9
+    assert abs(result["total_net_pnl"] - (lot1_net + lot2_net)) < 1e-9
+    assert result["total_net_pnl"] < (110.0 - 100.0 + 120.0 - 100.0) * 75  # strictly worse than gross
 
 
 def test_run_dynamic_side_backtest_allows_entry_before_1445_cutoff():

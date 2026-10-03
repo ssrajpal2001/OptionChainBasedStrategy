@@ -665,11 +665,67 @@ def run_dynamic_side_backtest(bars_by_strike: dict[int, dict[datetime, Bar]],
     }
 
 
+def compute_performance_metrics(pnls: list[float]) -> dict:
+    """Profit Factor, Expectancy, and Maximum Drawdown (peak-to-trough on
+    CUMULATIVE P&L, in trade sequence order) for a list of per-trade net
+    P&L figures -- direct user request before any live-deployment
+    decision. `pnls` should already be in entry-time order."""
+    gross_win = sum(p for p in pnls if p > 0)
+    gross_loss = sum(-p for p in pnls if p < 0)
+    win_count = sum(1 for p in pnls if p > 0)
+    loss_count = sum(1 for p in pnls if p < 0)
+    profit_factor = (gross_win / gross_loss) if gross_loss > 0 else (
+        float("inf") if gross_win > 0 else 0.0)
+    expectancy = (sum(pnls) / len(pnls)) if pnls else 0.0
+
+    cum = peak = max_dd = 0.0
+    for p in pnls:
+        cum += p
+        peak = max(peak, cum)
+        max_dd = max(max_dd, peak - cum)
+
+    return {
+        "gross_win": gross_win, "gross_loss": gross_loss,
+        "profit_factor": profit_factor, "expectancy": expectancy,
+        "max_drawdown": max_dd, "total_pnl": sum(pnls),
+        "win_count": win_count, "loss_count": loss_count,
+        "trade_count": len(pnls),
+    }
+
+
+def apply_execution_costs(entry_price: float, lot1_exit_price: float,
+                           lot2_exit_price: float, lot_qty_each: int,
+                           cost_per_lot_leg: float = 30.0,
+                           slippage_pct: float = 0.0005) -> dict:
+    """Net-of-cost P&L for one 2-lot trade, direct user request before
+    any live-deployment decision: slippage works AGAINST the trade on
+    every fill (pay more to buy, receive less to sell); a flat
+    brokerage/STT/exchange fee of `cost_per_lot_leg` is charged per lot
+    per leg -- each lot has its own entry leg and its own exit leg (4
+    lot-legs total across both lots, even though the physical entry order
+    covers both lots at once -- a simplifying, disclosed assumption)."""
+    eff_entry = entry_price * (1 + slippage_pct)
+    eff_lot1_exit = lot1_exit_price * (1 - slippage_pct)
+    eff_lot2_exit = lot2_exit_price * (1 - slippage_pct)
+
+    lot1_net = (eff_lot1_exit - eff_entry) * lot_qty_each - 2 * cost_per_lot_leg
+    lot2_net = (eff_lot2_exit - eff_entry) * lot_qty_each - 2 * cost_per_lot_leg
+
+    return {
+        "lot1_net_pnl": lot1_net, "lot2_net_pnl": lot2_net,
+        "total_net_pnl": lot1_net + lot2_net,
+    }
+
+
 async def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--days", type=int, default=7)
     parser.add_argument("--strike-step", type=int, default=50)
     parser.add_argument("--lot-qty", type=int, default=75)
+    parser.add_argument("--cost-per-lot-leg", type=float, default=30.0,
+                         dest="cost_per_lot_leg")
+    parser.add_argument("--slippage-pct", type=float, default=0.0005,
+                         dest="slippage_pct")
     args = parser.parse_args()
 
     from config.global_config import IST
@@ -832,6 +888,45 @@ async def main() -> None:
     print(f"\n=== Dynamic/Fib Combined: {len(all_dynamic_trades)} trade(s) -- "
           f"Variant A total P&L: {total_a:.2f}  |  "
           f"Variant B total P&L: {total_b:.2f} ===")
+
+    # --- Risk metrics + net-of-cost simulation for Variant A (direct user
+    # request: validation before any live-deployment decision). ---
+    sorted_trades = sorted(all_dynamic_trades, key=lambda t: t["entry_ts"])
+    gross_a_pnls = [t["variant_a"]["total_pnl"] for t in sorted_trades]
+    gross_metrics = compute_performance_metrics(gross_a_pnls)
+
+    net_a_pnls = []
+    for t in sorted_trades:
+        costed = apply_execution_costs(
+            entry_price=t["entry_price"], lot1_exit_price=t["lot1_exit_price"],
+            lot2_exit_price=t["variant_a"]["lot2_exit_price"],
+            lot_qty_each=args.lot_qty, cost_per_lot_leg=args.cost_per_lot_leg,
+            slippage_pct=args.slippage_pct,
+        )
+        net_a_pnls.append(costed["total_net_pnl"])
+    net_metrics = compute_performance_metrics(net_a_pnls)
+
+    print("\n=== Variant A Risk Metrics (GROSS, before costs) ===")
+    print(f"  Trades: {gross_metrics['trade_count']}  "
+          f"Win/Loss: {gross_metrics['win_count']}W/{gross_metrics['loss_count']}L")
+    print(f"  Total P&L: {gross_metrics['total_pnl']:.2f}")
+    print(f"  Profit Factor: {gross_metrics['profit_factor']:.3f}")
+    print(f"  Expectancy/Trade: {gross_metrics['expectancy']:.2f}")
+    print(f"  Max Drawdown (peak-to-trough on cumulative P&L): "
+          f"{gross_metrics['max_drawdown']:.2f}")
+
+    print("\n=== Variant A Risk Metrics (NET, after slippage + fees) ===")
+    print(f"  Cost model: {args.cost_per_lot_leg} per lot per leg, "
+          f"{args.slippage_pct * 100:.3f}% slippage on every fill")
+    print(f"  Trades: {net_metrics['trade_count']}  "
+          f"Win/Loss: {net_metrics['win_count']}W/{net_metrics['loss_count']}L")
+    print(f"  Total P&L: {net_metrics['total_pnl']:.2f}")
+    print(f"  Profit Factor: {net_metrics['profit_factor']:.3f}")
+    print(f"  Expectancy/Trade: {net_metrics['expectancy']:.2f}")
+    print(f"  Max Drawdown (peak-to-trough on cumulative P&L): "
+          f"{net_metrics['max_drawdown']:.2f}")
+    print(f"  Total cost drag vs gross: "
+          f"{gross_metrics['total_pnl'] - net_metrics['total_pnl']:.2f}")
 
     audit_path = "data/bear_trap_oi_audit_trail.txt"
     with open(audit_path, "w", encoding="utf-8") as f:
