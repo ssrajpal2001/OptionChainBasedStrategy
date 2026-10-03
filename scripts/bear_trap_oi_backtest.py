@@ -157,7 +157,7 @@ def compute_daily_strikes(daily_candles: list[dict],
 
     Returns [(trading_day, ce_strike, pe_strike), ...] for every day from
     index 1 onward (index 0 has no preceding day and is not tradeable)."""
-    from strategies.bear_trap_oi.strike_selector import map_strikes, round_to_strike_step
+    from strategies.bear_trap_oi.strike_selector import map_strikes
 
     if len(daily_candles) < 2:
         return []
@@ -775,6 +775,7 @@ async def main() -> None:
     from config.global_config import IST
     from data_layer.historical_candles import fetch_upstox_daily, fetch_upstox_range_1m
     from data_layer.instrument_registry import REGISTRY
+    from strategies.bear_trap_oi.strike_selector import round_to_strike_step
 
     access_token = _get_upstox_access_token()
     today = datetime.now().date()
