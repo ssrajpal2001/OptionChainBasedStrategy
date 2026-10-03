@@ -1077,6 +1077,51 @@ def enter_on_1m_trap(bars_1m: list[Bar], lot_qty: int) -> Optional[dict]:
     return None
 
 
+def enter_on_1m_trap_with_sl(bars_1m: list[Bar], lot_qty: int) -> list[dict]:
+    """Same fresh 1-min trap cycle as enter_on_1m_trap, plus a direct
+    user-specified stop/re-entry rule: SL = the fresh zone's own
+    zone_lo. If SL is hit (a later bar closes at/below it), the position
+    closes there -- but the SAME side keeps watching, and if price later
+    closes back ABOVE the SAME reference candle's (C1) high, re-enters
+    on the same side with the SAME SL (never recalculated). Repeats for
+    as many SL-hit/reclaim cycles as the remaining bars contain. Returns
+    one dict per trade (entry->sl_hit or entry->eod)."""
+    zone = _fresh_zone()
+    trades: list[dict] = []
+    phase = "SCANNING_INITIAL"  # -> "IN_POSITION" -> "WAITING_RECLAIM" -> "IN_POSITION" -> ...
+    entry_price = entry_ts = None
+    sl = c1_high = None
+
+    for i, bar in enumerate(bars_1m):
+        is_last = i == len(bars_1m) - 1
+
+        if phase == "SCANNING_INITIAL":
+            if zone.state == TrapZoneState.ARMED_WAIT_REENTRY and check_zone_reentry(zone, bar.close):
+                entry_price, entry_ts = bar.close, bar.ts
+                sl, c1_high = zone.zone_lo, zone.c1.high
+                phase = "IN_POSITION"
+            else:
+                zone = on_bar_close(zone, bar)
+        elif phase == "IN_POSITION":
+            if bar.close <= sl:
+                trades.append({"entry_price": entry_price, "entry_ts": entry_ts,
+                                "exit_price": sl, "exit_ts": bar.ts,
+                                "exit_reason": "sl_hit", "zone_lo": sl})
+                entry_price = entry_ts = None
+                phase = "WAITING_RECLAIM"
+        elif phase == "WAITING_RECLAIM":
+            if bar.close > c1_high:
+                entry_price, entry_ts = bar.close, bar.ts
+                phase = "IN_POSITION"
+
+        if is_last and phase == "IN_POSITION":
+            trades.append({"entry_price": entry_price, "entry_ts": entry_ts,
+                            "exit_price": bar.close, "exit_ts": bar.ts,
+                            "exit_reason": "eod", "zone_lo": sl})
+
+    return trades
+
+
 def compute_performance_metrics(pnls: list[float]) -> dict:
     """Profit Factor, Expectancy, and Maximum Drawdown (peak-to-trough on
     CUMULATIVE P&L, in trade sequence order) for a list of per-trade net

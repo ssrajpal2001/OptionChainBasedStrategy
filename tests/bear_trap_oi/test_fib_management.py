@@ -10,7 +10,7 @@ from scripts.bear_trap_oi_backtest import (
     check_price_acceptance, svp_ready, compute_ema, check_momentum_acceptance,
     check_buyer_gate, compute_roc, check_velocity_gate, diagnose_trap_funnel,
     peak_strike_shift, detect_writer_panic, check_ltp_calc_gate,
-    detect_5m_zone_invalidation, enter_on_1m_trap,
+    detect_5m_zone_invalidation, enter_on_1m_trap, enter_on_1m_trap_with_sl,
 )
 
 
@@ -594,6 +594,44 @@ def test_enter_on_1m_trap_returns_none_if_no_reentry_yet():
         _bar(2, 45, 60, 45, 58),  # armed, but never re-enters within these bars
     ]
     assert enter_on_1m_trap(bars_1m, lot_qty=75) is None
+
+
+def test_enter_on_1m_trap_with_sl_single_trade_runs_to_eod_when_never_stopped():
+    bars_1m = [
+        _bar(0, 50, 55, 48, 52),    # 1m C1 (high=55)
+        _bar(1, 47, 49, 40, 44),    # 1m C2, zone_lo=40
+        _bar(2, 45, 60, 45, 58),    # confirm (close 58 > C1.high 55), armed
+        _bar(3, 58, 59, 39, 45),    # re-entry inside [40,52] -> entry @45, SL=40
+        _bar(4, 45, 70, 44, 65),    # never dips to SL -> stays in position
+    ]
+    trades = enter_on_1m_trap_with_sl(bars_1m, lot_qty=75)
+    assert len(trades) == 1
+    assert trades[0]["entry_price"] == 45.0 and trades[0]["entry_ts"] == bars_1m[3].ts
+    assert trades[0]["exit_reason"] == "eod"
+    assert trades[0]["exit_price"] == 65.0 and trades[0]["exit_ts"] == bars_1m[4].ts
+    assert trades[0]["zone_lo"] == 40.0
+
+
+def test_enter_on_1m_trap_with_sl_reenters_same_side_on_ref_candle_reclaim():
+    bars_1m = [
+        _bar(0, 50, 55, 48, 52),    # 1m C1 (high=55)
+        _bar(1, 47, 49, 40, 44),    # 1m C2, zone_lo=40
+        _bar(2, 45, 60, 45, 58),    # confirm, armed, zone=[40,52]
+        _bar(3, 58, 59, 39, 45),    # entry @45, SL=40
+        _bar(4, 45, 46, 38, 39),    # closes below SL(40) -> stopped out @40
+        _bar(5, 39, 50, 38, 48),    # still below C1.high(55) -- no reclaim yet
+        _bar(6, 48, 60, 47, 57),    # closes above C1.high(55) -> RE-ENTER @57, same SL=40
+        _bar(7, 57, 80, 56, 75),    # EOD, never re-stopped
+    ]
+    trades = enter_on_1m_trap_with_sl(bars_1m, lot_qty=75)
+    assert len(trades) == 2
+    first, second = trades
+    assert first["exit_reason"] == "sl_hit"
+    assert first["exit_price"] == 40.0 and first["exit_ts"] == bars_1m[4].ts
+    assert second["entry_price"] == 57.0 and second["entry_ts"] == bars_1m[6].ts
+    assert second["zone_lo"] == 40.0  # SAME SL, not recalculated
+    assert second["exit_reason"] == "eod"
+    assert second["exit_price"] == 75.0 and second["exit_ts"] == bars_1m[7].ts
 
 
 def test_run_dynamic_side_backtest_allows_entry_before_1445_cutoff():
