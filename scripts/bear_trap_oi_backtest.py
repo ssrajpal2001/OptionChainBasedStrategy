@@ -99,18 +99,33 @@ def _group_by_trading_day(bars: list[Bar]) -> list[list[Bar]]:
     return [list(g) for _, g in groupby(bars, key=keyfunc)]
 
 
-async def _fetch_week_of_premium(underlying: str, ce_key: str, pe_key: str,
-                                  days: int):
-    """Fetches real 5-min premium history via the platform's existing
-    Upstox intraday fetcher. Imported lazily so unit tests (which only
-    exercise run_side_backtest) never need network/broker config."""
-    from data_layer.historical_candles import fetch_upstox_intraday_1m
+def _candle_dicts_to_bars(rows: list[dict]) -> list[Bar]:
+    """Converts historical_candles.py's raw {'ts','open','high','low',
+    'close',...} dicts (ts = Upstox ISO-8601 string) into our Bar
+    dataclass."""
+    out: list[Bar] = []
+    for r in rows:
+        ts = r["ts"]
+        if isinstance(ts, str):
+            ts = datetime.fromisoformat(ts)
+        out.append(Bar(ts=ts, open=r["open"], high=r["high"], low=r["low"],
+                        close=r["close"]))
+    return out
 
-    end = datetime.now()
+
+async def _fetch_week_of_premium(ce_key: str, pe_key: str, access_token: str,
+                                  days: int) -> tuple[list[Bar], list[Bar]]:
+    """Fetches real 1-min premium history via the platform's existing
+    Upstox range fetcher, then converts to Bar. Imported lazily so unit
+    tests (which only exercise run_side_backtest) never need network/
+    broker config."""
+    from data_layer.historical_candles import fetch_upstox_range_1m
+
+    end = datetime.now().date()
     start = end - timedelta(days=days)
-    ce_1m = await fetch_upstox_intraday_1m(ce_key, start, end)
-    pe_1m = await fetch_upstox_intraday_1m(pe_key, start, end)
-    return ce_1m, pe_1m
+    ce_rows = await fetch_upstox_range_1m(ce_key, access_token, start, end)
+    pe_rows = await fetch_upstox_range_1m(pe_key, access_token, start, end)
+    return _candle_dicts_to_bars(ce_rows), _candle_dicts_to_bars(pe_rows)
 
 
 def _resample_1m_to_5m(bars_1m: list[Bar]) -> list[Bar]:
@@ -125,6 +140,29 @@ def _resample_1m_to_5m(bars_1m: list[Bar]) -> list[Bar]:
     if partial is not None:
         out.append(partial)
     return out
+
+
+def _get_upstox_access_token() -> str:
+    """Reads the Upstox access token from the platform's own credentials
+    store (data/clients.db, system_feeder_creds table) -- same source
+    every other live/backtest script in this codebase uses."""
+    import sqlite3
+
+    conn = sqlite3.connect("data/clients.db")
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT access_token FROM system_feeder_creds WHERE provider='upstox'"
+        )
+        row = cur.fetchone()
+        if not row or not row[0]:
+            raise RuntimeError(
+                "No Upstox access_token found in data/clients.db "
+                "(system_feeder_creds) -- cannot run a real-data backtest."
+            )
+        return row[0]
+    finally:
+        conn.close()
 
 
 def _print_report(side: str, trades: list[BacktestTrade]) -> None:
@@ -157,16 +195,39 @@ async def main() -> None:
     from data_layer.instrument_registry import REGISTRY
     from strategies.bear_trap_oi.strike_selector import map_strikes
 
-    today = datetime.now()
-    daily = await fetch_upstox_daily("NSE_INDEX|Nifty 50", lookback_days=args.days + 2)
-    pdh, pdl = daily[-2].high, daily[-2].low  # previous trading day
+    access_token = _get_upstox_access_token()
+    today = datetime.now().date()
+
+    index_key = REGISTRY.get_upstox_index_key("NIFTY")
+    daily = await fetch_upstox_daily(index_key, access_token,
+                                      lookback_days=args.days + 2)
+    if len(daily) < 2:
+        raise RuntimeError(
+            f"Only {len(daily)} daily candle(s) returned for {index_key}; "
+            "need at least 2 to read the previous trading day's PDH/PDL."
+        )
+    pdh, pdl = daily[-2]["high"], daily[-2]["low"]  # previous trading day
 
     ce_strike, pe_strike = map_strikes(pdh, pdl, args.strike_step)
-    expiry = REGISTRY.get_active_expiry_strict("NIFTY", from_date=today)
-    ce_key = REGISTRY.get_option_key("NIFTY", expiry, ce_strike, "CE")
-    pe_key = REGISTRY.get_option_key("NIFTY", expiry, pe_strike, "PE")
 
-    ce_1m, pe_1m = await _fetch_week_of_premium("NIFTY", ce_key, pe_key, args.days)
+    REGISTRY.load_sync("NIFTY", access_token)
+    expiry = REGISTRY.get_active_expiry_strict("NIFTY", from_date=today)
+    if expiry is None:
+        raise RuntimeError("Could not resolve NIFTY's active weekly expiry.")
+    ce_key = REGISTRY.get_upstox_key("NIFTY", expiry, ce_strike, "CE")
+    pe_key = REGISTRY.get_upstox_key("NIFTY", expiry, pe_strike, "PE")
+    if not ce_key or not pe_key:
+        raise RuntimeError(
+            f"Could not resolve Upstox keys for CE {ce_strike}/PE {pe_strike} "
+            f"@ expiry {expiry} -- contract may not be loaded."
+        )
+
+    print(f"PDH={pdh} PDL={pdl} -> CE strike={ce_strike} PE strike={pe_strike} "
+          f"expiry={expiry}")
+
+    ce_1m, pe_1m = await _fetch_week_of_premium(ce_key, pe_key, access_token,
+                                                 args.days)
+    print(f"Fetched {len(ce_1m)} CE 1-min bars, {len(pe_1m)} PE 1-min bars")
     ce_5m = _resample_1m_to_5m(ce_1m)
     pe_5m = _resample_1m_to_5m(pe_1m)
 
