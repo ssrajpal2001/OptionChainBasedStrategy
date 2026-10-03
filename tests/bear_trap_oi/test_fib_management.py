@@ -12,10 +12,17 @@ def _bar(minute, o, h, l, c):
     return Bar(ts=base + timedelta(minutes=minute), open=o, high=h, low=l, close=c)
 
 
-def test_fib_extension_levels_computes_1272_and_1618():
-    levels = fib_extension_levels(base_price=100.0, top_price=150.0)
-    assert levels["1.272"] == 100.0 + (150.0 - 100.0) * 1.272
-    assert levels["1.618"] == 100.0 + (150.0 - 100.0) * 1.618
+def test_fib_extension_levels_computes_widened_1618_and_2618_by_default():
+    target1, target2 = fib_extension_levels(base_price=100.0, top_price=150.0)
+    assert target1 == 100.0 + (150.0 - 100.0) * 1.618
+    assert target2 == 100.0 + (150.0 - 100.0) * 2.618
+
+
+def test_fib_extension_levels_accepts_custom_ratios():
+    target1, target2 = fib_extension_levels(base_price=100.0, top_price=150.0,
+                                             ratio1=1.272, ratio2=1.618)
+    assert target1 == 100.0 + (150.0 - 100.0) * 1.272
+    assert target2 == 100.0 + (150.0 - 100.0) * 1.618
 
 
 def test_compute_itm_strike_ce_is_below_spot_pe_is_above_spot():
@@ -42,18 +49,19 @@ def test_compute_roll_schedule_emits_event_on_100pt_move_and_resets_anchor():
 def test_manage_fib_trade_uses_fallback_fixed_r_when_impulse_too_small():
     # Peak never clears 2% above entry (max peak = 101, only +1%), so the
     # dynamic zone_lo->peak Fib span is never trusted; lot1 uses the fixed
-    # 1.5R fallback off (entry - zone_lo), lot2 the fixed 2R fallback.
+    # 2R fallback off (entry - zone_lo), lot2 the fixed 3R fallback
+    # (widened 2026-10-03, direct user fix -- was 1.5R/2.0R).
     entry_price, zone_lo = 100.0, 95.0  # risk = 5
     bars = [
         _bar(0, 100, 101, 99, 100),
         _bar(5, 100, 100.5, 99, 100),
-        _bar(315, 100, 100.8, 99, 99.5),  # EOD, target1 (107.5) never reached
+        _bar(315, 100, 100.8, 99, 99.5),  # EOD, target1 (110) never reached
     ]
     result = manage_fib_trade(bars, entry_price=entry_price, zone_lo=zone_lo,
                                lot_qty_each=75)
     assert result["mode"] == "fallback_fixed_R"
-    assert result["target1"] == entry_price + 1.5 * (entry_price - zone_lo)  # 107.5
-    assert result["target2"] == entry_price + 2.0 * (entry_price - zone_lo)  # 110.0
+    assert result["target1"] == entry_price + 2.0 * (entry_price - zone_lo)  # 110.0
+    assert result["target2"] == entry_price + 3.0 * (entry_price - zone_lo)  # 115.0
     assert result["lot1_exit_reason"] == "eod_target1_not_reached"
     assert result["lot1_exit_price"] == bars[-1].close
 
@@ -64,8 +72,8 @@ def test_manage_fib_trade_floors_risk_to_1pct_for_a_razor_thin_zone():
     # Floored risk = max(113.3-113.25, 113.3*0.01) = max(0.05, 1.133) = 1.133.
     entry_price, zone_lo = 113.3, 113.25
     floored_risk = max(entry_price - zone_lo, entry_price * 0.01)
-    expected_target1 = entry_price + 1.5 * floored_risk
-    expected_target2 = entry_price + 2.0 * floored_risk
+    expected_target1 = entry_price + 2.0 * floored_risk
+    expected_target2 = entry_price + 3.0 * floored_risk
     bars = [
         _bar(0, entry_price, entry_price + 0.5, entry_price - 0.5, entry_price),
         _bar(5, entry_price, expected_target1 + 1, entry_price - 1, expected_target1),
@@ -84,24 +92,65 @@ def test_manage_fib_trade_floors_risk_to_1pct_for_a_razor_thin_zone():
 def test_manage_fib_trade_switches_to_dynamic_peak_mode_once_impulse_qualifies():
     # entry=100, zone_lo=90 -> risk=10. First bar's high (103) clears the
     # 2% impulse gate ((103-100)/100=3%), so from the FOLLOWING bar onward
-    # target1 is the zone_lo->peak Fib 1.272 extension, not the fallback.
+    # target1 is the zone_lo->peak Fib 1.618 extension, not the fallback.
     entry_price, zone_lo = 100.0, 90.0
     bars = [
         _bar(0, 100, 103, 99, 102),     # peak becomes 103 after this bar (still fallback THIS bar)
-        _bar(5, 102, 108, 101, 106),    # target1 now = 90+(103-90)*1.272=106.536; high=108 clears it
-        _bar(10, 106, 115, 95, 110),    # variant A: low=95<=entry(100) -> TSL; variant B: checked below
-        _bar(315, 110, 112, 108, 111),  # EOD
+        _bar(5, 102, 112, 101, 106),    # target1 now = 90+(103-90)*1.618=111.034; high=112 clears it
+        _bar(10, 106, 115, 95, 110),    # EOD
     ]
     result = manage_fib_trade(bars, entry_price=entry_price, zone_lo=zone_lo,
                                lot_qty_each=75)
     assert result["mode"] == "fib_dynamic_peak"
-    target1 = zone_lo + (103.0 - zone_lo) * 1.272
+    target1 = zone_lo + (103.0 - zone_lo) * 1.618
     assert result["target1"] == target1
     assert result["lot1_exit_reason"] == "target1_hit"
     assert result["lot1_exit_price"] == target1
     assert result["lot1_exit_ts"] == bars[1].ts
-    assert result["variant_a"]["lot2_exit_reason"] == "tsl_breakeven"
-    assert result["variant_a"]["lot2_exit_price"] == entry_price
+
+
+def test_manage_fib_trade_variant_a_3bar_low_tsl_survives_a_dip_flat_breakeven_would_not():
+    # Real incident this reproduces: Variant A's OLD flat-breakeven stop
+    # got kicked out by an ordinary dip minutes before a real rally
+    # (CE 22550, 2026-09-30). Entry=100, zone_lo=90: bar0/bar1 both dip
+    # well below entry (lows 85 and 90), so the rolling 3-bar low sits at
+    # 85 -- a dip to 92 on the very next bar would have breached a flat
+    # breakeven(100) stop, but does NOT breach the 3-bar-low(85) stop.
+    entry_price, zone_lo = 100.0, 90.0
+    bars = [
+        _bar(0, 100, 103, 85, 102),     # peak->103 after check; low=85 (feeds the 3-bar window)
+        _bar(5, 102, 112, 90, 108),     # target1=90+(103-90)*1.618=111.034 -> lot1 fires here
+        _bar(10, 108, 109, 92, 95),     # a dip to 92: ABOVE the 3-bar-low(85) stop -> no exit
+        _bar(15, 95, 130, 93, 128),     # rally continues: high=130 clears target2
+    ]
+    target1 = zone_lo + (103.0 - zone_lo) * 1.618
+    target2 = zone_lo + (103.0 - zone_lo) * 2.618
+    result = manage_fib_trade(bars, entry_price=entry_price, zone_lo=zone_lo,
+                               lot_qty_each=75)
+    assert result["lot1_exit_ts"] == bars[1].ts
+    assert result["target2"] == target2
+    # Variant A was NOT stopped out on the dip at bars[2] -- it rides the
+    # rally to target2, same bar as Variant B.
+    assert result["variant_a"]["lot2_exit_reason"] == "target2_hit"
+    assert result["variant_a"]["lot2_exit_price"] == target2
+    assert result["variant_a"]["lot2_exit_ts"] == bars[3].ts
+    assert result["variant_b"]["lot2_exit_reason"] == "target2_hit"
+    assert result["variant_b"]["lot2_exit_ts"] == bars[3].ts
+
+
+def test_manage_fib_trade_variant_a_3bar_low_tsl_still_exits_on_a_genuine_breach():
+    entry_price, zone_lo = 100.0, 90.0
+    bars = [
+        _bar(0, 100, 103, 98, 102),     # 3-bar window feeds low=98
+        _bar(5, 102, 112, 99, 108),     # target1 hit here; window low so far min(98,99)
+        _bar(10, 108, 109, 80, 95),     # genuine breach: 80 is below the rolling 3-bar low
+    ]
+    result = manage_fib_trade(bars, entry_price=entry_price, zone_lo=zone_lo,
+                               lot_qty_each=75)
+    assert result["variant_a"]["lot2_exit_reason"] == "tsl_3bar_low"
+    # stop level = min low of the 3 bars ending at (and including) the
+    # lot1-firing bar = min(98, 99) = 98 (only 2 bars exist that far back)
+    assert result["variant_a"]["lot2_exit_price"] == 98.0
     assert result["variant_a"]["lot2_exit_ts"] == bars[2].ts
 
 
