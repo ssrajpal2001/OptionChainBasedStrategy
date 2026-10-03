@@ -1119,13 +1119,17 @@ async def main() -> None:
                            key=lambda s: oi_now["CE"].get(s, 0) + oi_now["PE"].get(s, 0),
                            default=atm)
         own_strike_abs_oi = oi_now[trade.side].get(trade.strike, 0)
-        significant = is_strike_oi_significant(own_strike_abs_oi, peak_oi, min_pct=0.05)
+        # Sensitivity pass, 2026-10-03: noise floor bypassed (0%) to test
+        # whether CE 23100 was correctly rejected on OI concentration alone.
+        significant = is_strike_oi_significant(own_strike_abs_oi, peak_oi, min_pct=0.0)
 
         wall_oi_base = oi_base["CE"].get(wall_strike, 0) + oi_base["PE"].get(wall_strike, 0)
         wall_oi_now = oi_now["CE"].get(wall_strike, 0) + oi_now["PE"].get(wall_strike, 0)
         wall_change_pct = (abs(wall_oi_now - wall_oi_base) / wall_oi_base) if wall_oi_base else 0.0
+        # Sensitivity pass, 2026-10-03: wall proximity relaxed 50->25pts to
+        # test whether PE 23550 clears a tighter threshold.
         blocked_by_wall = check_hard_wall(float(trade.strike), float(wall_strike),
-                                           distance_pts=50, oi_change_pct=wall_change_pct,
+                                           distance_pts=25, oi_change_pct=wall_change_pct,
                                            override_pct=0.30)
 
         # Directional matrix: needs a Futures OI trend too.
