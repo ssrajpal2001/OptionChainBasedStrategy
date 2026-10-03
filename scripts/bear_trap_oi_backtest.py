@@ -21,9 +21,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from itertools import groupby
-from typing import Literal
+from typing import Callable, Literal, Optional
 
 from strategies.bear_trap_oi.models import Bar, TrapZone, TrapZoneState
 from strategies.bear_trap_oi.trap_detector import (
@@ -42,6 +42,7 @@ class BacktestTrade:
     exit_price: float
     exit_ts: datetime
     pnl: float
+    pnl_pct: float
     c1: Bar
     c2: Bar
 
@@ -52,12 +53,24 @@ def _fresh_zone() -> TrapZone:
 
 
 def run_side_backtest(bars: list[Bar], side: Side, strike: int,
-                       lot_qty: int) -> list[BacktestTrade]:
+                       lot_qty: int,
+                       logger: Optional[Callable[[str], None]] = None,
+                       ) -> list[BacktestTrade]:
     """Replay one trading day's bars for one side through the real
-    detector. OI filter is bypassed (see module docstring)."""
+    detector. OI filter is bypassed (see module docstring).
+
+    When `logger` is given, every state transition (C1 reference, C2
+    breakdown, trap confirmation + zone, re-entry/entry, EOD exit) is
+    emitted to it as a timestamped, human-readable line -- so a reviewer
+    can see exactly why (or why not) a trade fired on a given day, not
+    just the final trade list."""
     trades: list[BacktestTrade] = []
     zone = _fresh_zone()
     open_entry: tuple[float, datetime, Bar, Bar] | None = None  # price, ts, c1, c2
+
+    def log(msg: str) -> None:
+        if logger is not None:
+            logger(f"[{side} {strike}] {msg}")
 
     for i, bar in enumerate(bars):
         is_last_bar = i == len(bars) - 1
@@ -72,6 +85,8 @@ def run_side_backtest(bars: list[Bar], side: Side, strike: int,
             if check_zone_reentry(zone, bar.close):
                 entry_price = bar.close
                 open_entry = (entry_price, bar.ts, zone.c1, zone.c2)
+                log(f"ZONE RE-ENTRY & ENTRY @{bar.ts} price={entry_price} "
+                    f"(zone was [{zone.zone_lo}, {zone.zone_hi}])")
                 zone = TrapZone(state=TrapZoneState.IN_POSITION, c1=zone.c1,
                                  c2=zone.c2, zone_lo=zone.zone_lo,
                                  zone_hi=zone.zone_hi,
@@ -79,21 +94,62 @@ def run_side_backtest(bars: list[Bar], side: Side, strike: int,
                 continue  # don't also run on_bar_close on the entry bar
 
         if zone.state not in (TrapZoneState.IN_POSITION,):
+            prev_state = zone.state
             zone = on_bar_close(zone, bar)
+            if prev_state == TrapZoneState.WAITING and zone.state == TrapZoneState.BREAKDOWN_WATCH:
+                log(f"C1 (CANDLE 1 / REFERENCE) @{bar.ts} O={bar.open} "
+                    f"H={bar.high} L={bar.low} C={bar.close}")
+            elif prev_state == TrapZoneState.BREAKDOWN_WATCH and zone.state == TrapZoneState.TRAP_WATCH:
+                log(f"C2 (CANDLE 2 / BREAKDOWN) @{bar.ts} low={bar.low} "
+                    f"-> zone_lo={zone.zone_lo}")
+            elif prev_state == TrapZoneState.BREAKDOWN_WATCH and zone.c1 is bar:
+                log(f"C1 (CANDLE 1 / REFERENCE, rolled -- no breakdown yet) "
+                    f"@{bar.ts} O={bar.open} H={bar.high} L={bar.low} C={bar.close}")
+            elif prev_state == TrapZoneState.TRAP_WATCH and zone.state == TrapZoneState.ARMED_WAIT_REENTRY:
+                log(f"TRAP CONFIRMED @{bar.ts} close={bar.close} "
+                    f"-> zone_hi={zone.zone_hi}")
+                log(f"ZONE ACTIVE [{zone.zone_lo}, {zone.zone_hi}]")
 
         if is_last_bar and open_entry is not None:
             entry_price, entry_ts, c1, c2 = open_entry
             exit_price = bar.close
             pnl = (exit_price - entry_price) * lot_qty
+            pnl_pct = ((exit_price - entry_price) / entry_price) * 100 if entry_price else 0.0
+            log(f"EXIT (EOD) @{bar.ts} price={exit_price} "
+                f"pnl_pts={pnl:.2f} pnl_pct={pnl_pct:.2f}%")
             trades.append(BacktestTrade(
                 side=side, strike=strike, entry_price=entry_price,
                 entry_ts=entry_ts, exit_price=exit_price, exit_ts=bar.ts,
-                pnl=pnl, c1=c1, c2=c2,
+                pnl=pnl, pnl_pct=pnl_pct, c1=c1, c2=c2,
             ))
             open_entry = None
             zone = close_position(zone)
 
     return trades
+
+
+def compute_daily_strikes(daily_candles: list[dict],
+                           step: int) -> list[tuple[date, int, int]]:
+    """For EVERY tradeable day in a daily-candle series (oldest-first dicts
+    with 'ts'/'high'/'low'), computes that day's OWN ce_strike/pe_strike
+    from its immediately preceding day's PDH/PDL -- per spec Section 3,
+    strikes are fixed for a given trading day but must be recomputed fresh
+    each day, never reused across the whole backtest window.
+
+    Returns [(trading_day, ce_strike, pe_strike), ...] for every day from
+    index 1 onward (index 0 has no preceding day and is not tradeable)."""
+    from strategies.bear_trap_oi.strike_selector import map_strikes
+
+    if len(daily_candles) < 2:
+        return []
+
+    out: list[tuple[date, int, int]] = []
+    for i in range(1, len(daily_candles)):
+        prev = daily_candles[i - 1]
+        trading_day = datetime.fromisoformat(daily_candles[i]["ts"]).date()
+        ce_strike, pe_strike = map_strikes(prev["high"], prev["low"], step)
+        out.append((trading_day, ce_strike, pe_strike))
+    return out
 
 
 def _group_by_trading_day(bars: list[Bar]) -> list[list[Bar]]:
@@ -124,21 +180,6 @@ def _candle_dicts_to_bars(rows: list[dict]) -> list[Bar]:
         out.append(Bar(ts=ts, open=r["open"], high=r["high"], low=r["low"],
                         close=r["close"]))
     return out
-
-
-async def _fetch_week_of_premium(ce_key: str, pe_key: str, access_token: str,
-                                  days: int) -> tuple[list[Bar], list[Bar]]:
-    """Fetches real 1-min premium history via the platform's existing
-    Upstox range fetcher, then converts to Bar. Imported lazily so unit
-    tests (which only exercise run_side_backtest) never need network/
-    broker config."""
-    from data_layer.historical_candles import fetch_upstox_range_1m
-
-    end = datetime.now().date()
-    start = end - timedelta(days=days)
-    ce_rows = await fetch_upstox_range_1m(ce_key, access_token, start, end)
-    pe_rows = await fetch_upstox_range_1m(pe_key, access_token, start, end)
-    return _candle_dicts_to_bars(ce_rows), _candle_dicts_to_bars(pe_rows)
 
 
 def _resample_1m_to_5m(bars_1m: list[Bar], bucket_minutes: int = 5) -> list[Bar]:
@@ -213,7 +254,7 @@ def _print_report(side: str, trades: list[BacktestTrade]) -> None:
         print(f"  [{t.entry_ts}] strike={t.strike} C1(close={t.c1.close}, "
               f"high={t.c1.high}, low={t.c1.low}) C2(low={t.c2.low}) "
               f"entry={t.entry_price} -> exit({t.exit_ts})={t.exit_price} "
-              f"pnl={t.pnl:.2f}")
+              f"pnl={t.pnl:.2f} ({t.pnl_pct:.2f}%)")
 
 
 async def main() -> None:
@@ -223,55 +264,70 @@ async def main() -> None:
     parser.add_argument("--lot-qty", type=int, default=75)
     args = parser.parse_args()
 
-    from data_layer.historical_candles import fetch_upstox_daily
+    from data_layer.historical_candles import fetch_upstox_daily, fetch_upstox_range_1m
     from data_layer.instrument_registry import REGISTRY
-    from strategies.bear_trap_oi.strike_selector import map_strikes
 
     access_token = _get_upstox_access_token()
     today = datetime.now().date()
 
     index_key = REGISTRY.get_upstox_index_key("NIFTY")
+    # +3 lookback margin so the FIRST tradeable day in --days still has a
+    # real preceding day's candle to compute PDH/PDL from.
     daily = await fetch_upstox_daily(index_key, access_token,
-                                      lookback_days=args.days + 2)
-    if len(daily) < 2:
-        raise RuntimeError(
-            f"Only {len(daily)} daily candle(s) returned for {index_key}; "
-            "need at least 2 to read the previous trading day's PDH/PDL."
-        )
-    # fetch_upstox_daily already ends at yesterday (its own end=today-1), so
-    # daily[-1] IS the previous trading day -- daily[-2] would be two days back.
-    pdh, pdl = daily[-1]["high"], daily[-1]["low"]
+                                      lookback_days=args.days + 3)
+    daily_strikes = compute_daily_strikes(daily, args.strike_step)
+    # Keep only the trading days actually within the requested window.
+    cutoff = today - timedelta(days=args.days)
+    daily_strikes = [row for row in daily_strikes if row[0] >= cutoff]
 
-    ce_strike, pe_strike = map_strikes(pdh, pdl, args.strike_step)
+    if not daily_strikes:
+        raise RuntimeError(
+            f"No tradeable days with a resolvable preceding-day PDH/PDL "
+            f"found in the last {args.days} day(s) for {index_key}."
+        )
 
     REGISTRY.load_sync("NIFTY", access_token)
-    expiry = REGISTRY.get_active_expiry_strict("NIFTY", from_date=today)
-    if expiry is None:
-        raise RuntimeError("Could not resolve NIFTY's active weekly expiry.")
-    ce_key = REGISTRY.get_upstox_key("NIFTY", expiry, ce_strike, "CE")
-    pe_key = REGISTRY.get_upstox_key("NIFTY", expiry, pe_strike, "PE")
-    if not ce_key or not pe_key:
-        raise RuntimeError(
-            f"Could not resolve Upstox keys for CE {ce_strike}/PE {pe_strike} "
-            f"@ expiry {expiry} -- contract may not be loaded."
-        )
 
-    print(f"PDH={pdh} PDL={pdl} -> CE strike={ce_strike} PE strike={pe_strike} "
-          f"expiry={expiry}")
-
-    ce_1m, pe_1m = await _fetch_week_of_premium(ce_key, pe_key, access_token,
-                                                 args.days)
-    print(f"Fetched {len(ce_1m)} CE 1-min bars, {len(pe_1m)} PE 1-min bars")
-    ce_5m = _resample_1m_to_5m(ce_1m)
-    pe_5m = _resample_1m_to_5m(pe_1m)
+    print(f"=== Bear Trap OI backtest: {len(daily_strikes)} trading day(s) in "
+          f"window, daily strikes recomputed per spec Section 3 ===\n")
 
     all_trades: list[BacktestTrade] = []
-    for day_bars in _group_by_trading_day(ce_5m):
-        day_bars = _truncate_to_eod(day_bars)
-        all_trades += run_side_backtest(day_bars, "CE", ce_strike, args.lot_qty)
-    for day_bars in _group_by_trading_day(pe_5m):
-        day_bars = _truncate_to_eod(day_bars)
-        all_trades += run_side_backtest(day_bars, "PE", pe_strike, args.lot_qty)
+
+    for trading_day, ce_strike, pe_strike in daily_strikes:
+        expiry = REGISTRY.get_active_expiry_strict("NIFTY", from_date=trading_day)
+        if expiry is None:
+            print(f"[{trading_day}] SKIP -- could not resolve active expiry")
+            continue
+
+        ce_key = REGISTRY.get_upstox_key("NIFTY", expiry, ce_strike, "CE")
+        pe_key = REGISTRY.get_upstox_key("NIFTY", expiry, pe_strike, "PE")
+        print(f"[{trading_day}] DAY START: expiry={expiry} "
+              f"ce_strike={ce_strike} pe_strike={pe_strike}")
+        if not ce_key or not pe_key:
+            print(f"[{trading_day}] SKIP -- could not resolve Upstox keys "
+                  f"for CE {ce_strike}/PE {pe_strike} @ expiry {expiry}")
+            continue
+
+        ce_rows = await fetch_upstox_range_1m(ce_key, access_token,
+                                               trading_day, trading_day)
+        pe_rows = await fetch_upstox_range_1m(pe_key, access_token,
+                                               trading_day, trading_day)
+        if not ce_rows and not pe_rows:
+            print(f"[{trading_day}] SKIP -- no premium history returned "
+                  f"for either leg (holiday or no data)")
+            continue
+
+        ce_bars = _truncate_to_eod(_resample_1m_to_5m(_candle_dicts_to_bars(ce_rows)))
+        pe_bars = _truncate_to_eod(_resample_1m_to_5m(_candle_dicts_to_bars(pe_rows)))
+        print(f"[{trading_day}] fetched {len(ce_rows)} CE 1-min bars "
+              f"({len(ce_bars)} 5-min), {len(pe_rows)} PE 1-min bars "
+              f"({len(pe_bars)} 5-min)")
+
+        all_trades += run_side_backtest(ce_bars, "CE", ce_strike, args.lot_qty,
+                                         logger=print)
+        all_trades += run_side_backtest(pe_bars, "PE", pe_strike, args.lot_qty,
+                                         logger=print)
+        print()
 
     _print_report("CE", [t for t in all_trades if t.side == "CE"])
     _print_report("PE", [t for t in all_trades if t.side == "PE"])

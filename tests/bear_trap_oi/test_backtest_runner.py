@@ -54,6 +54,34 @@ def test_entry_requires_bar_close_inside_zone_not_just_range_overlap():
     assert trades[0].entry_price == 100.0
 
 
+def test_run_side_backtest_emits_verbose_audit_log_when_logger_given():
+    bars = [
+        _bar(15, 100, 105, 98, 102),   # c1
+        _bar(20, 97, 99, 90, 94),      # c2 breakdown
+        _bar(25, 95, 110, 95, 108),    # trap confirmed
+        _bar(30, 108, 112, 96, 97),    # re-entry @ 97
+        _bar(315, 97, 150, 97, 145),   # EOD close @ 145
+    ]
+    log: list[str] = []
+    trades = run_side_backtest(bars, side="CE", strike=24500, lot_qty=75,
+                                logger=log.append)
+    assert len(trades) == 1
+    trade = trades[0]
+    assert trade.pnl_pct == ((145.0 - 97.0) / 97.0) * 100
+
+    joined = "\n".join(log)
+    assert "C1" in joined and "102" in joined  # c1 close logged
+    assert "C2" in joined or "BREAKDOWN" in joined
+    assert "90" in joined  # zone_lo logged
+    assert "TRAP" in joined or "CONFIRM" in joined
+    assert "ZONE" in joined and "[90" in joined  # zone range printed
+    assert "ENTRY" in joined and "97" in joined
+    assert "EXIT" in joined and "145" in joined
+    # state transitions must be in chronological order in the log
+    assert log.index([l for l in log if "C1" in l][0]) < \
+           log.index([l for l in log if "ENTRY" in l][0])
+
+
 def test_armed_but_never_reentered_produces_zero_trades():
     bars = [
         _bar(15, 100, 105, 98, 102),   # c1
