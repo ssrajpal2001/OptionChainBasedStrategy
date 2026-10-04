@@ -51,6 +51,13 @@ class IndexTick:
     # track them separately and derive a mean-based ATM. Every other producer of
     # IndexTick omits this and gets the "spot" default, unchanged behavior.
     source: str = "spot"
+    # 2026-10-04: futures open interest, populated ONLY for a "futures"-source
+    # tick where the broker's own full-mode payload carries it (currently
+    # Upstox; see UpstoxFeeder._parse_frame's own extras.get("oi")) -- every
+    # other producer/consumer of IndexTick omits this and gets 0, unchanged
+    # behavior. Feeds strategies/vp_oi_regime/futures_rollover.py's
+    # FuturesRolloverTracker via the opt-in SellStraddle vp_oi_regime adapter.
+    oi: int = 0
 
 
 @dataclass(frozen=True)

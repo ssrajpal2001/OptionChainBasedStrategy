@@ -779,6 +779,10 @@ class UpstoxFeeder(BaseFeeder):
                     volume=int(extras.get("volume", 0) or 0),
                     timestamp=now,
                     source=_source,
+                    # Only meaningful (and only ever non-zero) for a futures-
+                    # source tick -- a real index has no OI. See IndexTick's
+                    # own docstring for the consumer.
+                    oi=int(extras.get("oi", 0) or 0) if _source == "futures" else 0,
                 )
                 await self._publish_index(tick)
                 continue

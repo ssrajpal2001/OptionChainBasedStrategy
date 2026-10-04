@@ -139,6 +139,11 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         # (and _atm_ref falls back to self._spot) for any underlying not listed in
         # cfg.futures_atm_underlyings, so this is a complete no-op elsewhere.
         self._futures_spot: float = 0.0
+        # 2026-10-04: latest futures OI (0.0 unless this underlying is
+        # futures_atm AND the primary feeder populates IndexTick.oi -- see
+        # that field's own docstring). Only ever read by the opt-in
+        # vp_oi_regime adapter; every other code path ignores it.
+        self._futures_oi: float = 0.0
         self._atm_ref: float = 0.0
         _fa = {u.upper() for u in (getattr(self._cfg, "futures_atm_underlyings", None) or [])}
         self._uses_mean_atm: bool = self._underlying.upper() in _fa
@@ -1406,6 +1411,9 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                         self._spot_reject_streak = 0
                         if _is_fut_tick:
                             self._futures_spot = _new_spot
+                            _oi = float(getattr(tick, "oi", 0) or 0)
+                            if _oi > 0:
+                                self._futures_oi = _oi
                         else:
                             self._spot = _new_spot
                         # mean(spot, futures), rounded per-caller -- falls back to plain
@@ -2069,13 +2077,23 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                 if tick.ltp > 0 and _entry_exp_ok:
                     _k = (int(tick.strike), tick.option_type)
                     _a = float(getattr(tick, "atp", 0.0) or 0.0)
+                    # 2026-10-04: additive "oi" field, purely for the opt-in
+                    # vp_oi_regime live adapter -- every existing reader of
+                    # this dict uses .get("ltp"/"atp", default) by name, so a
+                    # third key cannot break anything already consuming it.
+                    _oi = float(getattr(tick, "oi", 0) or 0)
                     entry = self._strike_prem.get(_k)
                     if entry is None:
-                        self._strike_prem[_k] = {"ltp": float(tick.ltp), "atp": _a}
+                        self._strike_prem[_k] = {"ltp": float(tick.ltp), "atp": _a, "oi": _oi}
                     else:
                         entry["ltp"] = float(tick.ltp)
                         if _a > 0:
                             entry["atp"] = _a
+                        if _oi > 0:
+                            entry["oi"] = _oi
+                    if self._vp_oi_enabled and self._vp_oi_adapter is not None and _oi > 0:
+                        self._vp_oi_adapter.on_option_oi_tick(
+                            int(tick.strike), tick.option_type, _oi, tick.timestamp.timestamp())
                     # 2026-09-03, direct user spec: run a paper-mode A/B comparison
                     # between the broker-ATP VWAP (default, every other deployment)
                     # and the calculative (self-computed) VWAP on two separate paper

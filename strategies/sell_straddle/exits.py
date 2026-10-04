@@ -1912,6 +1912,18 @@ class ExitMixin:
         if not (self._position and self._position.status == "open"):
             # Either check may have closed the position outright (no roll partner
             # found / no valid recovery strike) -- don't fall through to the
+            return
+
+        # 2b-ii. VP/OI REGIME (2026-10-04, opt-in via strategy_params.vp_oi_enabled,
+        # default False -- byte-for-byte no-op for every binding not explicitly
+        # opted in, including every existing live deployment). Runs right after
+        # the ITM-gate/roll-protection hard risk checks, before the generic
+        # roll ladder below, per the flowchart's own placement: a structural
+        # regime signal outranks routine roll triggers but not a hard loss cap.
+        await self._check_vp_oi_regime(now)
+        if not (self._position and self._position.status == "open"):
+            # Either check may have closed the position outright (no roll partner
+            # found / no valid recovery strike) -- don't fall through to the
             # remaining checks below using the now-stale `pos` reference.
             return
 
@@ -2744,6 +2756,264 @@ class ExitMixin:
         self._clog.info("CLOSE LEG %s strike=%.0f pnl=%.2fpts [%s] confirmed",
                         side, leg.strike, leg_pnl, reason)
         return order_ev
+
+    # ── VP/OI REGIME (2026-10-04, opt-in, see config.py's vp_oi_enabled) ──────
+    #
+    # The "naked long" this adds (one side's SOLD leg exited + a hedge bought
+    # in its place, per the 27-row matrix) is deliberately tracked in its OWN
+    # bookkeeping (self._vp_oi_naked_leg), NOT via StraddlePosition's existing
+    # hedge_ce_leg/hedge_pe_leg/is_hedged_positional fields -- those belong to
+    # the EOD hedge-and-carry feature and specifically mean "BOTH sold legs
+    # are closed, running a 4-leg T-1 carry." A VP/OI single-leg exit only
+    # ever removes ONE sold leg while the other keeps running/rolling
+    # normally -- setting is_hedged_positional here would wrongly pull this
+    # position into the EOD feature's T-1/4-leg-close logic. Reusing
+    # pos.ce_leg_closed/pe_leg_closed IS correct and intentional, though --
+    # that flag's "one leg closed, the other runs solo" meaning already
+    # exists in this codebase (see _check_post1500_r1_exit above) and every
+    # other ladder step already respects it.
+    #
+    # KNOWN LIMITATION: self._vp_oi_naked_leg is in-memory only, not
+    # persisted/restored across a restart (same accepted gap as CAG
+    # Straddle's own standing-order state -- see that strategy's own
+    # module docstring for the precedent). A restart while a naked long is
+    # open loses the 9-EMA/re-entry watch for that leg; the leg itself is
+    # NOT force-closed by this gap, just no longer actively managed by this
+    # mechanic until the adapter/9-EMA re-warms (it won't, having no
+    # persistence) -- flagged here, not silently papered over.
+    async def _check_vp_oi_regime(self, now: datetime) -> None:
+        adapter = getattr(self, "_vp_oi_adapter", None)
+        if not getattr(self, "_vp_oi_enabled", False) or adapter is None:
+            return
+        pos = self._position
+        if not pos or pos.status != "open":
+            return
+        if not hasattr(self, "_vp_oi_naked_leg"):
+            self._vp_oi_naked_leg: dict = {}
+        if not hasattr(self, "_vp_oi_last_exited_strike"):
+            self._vp_oi_last_exited_strike: dict = {}
+
+        # Feed the Volume Profile off the futures/spot price every tick, bucketed
+        # into 1-min bars. Real traded volume isn't plumbed to this engine today
+        # (see live_adapter.py's own docstring) -- every tick within a bar is
+        # weighted equally (tick count as a volume proxy), a documented, honest
+        # simplification, not fabricated volume data.
+        fut_px = float(getattr(self, "_futures_spot", 0.0) or getattr(self, "_spot", 0.0) or 0.0)
+        if fut_px > 0:
+            minute = now.replace(second=0, microsecond=0)
+            acc = getattr(self, "_vp_oi_fut_bar", None)
+            if acc is None:
+                self._vp_oi_fut_bar = {"minute": minute, "h": fut_px, "l": fut_px, "n": 1}
+            elif acc["minute"] != minute:
+                # 2026-10-04: real futures OI, when the primary feeder
+                # populates it (see IndexTick.oi's own docstring) -- 0.0
+                # otherwise (non-futures_atm underlying, or a provider that
+                # doesn't send it), in which case FuturesRolloverTracker
+                # degrades to "No Change" forever, same honest fallback this
+                # module already had before OI capture existed.
+                adapter.on_futures_bar(acc["h"], acc["l"], volume=float(acc["n"]),
+                                        oi=float(getattr(self, "_futures_oi", 0.0) or 0.0),
+                                        ts=acc["minute"].timestamp())
+                self._vp_oi_fut_bar = {"minute": minute, "h": fut_px, "l": fut_px, "n": 1}
+            else:
+                acc["h"] = max(acc["h"], fut_px)
+                acc["l"] = min(acc["l"], fut_px)
+                acc["n"] += 1
+
+        # Any side currently naked or awaiting re-entry owns this tick --
+        # don't also re-evaluate a fresh regime decision the same cycle.
+        if self._vp_oi_naked_leg or adapter.awaiting_reentry:
+            await self._vp_oi_manage_naked_legs(pos, now)
+            return
+
+        dr = adapter.evaluate(spot=float(getattr(self, "_spot", 0.0) or 0.0), now_ts=now.timestamp())
+        if dr is None:
+            return
+
+        if dr.regime.startswith("Highly Bearish") and not pos.pe_leg_closed:
+            await self._vp_oi_exit_leg("PE", dr.put_hedge, now)
+        elif dr.regime.startswith("Highly Bullish") and not pos.ce_leg_closed:
+            await self._vp_oi_exit_leg("CE", dr.call_hedge, now)
+        elif dr.regime == "Volatile" and not (pos.ce_leg_closed or pos.pe_leg_closed):
+            # KNOWN GAP, deliberately NOT shipped this pass: a full Volatile
+            # close sets self._position to None, but naked-leg management
+            # (9-EMA stop + Re-entry Rule) only ever runs from inside
+            # _check_exits, which itself returns immediately when there's no
+            # open StraddlePosition -- so both naked longs would go
+            # completely unmanaged (no stop, no re-entry) with nothing
+            # watching them. Rather than ship that silently, Volatile is
+            # logged and skipped until naked-leg management is moved to run
+            # independent of StraddlePosition's own lifecycle. The two
+            # single-leg regimes above (Highly Bearish/Bullish) don't have
+            # this problem -- the OTHER sold leg always stays open, so
+            # self._position and _check_exits keep running normally.
+            self._clog.info(
+                "VP/OI REGIME — Volatile regime detected but NOT acted on (known gap: "
+                "naked-leg management can't run with no open position -- see "
+                "_check_vp_oi_regime's own docstring)."
+            )
+
+    async def _vp_oi_exit_leg(self, side: str, hedge, now: datetime) -> None:
+        """Close one SOLD leg (Highly Bearish/Bullish row) and, if the
+        matrix row's hedge is enabled, buy a premium-matched replacement
+        long -- tracked as a naked position via self._vp_oi_naked_leg."""
+        pos = self._position
+        leg = pos.ce_leg if side == "CE" else pos.pe_leg
+        entry_premium = float(leg.entry_price or 0.0)
+        exited_strike = int(leg.strike)
+        order_ev = await self._close_leg(side, "vp_oi_regime_exit", now)
+        if getattr(order_ev, "close_aborted", False):
+            return
+        setattr(pos, f"{side.lower()}_leg_closed", True)
+        self._vp_oi_last_exited_strike[side] = exited_strike
+        self._persist()
+        self._clog.info("VP/OI REGIME — exited %s leg (strike=%.0f, regime-driven)",
+                         side, leg.strike)
+
+        if not (hedge.enabled and entry_premium > 0):
+            return
+        from strategies.vp_oi_regime.decision_matrix import hedge_target_premium, pick_strike_by_premium_match
+        target = hedge_target_premium(hedge, entry_premium)
+        if not target:
+            return
+        chain = {s: v.get("ltp", 0.0) for (s, sd), v in self._strike_prem.items() if sd == side}
+        picked = pick_strike_by_premium_match(chain, target[0], target[1])
+        if not picked:
+            self._clog.info("VP/OI REGIME — no strike in [%.2f,%.2f] premium band for %s hedge; "
+                             "leg stays fully closed, no naked long opened", target[0], target[1], side)
+            return
+        h_strike, h_ltp = picked
+        h_fill = await self._dispatch_hedge_order(
+            "BUY", side, int(h_strike), h_ltp, h_ltp, pos.expiry_date, "vp_oi_hedge")
+        if h_fill is None or getattr(h_fill, "entry_aborted", False) or h_fill.fill_price <= 0:
+            self._clog.critical("VP/OI REGIME — hedge %s BUY failed/unconfirmed -- leg left "
+                                 "closed with NO naked long opened (needs review)", side)
+            return
+        self._vp_oi_naked_leg[side] = {"strike": int(h_strike), "entry": float(h_fill.fill_price)}
+        self._vp_oi_adapter.mark_naked(
+            "NAKED_BOTH" if len(self._vp_oi_naked_leg) == 2 else f"NAKED_{side}",
+            {s: d["entry"] for s, d in self._vp_oi_naked_leg.items()},
+        )
+        self._clog.info("VP/OI REGIME — hedge %s%d BUY@%.2f confirmed (naked long armed, 9-EMA trailing)",
+                         side, h_strike, h_fill.fill_price)
+
+    async def _vp_oi_exit_both(self, dr, now: datetime) -> None:
+        """Volatile regime: close the whole straddle, then buy both hedges.
+
+        NOT CURRENTLY CALLED -- see the Volatile branch's comment in
+        _check_vp_oi_regime for why (naked-leg management can't run once
+        self._position goes to None). Left implemented and ready for when
+        that structural fix lands, rather than discarded."""
+        pos = self._position
+        ce_entry = float(pos.ce_leg.entry_price or 0.0)
+        pe_entry = float(pos.pe_leg.entry_price or 0.0)
+        self._vp_oi_last_exited_strike["CE"] = int(pos.ce_leg.strike)
+        self._vp_oi_last_exited_strike["PE"] = int(pos.pe_leg.strike)
+        await self._close_position("vp_oi_regime_exit_volatile")
+        if self._position is not None:
+            return  # close_position aborted (still "closing"/"open") -- don't hedge a live position
+        for side, hedge, entry_premium in (("CE", dr.call_hedge, ce_entry), ("PE", dr.put_hedge, pe_entry)):
+            if not (hedge.enabled and entry_premium > 0):
+                continue
+            from strategies.vp_oi_regime.decision_matrix import hedge_target_premium, pick_strike_by_premium_match
+            target = hedge_target_premium(hedge, entry_premium)
+            if not target:
+                continue
+            chain = {s: v.get("ltp", 0.0) for (s, sd), v in self._strike_prem.items() if sd == side}
+            picked = pick_strike_by_premium_match(chain, target[0], target[1])
+            if not picked:
+                continue
+            h_strike, h_ltp = picked
+            expiry = getattr(self, "_entry_expiry_date", None)
+            h_fill = await self._dispatch_hedge_order("BUY", side, int(h_strike), h_ltp, h_ltp, expiry, "vp_oi_hedge")
+            if h_fill is None or getattr(h_fill, "entry_aborted", False) or h_fill.fill_price <= 0:
+                self._clog.critical("VP/OI REGIME (Volatile) — hedge %s BUY failed/unconfirmed", side)
+                continue
+            self._vp_oi_naked_leg[side] = {"strike": int(h_strike), "entry": float(h_fill.fill_price)}
+        if self._vp_oi_naked_leg:
+            self._vp_oi_adapter.mark_naked(
+                "NAKED_BOTH" if len(self._vp_oi_naked_leg) == 2 else
+                f"NAKED_{next(iter(self._vp_oi_naked_leg))}",
+                {s: d["entry"] for s, d in self._vp_oi_naked_leg.items()},
+            )
+
+    async def _vp_oi_manage_naked_legs(self, pos: "StraddlePosition", now: datetime) -> None:
+        """Every tick while any side is naked: feed its live LTP into the
+        9-EMA trailing stop; on a stop-hit, sell the naked long and arm the
+        Re-entry Rule. Every tick while a side is merely awaiting re-entry
+        (no naked long currently open on it), watch for the POC-crossing
+        fakeout confirmation and re-sell a fresh short leg if it fires."""
+        adapter = self._vp_oi_adapter
+        spot = float(getattr(self, "_spot", 0.0) or 0.0)
+        for side in ("CE", "PE"):
+            leg_info = self._vp_oi_naked_leg.get(side)
+            if leg_info is not None:
+                ltp = float(self._strike_prem.get((leg_info["strike"], side), {}).get("ltp", 0.0) or 0.0)
+                if ltp <= 0:
+                    continue
+                adapter.on_naked_leg_price(side, ltp)
+                if adapter.stop_hit(side, ltp):
+                    await self._vp_oi_close_naked(side, leg_info, now)
+                    adapter.on_naked_stopped(side)
+            elif adapter.awaiting_reentry.get(side):
+                if spot > 0 and adapter.check_reentry(side, spot):
+                    await self._vp_oi_resell_leg(side, now)
+
+    async def _vp_oi_close_naked(self, side: str, leg_info: dict, now: datetime) -> None:
+        """9-EMA stop fired on a naked long -- sell it (Hedge Exit Rule)."""
+        ltp = float(self._strike_prem.get((leg_info["strike"], side), {}).get("ltp", 0.0) or 0.0)
+        pos = self._position
+        expiry = pos.expiry_date if pos else getattr(self, "_entry_expiry_date", None)
+        fill = await self._dispatch_hedge_order(
+            "SELL", side, leg_info["strike"], ltp, leg_info["entry"], expiry, "vp_oi_hedge_exit")
+        self._vp_oi_naked_leg.pop(side, None)
+        if fill is None or getattr(fill, "exit_aborted", False):
+            self._clog.critical("VP/OI REGIME — naked long %s SELL (stop-exit) failed/unconfirmed",
+                                 side)
+            return
+        pnl = float(fill.fill_price or 0.0) - leg_info["entry"]
+        self._clog.info("VP/OI REGIME — naked long %s%d stopped out @ %.2f pnl=%.2fpts; "
+                         "Re-entry Rule now watching", side, leg_info["strike"], ltp, pnl)
+
+    async def _vp_oi_resell_leg(self, side: str, now: datetime) -> None:
+        """Re-entry Rule fired (price closed back on the fakeout side of
+        POC) -- re-sell a fresh short leg on this side.
+
+        NOTE: _single_side_roll is NOT reusable here -- it picks WHICH side
+        to roll by comparing both legs' own P&L and assumes both are
+        currently open, neither of which holds for a side that's already
+        fully closed. Instead this reuses select_rollover_partner_directional
+        the same way a roll does, balancing the new strike against the
+        OTHER leg (if it's still open) as the reference "kept" leg, then
+        places it via _open_leg (the same primitive every roll path uses)."""
+        pos = self._position
+        if not pos or getattr(pos, f"{side.lower()}_leg_closed", False) is False:
+            return  # leg already re-sold by something else, or position gone
+        other_side = "PE" if side == "CE" else "CE"
+        other_leg = pos.pe_leg if side == "CE" else pos.ce_leg
+        if getattr(pos, f"{other_side.lower()}_leg_closed", False):
+            # Both sides flat (Volatile-regime double re-entry) -- balancing
+            # against a closed other leg has no meaning. Known gap: needs a
+            # fresh BEGINNING-style pair selection, not built this pass.
+            self._clog.info("VP/OI REGIME — Re-entry Rule fired for %s but the other side is "
+                             "also flat (no reference leg); not re-selling -- needs a fresh "
+                             "pair-selection path, not yet implemented", side)
+            return
+        from strategies.sell_straddle.selection import select_rollover_partner_directional
+        step = self._cfg.exchange.strike_steps.get(self._underlying, 50.0) if self._cfg else 50.0
+        old_strike = self._vp_oi_last_exited_strike.get(side, other_leg.strike)
+        picked = select_rollover_partner_directional(
+            self._strike_prem, side, int(other_leg.strike), float(other_leg.ltp or 0.0),
+            int(old_strike), float(getattr(self, "_spot", 0.0) or 0.0), step,
+            min_gap_pts=100.0, rule_pass=True,
+        )
+        if not picked:
+            self._clog.info("VP/OI REGIME — Re-entry Rule fired for %s but no valid re-sell "
+                             "strike found; staying flat on this side", side)
+            return
+        strike, ltp = picked
+        await self._open_leg(side, int(strike), float(ltp), now, "vp_oi_reentry_resell")
+        self._clog.info("VP/OI REGIME — Re-entry Rule fired, %s leg re-sold @ strike=%d", side, int(strike))
 
     async def _abort_roll_reopen(self, fill) -> None:
         """A single-leg roll-reopen (_open_leg, called mid-roll after the old leg's

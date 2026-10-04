@@ -93,6 +93,13 @@ class SellStraddleConfig:
 
     roll_fail_hedge_enabled: bool
 
+    # 2026-10-04, opt-in only (default False): wires the backtest-validated
+    # strategies/vp_oi_regime/ decision layer into this book's live exit
+    # ladder (naked-leg exits + premium-match hedges on Highly Bearish/
+    # Bullish/Volatile regimes). Every other deployment's strategy_params
+    # omits this key and is byte-for-byte unaffected.
+    vp_oi_enabled: bool
+
 
 def _apply_client_overrides(
     cfg: SellStraddleConfig,
@@ -251,6 +258,8 @@ def load_sell_straddle_config(
     day_low_exit_enabled = bool(ss.get("day_low_exit_enabled", False))
     day_low_freeze_time = _parse_time(ss.get("day_low_freeze_time", "15:00"))
 
+    vp_oi_enabled = bool(ss.get("vp_oi_enabled", False))
+
     # Post-15:00 per-leg R1 exit (2026-08-28, direct user spec): replaces the
     # old day-low-reversal-exit's own action ("close both legs") for
     # bindings that opt into this instead -- the day-low condition (and a
@@ -354,6 +363,7 @@ def load_sell_straddle_config(
         itm_roll_protection_enabled=itm_roll_protection_enabled,
         day_low_exit_enabled=day_low_exit_enabled,
         day_low_freeze_time=day_low_freeze_time,
+        vp_oi_enabled=vp_oi_enabled,
         post1500_exit_enabled=post1500_exit_enabled,
         shadow_vwap_enabled=shadow_vwap_enabled,
         vwap_source=vwap_source,
@@ -447,6 +457,15 @@ class ConfigMixin:
         self._day_low_freeze_time = cfg.day_low_freeze_time
         if not hasattr(self, "_session_min_straddle_frozen"):
             self._session_min_straddle_frozen = None
+
+        self._vp_oi_enabled = cfg.vp_oi_enabled
+        if self._vp_oi_enabled:
+            if getattr(self, "_vp_oi_adapter", None) is None:
+                from strategies.vp_oi_regime.live_adapter import VpOiRegimeAdapter
+                step = self._cfg.exchange.strike_steps.get(self._underlying, 50.0) if self._cfg else 50.0
+                self._vp_oi_adapter = VpOiRegimeAdapter(strike_step=step)
+        else:
+            self._vp_oi_adapter = None
 
         self._post1500_exit_enabled = cfg.post1500_exit_enabled
         self._shadow_vwap_enabled = cfg.shadow_vwap_enabled
