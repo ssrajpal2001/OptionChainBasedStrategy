@@ -127,6 +127,87 @@ def test_vp_oi_highly_bearish_exits_put_leg_and_buys_hedge():
     asyncio.run(run())
 
 
+def test_vp_oi_volatile_closes_both_legs_and_still_manages_naked_longs_after():
+    """2026-10-05 structural fix: a Volatile regime closes the WHOLE
+    position (self._position -> None), but naked-leg management must keep
+    running on later ticks anyway (via _check_vp_oi_naked_legs_standalone,
+    called unconditionally at the top of _check_exits, before the
+    'no position' early-return)."""
+    async def run():
+        s = _base_strategy()
+        s._vp_oi_enabled = True
+        adapter = VpOiRegimeAdapter()
+        dr = DecisionResult(
+            regime="Volatile", call_action="Buy put hedge", put_action="Buy call hedge",
+            call_hedge=HedgeSpend(enabled=True, pct_of_premium=(0.50, 0.50)),
+            put_hedge=HedgeSpend(enabled=True, pct_of_premium=(0.50, 0.50)),
+            algo_sr_trigger="", reentry_rule="", hedge_exit_rule="",
+        )
+        adapter.evaluate = lambda spot, now_ts: dr
+        s._vp_oi_adapter = adapter
+
+        s._position = StraddlePosition(
+            underlying="NIFTY", atm_at_entry=24000, entry_spot=24000,
+            ce_leg=StraddleLeg("CE", 24050, 50.0, 50.0),
+            pe_leg=StraddleLeg("PE", 23950, 100.0, 100.0),
+            net_credit=150.0, status="open",
+        )
+        s._entry_expiry_date = s._position.expiry_date
+        s._strike_prem = {
+            (24150, "CE"): {"ltp": 25.0},  # 50% of 50 = 25
+            (23850, "PE"): {"ltp": 50.0},  # 50% of 100 = 50
+        }
+
+        closed = {"called": False}
+
+        async def _fake_close_position(reason):
+            closed["called"] = True
+            closed["reason"] = reason
+            s._position = None  # mirrors the real method's own effect once confirmed
+        s._close_position = _fake_close_position
+
+        hedge_calls = []
+
+        async def _fake_dispatch_hedge_order(action, side, strike, price, entry_price, expiry, reason, entry_ts=None):
+            hedge_calls.append((action, side, strike, reason))
+            class _Fill:
+                entry_aborted = False
+                exit_aborted = False
+                fill_price = price
+            return _Fill()
+        s._dispatch_hedge_order = _fake_dispatch_hedge_order
+
+        with patch("strategies.sell_straddle.rolling.RuntimeConfig.index_section", return_value={}):
+            await s._check_exits()
+
+        assert closed["called"] and closed["reason"] == "vp_oi_regime_exit_volatile"
+        assert s._position is None
+        assert ("BUY", "CE", 24150, "vp_oi_hedge") in hedge_calls
+        assert ("BUY", "PE", 23850, "vp_oi_hedge") in hedge_calls
+        assert adapter.naked_state == "NAKED_BOTH"
+        assert s._vp_oi_naked_leg == {"CE": {"strike": 24150, "entry": 25.0},
+                                       "PE": {"strike": 23850, "entry": 50.0}}
+
+        # Next tick: self._position is still None, but the 9-EMA stop on the
+        # CE naked long must still be checked -- this is the actual proof of
+        # the structural fix (before it, _check_exits returned immediately
+        # with no position and never reached any VP/OI code at all).
+        # Warm the EMA on an UPTREND (the naked long CALL riding price up),
+        # then a sharp fall back through the EMA is what actually exits a
+        # long-call trailing stop (direction='up': stop_hit when price < EMA).
+        for p in (18.0, 19.0, 20.0, 22.0, 24.0, 26.0, 28.0, 30.0, 32.0):
+            adapter.on_naked_leg_price("CE", p)
+        s._strike_prem[(24150, "CE")] = {"ltp": 15.0}  # fell well below the EMA -> long CE stop
+
+        with patch("strategies.sell_straddle.rolling.RuntimeConfig.index_section", return_value={}):
+            await s._check_exits()
+
+        assert ("SELL", "CE", 24150, "vp_oi_hedge_exit") in hedge_calls
+        assert "CE" not in s._vp_oi_naked_leg
+        assert adapter.awaiting_reentry.get("CE") is True
+    asyncio.run(run())
+
+
 def test_vp_oi_naked_leg_stop_hit_then_reentry_resells():
     """Once a naked long's 9-EMA stop fires, the Re-entry Rule arms; once
     price closes back on the fakeout side of POC, a fresh short is resold

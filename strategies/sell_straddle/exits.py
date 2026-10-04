@@ -1456,6 +1456,15 @@ class ExitMixin:
                 self._stop_for_day = True
 
     async def _check_exits(self) -> None:
+        # 2026-10-05, direct user spec ("every part to run"): VP/OI naked-leg
+        # management (9-EMA stop + Re-entry Rule) must keep running even
+        # with NO open StraddlePosition -- the Volatile regime's own exit
+        # closes the whole position (self._position -> None) while leaving
+        # naked longs bought against it. This call is BEFORE the `if not
+        # pos: return` guard below specifically so it isn't skipped in that
+        # state; it's a cheap no-op whenever vp_oi isn't enabled or nothing
+        # is naked (see its own early-return).
+        await self._check_vp_oi_naked_legs_standalone(datetime.now(IST))
         pos = self._position
         if not pos:
             return
@@ -2822,8 +2831,11 @@ class ExitMixin:
 
         # Any side currently naked or awaiting re-entry owns this tick --
         # don't also re-evaluate a fresh regime decision the same cycle.
+        # (Naked-leg management itself already ran this tick, unconditionally,
+        # via _check_vp_oi_naked_legs_standalone at the very top of
+        # _check_exits -- NOT repeated here, to avoid double-feeding the
+        # same tick's price into the 9-EMA / double-firing a stop-exit.)
         if self._vp_oi_naked_leg or adapter.awaiting_reentry:
-            await self._vp_oi_manage_naked_legs(pos, now)
             return
 
         dr = adapter.evaluate(spot=float(getattr(self, "_spot", 0.0) or 0.0), now_ts=now.timestamp())
@@ -2835,23 +2847,17 @@ class ExitMixin:
         elif dr.regime.startswith("Highly Bullish") and not pos.ce_leg_closed:
             await self._vp_oi_exit_leg("CE", dr.call_hedge, now)
         elif dr.regime == "Volatile" and not (pos.ce_leg_closed or pos.pe_leg_closed):
-            # KNOWN GAP, deliberately NOT shipped this pass: a full Volatile
-            # close sets self._position to None, but naked-leg management
-            # (9-EMA stop + Re-entry Rule) only ever runs from inside
-            # _check_exits, which itself returns immediately when there's no
-            # open StraddlePosition -- so both naked longs would go
-            # completely unmanaged (no stop, no re-entry) with nothing
-            # watching them. Rather than ship that silently, Volatile is
-            # logged and skipped until naked-leg management is moved to run
-            # independent of StraddlePosition's own lifecycle. The two
-            # single-leg regimes above (Highly Bearish/Bullish) don't have
-            # this problem -- the OTHER sold leg always stays open, so
-            # self._position and _check_exits keep running normally.
-            self._clog.info(
-                "VP/OI REGIME — Volatile regime detected but NOT acted on (known gap: "
-                "naked-leg management can't run with no open position -- see "
-                "_check_vp_oi_regime's own docstring)."
-            )
+            # 2026-10-05: re-enabled now that _check_vp_oi_naked_legs_standalone
+            # runs unconditionally from the top of _check_exits (before the
+            # "no open position" early-return) -- a full close here sets
+            # self._position to None, but naked-leg management (9-EMA stop +
+            # Hedge Exit Rule) keeps running regardless. The Re-entry Rule's
+            # own re-SELL side still won't fire in this specific state (needs
+            # a fresh BEGINNING-style entry with no reference leg to balance
+            # against -- see _vp_oi_resell_leg's own pos-is-None branch,
+            # logged clearly rather than silently dropped), but the stop/
+            # hedge-exit side is fully managed.
+            await self._vp_oi_exit_both(dr, now)
 
     async def _vp_oi_exit_leg(self, side: str, hedge, now: datetime) -> None:
         """Close one SOLD leg (Highly Bearish/Bullish row) and, if the
@@ -2900,10 +2906,10 @@ class ExitMixin:
     async def _vp_oi_exit_both(self, dr, now: datetime) -> None:
         """Volatile regime: close the whole straddle, then buy both hedges.
 
-        NOT CURRENTLY CALLED -- see the Volatile branch's comment in
-        _check_vp_oi_regime for why (naked-leg management can't run once
-        self._position goes to None). Left implemented and ready for when
-        that structural fix lands, rather than discarded."""
+        Called from _check_vp_oi_regime; naked-leg management (9-EMA stop +
+        Hedge Exit Rule) for the resulting naked longs runs via
+        _check_vp_oi_naked_legs_standalone, unconditionally, even with
+        self._position == None after this closes the whole position."""
         pos = self._position
         ce_entry = float(pos.ce_leg.entry_price or 0.0)
         pe_entry = float(pos.pe_leg.entry_price or 0.0)
@@ -2987,8 +2993,20 @@ class ExitMixin:
         OTHER leg (if it's still open) as the reference "kept" leg, then
         places it via _open_leg (the same primitive every roll path uses)."""
         pos = self._position
-        if not pos or getattr(pos, f"{side.lower()}_leg_closed", False) is False:
-            return  # leg already re-sold by something else, or position gone
+        if pos is None:
+            # Volatile-regime double exit: the whole StraddlePosition is gone,
+            # so there's no "other leg" to balance a fresh short against --
+            # re-opening would mean a full fresh BEGINNING-style entry
+            # (strike selection, subscriptions, position creation), a
+            # separate, larger change not built this pass. Logged clearly
+            # rather than silently dropped.
+            self._clog.info("VP/OI REGIME — Re-entry Rule fired for %s but no position exists "
+                             "to resume (Volatile double-exit case); needs a fresh BEGINNING-"
+                             "style entry path, not yet implemented -- staying flat", side)
+            self._vp_oi_adapter.awaiting_reentry[side] = False
+            return
+        if getattr(pos, f"{side.lower()}_leg_closed", False) is False:
+            return  # leg already re-sold by something else
         other_side = "PE" if side == "CE" else "CE"
         other_leg = pos.pe_leg if side == "CE" else pos.ce_leg
         if getattr(pos, f"{other_side.lower()}_leg_closed", False):
@@ -3014,6 +3032,20 @@ class ExitMixin:
         strike, ltp = picked
         await self._open_leg(side, int(strike), float(ltp), now, "vp_oi_reentry_resell")
         self._clog.info("VP/OI REGIME — Re-entry Rule fired, %s leg re-sold @ strike=%d", side, int(strike))
+
+    async def _check_vp_oi_naked_legs_standalone(self, now: datetime) -> None:
+        """Entry point called from _check_exits() UNCONDITIONALLY, before the
+        'no open position' early-return -- see that call site's own comment.
+        _vp_oi_manage_naked_legs itself never actually reads its `pos` arg
+        (every lookup goes through self._vp_oi_naked_leg/self._strike_prem),
+        so passing self._position (possibly None, e.g. right after a
+        Volatile-regime full close) through unchanged is safe."""
+        adapter = getattr(self, "_vp_oi_adapter", None)
+        if not getattr(self, "_vp_oi_enabled", False) or adapter is None:
+            return
+        if not getattr(self, "_vp_oi_naked_leg", None) and not adapter.awaiting_reentry:
+            return
+        await self._vp_oi_manage_naked_legs(self._position, now)
 
     async def _abort_roll_reopen(self, fill) -> None:
         """A single-leg roll-reopen (_open_leg, called mid-roll after the old leg's
