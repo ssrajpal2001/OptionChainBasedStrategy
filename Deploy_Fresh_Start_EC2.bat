@@ -28,7 +28,20 @@ echo StochRSI entry(3m)/exit(75m) -- validated against 20 real trading days,
 echo see scripts/oi_bias_rsi_exit_backtest.py / _optimize.py). First live
 echo paper-mode day -- watch logs closely.
 echo.
-ssh -t -i "%USERPROFILE%\.ssh\algotrading_ec2" ec2-user@13.200.171.160 "cd ~/OptionChainBasedStrategy; git pull origin nifty-cascade-v4-indicators; pm2 delete terminus 2>/dev/null; pm2 start run_system.py --name terminus --interpreter python3 -- --mode live --ui --port 5000 --index NIFTY --strategies sell_straddle,oi_bias_rsi_exit,cag_straddle,iron_fly --futures-atm-underlyings NIFTY; pm2 save --force; sleep 8; echo; echo '=== VERIFY: actual running process args ==='; ps aux | grep run_system.py | grep -v grep; echo; echo '=== VERIFY: strategies the app itself parsed ==='; grep 'enabled strategies' ~/.pm2/logs/terminus-out.log | tail -1; echo; echo '=== VERIFY: any auth/startup failures? ==='; grep -iE 'auth failed|startup aborted' ~/.pm2/logs/terminus-out.log | tail -5; echo; echo '=== Recent log tail ==='; pm2 logs terminus --lines 40 --nostream; bash -l"
+echo 2026-10-05, direct user decision: oi_bias_rsi_exit, cag_straddle, and
+echo iron_fly REMOVED from --strategies -- ONLY sell_straddle stays, so the
+echo ONLY book that can spawn is whatever DB deployment rows have
+echo is_running=1 under strategy_name IN ('sell_straddle',
+echo 'sell_straddle_calc_vwap') -- currently just
+echo ssrajpal2001/SA5770/NIFTY/sell_straddle_calc_vwap (vp_oi_enabled=true).
+echo NOTE: 'sell_straddle_calc_vwap' is NOT a separate --strategies name --
+echo it is a strategy_name variant handled entirely inside the sell_straddle
+echo module's own StraddleBookManager (forces vwap_source=calculative), so
+echo --strategies must still say "sell_straddle", never
+echo "sell_straddle_calc_vwap" (an unrecognized name here would be silently
+echo DROPPED with no error, per the warning above).
+echo.
+ssh -t -i "%USERPROFILE%\.ssh\algotrading_ec2" ec2-user@13.200.171.160 "cd ~/OptionChainBasedStrategy; git pull origin nifty-cascade-v4-indicators; pm2 delete terminus 2>/dev/null; pm2 start run_system.py --name terminus --interpreter python3 -- --mode live --ui --port 5000 --index NIFTY --strategies sell_straddle --futures-atm-underlyings NIFTY; pm2 save --force; sleep 8; echo; echo '=== VERIFY: actual running process args ==='; ps aux | grep run_system.py | grep -v grep; echo; echo '=== VERIFY: strategies the app itself parsed ==='; grep 'enabled strategies' ~/.pm2/logs/terminus-out.log | tail -1; echo; echo '=== VERIFY: any auth/startup failures? ==='; grep -iE 'auth failed|startup aborted' ~/.pm2/logs/terminus-out.log | tail -5; echo; echo '=== Recent log tail ==='; pm2 logs terminus --lines 40 --nostream; bash -l"
 echo.
 echo Connection closed. Press any key to close this window.
 pause >nul
