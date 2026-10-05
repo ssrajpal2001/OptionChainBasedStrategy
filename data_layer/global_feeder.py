@@ -1758,6 +1758,16 @@ class AngelOneFeeder(BaseFeeder):
                 volume=int(raw.get("volume_trade_for_the_day", 0) or 0),
                 timestamp=datetime.now(IST),
                 source=src,
+                # 2026-10-05: AngelOne is primary (see active-passive feeder
+                # design) -- its own raw payload already carries
+                # 'open_interest' for a futures token (confirmed in the
+                # real first-tick log sample), but this was never wired
+                # into IndexTick.oi the way UpstoxFeeder's equivalent branch
+                # was -- so FuturesRolloverTracker never saw real futures OI
+                # at all while AngelOne drove the feed, silently blocking
+                # every Future-OI-dependent vp_oi_regime row (Highly
+                # Bearish/Bullish, Obs 5/6/23/24) from ever being reachable.
+                oi=int(raw.get("open_interest", 0) or 0) if src == "futures" else 0,
             )
             # 2026-09-09, direct user spec: "let primary be upstox and have a
             # log which should replicate the same and save what angel is
