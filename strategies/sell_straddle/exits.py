@@ -2839,6 +2839,29 @@ class ExitMixin:
             return
 
         dr = adapter.evaluate(spot=float(getattr(self, "_spot", 0.0) or 0.0), now_ts=now.timestamp())
+
+        # 2026-10-05, real live-day gap found while debugging the first paper
+        # session: this whole module only ever logged when it actually ACTED
+        # (closed a leg, bought a hedge) -- total silence was indistinguishable
+        # from "working fine, nothing actionable yet" vs. "quietly stuck".
+        # Throttled heartbeat (same ~60s cadence as EXIT-CHECK's own periodic
+        # log above) makes the live state actually observable.
+        import time as _t_vpoi
+        if _t_vpoi.monotonic() - getattr(self, "_vp_oi_last_heartbeat", 0.0) > 60.0:
+            self._vp_oi_last_heartbeat = _t_vpoi.monotonic()
+            if dr is None:
+                self._clog.info(
+                    "VP/OI REGIME — not warm yet (OiRegimeTracker needs full "
+                    "ATM±5 CE+PE OI coverage before it returns a reading)."
+                )
+            else:
+                self._clog.info(
+                    "VP/OI REGIME — regime=%s call_action=%s put_action=%s "
+                    "call_hedge=%s put_hedge=%s futures_oi=%.0f",
+                    dr.regime, dr.call_action, dr.put_action,
+                    dr.call_hedge, dr.put_hedge, float(getattr(self, "_futures_oi", 0.0) or 0.0),
+                )
+
         if dr is None:
             return
 
