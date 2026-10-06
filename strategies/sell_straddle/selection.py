@@ -743,6 +743,7 @@ def select_balanced_pair_at(
     variable_strikes: bool = False,
     balance_ratio: float = 1.0,
     anchor_otm_steps: int = 0,
+    forced_anchor_side: Optional[str] = None,
 ) -> Optional[Tuple[int, int, float, float]]:
     """
     Same anchor+partner balanced-pair search as select_balanced_pair(), but takes the
@@ -797,29 +798,50 @@ def select_balanced_pair_at(
     ce_tv = strip_intrinsic(ce_ltp, "CE", atm, spot)
     pe_tv = strip_intrinsic(pe_ltp, "PE", atm, spot)
 
-    # Anchor SIDE = side with lower TIME VALUE at ATM -- this decision always reads the
-    # raw ATM quotes, independent of anchor_otm_steps below.
-    if ce_tv < pe_tv:
-        anchor_side, anchor_strike, anchor_ltp, anchor_tv, partner_side = "CE", atm, ce_ltp, ce_tv, "PE"
-    else:
-        anchor_side, anchor_strike, anchor_ltp, anchor_tv, partner_side = "PE", atm, pe_ltp, pe_tv, "CE"
-
-    if trace is not None:
-        trace.append(
-            f"ANCHOR atm={atm} ce_tv={ce_tv:.2f} pe_tv={pe_tv:.2f} -> "
-            f"anchor_side={anchor_side} (lower time value at ATM)"
-        )
-
-    # 2026-08-26, direct user correction: the dual floor is checked HERE, at the raw
-    # ATM reading, ALWAYS -- before any OTM shift below, never against the shifted
-    # strike. "otm ltp and theta will not be checked ... it will be selected directly."
-    if not leg_passes_dual_floor(anchor_side, anchor_strike, anchor_ltp, spot, ltp_target, theta_target):
+    if forced_anchor_side is not None:
+        # 2026-10-06, direct user spec: BEGINNING entry's anchor SIDE is now
+        # decided by the caller from the MONTHLY contract's own theta
+        # comparison (done once via a REST snapshot, see entries.py's
+        # resolve_monthly_anchor_side) -- this weekly ATM reading's own
+        # ce_tv/pe_tv comparison and its dual-floor check are both skipped
+        # entirely here, since the floor was already verified against the
+        # monthly contract by the caller before this function was ever
+        # called. Only the (cheap, same-call) data-availability check above
+        # (both sides quoted, ltp>0) still applies -- this path trusts the
+        # caller's side decision, it doesn't re-derive or re-gate it.
+        anchor_side = forced_anchor_side
+        anchor_strike, partner_side = atm, ("PE" if forced_anchor_side == "CE" else "CE")
+        anchor_ltp = ce_ltp if forced_anchor_side == "CE" else pe_ltp
+        anchor_tv = ce_tv if forced_anchor_side == "CE" else pe_tv
         if trace is not None:
             trace.append(
-                f"REJECT anchor {anchor_side}{anchor_strike} ltp={anchor_ltp:.2f} "
-                f"tv={anchor_tv:.2f} fails dual floor (ltp>={ltp_target:.0f}, theta>={theta_target:.0f})"
+                f"ANCHOR atm={atm} ce_tv={ce_tv:.2f} pe_tv={pe_tv:.2f} -> "
+                f"anchor_side={anchor_side} (FORCED from monthly-contract theta comparison)"
             )
-        return None
+    else:
+        # Anchor SIDE = side with lower TIME VALUE at ATM -- this decision always reads the
+        # raw ATM quotes, independent of anchor_otm_steps below.
+        if ce_tv < pe_tv:
+            anchor_side, anchor_strike, anchor_ltp, anchor_tv, partner_side = "CE", atm, ce_ltp, ce_tv, "PE"
+        else:
+            anchor_side, anchor_strike, anchor_ltp, anchor_tv, partner_side = "PE", atm, pe_ltp, pe_tv, "CE"
+
+        if trace is not None:
+            trace.append(
+                f"ANCHOR atm={atm} ce_tv={ce_tv:.2f} pe_tv={pe_tv:.2f} -> "
+                f"anchor_side={anchor_side} (lower time value at ATM)"
+            )
+
+        # 2026-08-26, direct user correction: the dual floor is checked HERE, at the raw
+        # ATM reading, ALWAYS -- before any OTM shift below, never against the shifted
+        # strike. "otm ltp and theta will not be checked ... it will be selected directly."
+        if not leg_passes_dual_floor(anchor_side, anchor_strike, anchor_ltp, spot, ltp_target, theta_target):
+            if trace is not None:
+                trace.append(
+                    f"REJECT anchor {anchor_side}{anchor_strike} ltp={anchor_ltp:.2f} "
+                    f"tv={anchor_tv:.2f} fails dual floor (ltp>={ltp_target:.0f}, theta>={theta_target:.0f})"
+                )
+            return None
 
     if anchor_otm_steps > 0:
         _shift = anchor_otm_steps * step

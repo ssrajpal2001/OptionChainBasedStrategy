@@ -586,6 +586,20 @@ class InstrumentRegistry:
                 return exp
         return None
 
+    def get_monthly_expiry(self, underlying: str, from_date: date = None) -> Optional[date]:
+        """2026-10-06, direct user spec (BEGINNING-entry anchor-side selection
+        reads monthly-contract theta, not weekly): the nearest monthly expiry
+        (is_monthly_expiry -- last expiry of its calendar month) on or after
+        from_date. Reuses the same already-loaded self._expiries list
+        get_active_expiry reads -- no separate data source. None if the
+        registry isn't loaded yet, same convention as get_active_expiry."""
+        from_date = from_date or date.today()
+        expiries = self._expiries.get(underlying, [])
+        for exp in expiries:
+            if exp >= from_date and is_monthly_expiry(exp, underlying):
+                return exp
+        return None
+
     def get_active_expiry_strict(
         self, underlying: str, from_date: date, max_days_out: int = 35,
     ) -> Optional[date]:

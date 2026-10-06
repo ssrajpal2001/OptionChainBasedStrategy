@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timedelta
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from config.global_config import IST, Topic
 from data_layer.runtime_config import RuntimeConfig
@@ -654,6 +654,105 @@ class EntryMixin:
             ind_by_tf, passed, reason, ltp_target, theta_target, offset,
         )
 
+    async def _resolve_monthly_anchor_side(
+        self, step: float, ltp_target: float, theta_target: float,
+    ) -> Optional[str]:
+        """2026-10-06, direct user spec: BEGINNING entry's anchor SIDE is now
+        decided from the MONTHLY contract's own theta (not the weekly ATM
+        reading used everywhere else) -- the monthly contract's slower decay
+        is a cleaner directional read than weekly theta noise. One-time REST
+        snapshot per BEGINNING-entry evaluation (Option A, direct user
+        choice over a live subscription -- this is a once-a-day decision,
+        not something that needs to stay warm all day). 2026-10-06 follow-up,
+        direct user correction: the FUTURES price itself is also fetched via
+        this same one-time REST call, NOT read from self._futures_spot (the
+        live WS subscription) -- that would have required the underlying to
+        be in cfg.futures_atm_underlyings, which also changes self._spot
+        sourcing for EVERY OTHER binding on this underlying in the same
+        process (a real side-effect risk flagged earlier this session). This
+        feature now has zero dependency on that flag or any live futures
+        subscription at all.
+
+        Fetches: futures price (REST) -> rounds to strike step -> that
+        strike's MONTHLY expiry CE+PE (REST) -> applies the exact same
+        dual-floor check used everywhere else (leg_passes_dual_floor) ->
+        compares time value -> returns whichever side is lower.
+
+        Mirrors engine.py's _seed_shadow_vwap_from_rest for the credential/
+        symbol-resolution pattern (ClientDB upstox creds, REGISTRY.
+        get_broker_symbol/get_futures_upstox). Returns None on ANY failure
+        (no futures key/price, no token, no monthly expiry resolved, no
+        broker symbol, fetch error, or the monthly ATM failing the dual
+        floor) -- caller must fall back to the existing spot+futures-mean/
+        weekly-ATM behavior, never block or crash a BEGINNING-entry cycle
+        over this."""
+        try:
+            if step <= 0:
+                return None
+
+            from data_layer.instrument_registry import REGISTRY
+            from data_layer.client_db import ClientDB
+            from data_layer.historical_candles import fetch_upstox_v3_quote
+
+            creds = await asyncio.to_thread(ClientDB().get_feeder_creds_sync, "upstox")
+            token = (creds or {}).get("access_token", "")
+            if not token:
+                return None
+
+            fut_key = REGISTRY.get_futures_upstox(self._underlying)
+            if not fut_key:
+                return None
+            fut_quote = await fetch_upstox_v3_quote(fut_key, token)
+            if not fut_quote:
+                return None
+            fut_px = float(fut_quote.get("last_price", 0.0) or 0.0)
+            if fut_px <= 0:
+                return None
+            monthly_atm = int(round(fut_px / step) * step)
+
+            monthly_exp = REGISTRY.get_monthly_expiry(self._underlying, datetime.now(IST).date())
+            if not monthly_exp:
+                return None
+
+            ce_key = REGISTRY.get_broker_symbol(self._underlying, monthly_exp, monthly_atm, "CE", "upstox")
+            pe_key = REGISTRY.get_broker_symbol(self._underlying, monthly_exp, monthly_atm, "PE", "upstox")
+            if not ce_key or not pe_key:
+                return None
+
+            ce_quote, pe_quote = await asyncio.gather(
+                fetch_upstox_v3_quote(ce_key, token), fetch_upstox_v3_quote(pe_key, token),
+            )
+            if not ce_quote or not pe_quote:
+                return None
+            ce_ltp = float(ce_quote.get("last_price", 0.0) or 0.0)
+            pe_ltp = float(pe_quote.get("last_price", 0.0) or 0.0)
+            if ce_ltp <= 0 or pe_ltp <= 0:
+                return None
+
+            from strategies.sell_straddle.selection import strip_intrinsic, leg_passes_dual_floor
+            ce_tv = strip_intrinsic(ce_ltp, "CE", monthly_atm, fut_px)
+            pe_tv = strip_intrinsic(pe_ltp, "PE", monthly_atm, fut_px)
+            side = "CE" if ce_tv < pe_tv else "PE"
+            side_ltp = ce_ltp if side == "CE" else pe_ltp
+            if not leg_passes_dual_floor(side, monthly_atm, side_ltp, fut_px, ltp_target, theta_target):
+                self._clog.info(
+                    "MONTHLY-ANCHOR %s%d ltp=%.2f fails dual floor (ltp>=%.0f theta>=%.0f) -- "
+                    "falling back to weekly spot+futures-mean anchor selection",
+                    side, monthly_atm, side_ltp, ltp_target, theta_target,
+                )
+                return None
+            self._clog.info(
+                "MONTHLY-ANCHOR expiry=%s atm=%d ce_tv=%.2f pe_tv=%.2f -> side=%s",
+                monthly_exp, monthly_atm, ce_tv, pe_tv, side,
+            )
+            return side
+        except Exception:
+            logger.exception(
+                "SellStraddle[%s]: _resolve_monthly_anchor_side failed -- falling back to "
+                "weekly spot+futures-mean anchor selection.", self._underlying,
+            )
+            return None
+
     async def _eval_beginning_near_far(
         self, now: datetime, rule_key: str, rules: list, step: float, offset: int,
         ltp_target: float, theta_target: float, variable_strikes: bool, balance_ratio: float,
@@ -669,11 +768,25 @@ class EntryMixin:
         tie-break entirely; there is now exactly one candidate per cycle."""
         from strategies.sell_straddle.selection import select_balanced_pair_at
 
-        # 2026-08-26, direct user spec: anchor is the MEAN-of-spot-and-futures
-        # reference (self._atm_ref -- falls back to plain self._spot for any
-        # underlying not in cfg.futures_atm_underlyings, so this is unchanged
-        # there). 2026-09-01: nearest-round, not floor.
-        _atm_src = self._atm_ref if self._atm_ref > 0 else self._spot
+        # 2026-10-06 CRITICAL CHANGE, direct user spec: anchor SIDE is no
+        # longer decided from the spot+futures-mean weekly ATM reading --
+        # it now comes from a one-time REST comparison of the MONTHLY
+        # contract's own theta (see _resolve_monthly_anchor_side's own
+        # docstring for the full rationale and fallback contract). The
+        # actual TRADEABLE anchor strike/pair, however, is still resolved
+        # on the weekly chain, anchored at plain real SPOT -- no more
+        # futures-mean blending for BEGINNING's own ATM (that blending is
+        # now used ONLY as the futures-price input to the monthly-side
+        # lookup above, never for the weekly strike itself). Falls back to
+        # the original spot+futures-mean/auto-decided-side behavior
+        # whenever the monthly lookup can't produce an answer (no futures
+        # price, no token, monthly floor fails, any REST failure).
+        _forced_side = await self._resolve_monthly_anchor_side(step, ltp_target, theta_target)
+        if _forced_side is not None:
+            _atm_src = float(self._spot or 0.0)
+        else:
+            # Fallback: original behavior, unchanged.
+            _atm_src = self._atm_ref if self._atm_ref > 0 else self._spot
         atm = int(round(_atm_src / step) * step) if _atm_src > 0 and step > 0 else 0
 
         _trace: list = []
@@ -692,6 +805,7 @@ class EntryMixin:
             entry_basis=self._entry_basis, theta_target=theta_target,
             variable_strikes=variable_strikes, balance_ratio=balance_ratio,
             anchor_otm_steps=1,
+            forced_anchor_side=_forced_side,
             # 2026-09-30, direct user request: pass the full (bool, reason)
             # tuple through so the trace shows WHICH indicator/value decided
             # each candidate (e.g. "SLOPE(-1.37)<VALUE(0.00)=✗" or, when the
