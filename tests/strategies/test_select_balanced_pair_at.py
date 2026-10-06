@@ -137,6 +137,32 @@ def test_reentry_block_reason_atm_ref_matches_select_balanced_pair():
     assert (diag["ce"], diag["pe"]) == (at_explicit[0], at_explicit[1])
 
 
+def _cache_all_partners_under_ceiling():
+    """2026-10-06: separate from _cache() specifically so every CE partner
+    candidate clears the ltp<anchor_ltp ceiling (restored per direct user
+    spec) and reaches the rule-pass check -- _cache() has several CE
+    candidates priced ABOVE the PE-24500 anchor (184.25, 213.65 > 133.75),
+    which is exactly the real scenario the ceiling now correctly rejects
+    before rule_pass ever runs, and would make these rule-reason-visibility
+    tests assert on the wrong trace line."""
+    # CE24500 is the lower-time-value side at ATM -> becomes the anchor
+    # (ltp=125). The partner side's OWN atm-strike candidate (PE24500) is
+    # structurally guaranteed to fail the ceiling no matter what it's set
+    # to -- the anchor is BY DEFINITION the lower of the ATM pair, so the
+    # other side at that same strike can never be lower than it. Every
+    # OTHER-strike PE candidate is priced well under 125, so those clear
+    # the ceiling and reach the rule-pass check; the tests below filter
+    # out the one degenerate same-strike line rather than fight that
+    # structural fact with cache numbers.
+    return {
+        (24500, "CE"): {"ltp": 125.0, "atp": 120.0},
+        (24500, "PE"): {"ltp": 140.0, "atp": 135.0},
+        (24450, "PE"): {"ltp": 90.0, "atp": 88.0},
+        (24550, "PE"): {"ltp": 95.0, "atp": 92.0},
+        (24600, "PE"): {"ltp": 100.0, "atp": 98.0},
+    }
+
+
 def test_trace_shows_rule_reason_not_bare_word(monkeypatch):
     """2026-09-30, direct user request: the trace used to collapse every
     rule-rejected candidate to the bare word "rule", giving zero visibility
@@ -145,7 +171,7 @@ def test_trace_shows_rule_reason_not_bare_word(monkeypatch):
     that simply wasn't computable yet (both read as "rule"/N/A). rule_pass
     may now return (bool, reason) and that reason must show up verbatim in
     the trace line."""
-    cache = _cache()
+    cache = _cache_all_partners_under_ceiling()
     trace: list = []
 
     def _rule_pass(cs, ps):
@@ -155,7 +181,10 @@ def test_trace_shows_rule_reason_not_bare_word(monkeypatch):
         cache, 24500, 24512.0, 50, 2, 50.0, trace=trace, rule_pass=_rule_pass,
     )
     assert result is None
-    cand_lines = [ln for ln in trace if ln.strip().startswith("cand")]
+    # The PE24500 line is the degenerate same-strike-as-anchor candidate --
+    # structurally always ceiling-rejected (see the cache helper's own
+    # docstring), not part of what this test is verifying.
+    cand_lines = [ln for ln in trace if ln.strip().startswith("cand") and "PE24500" not in ln]
     assert cand_lines, "expected at least one candidate trace line"
     for ln in cand_lines:
         assert "SLOPE(-1.37)<VALUE(0.00)=✗" in ln
@@ -166,14 +195,14 @@ def test_trace_still_shows_bare_rule_word_when_rule_pass_returns_plain_bool():
     """Backward compat: an older-style rule_pass returning a plain bool
     (no reason) must still work, falling back to the original bare "rule"
     tag rather than crashing or showing an empty bracket."""
-    cache = _cache()
+    cache = _cache_all_partners_under_ceiling()
     trace: list = []
 
     result = select_balanced_pair_at(
         cache, 24500, 24512.0, 50, 2, 50.0, trace=trace, rule_pass=lambda cs, ps: False,
     )
     assert result is None
-    cand_lines = [ln for ln in trace if ln.strip().startswith("cand")]
+    cand_lines = [ln for ln in trace if ln.strip().startswith("cand") and "PE24500" not in ln]
     assert cand_lines
     for ln in cand_lines:
         assert ln.rstrip().endswith("rule")

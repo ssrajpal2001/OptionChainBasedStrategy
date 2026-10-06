@@ -869,18 +869,18 @@ def select_balanced_pair_at(
         # anchor_strike == atm, so this line is a no-op for RE-ENTRY.
         partner_strikes = [int(anchor_strike + i * step) for i in range(-offset, offset + 1)]
 
-    # 2026-09-25, direct user spec ("most balanced pair" = lowest
-    # |CE-PE|/(CE+PE) score, applied consistently to BEGINNING/RE-ENTRY and
-    # rollover -- see the matching change in select_rollover_partner_
-    # directional below): the old ceiling comparison (candidate LTP <=
-    # anchor_tv * balance_ratio, "richest candidate under the cutoff wins")
-    # is REPLACED by a genuine best-of-window score comparison -- among
-    # every candidate that still passes the floor and the rule-builder
-    # gate, pick the one whose premium is closest to the anchor's (lowest
-    # |anchor_ltp-candidate_ltp|/(anchor_ltp+candidate_ltp)), not merely the
-    # richest one under a cutoff. `balance_ratio` is kept as a parameter for
-    # backward compatibility with existing callers/config but is no longer
-    # applied as a filter.
+    # 2026-10-06 CRITICAL FIX, direct user correction: the 2026-09-25 change
+    # (commit 4c44cf9) dropped the ceiling entirely ("no cap, pick lowest
+    # |anchor-candidate|/(anchor+candidate) score") -- confirmed WRONG by
+    # direct user spec. The real, authoritative BEGINNING/RE-ENTRY steps:
+    # get ATM CE/PE -> anchor = lower-theta side -> shift anchor 1-OTM ->
+    # candidate partners must have ltp < anchor's ltp (a hard ceiling,
+    # restored here as _ok_ceiling) -> of THOSE, apply the entry-rule gate
+    # -> pick the most balanced (lowest score) survivor. The ceiling runs
+    # BEFORE scoring, as its own pass/fail gate alongside floor/rule, not
+    # folded into the score itself. `balance_ratio` stays unused as a
+    # scaling factor on the ceiling (kept at 1.0x anchor_ltp, matching the
+    # live BALANCE:1.00 config) unless a deployment ever wants it looser.
     best = None  # (score, ltp, strike)
     for s in partner_strikes:
         leg = strike_prem.get((s, partner_side))
@@ -890,6 +890,7 @@ def select_balanced_pair_at(
         if ltp <= 0:
             continue
         _ok_floor = leg_passes_dual_floor(partner_side, s, ltp, spot, ltp_target, theta_target)
+        _ok_ceiling = ltp < (anchor_ltp * balance_ratio)
         # Build the combined pair for the optional rule gate.
         if anchor_side == "CE":
             cs, ps = anchor_strike, s
@@ -909,13 +910,15 @@ def select_balanced_pair_at(
             _rule_reason = str(_rp[1]) if len(_rp) > 1 else ""
         else:
             _ok_rule, _rule_reason = bool(_rp), ""
-        _ok = _ok_floor and _ok_rule
+        _ok = _ok_floor and _ok_ceiling and _ok_rule
         _denom = anchor_ltp + ltp
         _score = abs(anchor_ltp - ltp) / _denom if _denom > 0 else 999.0
         if trace is not None:
             _tv = strip_intrinsic(ltp, partner_side, s, spot) if ltp > 0 else 0.0
             if not _ok_floor:
                 _why = "floor"
+            elif not _ok_ceiling:
+                _why = f"ceiling (ltp={ltp:.2f} >= anchor*{balance_ratio:.2f}={anchor_ltp * balance_ratio:.2f})"
             elif not _ok_rule:
                 _why = f"rule [{_rule_reason}]" if _rule_reason else "rule"
             else:

@@ -77,6 +77,18 @@ def eval_rules(rules: List[dict], ind_by_tf: Dict[int, Dict[str, float]]) -> Tup
             lv = f"{val:.2f}" if isinstance(val, float) else "N/A"
             label = f"{indicator.upper()}({lv}){op_sym}{thr}"
 
+        # 2026-10-06, direct user request: VWAP is the reference level most
+        # rules are implicitly judged against (e.g. "is price/SLOPE moving
+        # the right way relative to VWAP"), but it only showed up in this
+        # trace when a rule explicitly compared against it -- otherwise it
+        # was invisible even though it's always present in `ind` and always
+        # relevant context for reading the other indicator's value. Appended
+        # unconditionally (when available) so VWAP is visible during every
+        # rule evaluation, not just ones that reference it directly.
+        _vwap = ind.get("vwap")
+        if _vwap is not None and indicator != "vwap":
+            label += f" vwap={_vwap:.2f}"
+
         reasons.append(f"{label}={'✓' if passed else '✗'}")
 
         for b in str(rule.get("openBrackets", "")):
