@@ -41,7 +41,14 @@ echo --strategies must still say "sell_straddle", never
 echo "sell_straddle_calc_vwap" (an unrecognized name here would be silently
 echo DROPPED with no error, per the warning above).
 echo.
-ssh -t -i "%USERPROFILE%\.ssh\algotrading_ec2" ec2-user@13.200.171.160 "cd ~/OptionChainBasedStrategy; git pull origin nifty-cascade-v4-indicators; pm2 delete terminus 2>/dev/null; pm2 start run_system.py --name terminus --interpreter python3 -- --mode live --ui --port 5000 --index NIFTY --strategies sell_straddle --futures-atm-underlyings NIFTY; pm2 save --force; sleep 8; echo; echo '=== VERIFY: actual running process args ==='; ps aux | grep run_system.py | grep -v grep; echo; echo '=== VERIFY: strategies the app itself parsed ==='; grep 'enabled strategies' ~/.pm2/logs/terminus-out.log | tail -1; echo; echo '=== VERIFY: any auth/startup failures? ==='; grep -iE 'auth failed|startup aborted' ~/.pm2/logs/terminus-out.log | tail -5; echo; echo '=== Recent log tail ==='; pm2 logs terminus --lines 40 --nostream; bash -l"
+echo 2026-10-06: --futures-atm-underlyings NIFTY REMOVED. It forced self._spot
+echo to be sourced from the near-month FUTURES contract for every NIFTY
+echo binding in this process (incl. Gurmeet's live book) -- a side effect only
+echo the old BEGINNING-anchor-side logic needed. That logic now resolves the
+echo anchor side via a one-time REST monthly-contract theta fetch instead, so
+echo the flag is no longer required by anything.
+echo.
+ssh -t -i "%USERPROFILE%\.ssh\algotrading_ec2" ec2-user@13.200.171.160 "cd ~/OptionChainBasedStrategy; git pull origin nifty-cascade-v4-indicators; pm2 delete terminus 2>/dev/null; pm2 start run_system.py --name terminus --interpreter python3 -- --mode live --ui --port 5000 --index NIFTY --strategies sell_straddle; pm2 save --force; sleep 8; echo; echo '=== VERIFY: actual running process args ==='; ps aux | grep run_system.py | grep -v grep; echo; echo '=== VERIFY: strategies the app itself parsed ==='; grep 'enabled strategies' ~/.pm2/logs/terminus-out.log | tail -1; echo; echo '=== VERIFY: any auth/startup failures? ==='; grep -iE 'auth failed|startup aborted' ~/.pm2/logs/terminus-out.log | tail -5; echo; echo '=== Recent log tail ==='; pm2 logs terminus --lines 40 --nostream; bash -l"
 echo.
 echo Connection closed. Press any key to close this window.
 pause >nul
