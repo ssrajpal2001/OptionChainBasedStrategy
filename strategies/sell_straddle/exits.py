@@ -544,13 +544,18 @@ class ExitMixin:
     # ── EOD hedge-and-carry (2026-08-20, user spec) ─────────────────────────────
 
     def _is_t1_from_expiry(self, pos: "StraddlePosition", now: datetime) -> bool:
-        """True the trading day immediately before (or on/after) the position's own
-        expiry date. Deliberately a plain calendar-date check against the position's
-        already-known real expiry_date -- no separate trading-calendar logic needed,
-        since both `now` and `expiry_date` are always real trading days by
-        construction (a weekly Tue-expiry position held over a weekend still yields
-        exactly `.days == 1` on the Monday before it, matching the user's own
-        Monday/Tuesday example).
+        """True on the REAL trading day immediately before expiry (or on/after
+        expiry itself). 2026-10-06 CRITICAL FIX, direct user correction: this used
+        to be a plain calendar-date subtraction (`(expiry_date - now.date()).days
+        <= 1`), which breaks whenever a real NSE holiday falls between now and
+        expiry -- e.g. a Tuesday-expiry week with a Monday holiday: the TRUE T-1
+        trading day is Friday, but the old check never read True on Friday (4
+        calendar days out) and the holiday Monday itself has no trading at all, so
+        this would have only ever fired on expiry day itself -- too late, since
+        the whole point of T-1 is to act the day BEFORE expiry. Now computed via
+        data_layer.trading_calendar.previous_trading_day (weekends + real NSE
+        holidays, see that module's own docstring for why its holiday list starts
+        empty rather than guessed).
 
         2026-09-10, direct user spec: when same_day_expiry_enabled is on (testing
         running the entry side through expiry day rather than shifting to next week),
@@ -562,7 +567,9 @@ class ExitMixin:
             return False
         if not pos.expiry_date:
             return False
-        return (pos.expiry_date - now.date()).days <= 1
+        from data_layer.trading_calendar import previous_trading_day
+        t1_trading_day = previous_trading_day(pos.expiry_date)
+        return now.date() >= t1_trading_day
 
     def _cumulative_hedge_pnl(self, pos: "StraddlePosition", include_hedge: bool = False) -> float:
         """2026-08-24, user spec correction: the hedge decision is driven by
