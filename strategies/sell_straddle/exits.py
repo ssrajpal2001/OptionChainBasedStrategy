@@ -1884,32 +1884,42 @@ class ExitMixin:
                     )
                 if not _execute_now:
                     return
-                # 2026-09-29 CRITICAL FIX, direct user correction (supersedes the
-                # 2026-09-11 spec below): a day-loss-SL breach must trigger a
-                # ROLLOVER of the bleeding leg (single-side roll, same mechanism
-                # as vwap_rise_roll/ltp_decay/ratio_exit), NEVER the 4-leg hedge
-                # activation this used to call. If no valid roll partner exists,
-                # the position is left running unchanged (same as every other
-                # roll trigger's own no-partner behavior) -- direct user
-                # decision, not closed and not stopped for the day. This no
-                # longer depends on self._hedge_carry_enabled at all (rolling is
-                # independent of the hedge feature).
-                rolled = await self._single_side_roll(now, "day_loss_sl_roll")
-                if rolled:
+                # 2026-10-06 CRITICAL FIX, direct user correction: REVERTS the
+                # 2026-09-29 change (commit 801929b) back to the 2026-09-11
+                # spec -- real 2026-10-05 incident: day_loss_sl_roll fired 3x
+                # in under 25 minutes (13:45/13:46/14:06), each roll landing
+                # worse than the last (+2.90 -> -17.10 -> -51.15pts), because
+                # a single-side roll has no built-in loss cap -- if spot keeps
+                # trending the same direction it just keeps re-entering fresh
+                # losing strikes. A day-loss-SL breach now ALWAYS builds the
+                # 4-leg hedge (reusing the same _try_build_hedge mechanism EOD
+                # hedge-and-carry uses, via _hedge_or_roll_if_eligible) instead
+                # of rolling -- direct user spec, no roll fallback even when
+                # self._hedge_carry_enabled is off (option A: "always hedges").
+                # stop_for_day_on_hedge=False -- this fires mid-day, not at
+                # EOD, so a successful hedge must NOT stop the book for the
+                # day; it converts to a positional carry and every OTHER exit
+                # check keeps running on it (day_profit_target/day_loss_sl
+                # themselves are what then skip, via pos.is_hedged_positional,
+                # same as the existing EOD hedge-and-carry gate above).
+                hedged = await self._hedge_or_roll_if_eligible(pos, now, stop_for_day_on_hedge=False)
+                if hedged:
                     logger.info(
-                        "SellStraddle[%s]: DAY LOSS SL — ROLLED the bleeding leg (no hedge).",
+                        "SellStraddle[%s]: DAY LOSS SL — hedge activated (position now carried "
+                        "positionally; day_loss_sl/day_profit_target now skipped while hedged).",
                         self._underlying,
                     )
-                    self._clog.info("DAY LOSS SL — rolled the bleeding leg (no hedge)")
+                    self._clog.info("DAY LOSS SL — hedge activated, position now carried positionally")
                     return
+                _why = ("hedge_carry_enabled is OFF for this binding"
+                        if not getattr(self, "_hedge_carry_enabled", False)
+                        else "no valid hedge strike found (or already T-1, closed instead -- see log above)")
                 logger.info(
-                    "SellStraddle[%s]: DAY LOSS SL — no valid roll partner found, holding "
-                    "position unchanged (no hedge, no close).",
-                    self._underlying,
+                    "SellStraddle[%s]: DAY LOSS SL — no hedge activated (%s); holding "
+                    "position unchanged (no roll, no close).",
+                    self._underlying, _why,
                 )
-                self._clog.info(
-                    "DAY LOSS SL — no roll partner found, holding position (no hedge, no close)"
-                )
+                self._clog.info("DAY LOSS SL — no hedge activated (%s); holding position unchanged", _why)
                 return
 
         # 2b. ITM PAIR GATE + 70% ROLL PROTECTION -- must run BEFORE the generic
