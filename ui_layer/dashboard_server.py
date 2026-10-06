@@ -6162,6 +6162,7 @@ pm2 save
                 return {"ok": False, "error": _safe_error(exc)}
 
         self._register_oi_orb_routes(app)
+        self._register_vp_oi_regime_routes(app)
         self._register_cag_straddle_routes(app)
         self._register_iron_fly_routes(app)
         self._register_oi_bias_rsi_exit_routes(app)
@@ -6461,6 +6462,40 @@ pm2 save
                         getattr(b, "_client_id", "?"), getattr(b, "_binding_id", "?"),
                     )
             result.sort(key=lambda r: (0 if r.get("positions") else 1, r.get("client_id", "")))
+            return {"ok": True, "books": result}
+
+    def _register_vp_oi_regime_routes(self, app) -> None:
+        _srv = self
+
+        @app.get("/api/sellstraddle/vpoi_status")
+        async def sell_straddle_vpoi_status():
+            """vp_oi_regime live status per SellStraddle book that has it
+            enabled (strategy_params.vp_oi_enabled=true) -- POC/VAH/VAL,
+            Future/Put/Call OI regime, current matrix decision, naked-leg
+            state, straight from VpOiRegimeAdapter.monitoring_state()
+            (strategies/vp_oi_regime/live_adapter.py). Books without the
+            feature on are simply omitted, not shown as "off" -- this
+            panel only exists to answer "is the new thing doing anything
+            right now", not to audit every binding's config."""
+            result = []
+            for b in (_srv._sell_straddles or []):
+                adapter = getattr(b, "_vp_oi_adapter", None)
+                if not getattr(b, "_vp_oi_enabled", False) or adapter is None:
+                    continue
+                try:
+                    state = adapter.monitoring_state()
+                except Exception:
+                    logger.exception(
+                        "sell_straddle_vpoi_status: monitoring_state() raised for %s/%s/%s -- dropped.",
+                        getattr(b, "_client_id", "?"), getattr(b, "_binding_id", "?"),
+                        getattr(b, "_underlying", "?"),
+                    )
+                    continue
+                state["client_id"] = getattr(b, "_client_id", "")
+                state["binding_id"] = getattr(b, "_binding_id", "")
+                state["underlying"] = getattr(b, "_underlying", "")
+                state["strategy_name"] = getattr(b, "_strategy_name", "sell_straddle")
+                result.append(state)
             return {"ok": True, "books": result}
 
     def _register_cag_straddle_routes(self, app) -> None:

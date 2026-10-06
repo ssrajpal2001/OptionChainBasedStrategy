@@ -8435,6 +8435,72 @@ function amoTest() {
                     </div>
                   </template>
 
+                  <!-- VP/OI Regime live panel (2026-10-06): VpOiRegimeAdapter's own
+                       monitoring_state() (strategies/vp_oi_regime/live_adapter.py) -- only
+                       shows up at all for a SellStraddle deployment that has
+                       strategy_params.vp_oi_enabled=true; silently omitted otherwise (this
+                       panel's only job is "is the new thing doing anything right now", not
+                       auditing every binding's config). POC/VAH/VAL, current 27-row matrix
+                       regime + call/put action + hedge sizing, naked-leg state + which side
+                       is awaiting the Re-entry Rule. -->
+                  <template x-if="(dep.strategy_name==='sell_straddle'||dep.strategy_name==='sell_straddle_calc_vwap')">
+                    <div x-data="{
+                           _vp: null,
+                           _checked: false,
+                           async _load() {
+                             try {
+                               const tok = localStorage.getItem('terminus_token') || (authToken||'');
+                               const r = await fetch('/api/sellstraddle/vpoi_status', {headers:{'Authorization':'Bearer '+tok}});
+                               const d = await r.json();
+                               if (d.ok) {
+                                 this._vp = (d.books||[]).find(bk => bk.binding_id===b.binding_id
+                                             && bk.underlying===dep.underlying
+                                             && (bk.strategy_name||'sell_straddle')===dep.strategy_name) || null;
+                               }
+                             } catch(e) {}
+                             this._checked = true;
+                           }
+                         }"
+                         x-init="_load(); setInterval(()=>_load(), 5000)"
+                         x-show="_vp"
+                         class="rounded p-3 mb-2 text-xs font-mono" style="background:rgba(var(--t-purple-rgb,160,100,255),0.04);border:1px solid rgba(var(--t-purple-rgb,160,100,255),0.18)">
+                      <template x-if="_vp">
+                        <div>
+                          <div class="flex items-center justify-between mb-2">
+                            <span style="color:var(--t-muted)">VP/OI REGIME
+                              <span :style="(_vp.regime||'').includes('Bearish')?'color:var(--t-red)':((_vp.regime||'').includes('Bullish')?'color:var(--t-green)':((_vp.regime||'')==='Volatile'?'color:var(--t-amber)':'color:var(--t-dim)'))"
+                                    x-text="_vp.regime || (_vp.poc==null ? 'WARMING UP' : 'NEUTRAL')"></span>
+                            </span>
+                            <span style="color:var(--t-muted)">
+                              POC <span style="color:var(--t-cyan)" x-text="_vp.poc!=null ? _vp.poc.toFixed(2) : '—'"></span> ·
+                              VAH <span style="color:var(--t-dim)" x-text="_vp.vah!=null ? _vp.vah.toFixed(2) : '—'"></span> ·
+                              VAL <span style="color:var(--t-dim)" x-text="_vp.val!=null ? _vp.val.toFixed(2) : '—'"></span>
+                            </span>
+                          </div>
+                          <template x-if="_vp.regime">
+                            <div class="mb-2" style="color:var(--t-muted)">
+                              CE: <span x-text="_vp.call_action || '—'"></span>
+                              <span x-show="_vp.call_hedge && _vp.call_hedge.enabled" style="color:var(--t-amber)"
+                                    x-text="' (hedge ' + (_vp.call_hedge.pct*100).toFixed(0) + '%)'"></span>
+                              &nbsp;|&nbsp; PE: <span x-text="_vp.put_action || '—'"></span>
+                              <span x-show="_vp.put_hedge && _vp.put_hedge.enabled" style="color:var(--t-amber)"
+                                    x-text="' (hedge ' + (_vp.put_hedge.pct*100).toFixed(0) + '%)'"></span>
+                            </div>
+                          </template>
+                          <div class="flex items-center gap-3">
+                            <span style="color:var(--t-muted)">NAKED STATE
+                              <span :style="_vp.naked_state==='NONE'?'color:var(--t-dim)':'color:var(--t-amber)'"
+                                    x-text="_vp.naked_state||'NONE'"></span>
+                            </span>
+                            <template x-if="_vp.awaiting_reentry && Object.values(_vp.awaiting_reentry).some(v=>v)">
+                              <span style="color:var(--t-cyan)">watching for re-entry: <span x-text="Object.keys(_vp.awaiting_reentry).filter(k=>_vp.awaiting_reentry[k]).join(',')"></span></span>
+                            </template>
+                          </div>
+                        </div>
+                      </template>
+                    </div>
+                  </template>
+
                   <!-- OI-ORB Screener live panel (2026-08-24): OiOrbScreenerStrategy's own
                        monitoring_state() (strategies/oi_orb_screener/engine.py) -- shows
                        today's shortlist, NIFTY regime + frozen ORB levels per stock, and

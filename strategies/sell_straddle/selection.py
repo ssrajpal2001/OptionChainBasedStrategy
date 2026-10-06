@@ -845,10 +845,18 @@ def select_balanced_pair_at(
             )
 
     if trace is not None:
+        # 2026-10-05 fix, real live-day confusion: this line used to say
+        # "ltp<={anchor_tv*balance_ratio}" -- vestigial text from the
+        # pre-2026-09-25 ceiling-comparison rule. The REAL rule (see the
+        # scoring loop right below) has no upper cap at all -- it picks
+        # whichever candidate has the lowest |anchor-candidate|/(anchor+
+        # candidate) balance score, which can legitimately be well above
+        # the anchor's own LTP. The old wording made a correct selection
+        # look like a bug.
         trace.append(
             f"anchor={anchor_side}@{anchor_strike} ltp={anchor_ltp:.2f} tv={anchor_tv:.2f}; "
-            f"partner={partner_side} wants same floor and ltp<={anchor_tv * balance_ratio:.2f} "
-            f"(ratio={balance_ratio:.2f})"
+            f"partner={partner_side} wants same floor + rule-pass, lowest "
+            f"|anchor-candidate|/(anchor+candidate) balance score wins (no ltp cap)"
         )
 
     if variable_strikes:
