@@ -87,3 +87,35 @@ def test_day_loss_sl_holds_position_when_no_hedge_can_be_built():
         assert s._stop_for_day is False
 
     asyncio.run(run())
+
+
+def test_day_loss_sl_hedge_attempt_throttled_to_once_per_60s():
+    """2026-10-06 CRITICAL SAFETY FIX: _defer_exit fires 'execute now' on
+    nearly every tick once inside its boundary window (confirmed in a real
+    2026-10-05 production log -- the old roll-fallback message spammed
+    hundreds of times per minute). _try_build_hedge dispatches REAL broker
+    orders and has no throttle of its own (unlike _single_side_roll, which
+    has its own 60s _ROLL_RETRY_SECONDS) -- without a guard at this call
+    site, a repeatedly-failing hedge attempt would re-run on every single
+    tick. Simulates 5 ticks in rapid succession (well under 60s apart):
+    only the FIRST must actually call _hedge_or_roll_if_eligible."""
+    async def run():
+        bus = EventBus()
+        s = _strategy(bus)
+        s._hedge_or_roll_if_eligible = AsyncMock(return_value=False)
+        base = datetime.datetime.now(IST)
+        for i in range(5):
+            # Monkeypatch "now" indirectly via datetime.now(IST) isn't
+            # practical here -- _check_exits reads real wall-clock time
+            # internally, so instead we drive the throttle state directly
+            # the same way the real code does, confirming the guard fields
+            # behave correctly across repeated calls a few ms apart (same
+            # real-world cadence the production log showed).
+            await s._check_exits()
+        assert s._hedge_or_roll_if_eligible.await_count == 1, (
+            "5 rapid-fire ticks (all well under the 60s retry gap) must "
+            "only trigger ONE real hedge-build attempt, not one per tick"
+        )
+        s._single_side_roll.assert_not_awaited()
+
+    asyncio.run(run())

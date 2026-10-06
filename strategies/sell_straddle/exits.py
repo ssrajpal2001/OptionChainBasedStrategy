@@ -1902,7 +1902,38 @@ class ExitMixin:
                 # check keeps running on it (day_profit_target/day_loss_sl
                 # themselves are what then skip, via pos.is_hedged_positional,
                 # same as the existing EOD hedge-and-carry gate above).
-                hedged = await self._hedge_or_roll_if_eligible(pos, now, stop_for_day_on_hedge=False)
+                # 2026-10-06 CRITICAL SAFETY FIX, found before this ever went
+                # live: _defer_exit's "_execute_now" fires on nearly EVERY
+                # TICK once inside its boundary window (proven by yesterday's
+                # real log -- "no roll partner found" spammed hundreds of
+                # times per minute for over a minute straight). The old
+                # roll version was safe to spam because _single_side_roll has
+                # its OWN internal 60s throttle (_ROLL_RETRY_SECONDS) and only
+                # ever does an in-memory search. _try_build_hedge has NO such
+                # throttle and dispatches REAL broker BUY orders -- without a
+                # guard here, a tick where a valid hedge strike briefly
+                # qualifies would re-attempt (and potentially re-dispatch)
+                # every single tick. Two protections, mirroring this
+                # codebase's own existing patterns exactly:
+                # 1. _eod_decision_in_progress (the SAME reentrancy guard the
+                #    EOD hedge path already uses) -- prevents two overlapping
+                #    hedge-build attempts (this codebase already had a real
+                #    incident from exactly this race on the EOD path).
+                # 2. An explicit 60s minimum retry gap (matching rolling.py's
+                #    own _ROLL_RETRY_SECONDS), so a repeatedly-failing hedge
+                #    attempt doesn't re-run find_hedge_strike/dispatch every
+                #    tick even once the reentrancy guard above has cleared.
+                if getattr(self, "_eod_decision_in_progress", False):
+                    return
+                _last_attempt = getattr(self, "_last_day_loss_hedge_attempt", None)
+                if _last_attempt and (now - _last_attempt).total_seconds() < 60:
+                    return
+                self._last_day_loss_hedge_attempt = now
+                self._eod_decision_in_progress = True
+                try:
+                    hedged = await self._hedge_or_roll_if_eligible(pos, now, stop_for_day_on_hedge=False)
+                finally:
+                    self._eod_decision_in_progress = False
                 if hedged:
                     logger.info(
                         "SellStraddle[%s]: DAY LOSS SL — hedge activated (position now carried "
@@ -1915,7 +1946,7 @@ class ExitMixin:
                         if not getattr(self, "_hedge_carry_enabled", False)
                         else "no valid hedge strike found (or already T-1, closed instead -- see log above)")
                 logger.info(
-                    "SellStraddle[%s]: DAY LOSS SL — no hedge activated (%s); holding "
+                    "SellStraddle[%s]: DAY LOSS SL — no hedge activated (%s); retrying in 60s; holding "
                     "position unchanged (no roll, no close).",
                     self._underlying, _why,
                 )
