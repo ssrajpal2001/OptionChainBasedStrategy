@@ -48,10 +48,10 @@ def test_resolve_monthly_anchor_side_picks_lower_theta_and_passes_floor():
                    return_value={"access_token": "tok"}), \
              patch("data_layer.historical_candles.fetch_upstox_v3_quote",
                    new=AsyncMock(side_effect=_quote_side_effect(22650.0, 80.0, 140.0))):
-            side = await s._resolve_monthly_anchor_side(step=50.0, ltp_target=50.0, theta_target=20.0)
+            result = await s._resolve_monthly_anchor_side(step=50.0, ltp_target=50.0, theta_target=20.0)
         # monthly ATM = round(22650/50)*50 = 22650, so both legs are pure
         # time value: CE=80 < PE=140 -> CE wins.
-        assert side == "CE"
+        assert result == ("CE", 22650)
     asyncio.run(run())
 
 
@@ -69,8 +69,8 @@ def test_resolve_monthly_anchor_side_returns_none_on_floor_failure():
              patch("data_layer.historical_candles.fetch_upstox_v3_quote",
                    new=AsyncMock(side_effect=_quote_side_effect(22650.0, 10.0, 15.0))):
             # Both legs well under ltp_target=50 -> CE (lower theta) fails the floor.
-            side = await s._resolve_monthly_anchor_side(step=50.0, ltp_target=50.0, theta_target=20.0)
-        assert side is None
+            result = await s._resolve_monthly_anchor_side(step=50.0, ltp_target=50.0, theta_target=20.0)
+        assert result is None
     asyncio.run(run())
 
 
@@ -99,13 +99,15 @@ def test_resolve_monthly_anchor_side_returns_none_on_rest_failure():
     asyncio.run(run())
 
 
-def test_beginning_entry_passes_forced_side_and_spot_only_atm():
-    """When the monthly resolver returns a side, _eval_beginning_near_far must
-    (a) anchor at plain SPOT (not spot+futures-mean), and (b) pass
-    forced_anchor_side through to select_balanced_pair_at."""
+def test_beginning_entry_passes_forced_side_and_monthly_atm():
+    """When the monthly resolver returns (side, monthly_atm), _eval_beginning_
+    near_far must (a) anchor the shift at the MONTHLY atm (2026-10-07
+    correction -- NOT spot-rounded weekly atm, which was shifting 1-OTM
+    from the wrong strike), (b) pass real spot as the stripping reference,
+    and (c) pass forced_anchor_side through to select_balanced_pair_at."""
     async def run():
         s = _strategy(spot=22611.0)
-        s._resolve_monthly_anchor_side = AsyncMock(return_value="PE")
+        s._resolve_monthly_anchor_side = AsyncMock(return_value=("PE", 22700))
         captured = {}
 
         def _sel(strike_prem, atm, spot, step, offset, ltp_target, **kwargs):
@@ -120,10 +122,11 @@ def test_beginning_entry_passes_forced_side_and_spot_only_atm():
                 step=50, offset=5, ltp_target=50.0, theta_target=20.0,
                 variable_strikes=False, balance_ratio=1.0,
             )
-        # 22611/50 = 452.22 -> round -> 452 -> atm = 22600 (plain spot, NOT the
-        # futures-mean -- confirms the mean-blending no longer drives the
-        # weekly strike once the monthly side was resolved).
-        assert captured["atm"] == 22600
+        # atm = the MONTHLY atm itself (22700), so select_balanced_pair_at's
+        # own anchor_otm_steps=1 shift lands on PE@22650 -- not PE@22600,
+        # which is what a weekly-spot-rounded atm of 22600 would have shifted
+        # to. spot stays real spot (22611) for intrinsic/time-value stripping.
+        assert captured["atm"] == 22700
         assert captured["spot"] == 22611.0
         assert captured["forced_anchor_side"] == "PE"
     asyncio.run(run())

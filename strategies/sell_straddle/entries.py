@@ -656,7 +656,7 @@ class EntryMixin:
 
     async def _resolve_monthly_anchor_side(
         self, step: float, ltp_target: float, theta_target: float,
-    ) -> Optional[str]:
+    ) -> Optional[Tuple[str, int]]:
         """2026-10-06, direct user spec: BEGINNING entry's anchor SIDE is now
         decided from the MONTHLY contract's own theta (not the weekly ATM
         reading used everywhere else) -- the monthly contract's slower decay
@@ -742,10 +742,10 @@ class EntryMixin:
                 )
                 return None
             self._clog.info(
-                "MONTHLY-ANCHOR expiry=%s atm=%d ce_tv=%.2f pe_tv=%.2f -> side=%s",
-                monthly_exp, monthly_atm, ce_tv, pe_tv, side,
+                "MONTHLY-ANCHOR expiry=%s atm=%d ce_ltp=%.2f pe_ltp=%.2f ce_tv=%.2f pe_tv=%.2f -> side=%s",
+                monthly_exp, monthly_atm, ce_ltp, pe_ltp, ce_tv, pe_tv, side,
             )
-            return side
+            return side, monthly_atm
         except Exception:
             logger.exception(
                 "SellStraddle[%s]: _resolve_monthly_anchor_side failed -- falling back to "
@@ -772,22 +772,33 @@ class EntryMixin:
         # longer decided from the spot+futures-mean weekly ATM reading --
         # it now comes from a one-time REST comparison of the MONTHLY
         # contract's own theta (see _resolve_monthly_anchor_side's own
-        # docstring for the full rationale and fallback contract). The
-        # actual TRADEABLE anchor strike/pair, however, is still resolved
-        # on the weekly chain, anchored at plain real SPOT -- no more
-        # futures-mean blending for BEGINNING's own ATM (that blending is
-        # now used ONLY as the futures-price input to the monthly-side
-        # lookup above, never for the weekly strike itself). Falls back to
-        # the original spot+futures-mean/auto-decided-side behavior
-        # whenever the monthly lookup can't produce an answer (no futures
-        # price, no token, monthly floor fails, any REST failure).
-        _forced_side = await self._resolve_monthly_anchor_side(step, ltp_target, theta_target)
-        if _forced_side is not None:
-            _atm_src = float(self._spot or 0.0)
+        # docstring for the full rationale and fallback contract). Falls
+        # back to the original spot+futures-mean/auto-decided-side
+        # behavior whenever the monthly lookup can't produce an answer (no
+        # futures price, no token, monthly floor fails, any REST failure).
+        #
+        # 2026-10-07 CORRECTION, direct user spec: the anchor's 1-OTM shift
+        # must be measured from the MONTHLY atm (e.g. 22700 -> PE@22650),
+        # NOT from the weekly spot-rounded atm (which was wrongly producing
+        # PE@22600 -- one extra step off). `atm` below is therefore the
+        # monthly atm itself when a forced side exists; select_balanced_
+        # pair_at's own anchor_otm_steps shift then lands on the correct
+        # strike. The LTP/time-value actually used for that strike still
+        # comes from the live weekly/spot chain (self._strike_prem) --
+        # select_balanced_pair_at never reads anything else -- so "pool
+        # strikes come from spot, not futures" still holds; only the
+        # STRIKE NUMBER the shift is measured from changed. `spot` (3rd
+        # positional arg, used for intrinsic/time-value stripping of
+        # weekly candidates) stays real self._spot either way.
+        _resolved = await self._resolve_monthly_anchor_side(step, ltp_target, theta_target)
+        _atm_src = float(self._spot or 0.0)
+        if _resolved is not None:
+            _forced_side, atm = _resolved
         else:
             # Fallback: original behavior, unchanged.
+            _forced_side = None
             _atm_src = self._atm_ref if self._atm_ref > 0 else self._spot
-        atm = int(round(_atm_src / step) * step) if _atm_src > 0 and step > 0 else 0
+            atm = int(round(_atm_src / step) * step) if _atm_src > 0 and step > 0 else 0
 
         _trace: list = []
         # 2026-08-20 user spec: anchor SIDE decision stays at raw ATM, but the
