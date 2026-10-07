@@ -147,13 +147,32 @@ class InstrumentRegistry:
             api_client_obj = upstox_client.ApiClient(cfg)
             opt_api = upstox_client.OptionsApi(api_client_obj)
 
-            # Calculate next N weekly expiry dates
-            expiry_dates: List[date] = []
-            d = today
-            for _ in range(weeks_ahead):
-                d = _calc_next_expiry(underlying, d)
-                expiry_dates.append(d)
-                d = d + timedelta(days=1)
+            # 2026-10-07 direct user fix: real incident -- the old weekday-math
+            # guess (_calc_next_expiry) silently dropped 2026-10-19 from NIFTY's
+            # expiry list because that week's real listed expiry wasn't a
+            # Tuesday; the guessed query date (2026-10-20) returned 0 contracts
+            # from the API, and since OTHER weeks' guesses succeeded, the
+            # overall `if keys:` check below never fell back to master JSON --
+            # the gap went permanently unnoticed. Pull the real expiry dates
+            # straight from the exchange master JSON first (same file the
+            # master-JSON fallback path already trusts) -- "no calendar system
+            # for expiry calculation," direct user spec. Weekday math is now
+            # used only as a last-resort fallback if the master JSON itself is
+            # unreachable (network failure), never to decide which real dates
+            # to query.
+            expiry_dates = self._real_expiry_dates(underlying, today, weeks_ahead, diag)
+            if expiry_dates:
+                diag.append(f"real expiry dates from master JSON: "
+                            f"{[e.isoformat() for e in expiry_dates]}")
+            else:
+                diag.append("master JSON expiry lookup failed -- falling back to "
+                            "weekday-math guess (last resort)")
+                expiry_dates = []
+                d = today
+                for _ in range(weeks_ahead):
+                    d = _calc_next_expiry(underlying, d)
+                    expiry_dates.append(d)
+                    d = d + timedelta(days=1)
 
             diag.append(f"expiries to query: {[e.isoformat() for e in expiry_dates[:4]]} ...")
 
@@ -382,6 +401,82 @@ class InstrumentRegistry:
     def get_diagnostics(self, underlying: str) -> List[str]:
         """Return the diagnostic log from the last load_sync call for this underlying."""
         return list(self._diag.get(underlying, ["No load attempted yet."]))
+
+    def _real_expiry_dates(
+        self, underlying: str, today: date, weeks_ahead: int, diag: List[str],
+    ) -> List[date]:
+        """2026-10-07 direct user fix: real expiry dates, read straight from
+        the exchange master JSON -- "no calendar system for expiry
+        calculation." Used by load_sync's REST path to know WHICH dates to
+        query, instead of guessing via weekday math (_calc_next_expiry),
+        which silently dropped a genuine NIFTY expiry (2026-10-19, not a
+        Tuesday) because the guessed date for that week never matched a real
+        listed contract. Reuses the exact same download/cache/match/parse
+        logic _load_from_master_json already trusts (same _MASTER_CACHE key,
+        same segment-prefix + underlying_symbol match, same _parse_instrument
+        epoch handling) -- just to collect dates, not build the full key map.
+        Returns [] on ANY failure (network, parse) so the caller can fall
+        back to the weekday-math guess as a last resort rather than crash."""
+        try:
+            import gzip
+            import json
+            import ssl as _ssl
+            from urllib.request import urlopen, Request
+
+            _is_bse = underlying in ("SENSEX", "BANKEX")
+            _exch = "BSE" if _is_bse else "NSE"
+            cache_key = f"{_exch}:{today.isoformat()}"
+            raw_instruments = _MASTER_CACHE.get(cache_key)
+            if raw_instruments is None:
+                url = f"https://assets.upstox.com/market-quote/instruments/exchange/{_exch}.json.gz"
+                _ctx = _ssl.create_default_context()
+                _ctx.check_hostname = False
+                _ctx.verify_mode = _ssl.CERT_NONE
+                req = Request(url, headers={"Accept-Encoding": "gzip"})
+                with urlopen(req, timeout=60, context=_ctx) as r:
+                    raw = r.read()
+                try:
+                    raw_instruments = json.loads(gzip.decompress(raw))
+                except Exception:
+                    raw_instruments = json.loads(raw)
+                _MASTER_CACHE[cache_key] = raw_instruments
+
+            seg_prefix = "BSE_FO|" if _is_bse else "NSE_FO|"
+            dates: Set[date] = set()
+            for inst in raw_instruments:
+                ikey, ts, _strike, exp_raw = self._parse_instrument(inst)
+                if not ikey or not ikey.startswith(seg_prefix):
+                    continue
+                _uns = ((inst.get("underlying_symbol") or inst.get("name") or "")
+                        if isinstance(inst, dict)
+                        else (getattr(inst, "underlying_symbol", "") or getattr(inst, "name", "")))
+                if _uns:
+                    if str(_uns).upper() != underlying.upper():
+                        continue
+                elif not ts.startswith(underlying):
+                    continue
+                try:
+                    if isinstance(exp_raw, datetime):
+                        expiry_date = exp_raw.date()
+                    elif isinstance(exp_raw, date):
+                        expiry_date = exp_raw
+                    elif isinstance(exp_raw, (int, float)) or (
+                        isinstance(exp_raw, str) and str(exp_raw).strip().isdigit()):
+                        _epoch = int(exp_raw)
+                        if _epoch > 10_000_000_000:
+                            _epoch //= 1000
+                        from config.global_config import IST as _IST
+                        expiry_date = datetime.fromtimestamp(_epoch, _IST).date()
+                    else:
+                        expiry_date = date.fromisoformat(str(exp_raw)[:10])
+                except (ValueError, TypeError, OSError, OverflowError):
+                    continue
+                if expiry_date >= today:
+                    dates.add(expiry_date)
+            return sorted(dates)[:weeks_ahead]
+        except Exception as exc:
+            diag.append(f"real-expiry-date master-JSON lookup failed: {exc}")
+            return []
 
     def _load_from_master_json(self, underlying: str, today: date, diag: List[str] = None) -> None:
         """Download and parse the Upstox NSE instrument master JSON (cached per session)."""
