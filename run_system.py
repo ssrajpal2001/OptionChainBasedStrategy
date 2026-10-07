@@ -141,6 +141,18 @@ def _parse_args() -> argparse.Namespace:
              "deliberate, accepted tradeoff, not an oversight (see GlobalConfig's own "
              "docstring for futures_atm_underlyings).",
     )
+    p.add_argument(
+        "--futures-oi-underlyings",
+        default="",
+        help="2026-10-07, direct user spec: comma-list of underlyings that should "
+             "subscribe to the near-month FUTURES tick stream (price+OI) PURELY for "
+             "that OI data -- unlike --futures-atm-underlyings, this does NOT blend "
+             "futures into self._spot/_atm_ref for anyone. Exists so the vp_oi_regime "
+             "live adapter's Future-OI buildup/unwinding classification can get a "
+             "real, continuously-updating OI feed without also changing self._spot "
+             "for every binding on that underlying (that side effect stays scoped to "
+             "--futures-atm-underlyings alone). e.g. --futures-oi-underlyings NIFTY.",
+    )
     return p.parse_args()
 
 
@@ -1162,6 +1174,16 @@ def main() -> None:
             "day-low/hedge/exits, everywhere) will be sourced from the near-month FUTURES "
             "contract, not real spot. NSE/BSE options still settle against real spot -- "
             "this is a deliberate, direct user choice, not an oversight.", _futures_atm,
+        )
+
+    _futures_oi = [s.strip().upper() for s in str(args.futures_oi_underlyings).split(",") if s.strip()]
+    if _futures_oi:
+        cfg.futures_oi_underlyings = _futures_oi
+        logging.getLogger(__name__).info(
+            "futures_oi_underlyings=%s -- subscribing to the near-month FUTURES tick "
+            "stream (price+OI) for these underlyings PURELY for OI data; self._spot/"
+            "_atm_ref are NOT affected (that blending stays scoped to "
+            "futures_atm_underlyings alone).", _futures_oi,
         )
 
     logger = logging.getLogger(__name__)

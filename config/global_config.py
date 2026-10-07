@@ -399,6 +399,20 @@ class GlobalConfig:
     # a known, accepted tradeoff, not an oversight.
     futures_atm_underlyings: List[str] = field(default_factory=list)
 
+    # 2026-10-07, direct user spec: a SEPARATE opt-in list, decoupled from
+    # futures_atm_underlyings above -- subscribes to the near-month futures
+    # tick stream (price + OI) for these underlyings WITHOUT also blending
+    # futures into self._spot/_atm_ref (that side effect stays scoped to
+    # futures_atm_underlyings only). Exists because the vp_oi_regime live
+    # adapter's Future-OI buildup/unwinding classification needs a real,
+    # continuously-updating OI feed -- a one-time REST snapshot (as used by
+    # the BEGINNING-entry monthly-anchor feature) only gives a single point
+    # in time, not a live series. Added after removing NIFTY from
+    # futures_atm_underlyings (to stop it silently changing self._spot for
+    # every NIFTY binding, including live capital) broke VP/OI's OI feed as
+    # a side effect -- this restores just the OI data, nothing else.
+    futures_oi_underlyings: List[str] = field(default_factory=list)
+
     # Candle timeframes (minutes)
     candle_timeframes: List[int] = field(default_factory=lambda: [1, 2, 5, 15, 75])
 

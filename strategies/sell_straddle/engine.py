@@ -147,6 +147,16 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         self._atm_ref: float = 0.0
         _fa = {u.upper() for u in (getattr(self._cfg, "futures_atm_underlyings", None) or [])}
         self._uses_mean_atm: bool = self._underlying.upper() in _fa
+        # 2026-10-07, direct user spec: a real futures tick must be routed to
+        # self._futures_spot/_futures_oi (never self._spot) for ANY underlying
+        # that is genuinely receiving a futures tick stream -- not just the
+        # narrower set that also wants self._atm_ref blended. Decoupled from
+        # _uses_mean_atm above so futures_oi_underlyings (OI feed only, see
+        # GlobalConfig's own docstring) can capture real futures price/OI
+        # without ever touching self._spot/_atm_ref -- that blending stays
+        # scoped to futures_atm_underlyings alone, unchanged.
+        _foi = {u.upper() for u in (getattr(self._cfg, "futures_oi_underlyings", None) or [])}
+        self._captures_futures: bool = self._underlying.upper() in (_fa | _foi)
         self._ce_ltp: float = 0.0
         self._pe_ltp: float = 0.0
         self._ce_atp: float = 0.0
@@ -1393,7 +1403,11 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                 # self._futures_spot, never self._spot itself -- self._spot always keeps
                 # its true meaning (real index). Every other underlying only ever gets
                 # source="spot" ticks, so this is a no-op there (unchanged behavior).
-                _is_fut_tick = self._uses_mean_atm and getattr(tick, "source", "spot") == "futures"
+                # 2026-10-07: routing (which bucket a futures tick lands in)
+                # now keys off _captures_futures, not _uses_mean_atm -- see
+                # that flag's own comment above. _uses_mean_atm still alone
+                # controls the _atm_ref blend a few lines below, unchanged.
+                _is_fut_tick = self._captures_futures and getattr(tick, "source", "spot") == "futures"
                 _target = self._futures_spot if _is_fut_tick else self._spot
                 if _new_spot > 0:
                     if (_target > 0 and self._spot_reject_streak < 5

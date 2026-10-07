@@ -302,10 +302,17 @@ class UpstoxFeeder(BaseFeeder):
             if self._cfg and hasattr(self._cfg, "monitored_indices")
             else list(_UPSTOX_INDEX_KEY_TO_INTERNAL.values())
         )
+        # 2026-10-07: union with futures_oi_underlyings -- a SEPARATE opt-in
+        # list that subscribes the futures tick stream (price+OI) without
+        # also blending futures into self._spot/_atm_ref (that side effect
+        # stays scoped to futures_atm_underlyings alone; see GlobalConfig's
+        # own docstring for futures_oi_underlyings).
         _futures_atm = {u.upper() for u in (getattr(self._cfg, "futures_atm_underlyings", None) or [])}
+        _futures_oi = {u.upper() for u in (getattr(self._cfg, "futures_oi_underlyings", None) or [])}
+        _futures_sub = _futures_atm | _futures_oi
         keys: List[str] = []
         for i in indices:
-            if i.upper() in _futures_atm:
+            if i.upper() in _futures_sub:
                 # 2026-08-26, direct user spec revision: SellStraddle now wants BOTH
                 # the real spot AND the futures price simultaneously (to compute their
                 # mean for ATM), not futures-instead-of-spot -- so subscribe to both
@@ -1029,10 +1036,14 @@ class FyersFeeder(BaseFeeder):
             if self._cfg and hasattr(self._cfg, "monitored_indices")
             else list(_FYERS_INDEX_SYMBOLS.keys())
         )
+        # 2026-10-07: union with futures_oi_underlyings -- see UpstoxFeeder.
+        # _index_instrument_keys' matching comment.
         _futures_atm = {u.upper() for u in (getattr(self._cfg, "futures_atm_underlyings", None) or [])}
+        _futures_oi = {u.upper() for u in (getattr(self._cfg, "futures_oi_underlyings", None) or [])}
+        _futures_sub = _futures_atm | _futures_oi
         syms: List[str] = []
         for i in indices:
-            if i.upper() in _futures_atm:
+            if i.upper() in _futures_sub:
                 # 2026-08-26, direct user spec revision: subscribe to BOTH spot and
                 # futures for a futures_atm underlying (mean-based ATM), not futures-
                 # instead-of-spot -- see UpstoxFeeder._index_instrument_keys' matching
@@ -1695,7 +1706,11 @@ class AngelOneFeeder(BaseFeeder):
                 self._subscribed.setdefault(et, set()).add(tok)
                 by_exchange.setdefault(et, []).append(tok)
 
-        _futures_underlyings = {u.upper() for u in (getattr(self._cfg, "futures_atm_underlyings", None) or [])}
+        # 2026-10-07: union with futures_oi_underlyings -- see UpstoxFeeder.
+        # _index_instrument_keys' matching comment.
+        _futures_atm_u = {u.upper() for u in (getattr(self._cfg, "futures_atm_underlyings", None) or [])}
+        _futures_oi_u = {u.upper() for u in (getattr(self._cfg, "futures_oi_underlyings", None) or [])}
+        _futures_underlyings = _futures_atm_u | _futures_oi_u
         for u in _futures_underlyings:
             try:
                 fut_token = await self._resolve_futures_token(u)
