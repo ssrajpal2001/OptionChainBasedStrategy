@@ -48,7 +48,14 @@ echo the old BEGINNING-anchor-side logic needed. That logic now resolves the
 echo anchor side via a one-time REST monthly-contract theta fetch instead, so
 echo the flag is no longer required by anything.
 echo.
-ssh -t -i "%USERPROFILE%\.ssh\algotrading_ec2" ec2-user@13.200.171.160 "cd ~/OptionChainBasedStrategy; git pull origin nifty-cascade-v4-indicators; pm2 delete terminus 2>/dev/null; pm2 start run_system.py --name terminus --interpreter python3 -- --mode live --ui --port 5000 --index NIFTY --strategies sell_straddle; pm2 save --force; sleep 8; echo; echo '=== VERIFY: actual running process args ==='; ps aux | grep run_system.py | grep -v grep; echo; echo '=== VERIFY: strategies the app itself parsed ==='; grep 'enabled strategies' ~/.pm2/logs/terminus-out.log | tail -1; echo; echo '=== VERIFY: any auth/startup failures? ==='; grep -iE 'auth failed|startup aborted' ~/.pm2/logs/terminus-out.log | tail -5; echo; echo '=== Recent log tail ==='; pm2 logs terminus --lines 40 --nostream; bash -l"
+echo 2026-10-07: --futures-oi-underlyings NIFTY ADDED (separate from, and NOT
+echo the same as, the removed --futures-atm-underlyings above). Subscribes
+echo the near-month futures tick stream (price+OI) PURELY so vp_oi_regime's
+echo Future-OI buildup/unwinding classification has real data -- does NOT
+echo blend futures into self._spot/_atm_ref for anyone (that side effect
+echo stays scoped to --futures-atm-underlyings, which is NOT re-added).
+echo.
+ssh -t -i "%USERPROFILE%\.ssh\algotrading_ec2" ec2-user@13.200.171.160 "cd ~/OptionChainBasedStrategy; git pull origin nifty-cascade-v4-indicators; pm2 delete terminus 2>/dev/null; pm2 start run_system.py --name terminus --interpreter python3 -- --mode live --ui --port 5000 --index NIFTY --strategies sell_straddle --futures-oi-underlyings NIFTY; pm2 save --force; sleep 8; echo; echo '=== VERIFY: actual running process args ==='; ps aux | grep run_system.py | grep -v grep; echo; echo '=== VERIFY: strategies the app itself parsed ==='; grep 'enabled strategies' ~/.pm2/logs/terminus-out.log | tail -1; echo; echo '=== VERIFY: any auth/startup failures? ==='; grep -iE 'auth failed|startup aborted' ~/.pm2/logs/terminus-out.log | tail -5; echo; echo '=== Recent log tail ==='; pm2 logs terminus --lines 40 --nostream; bash -l"
 echo.
 echo Connection closed. Press any key to close this window.
 pause >nul

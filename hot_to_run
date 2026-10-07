@@ -9,6 +9,6 @@ echo "Clean. Ready to start."
 pm2 stop terminus
 pm2 delete terminus
 git pull origin nifty-cascade-v4-indicators
-pm2 start run_system.py --name terminus --interpreter python3 -- --mode live --ui --port 5000 --index NIFTY --strategies sell_straddle
+pm2 start run_system.py --name terminus --interpreter python3 -- --mode live --ui --port 5000 --index NIFTY --strategies sell_straddle --futures-oi-underlyings NIFTY
 pm2 save --force
 pm2 logs terminus
