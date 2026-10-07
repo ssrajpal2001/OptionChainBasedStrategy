@@ -52,28 +52,34 @@ def test_select_balanced_pair_at_returns_none_when_no_quotes_at_atm():
     assert select_balanced_pair_at(cache, atm=99999, spot=24512.90, step=50, offset=4, ltp_target=50.0) is None
 
 
-def test_partner_window_centers_on_shifted_anchor_not_pre_shift_atm():
-    """2026-08-24, direct user spec ("we need to pair with the OTM just
-    selected"): once the anchor shifts anchor_otm_steps further OTM, the
-    PARTNER search window must center on that SHIFTED anchor strike, not the
-    pre-shift atm. This cache only quotes a valid partner leg (PE24600) that
-    is OUTSIDE offset=1 of atm=24500 but INSIDE offset=1 of the shifted CE
-    anchor (24550 = atm+step) -- so this only succeeds if the partner window
-    genuinely re-centered on the shifted anchor, not the original atm."""
+def test_partner_window_centers_on_real_spot_atm_not_shifted_anchor():
+    """2026-10-07 CORRECTION, direct user spec: the PARTNER search window
+    must center on real SPOT ATM, not the anchor's own (possibly OTM-
+    shifted, and -- with forced_anchor_side -- possibly monthly-atm-based)
+    strike. Superseded the 2026-08-24 "center on shifted anchor" spec after
+    a real live incident (2026-10-07): with the anchor shifted 2 strikes
+    away from real spot, a configured pool_otm_depth=4/itm_depth=4 ended up
+    skewed (2 OTM / 6 ITM measured from spot) instead of symmetric.
+
+    atm=24500 and the shifted CE anchor=24550 are both DELIBERATELY
+    different from spot=24600, so this only succeeds if the window
+    genuinely centers on spot (24600 +/- step*1 = 24550/24600/24650) --
+    not atm (24450-24550) and not the shifted anchor (24500-24600), both of
+    which would miss PE24650 entirely."""
     cache = {
         (24500, "CE"): {"ltp": 150.0, "atp": 148.0},
         (24500, "PE"): {"ltp": 200.0, "atp": 198.0},
         (24550, "CE"): {"ltp": 120.0, "atp": 118.0},   # shifted anchor strike (atm+step)
-        (24600, "PE"): {"ltp": 80.0, "atp": 78.0},     # only reachable from the shifted anchor
+        (24650, "PE"): {"ltp": 80.0, "atp": 78.0},     # only reachable centered on real spot
     }
     result = select_balanced_pair_at(
-        cache, atm=24500, spot=24500.0, step=50, offset=1, ltp_target=50.0,
+        cache, atm=24500, spot=24600.0, step=50, offset=1, ltp_target=50.0,
         anchor_otm_steps=1,
     )
     assert result is not None
     ce_strike, pe_strike, ce_ltp, pe_ltp = result
     assert ce_strike == 24550   # the shifted anchor (CE has lower TV at raw ATM)
-    assert pe_strike == 24600   # only reachable once the partner window re-centers
+    assert pe_strike == 24650   # only reachable once the partner window centers on spot
 
 
 def test_partner_window_unchanged_for_reentry_anchor_otm_steps_zero():

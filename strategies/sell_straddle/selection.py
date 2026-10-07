@@ -886,10 +886,21 @@ def select_balanced_pair_at(
             strike_prem, partner_side, spot, offset=max(1, int(offset))
         )
     else:
-        # Centred on anchor_strike (the anchor's own, possibly-OTM-shifted strike), not
-        # the pre-shift `atm` -- see the docstring's step 5. When anchor_otm_steps=0,
-        # anchor_strike == atm, so this line is a no-op for RE-ENTRY.
-        partner_strikes = [int(anchor_strike + i * step) for i in range(-offset, offset + 1)]
+        # 2026-10-07 CORRECTION, direct user spec: the pool search window
+        # must be centred on real SPOT ATM, not the anchor's own (possibly
+        # OTM-shifted, and -- with forced_anchor_side -- possibly MONTHLY-
+        # atm-based) strike. The variable_strikes branch above already did
+        # this correctly via _strikes_around_atm(..., spot, ...); this fixed-
+        # step branch was the one actual live deployment (variable_strikes=
+        # OFF) is on, and it was centering on anchor_strike instead --
+        # confirmed live 2026-10-07: with anchor shifted to CE@22700 (itself
+        # 2 strikes off real spot ATM 22600), the configured pool_otm_depth=4/
+        # pool_itm_depth=4 was symmetric around 22700, which measured from
+        # real spot only reached 2 strikes OTM but 6 strikes ITM. Re-centering
+        # on real spot ATM makes the configured depth symmetric around spot
+        # as intended, independent of where the anchor strike itself ends up.
+        _spot_atm = int(round(spot / step) * step) if spot > 0 and step > 0 else anchor_strike
+        partner_strikes = [int(_spot_atm + i * step) for i in range(-offset, offset + 1)]
 
     # 2026-10-06 CRITICAL FIX, direct user correction: the 2026-09-25 change
     # (commit 4c44cf9) dropped the ceiling entirely ("no cap, pick lowest
