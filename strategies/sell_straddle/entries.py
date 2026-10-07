@@ -736,14 +736,14 @@ class EntryMixin:
             side_ltp = ce_ltp if side == "CE" else pe_ltp
             if not leg_passes_dual_floor(side, monthly_atm, side_ltp, fut_px, ltp_target, theta_target):
                 self._clog.info(
-                    "MONTHLY-ANCHOR %s%d ltp=%.2f fails dual floor (ltp>=%.0f theta>=%.0f) -- "
+                    "MONTHLY-ANCHOR fut_px=%.2f %s%d ltp=%.2f fails dual floor (ltp>=%.0f theta>=%.0f) -- "
                     "falling back to weekly spot+futures-mean anchor selection",
-                    side, monthly_atm, side_ltp, ltp_target, theta_target,
+                    fut_px, side, monthly_atm, side_ltp, ltp_target, theta_target,
                 )
                 return None
             self._clog.info(
-                "MONTHLY-ANCHOR expiry=%s atm=%d ce_ltp=%.2f pe_ltp=%.2f ce_tv=%.2f pe_tv=%.2f -> side=%s",
-                monthly_exp, monthly_atm, ce_ltp, pe_ltp, ce_tv, pe_tv, side,
+                "MONTHLY-ANCHOR expiry=%s fut_px=%.2f atm=%d ce_ltp=%.2f pe_ltp=%.2f ce_tv=%.2f pe_tv=%.2f -> side=%s",
+                monthly_exp, fut_px, monthly_atm, ce_ltp, pe_ltp, ce_tv, pe_tv, side,
             )
             return side, monthly_atm
         except Exception:
