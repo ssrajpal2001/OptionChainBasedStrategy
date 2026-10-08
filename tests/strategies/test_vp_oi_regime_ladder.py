@@ -15,6 +15,29 @@ from config.global_config import GlobalConfig
 from strategies.sell_straddle import SellStraddleStrategy, StraddlePosition, StraddleLeg
 from strategies.vp_oi_regime.decision_matrix import DecisionResult, HedgeSpend
 from strategies.vp_oi_regime.live_adapter import VpOiRegimeAdapter
+from strategies.vp_oi_regime.volume_profile import VolumeProfileSnapshot
+
+
+def _snap_with_lvn_below(val: float, lvn_price: float) -> VolumeProfileSnapshot:
+    """A snapshot whose VAL is `val` and which has a real LVN row that
+    `lvn_price` falls inside, below VAL -- i.e. in_lvn(lvn_price, "below")
+    is True. Used to simulate "real breakout, volume-confirmed" below VAL."""
+    row_size = 10.0
+    row_low = lvn_price - (lvn_price % row_size)
+    return VolumeProfileSnapshot(
+        poc=val + 50.0, vah=val + 100.0, val=val,
+        lvn_rows=[row_low], hvn_rows=[], total_volume=1000.0,
+        row_size=row_size, rows={},
+    )
+
+
+def _snap_inside_value_area(poc: float, vah: float, val: float) -> VolumeProfileSnapshot:
+    """A snapshot with no LVN rows at all below VAL/above VAH -- simulates
+    "price hasn't shown LVN acceptance yet", regardless of where spot is."""
+    return VolumeProfileSnapshot(
+        poc=poc, vah=vah, val=val, lvn_rows=[], hvn_rows=[],
+        total_volume=1000.0, row_size=10.0, rows={},
+    )
 
 
 def _base_strategy():
@@ -64,11 +87,14 @@ def test_vp_oi_disabled_is_a_byte_for_byte_noop():
 
 
 def test_vp_oi_highly_bearish_exits_put_leg_and_buys_hedge():
-    """Highly Bearish regime -> exits the PE leg, CE leg keeps running,
-    hedge is bought per the matrix's premium-match target (70% of the
-    exited leg's own entry premium, per the current unified Obs5/23 rule)."""
+    """Highly Bearish regime, AND price has shown real LVN volume
+    acceptance below VAL (2026-10-09 confirmation gate) -> exits the PE
+    leg, CE leg keeps running, hedge is bought per the matrix's
+    premium-match target (70% of the exited leg's own entry premium, per
+    the current unified Obs5/23 rule)."""
     async def run():
         s = _base_strategy()
+        s._spot = 23795.0
         s._vp_oi_enabled = True
         adapter = VpOiRegimeAdapter()
         dr = DecisionResult(
@@ -79,6 +105,7 @@ def test_vp_oi_highly_bearish_exits_put_leg_and_buys_hedge():
             algo_sr_trigger="", reentry_rule="", hedge_exit_rule="",
         )
         adapter.evaluate = lambda spot, now_ts: dr
+        adapter.last_snapshot = _snap_with_lvn_below(val=23900.0, lvn_price=23795.0)
         s._vp_oi_adapter = adapter
 
         s._position = StraddlePosition(
@@ -124,6 +151,138 @@ def test_vp_oi_highly_bearish_exits_put_leg_and_buys_hedge():
         assert ("BUY", "PE", 23850, "vp_oi_hedge") in hedge_calls
         assert s._vp_oi_naked_leg == {"PE": {"strike": 23850, "entry": 70.0}}
         assert adapter.naked_state == "NAKED_PE"
+    asyncio.run(run())
+
+
+def test_vp_oi_highly_bearish_shifts_otm_when_not_yet_lvn_confirmed():
+    """2026-10-09 direct user spec (the price-location confirmation gate):
+    Highly Bearish regime, but price has NOT shown LVN volume acceptance
+    below VAL -- must NOT exit the leg at all. Instead shifts the losing PE
+    leg 100pts further OTM (the doc's own concrete number) and leaves the
+    position open, watching for a later LVN confirmation."""
+    async def run():
+        s = _base_strategy()
+        s._spot = 23950.0  # inside the value area, no breakout shown
+        s._vp_oi_enabled = True
+        adapter = VpOiRegimeAdapter()
+        dr = DecisionResult(
+            regime="Highly Bearish (Short Buildup)",
+            call_action="Shift put to OTM", put_action="Exit the Put leg",
+            call_hedge=HedgeSpend(enabled=False, pct_of_premium=None),
+            put_hedge=HedgeSpend(enabled=True, pct_of_premium=(0.70, 0.70)),
+            algo_sr_trigger="", reentry_rule="", hedge_exit_rule="",
+        )
+        adapter.evaluate = lambda spot, now_ts: dr
+        adapter.last_snapshot = _snap_inside_value_area(poc=24000.0, vah=24100.0, val=23900.0)
+        s._vp_oi_adapter = adapter
+
+        s._position = StraddlePosition(
+            underlying="NIFTY", atm_at_entry=24000, entry_spot=24000,
+            ce_leg=StraddleLeg("CE", 24050, 50.0, 50.0),
+            pe_leg=StraddleLeg("PE", 23950, 100.0, 100.0),
+            net_credit=150.0, status="open",
+        )
+        s._strike_prem = {
+            (24050, "CE"): {"ltp": 50.0},
+            (23950, "PE"): {"ltp": 100.0},
+            (23850, "PE"): {"ltp": 130.0},  # the 100pt-further-OTM strike (23950-100)
+        }
+
+        close_leg_calls = []
+
+        async def _fake_close_leg(side, reason, now):
+            close_leg_calls.append((side, reason))
+            class _Ev:
+                close_aborted = False
+                realized_pnl = 0.0
+            return _Ev()
+        s._close_leg = _fake_close_leg
+
+        open_leg_calls = []
+
+        async def _fake_open_leg(side, strike, ltp, now, reason):
+            open_leg_calls.append((side, strike, ltp, reason))
+            leg = s._position.ce_leg if side == "CE" else s._position.pe_leg
+            leg.strike = strike
+            leg.entry_price = ltp
+        s._open_leg = _fake_open_leg
+
+        hedge_calls = []
+        s._dispatch_hedge_order = lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("no hedge should be dispatched -- the leg was shifted, not exited"))
+
+        with patch("strategies.sell_straddle.rolling.RuntimeConfig.index_section", return_value={}):
+            await s._check_exits()
+
+        assert ("PE", "vp_oi_regime_otm_shift") in close_leg_calls
+        assert ("PE", 23850, 130.0, "vp_oi_regime_otm_shift") in open_leg_calls
+        assert s._position.pe_leg_closed is False  # not exited -- shifted in place
+        assert s._position.status == "open"
+        assert adapter.shifted_strike.get("PE") == 23850
+
+        # A second cycle at the SAME (still-unconfirmed) state must NOT
+        # shift again -- only once per episode.
+        close_leg_calls.clear()
+        open_leg_calls.clear()
+        with patch("strategies.sell_straddle.rolling.RuntimeConfig.index_section", return_value={}):
+            await s._check_exits()
+        assert close_leg_calls == []
+        assert open_leg_calls == []
+    asyncio.run(run())
+
+
+def test_vp_oi_highly_bearish_exits_flat_when_price_reverses_through_poc():
+    """2026-10-09 direct user spec: Highly Bearish regime, price never
+    showed LVN acceptance below VAL, but instead reversed back UP through
+    POC -- the bearish thesis failed. Must exit the PE leg FLAT (no
+    replacement hedge -- there's no confirmed breakout left to ride)."""
+    async def run():
+        s = _base_strategy()
+        s._spot = 24010.0  # back above POC (24000) -- thesis reversed
+        s._vp_oi_enabled = True
+        adapter = VpOiRegimeAdapter()
+        dr = DecisionResult(
+            regime="Highly Bearish (Short Buildup)",
+            call_action="Shift put to OTM", put_action="Exit the Put leg",
+            call_hedge=HedgeSpend(enabled=False, pct_of_premium=None),
+            put_hedge=HedgeSpend(enabled=True, pct_of_premium=(0.70, 0.70)),
+            algo_sr_trigger="", reentry_rule="", hedge_exit_rule="",
+        )
+        adapter.evaluate = lambda spot, now_ts: dr
+        # No LVN rows at all -- never confirmed; POC=24000, spot=24010 is
+        # above it -> reversal condition fires for PE.
+        adapter.last_snapshot = _snap_inside_value_area(poc=24000.0, vah=24100.0, val=23900.0)
+        s._vp_oi_adapter = adapter
+
+        s._position = StraddlePosition(
+            underlying="NIFTY", atm_at_entry=24000, entry_spot=24000,
+            ce_leg=StraddleLeg("CE", 24050, 50.0, 50.0),
+            pe_leg=StraddleLeg("PE", 23950, 100.0, 100.0),
+            net_credit=150.0, status="open",
+        )
+        s._strike_prem = {(24050, "CE"): {"ltp": 50.0}, (23950, "PE"): {"ltp": 80.0}}
+
+        close_leg_calls = []
+
+        async def _fake_close_leg(side, reason, now):
+            close_leg_calls.append((side, reason))
+            class _Ev:
+                close_aborted = False
+                realized_pnl = 0.0
+            return _Ev()
+        s._close_leg = _fake_close_leg
+        s._open_leg = lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("no leg should be opened -- this is a flat exit, not a shift"))
+        s._dispatch_hedge_order = lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("no hedge should be dispatched on a reversal exit"))
+
+        with patch("strategies.sell_straddle.rolling.RuntimeConfig.index_section", return_value={}):
+            await s._check_exits()
+
+        assert ("PE", "vp_oi_regime_exit_reversal") in close_leg_calls
+        assert s._position.pe_leg_closed is True
+        assert s._position.status == "open"  # CE keeps running
+        assert s._vp_oi_naked_leg == {}  # no naked long opened
     asyncio.run(run())
 
 

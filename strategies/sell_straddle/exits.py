@@ -2914,10 +2914,17 @@ class ExitMixin:
             return
 
         if dr.regime.startswith("Highly Bearish") and not pos.pe_leg_closed:
-            await self._vp_oi_exit_leg("PE", dr.put_hedge, now)
+            await self._vp_oi_handle_directional(pos, "PE", dr.put_hedge, now)
         elif dr.regime.startswith("Highly Bullish") and not pos.ce_leg_closed:
-            await self._vp_oi_exit_leg("CE", dr.call_hedge, now)
-        elif dr.regime == "Volatile" and not (pos.ce_leg_closed or pos.pe_leg_closed):
+            await self._vp_oi_handle_directional(pos, "CE", dr.call_hedge, now)
+        else:
+            # 2026-10-09: regime left Highly Bearish/Bullish (or the other
+            # leg already closed) -- clear any OTM-shift state so a FUTURE
+            # Highly Bearish/Bullish episode on this side starts fresh
+            # instead of thinking it already shifted.
+            self._vp_oi_adapter.shifted_strike.pop("PE", None)
+            self._vp_oi_adapter.shifted_strike.pop("CE", None)
+        if dr.regime == "Volatile" and not (pos.ce_leg_closed or pos.pe_leg_closed):
             # 2026-10-05: re-enabled now that _check_vp_oi_naked_legs_standalone
             # runs unconditionally from the top of _check_exits (before the
             # "no open position" early-return) -- a full close here sets
@@ -2929,6 +2936,95 @@ class ExitMixin:
             # logged clearly rather than silently dropped), but the stop/
             # hedge-exit side is fully managed.
             await self._vp_oi_exit_both(dr, now)
+
+    async def _vp_oi_handle_directional(self, pos, side: str, hedge, now: datetime) -> None:
+        """2026-10-09, direct user spec (closing the Volume-Profile
+        confirmation gap), per the real source table (observations 5/6/23/
+        24's own "Action Near Support"/"Action Near Resistance" columns):
+        a Highly Bearish/Bullish OI regime no longer exits+hedges the
+        losing leg immediately off the regime alone. Three price-location
+        outcomes, checked in this order:
+
+        1. LVN volume acceptance beyond the near zone (below VAL for a
+           losing PUT, above VAH for a losing CALL) -- "the downside/upside
+           trend is confirmed." Real breakout -- exit the leg and buy the
+           70%-of-entry-premium replacement long (_vp_oi_exit_leg,
+           unchanged), to ride it with the 9-EMA trailing stop.
+        2. Price reverses back through POC into the OPPOSITE zone without
+           ever reaching that LVN confirmation -- the directional thesis
+           failed. Exit the leg FLAT, no replacement hedge (judgment call,
+           not explicit in the source doc: the hedge exists to ride a
+           CONFIRMED breakout: "Strategy is holding a naked Long Put: Ride
+           the downside breakout..." -- buying a fresh directional long
+           against a move that just reversed would contradict the read
+           that triggered the exit in the first place).
+        3. Neither yet -- still testing the near (dangerous) zone, breakout
+           not yet confirmed either way. Shift the leg 100pts further OTM
+           (the doc's own concrete number; "between POC and VAL/VAH" is a
+           qualitative placement refinement with no formula given, not
+           implemented) instead of doing nothing. Shifts once per regime
+           episode (adapter.shifted_strike), not every cycle."""
+        adapter = self._vp_oi_adapter
+        snap = adapter.last_snapshot
+        spot = float(getattr(self, "_spot", 0.0) or 0.0)
+        if snap is None or spot <= 0:
+            return  # Volume Profile not warm yet -- safe no-op, same as before this feature existed
+        lvn_side = "below" if side == "PE" else "above"
+        if snap.in_lvn(spot, lvn_side):
+            adapter.shifted_strike.pop(side, None)
+            await self._vp_oi_exit_leg(side, hedge, now)
+            return
+
+        reversed_through_poc = (spot >= snap.poc) if side == "PE" else (spot <= snap.poc)
+        if reversed_through_poc:
+            adapter.shifted_strike.pop(side, None)
+            await self._vp_oi_exit_leg_flat(side, now)
+            return
+
+        leg = pos.ce_leg if side == "CE" else pos.pe_leg
+        step = self._cfg.exchange.strike_steps.get(self._underlying, 50.0) if self._cfg else 50.0
+        shift_pts = max(100.0, step)  # never shift by less than one real strike step
+        already_shifted_from = adapter.shifted_strike.get(side)
+        if already_shifted_from == int(leg.strike):
+            return  # already shifted this episode, waiting on LVN confirmation
+        new_strike = int(leg.strike + shift_pts) if side == "CE" else int(leg.strike - shift_pts)
+        new_leg = self._strike_prem.get((new_strike, side))
+        new_ltp = float(new_leg.get("ltp", 0.0) or 0.0) if new_leg else 0.0
+        if new_ltp <= 0:
+            self._clog.info(
+                "VP/OI REGIME — %s leg not yet LVN-confirmed, wants OTM shift to %d but no "
+                "live quote there yet; retrying next cycle", side, new_strike,
+            )
+            return
+        close_ev = await self._close_leg(side, "vp_oi_regime_otm_shift", now)
+        if getattr(close_ev, "close_aborted", False):
+            return
+        await self._open_leg(side, new_strike, new_ltp, now, "vp_oi_regime_otm_shift")
+        adapter.shifted_strike[side] = new_strike
+        self._persist()
+        self._clog.info(
+            "VP/OI REGIME — %s leg shifted OTM %d -> %d (no LVN confirmation yet; "
+            "watching for breakout)", side, leg.strike, new_strike,
+        )
+
+    async def _vp_oi_exit_leg_flat(self, side: str, now: datetime) -> None:
+        """2026-10-09: price reversed back through POC without ever
+        LVN-confirming the breakout -- the directional thesis failed.
+        Close the leg plainly, no replacement hedge, no naked-leg tracking
+        (there is no naked long to ride a 9-EMA stop on). The OTHER leg
+        keeps running untouched, same as _vp_oi_exit_leg."""
+        pos = self._position
+        leg = pos.ce_leg if side == "CE" else pos.pe_leg
+        order_ev = await self._close_leg(side, "vp_oi_regime_exit_reversal", now)
+        if getattr(order_ev, "close_aborted", False):
+            return
+        setattr(pos, f"{side.lower()}_leg_closed", True)
+        self._vp_oi_last_exited_strike[side] = int(leg.strike)
+        self._persist()
+        self._clog.info(
+            "VP/OI REGIME — exited %s leg flat (strike=%.0f, price reversed through POC "
+            "without LVN confirmation -- no replacement hedge)", side, leg.strike,
+        )
 
     async def _vp_oi_exit_leg(self, side: str, hedge, now: datetime) -> None:
         """Close one SOLD leg (Highly Bearish/Bullish row) and, if the

@@ -5,14 +5,13 @@ book. This module owns NO I/O and NO bus/broker calls -- it only tracks
 state and returns decisions; the caller (strategies/sell_straddle/exits.py)
 is responsible for acting on them (closing legs, buying hedges).
 
-NOTE (2026-10-04): live OI is NOT currently captured anywhere in
-strategies/sell_straddle/engine.py -- self._strike_prem only ever stores
-{"ltp": ..., "atp": ...} per strike, never "oi". Until that capture is added
-(a separate, small engine.py change reading OptionTick.oi), on_option_oi_tick
-below simply never gets called in production and OiRegimeTracker.classify()
-returns None, so `evaluate()` degrades safely to "no decision yet" rather
-than silently trading on stale/zero OI. The adapter and its tests are correct
-and ready; the missing OI capture is a separate, explicitly flagged gap.
+NOTE (2026-10-04, UPDATED 2026-10-09): engine.py now DOES capture live
+option OI (self._strike_prem stores an "oi" key per strike, see
+engine.py's _option_loop) and feeds it to on_option_oi_tick below -- this
+module's own docstring was stale, written before that capture was added.
+The adapter and its tests are correct and ready, and are now genuinely
+live (confirmed via real production logs 2026-10-07/08: futures_oi and
+regime classification both updating off real data).
 """
 from __future__ import annotations
 
@@ -22,7 +21,7 @@ from typing import Dict, Optional
 from strategies.vp_oi_regime.decision_matrix import DecisionResult, NineEmaTrailingStop, decide
 from strategies.vp_oi_regime.futures_rollover import FuturesRolloverTracker
 from strategies.vp_oi_regime.oi_regime import OiRegimeTracker
-from strategies.vp_oi_regime.volume_profile import SessionVolumeProfile
+from strategies.vp_oi_regime.volume_profile import SessionVolumeProfile, VolumeProfileSnapshot
 
 # NONE = flat/normal straddle running; NAKED_CE/NAKED_PE = one leg was exited
 # per a Highly Bearish/Bullish regime and a hedge (if any) was bought;
@@ -54,6 +53,20 @@ class VpOiRegimeAdapter:
     last_poc: Optional[float] = field(default=None, init=False)
     last_vah: Optional[float] = field(default=None, init=False)
     last_val: Optional[float] = field(default=None, init=False)
+    # 2026-10-09, direct user spec (price-location/LVN confirmation gate):
+    # the full snapshot (needed for .in_lvn()/.location(), not just the
+    # three POC/VAH/VAL floats above) so a caller can check "volume
+    # acceptance in LVN below VAL/above VAH" before acting on a Highly
+    # Bearish/Bullish regime, matching the Algo S/R Trigger text already in
+    # decision_matrix.py's _BEARISH_SR/_BULLISH_SR constants.
+    last_snapshot: Optional[VolumeProfileSnapshot] = field(default=None, init=False)
+    # Per-side OTM-shift state for the "shift to OTM while not yet LVN-
+    # confirmed" interim action -- tracks the side's CURRENT strike after a
+    # shift, so _check_vp_oi_regime only shifts once per regime episode
+    # (not every cycle) and can tell a fresh regime flip from a still-active
+    # one. Cleared on reset() and whenever the regime leaves Highly
+    # Bearish/Bullish for that side.
+    shifted_strike: Dict[str, int] = field(default_factory=dict, init=False)
 
     def __post_init__(self) -> None:
         self._vp = SessionVolumeProfile(rows=80, value_area_pct=0.70)
@@ -74,6 +87,8 @@ class VpOiRegimeAdapter:
         self.awaiting_reentry = {}
         self.last_decision = None
         self.last_poc = self.last_vah = self.last_val = None
+        self.last_snapshot = None
+        self.shifted_strike = {}
 
     # ── Feed methods (called by the engine as ticks/bars arrive) ──────────
     def on_futures_bar(self, high: float, low: float, volume: float, oi: float, ts: float) -> None:
@@ -100,6 +115,7 @@ class VpOiRegimeAdapter:
         the honest, safe degrade described in this module's docstring)."""
         self.last_spot = spot
         snap = self._vp.snapshot()
+        self.last_snapshot = snap
         if snap:
             self.last_poc, self.last_vah, self.last_val = snap.poc, snap.vah, snap.val
 
