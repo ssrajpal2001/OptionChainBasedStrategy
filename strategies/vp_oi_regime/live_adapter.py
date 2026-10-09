@@ -67,6 +67,19 @@ class VpOiRegimeAdapter:
     last_future_trend: Optional[str] = field(default=None, init=False)
     last_call_trend: Optional[str] = field(default=None, init=False)
     last_put_trend: Optional[str] = field(default=None, init=False)
+    # 2026-10-09, direct user ask: previous (anchor) OI, current OI, and the
+    # %-move between them that the Rise/Fall/No Change call above is based
+    # on -- all three already real fields on RolloverState/OiRegimeResult,
+    # just never carried past evaluate() before.
+    last_future_oi_now: Optional[float] = field(default=None, init=False)
+    last_future_oi_anchor: Optional[float] = field(default=None, init=False)
+    last_future_oi_pct: Optional[float] = field(default=None, init=False)
+    last_call_oi_now: Optional[float] = field(default=None, init=False)
+    last_call_oi_anchor: Optional[float] = field(default=None, init=False)
+    last_call_oi_pct: Optional[float] = field(default=None, init=False)
+    last_put_oi_now: Optional[float] = field(default=None, init=False)
+    last_put_oi_anchor: Optional[float] = field(default=None, init=False)
+    last_put_oi_pct: Optional[float] = field(default=None, init=False)
     # Per-side OTM-shift state for the "shift to OTM while not yet LVN-
     # confirmed" interim action -- tracks the side's CURRENT strike after a
     # shift, so _check_vp_oi_regime only shifts once per regime episode
@@ -102,6 +115,9 @@ class VpOiRegimeAdapter:
         self.last_poc = self.last_vah = self.last_val = None
         self.last_snapshot = None
         self.last_future_trend = self.last_call_trend = self.last_put_trend = None
+        self.last_future_oi_now = self.last_future_oi_anchor = self.last_future_oi_pct = None
+        self.last_call_oi_now = self.last_call_oi_anchor = self.last_call_oi_pct = None
+        self.last_put_oi_now = self.last_put_oi_anchor = self.last_put_oi_pct = None
         self.shifted_strike = {}
         self.remarks = deque(maxlen=30)
 
@@ -158,15 +174,29 @@ class VpOiRegimeAdapter:
         # and discarded right after feeding decide(), so the UI could only
         # ever show the final conclusion, never "why" (the log heartbeat in
         # exits.py was the only place these ever became visible, and only
-        # as text in a log file, not in the dashboard).
+        # as text in a log file, not in the dashboard). Current/anchor/%-vs-
+        # anchor were already real fields on RolloverState/OiRegimeResult
+        # (not computed here) -- just never threaded past evaluate() before.
         self.last_future_trend = roll_state.future_oi_trend
+        self.last_future_oi_now = roll_state.near_oi
+        self.last_future_oi_anchor = roll_state.future_oi_anchor
+        self.last_future_oi_pct = roll_state.future_oi_pct_vs_anchor
         if oi_res is None:
             self.last_decision = None
             self.last_call_trend = self.last_put_trend = None
+            self.last_call_oi_now = self.last_put_oi_now = None
+            self.last_call_oi_anchor = self.last_put_oi_anchor = None
+            self.last_call_oi_pct = self.last_put_oi_pct = None
             return None
 
         self.last_call_trend = oi_res.call_trend
         self.last_put_trend = oi_res.put_trend
+        self.last_call_oi_now = oi_res.call_total_now
+        self.last_put_oi_now = oi_res.put_total_now
+        self.last_call_oi_anchor = oi_res.call_anchor_oi
+        self.last_put_oi_anchor = oi_res.put_anchor_oi
+        self.last_call_oi_pct = oi_res.call_pct_vs_anchor
+        self.last_put_oi_pct = oi_res.put_pct_vs_anchor
         self.last_decision = decide(roll_state.future_oi_trend, oi_res.put_trend, oi_res.call_trend)
         return self.last_decision
 
@@ -220,6 +250,24 @@ class VpOiRegimeAdapter:
             "future_oi_trend": self.last_future_trend,
             "call_oi_trend": self.last_call_trend,
             "put_oi_trend": self.last_put_trend,
+            # 2026-10-09, direct user ask: previous (anchor) OI, current OI,
+            # the %-move between them, and the threshold that %-move is
+            # judged against -- the "why" behind the trend labels above.
+            # Future's own threshold is a separate hardcoded 3.0 in
+            # futures_rollover.py (currently identical to call/put's
+            # configurable self._oi.trend_pct, but a distinct constant --
+            # exposed separately rather than assumed equal).
+            "future_oi_trend_threshold_pct": 3.0,
+            "oi_trend_threshold_pct": self._oi.trend_pct,
+            "future_oi_now": self.last_future_oi_now,
+            "future_oi_anchor": self.last_future_oi_anchor,
+            "future_oi_pct": self.last_future_oi_pct,
+            "call_oi_now": self.last_call_oi_now,
+            "call_oi_anchor": self.last_call_oi_anchor,
+            "call_oi_pct": self.last_call_oi_pct,
+            "put_oi_now": self.last_put_oi_now,
+            "put_oi_anchor": self.last_put_oi_anchor,
+            "put_oi_pct": self.last_put_oi_pct,
             "regime": dr.regime if dr else None,
             "call_action": dr.call_action if dr else None,
             "put_action": dr.put_action if dr else None,

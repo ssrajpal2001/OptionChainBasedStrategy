@@ -61,11 +61,13 @@ _OFF = -12  # 2026-10-09: monitor.html grew by 5 lines (login/session-restore
             # <link> to the static build) -- cumulative offset for every
             # boundary AT OR BEFORE original line ~8471 (inside the
             # positions tab's own content).
-_OFF2 = _OFF + 18  # same as _OFF, plus 18 more lines (raw Call/Put/Future
-                   # OI trend row added to the VP/OI REGIME panel, inserted
-                   # at original line ~8471) -- use for every boundary AFTER
-                   # that insertion point, since a mid-file insertion shifts
-                   # only what comes after it, not what comes before.
+_OFF2 = _OFF + 18 + 23  # same as _OFF, plus 18 lines (raw Call/Put/Future OI
+                        # trend row) plus 23 more (prev->current/diff/%/
+                        # threshold-distance breakdown row), both inserted
+                        # at original line ~8471-ish -- use for every
+                        # boundary AFTER that insertion point, since a
+                        # mid-file insertion shifts only what comes after
+                        # it, not what comes before.
 
 HEAD_LOGIN_NAV = seg(1, 3582 + _OFF)       # head + shared JS + login + top navbar + mobile drawer
 ADMIN_SHELL    = seg(3583 + _OFF, 3646 + _OFF)    # admin subnav + <main admin> open + banner alerts

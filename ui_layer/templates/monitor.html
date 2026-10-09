@@ -8484,6 +8484,29 @@ function amoTest() {
                                     x-text="_vp.put_oi_trend||'—'"></span>
                             </span>
                           </div>
+                          <!-- 2026-10-09, direct user ask: prev vs current OI, the diff, the
+                               %-move, and how far that %-move still is from the Rise/Fall
+                               threshold -- the numeric "why" behind the trend labels above. -->
+                          <div class="mb-2 space-y-0.5" style="color:var(--t-dim)">
+                            <template x-for="row in [
+                                       {label:'FUT', now:_vp.future_oi_now, anchor:_vp.future_oi_anchor, pct:_vp.future_oi_pct, thr:_vp.future_oi_trend_threshold_pct},
+                                       {label:'CALL', now:_vp.call_oi_now, anchor:_vp.call_oi_anchor, pct:_vp.call_oi_pct, thr:_vp.oi_trend_threshold_pct},
+                                       {label:'PUT', now:_vp.put_oi_now, anchor:_vp.put_oi_anchor, pct:_vp.put_oi_pct, thr:_vp.oi_trend_threshold_pct},
+                                     ]" :key="row.label">
+                              <div x-show="row.now!=null" class="flex items-center gap-1.5">
+                                <span class="w-9 inline-block" style="color:var(--t-muted)" x-text="row.label"></span>
+                                <span x-text="(row.anchor||0).toFixed(0)"></span>
+                                <span>→</span>
+                                <span x-text="(row.now||0).toFixed(0)"></span>
+                                <span :style="(row.now-row.anchor)>=0?'color:var(--t-green)':'color:var(--t-red)'"
+                                      x-text="((row.now-row.anchor)>=0?'+':'')+(row.now-row.anchor).toFixed(0)"></span>
+                                <span :style="(row.pct||0)>=0?'color:var(--t-green)':'color:var(--t-red)'"
+                                      x-text="'('+((row.pct||0)>=0?'+':'')+(row.pct||0).toFixed(2)+'%)'"></span>
+                                <span style="color:var(--t-muted)"
+                                      x-text="Math.abs(row.pct||0)>=row.thr ? 'threshold crossed ('+row.thr+'%)' : (row.thr-Math.abs(row.pct||0)).toFixed(2)+'% to '+row.thr+'% threshold'"></span>
+                              </div>
+                            </template>
+                          </div>
                           <template x-if="_vp.regime">
                             <div class="mb-2" style="color:var(--t-muted)">
                               CE: <span x-text="_vp.call_action || '—'"></span>
