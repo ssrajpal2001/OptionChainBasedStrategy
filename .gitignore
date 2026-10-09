@@ -77,3 +77,4 @@ tools/start_crude_test.py
 # EC2/production. Run them from here same as always -- they are just no
 # longer committed/pulled on the server.
 tests/
+.tailwind_cli/

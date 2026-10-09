@@ -1,0 +1,28 @@
+@import "tailwindcss";
+
+/* Ported from monitor.html's inline tailwind.config (v3 CDN JS config) to
+   v4's CSS-first @theme -- colors reference the same CSS custom properties
+   the JS theme engine already sets at runtime, so t.* classes keep
+   auto-updating on theme switch exactly as before. Keep this in sync with
+   monitor.html's own :root block if a new --t-* variable or font is added. */
+@theme {
+  --font-mono: 'JetBrains Mono', monospace;
+  --font-display: 'Plus Jakarta Sans', sans-serif;
+  --font-ui: 'Plus Jakarta Sans', sans-serif;
+
+  --color-t-bg: var(--t-bg);
+  --color-t-surface: var(--t-surface);
+  --color-t-card: var(--t-card);
+  --color-t-border: var(--t-border);
+  --color-t-dim: var(--t-dim);
+  --color-t-cyan: var(--t-cyan);
+  --color-t-green: var(--t-green);
+  --color-t-red: var(--t-red);
+  --color-t-amber: var(--t-amber);
+  --color-t-muted: var(--t-muted);
+  --color-t-text: var(--t-text);
+  --color-t-bright: var(--t-bright);
+}
+
+@source "templates/monitor.html";
+@source "templates/pages/*.html";

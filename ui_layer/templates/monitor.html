@@ -9,42 +9,18 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
 
-  <!-- Tailwind CDN — config uses CSS variables so all t.* classes auto-update on theme switch -->
-  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Tailwind -- pre-built static CSS (scripts/build_tailwind.py), replacing
+       the CDN JIT script (2026-10-09). The CDN build re-scanned/recompiled the
+       whole utility set in-browser on EVERY page load -- paid once per session
+       under the old single-page model, but on every single tab click after
+       the admin/client page split. The old config's t.* colors still resolve
+       through the same CSS custom properties below, so the JS theme engine
+       keeps working unchanged; only the compile step moved to build time. -->
+  <link rel="stylesheet" href="/static/tailwind.css" />
   <!-- ApexCharts CDN — client-side multi-line straddle/strangle chart -->
   <script src="https://cdn.jsdelivr.net/npm/apexcharts@3.45.2/dist/apexcharts.min.js"></script>
   <!-- Alpine.js CDN -->
   <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.0/dist/cdn.min.js"></script>
-
-  <script>
-    tailwind.config = {
-      theme: {
-        extend: {
-          fontFamily: {
-            mono:    ['JetBrains Mono', 'monospace'],
-            display: ['Plus Jakarta Sans', 'sans-serif'],
-            ui:      ['Plus Jakarta Sans', 'sans-serif'],
-          },
-          colors: {
-            t: {
-              bg:      'var(--t-bg)',
-              surface: 'var(--t-surface)',
-              card:    'var(--t-card)',
-              border:  'var(--t-border)',
-              dim:     'var(--t-dim)',
-              cyan:    'var(--t-cyan)',
-              green:   'var(--t-green)',
-              red:     'var(--t-red)',
-              amber:   'var(--t-amber)',
-              muted:   'var(--t-muted)',
-              text:    'var(--t-text)',
-              bright:  'var(--t-bright)',
-            }
-          },
-        }
-      }
-    }
-  </script>
 
   <style>
     /* ── CSS custom properties — Kite "Daylight" defaults (Zerodha palette) ──────
