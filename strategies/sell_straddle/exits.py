@@ -2866,12 +2866,12 @@ class ExitMixin:
                 self._vp_oi_adapter.seed_volume_profile_bar(
                     float(b["high"]), float(b["low"]), float(b.get("volume") or 1.0))
             if bars:
-                logger.info(
-                    "SellStraddle[%s]: VP/OI volume profile seeded from REST — %d bars "
-                    "(%s to %s).", self._underlying, len(bars), bars[0]["ts"], bars[-1]["ts"],
+                self._clog.info(
+                    "VP/OI volume profile seeded from REST — %d bars (%s to %s).",
+                    len(bars), bars[0]["ts"], bars[-1]["ts"],
                 )
         except Exception as exc:
-            logger.warning("SellStraddle[%s]: VP/OI REST seed failed: %s", self._underlying, exc)
+            self._clog.warning("VP/OI REST seed failed: %s", exc)
 
     async def _check_vp_oi_regime(self, now: datetime) -> None:
         adapter = getattr(self, "_vp_oi_adapter", None)
