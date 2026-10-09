@@ -2926,6 +2926,28 @@ class ExitMixin:
 
         dr = adapter.evaluate(spot=float(getattr(self, "_spot", 0.0) or 0.0), now_ts=now.timestamp())
 
+        # 2026-10-09, direct user ask after the first live day: nothing was
+        # ever persisted beyond a 60s-throttled text-log heartbeat (regime
+        # label + the raw futures number only) -- not enough to backtest or
+        # review after the fact. Record every real evaluate() cycle (full
+        # resolution, not throttled like the heartbeat log below) so a
+        # future day's real OI history survives for offline review/backtest
+        # (strategies/vp_oi_regime/recorder.py -- cannot be backfilled for
+        # past days: Upstox's historical candle API hardcodes OI to 0 at any
+        # intraday granularity, so this is the only place it can ever be
+        # captured, going forward from whenever this was added).
+        try:
+            from strategies.vp_oi_regime.recorder import record_snapshot
+            await asyncio.to_thread(
+                record_snapshot,
+                client_id=getattr(self, "_client_id", ""),
+                binding_id=getattr(self, "_binding_id", ""),
+                underlying=self._underlying,
+                state=adapter.monitoring_state(),
+            )
+        except Exception as exc:
+            self._clog.warning("VP/OI snapshot record failed: %s", exc)
+
         # 2026-10-05, real live-day gap found while debugging the first paper
         # session: this whole module only ever logged when it actually ACTED
         # (closed a leg, bought a hedge) -- total silence was indistinguishable
