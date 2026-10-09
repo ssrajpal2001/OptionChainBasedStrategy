@@ -30,11 +30,13 @@ def _audit_path() -> str:
 
 
 def _write(record: Dict[str, Any]) -> None:
-    try:
-        with open(_audit_path(), "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, default=str, ensure_ascii=False) + "\n")
-    except Exception as exc:
-        logger.warning("SellStraddle audit write failed: %s", exc)
+    # 2026-10-09, direct user spec: disabled -- this ran every exit-eval
+    # cycle (roughly once a minute per open book, all day) with no
+    # retention policy, contributing meaningfully to data/recorded/'s
+    # unbounded growth alongside TickRecorder (see run_system.py's own
+    # disable comment). Re-enable by restoring the body below if real
+    # replay/audit use for this comes up again.
+    return
 
 
 def audit_entry_eval(

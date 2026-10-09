@@ -1000,14 +1000,12 @@ async def _run_live(
                             "subscriptions (chain_watch_max_stocks cap still applies).", exc)
             oiorb_feeder = None
 
-    # Live tick/bars recorder — captures raw INDEX_TICK + OPTION_TICK to Parquet
-    # for post-market replay, backtest, and optimisation.
+    # 2026-10-09, direct user spec: TickRecorder disabled -- it ran
+    # unconditionally every day with no retention policy anywhere, and
+    # data/recorded/ had grown to 143MB with nothing ever reading it back.
+    # Re-enable (restore the try/except block below) if real backtest/replay
+    # use for these recordings comes up again.
     tick_recorder = None
-    try:
-        from data_layer.tick_recorder import TickRecorder
-        tick_recorder = TickRecorder(bus, cfg.storage)
-    except Exception as exc:
-        logger.warning("TickRecorder could not be instantiated: %s", exc)
 
     # SellStraddle: the book manager spawns/starts one independent book per (client,binding,index)
     # deployment and keeps reconciling (auto-start on deploy). Started as a task below.
