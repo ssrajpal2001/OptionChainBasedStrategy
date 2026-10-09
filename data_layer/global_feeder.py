@@ -186,7 +186,7 @@ class DedupBuffer:
         # entire purpose of having a backup feed for exactly this scenario.
         # Now each symbol's own primary-side freshness is tracked
         # independently, so failover engages per-symbol, not all-or-nothing.
-        self._last_primary_ts: Dict[str, float] = {}
+        self._last_primary_ts: Dict[Tuple[str, str], float] = {}  # (symbol, source) -> ts
         self._primary_set_ts: float = 0.0   # boot-time reference for never-yet-seen symbols
 
     def set_primary(self, provider: Optional[str], stale_sec: float = 3.0) -> None:
@@ -200,22 +200,35 @@ class DedupBuffer:
         self._primary_set_ts = time.monotonic()
         self._last_primary_ts = {}
 
-    def accept(self, symbol: str, ltp: float, provider: Optional[str] = None) -> bool:
+    def accept(self, symbol: str, ltp: float, provider: Optional[str] = None, source: str = "spot") -> bool:
         now = time.monotonic()
-        # Active-passive gate — evaluated PER SYMBOL now (see __init__'s own
-        # comment on why a global timestamp silently defeated single-strike
-        # failover).
+        # Active-passive gate — evaluated PER (SYMBOL, SOURCE) now. Real
+        # 2026-10-09 incident: NIFTY's spot and futures ticks share the same
+        # bare symbol "NIFTY" (distinguished only by IndexTick.source), but
+        # used to share ONE staleness timestamp too -- so Upstox's healthy
+        # SPOT stream kept the whole symbol looking "fresh" for 4+ hours
+        # straight while its FUTURES sub-stream had silently stopped
+        # including OI (a real Upstox feed-mode quirk, not a crash), with
+        # AngelOne's own perfectly good futures OI permanently rejected as
+        # "secondary, primary still healthy" the entire time -- the OI
+        # regime tracker froze at one value for the rest of the day with
+        # zero indication anything was wrong. Same root cause as the
+        # per-symbol fix in __init__'s own comment, one level deeper: a bare
+        # symbol can be two independent sub-streams, and a degraded one must
+        # be able to fail over without a healthy sibling masking it.
+        _key = (symbol, source)
         if self._primary is not None and provider is not None:
             if provider.lower() == self._primary:
-                self._last_primary_ts[symbol] = now
+                self._last_primary_ts[_key] = now
             else:
-                # A symbol the primary has never ticked yet falls back to the
-                # boot-time reference (preserves the original boot-window
-                # guard); once the primary has ticked THIS symbol at least
-                # once, only that symbol's own freshness matters.
-                last_primary_for_symbol = self._last_primary_ts.get(symbol, self._primary_set_ts)
-                if (now - last_primary_for_symbol) < self._stale_sec:
-                    return False   # secondary dropped while THIS symbol's primary feed is healthy
+                # A (symbol, source) the primary has never ticked yet falls
+                # back to the boot-time reference (preserves the original
+                # boot-window guard); once the primary has ticked THIS
+                # (symbol, source) at least once, only its own freshness
+                # matters.
+                last_primary_for_key = self._last_primary_ts.get(_key, self._primary_set_ts)
+                if (now - last_primary_for_key) < self._stale_sec:
+                    return False   # secondary dropped while THIS (symbol, source)'s primary feed is healthy
         entry = self._last.get(symbol)
         if entry is None:
             self._last[symbol] = (now, ltp)

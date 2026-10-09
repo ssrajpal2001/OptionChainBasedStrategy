@@ -380,7 +380,8 @@ class BaseFeeder(ABC):
                 # N consecutive at the new level → it's real; accept and reset
             self._bad_tick_count[tick.symbol] = 0
         self._last_good_index[tick.symbol] = tick.ltp
-        if self._dedup_buffer is not None and not self._dedup_buffer.accept(tick.symbol, tick.ltp, self._provider_name):
+        if self._dedup_buffer is not None and not self._dedup_buffer.accept(
+                tick.symbol, tick.ltp, self._provider_name, source=tick.source):
             return
         await self._bus.publish(Topic.INDEX_TICK, tick)
 
