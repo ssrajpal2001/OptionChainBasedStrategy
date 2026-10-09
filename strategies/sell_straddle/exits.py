@@ -2838,10 +2838,48 @@ class ExitMixin:
     # NOT force-closed by this gap, just no longer actively managed by this
     # mechanic until the adapter/9-EMA re-warms (it won't, having no
     # persistence) -- flagged here, not silently papered over.
+    async def _seed_vp_oi_volume_profile(self) -> None:
+        """One-time REST backfill of today's futures 1-min high/low/volume
+        into the Volume Profile, so a mid-day restart doesn't start POC/
+        VAH/VAL from a blank session when the real morning's range already
+        happened. Same REST-seed-on-restart pattern as
+        _compute_day_low_for_pair above. Cannot seed the OI regime tracker
+        or the rollover tracker's OI history the same way -- Upstox's
+        historical 1-min candle API hardcodes OI to 0 at this granularity
+        (see seed_volume_profile_bar's own docstring); those always rebuild
+        from live ticks forward from whenever this process started."""
+        try:
+            if getattr(self, "_is_crypto", False):
+                return
+            from data_layer.historical_candles import fetch_upstox_intraday_1m
+            from data_layer.instrument_registry import REGISTRY
+            from data_layer.client_db import ClientDB
+            creds = await asyncio.to_thread(ClientDB().get_feeder_creds_sync, "upstox")
+            token = (creds or {}).get("access_token", "")
+            if not token:
+                return
+            fut_key = REGISTRY.get_futures_upstox(self._underlying)
+            if not fut_key:
+                return
+            bars = await fetch_upstox_intraday_1m(fut_key, token)
+            for b in bars:
+                self._vp_oi_adapter.seed_volume_profile_bar(
+                    float(b["high"]), float(b["low"]), float(b.get("volume") or 1.0))
+            if bars:
+                logger.info(
+                    "SellStraddle[%s]: VP/OI volume profile seeded from REST — %d bars "
+                    "(%s to %s).", self._underlying, len(bars), bars[0]["ts"], bars[-1]["ts"],
+                )
+        except Exception as exc:
+            logger.warning("SellStraddle[%s]: VP/OI REST seed failed: %s", self._underlying, exc)
+
     async def _check_vp_oi_regime(self, now: datetime) -> None:
         adapter = getattr(self, "_vp_oi_adapter", None)
         if not getattr(self, "_vp_oi_enabled", False) or adapter is None:
             return
+        if not getattr(self, "_vp_oi_seeded", False):
+            self._vp_oi_seeded = True
+            await self._seed_vp_oi_volume_profile()
         pos = self._position
         if not pos or pos.status != "open":
             return

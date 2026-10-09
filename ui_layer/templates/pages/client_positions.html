@@ -4206,6 +4206,20 @@ function amoTest() {
                               VAL <span style="color:var(--t-dim)" x-text="_vp.val!=null ? _vp.val.toFixed(2) : '—'"></span>
                             </span>
                           </div>
+                          <div class="mb-2 flex items-center gap-3" style="color:var(--t-muted)">
+                            <span>FUT OI
+                              <span :style="_vp.future_oi_trend==='Rise'?'color:var(--t-green)':(_vp.future_oi_trend==='Fall'?'color:var(--t-red)':'color:var(--t-dim)')"
+                                    x-text="_vp.future_oi_trend||'—'"></span>
+                            </span>
+                            <span>CALL OI
+                              <span :style="_vp.call_oi_trend==='Rise'?'color:var(--t-green)':(_vp.call_oi_trend==='Fall'?'color:var(--t-red)':'color:var(--t-dim)')"
+                                    x-text="_vp.call_oi_trend||'—'"></span>
+                            </span>
+                            <span>PUT OI
+                              <span :style="_vp.put_oi_trend==='Rise'?'color:var(--t-green)':(_vp.put_oi_trend==='Fall'?'color:var(--t-red)':'color:var(--t-dim)')"
+                                    x-text="_vp.put_oi_trend||'—'"></span>
+                            </span>
+                          </div>
                           <template x-if="_vp.regime">
                             <div class="mb-2" style="color:var(--t-muted)">
                               CE: <span x-text="_vp.call_action || '—'"></span>

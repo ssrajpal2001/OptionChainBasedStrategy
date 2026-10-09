@@ -61,6 +61,12 @@ class VpOiRegimeAdapter:
     # Bearish/Bullish regime, matching the Algo S/R Trigger text already in
     # decision_matrix.py's _BEARISH_SR/_BULLISH_SR constants.
     last_snapshot: Optional[VolumeProfileSnapshot] = field(default=None, init=False)
+    # 2026-10-09, direct user ask: expose the raw Rise/Fall/No Change inputs
+    # the regime label is built from, not just the conclusion -- previously
+    # computed in evaluate() and discarded right after feeding decide().
+    last_future_trend: Optional[str] = field(default=None, init=False)
+    last_call_trend: Optional[str] = field(default=None, init=False)
+    last_put_trend: Optional[str] = field(default=None, init=False)
     # Per-side OTM-shift state for the "shift to OTM while not yet LVN-
     # confirmed" interim action -- tracks the side's CURRENT strike after a
     # shift, so _check_vp_oi_regime only shifts once per regime episode
@@ -95,6 +101,7 @@ class VpOiRegimeAdapter:
         self.last_decision = None
         self.last_poc = self.last_vah = self.last_val = None
         self.last_snapshot = None
+        self.last_future_trend = self.last_call_trend = self.last_put_trend = None
         self.shifted_strike = {}
         self.remarks = deque(maxlen=30)
 
@@ -113,6 +120,18 @@ class VpOiRegimeAdapter:
 
     def on_option_oi_tick(self, strike: int, side: str, oi: float, ts: float) -> None:
         self._oi.update_tick(strike, side, oi, ts)
+
+    def seed_volume_profile_bar(self, high: float, low: float, volume: float) -> None:
+        """REST-seed ONLY the Volume Profile from today's real historical
+        high/low/volume (e.g. on a mid-day restart) -- deliberately does
+        NOT touch the futures rollover tracker via on_futures_bar, since
+        Upstox's historical 1-min candle API hardcodes OI to 0 at this
+        granularity; feeding fake zero-OI readings into the rollover
+        tracker would corrupt its state, not just leave it unwarmed. The
+        OI regime tracker (option strike OI) has no historical source at
+        all and always rebuilds from live ticks forward -- same structural
+        gap already documented for OI-Flow/Liquidity Trap in this codebase."""
+        self._vp.add_bar(high, low, volume)
 
     def on_naked_leg_price(self, side: str, ltp: float) -> None:
         """Feed the naked long's own live LTP into its 9-EMA trailing stop,
@@ -134,10 +153,20 @@ class VpOiRegimeAdapter:
 
         roll_state = self._rollover.classify(now_ts=now_ts, is_expiry_week=self.is_expiry_week)
         oi_res = self._oi.classify(spot=spot, minute_ts=now_ts, rollover_active=roll_state.rollover_detected)
+        # 2026-10-09, direct user ask: expose the raw Rise/Fall/No Change
+        # inputs the regime label is built from -- previously computed here
+        # and discarded right after feeding decide(), so the UI could only
+        # ever show the final conclusion, never "why" (the log heartbeat in
+        # exits.py was the only place these ever became visible, and only
+        # as text in a log file, not in the dashboard).
+        self.last_future_trend = roll_state.future_oi_trend
         if oi_res is None:
             self.last_decision = None
+            self.last_call_trend = self.last_put_trend = None
             return None
 
+        self.last_call_trend = oi_res.call_trend
+        self.last_put_trend = oi_res.put_trend
         self.last_decision = decide(roll_state.future_oi_trend, oi_res.put_trend, oi_res.call_trend)
         return self.last_decision
 
@@ -188,6 +217,9 @@ class VpOiRegimeAdapter:
         return {
             "spot": self.last_spot,
             "poc": self.last_poc, "vah": self.last_vah, "val": self.last_val,
+            "future_oi_trend": self.last_future_trend,
+            "call_oi_trend": self.last_call_trend,
+            "put_oi_trend": self.last_put_trend,
             "regime": dr.regime if dr else None,
             "call_action": dr.call_action if dr else None,
             "put_action": dr.put_action if dr else None,

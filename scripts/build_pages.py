@@ -58,16 +58,21 @@ _OFF = -12  # 2026-10-09: monitor.html grew by 5 lines (login/session-restore
             # loadIvMatrix/loadAdminEvents), then 3 more (gating
             # checkPendingManualEntries to the positions tab), then shrank by
             # 24 (CDN Tailwind script + inline config replaced with one
-            # <link> to the static build) after boundaries were originally
-            # mapped; every absolute line number below is shifted by this
-            # fixed, cumulative offset.
+            # <link> to the static build) -- cumulative offset for every
+            # boundary AT OR BEFORE original line ~8471 (inside the
+            # positions tab's own content).
+_OFF2 = _OFF + 18  # same as _OFF, plus 18 more lines (raw Call/Put/Future
+                   # OI trend row added to the VP/OI REGIME panel, inserted
+                   # at original line ~8471) -- use for every boundary AFTER
+                   # that insertion point, since a mid-file insertion shifts
+                   # only what comes after it, not what comes before.
 
 HEAD_LOGIN_NAV = seg(1, 3582 + _OFF)       # head + shared JS + login + top navbar + mobile drawer
 ADMIN_SHELL    = seg(3583 + _OFF, 3646 + _OFF)    # admin subnav + <main admin> open + banner alerts
 CLIENT_SHELL   = seg(6417 + _OFF, 6708 + _OFF)    # <main client> open + alerts + onboarding/pending + topbar + subnav
-FOOTER_ONLY    = seg(10179 + _OFF, 10183 + _OFF)  # just <footer>...</footer>, no surrounding div-closes
-BROKER_MODAL   = seg(10189 + _OFF, 10272 + _OFF)  # client-only broker-add modal
-FINAL_CLOSE    = seg(10273 + _OFF, 10277 + _OFF)  # blank lines + </body></html>
+FOOTER_ONLY    = seg(10179 + _OFF2, 10183 + _OFF2)  # just <footer>...</footer>, no surrounding div-closes
+BROKER_MODAL   = seg(10189 + _OFF2, 10272 + _OFF2)  # client-only broker-add modal
+FINAL_CLOSE    = seg(10273 + _OFF2, 10277 + _OFF2)  # blank lines + </body></html>
 
 ADMIN_TABS = {
     "dashboard":  (3647 + _OFF, 4096 + _OFF, "adminTab='dashboard'"),
@@ -80,8 +85,8 @@ CLIENT_TABS = {
     "dashboard":  (6709 + _OFF, 6785 + _OFF, "clientMenu='dashboard'; loadClientPositions()"),
     "strategies": (6786 + _OFF, 6920 + _OFF, "clientMenu='strategies'"),
     "brokers":    (6921 + _OFF, 7893 + _OFF, "clientMenu='brokers'"),
-    "positions":  (7894 + _OFF, 9983 + _OFF, "clientMenu='positions'; loadClientPositions()"),
-    "history":    (9984 + _OFF, 10173 + _OFF, "clientMenu='history'; loadClientHistory()"),  # excludes orphaned line (orig 10174)
+    "positions":  (7894 + _OFF, 9983 + _OFF2, "clientMenu='positions'; loadClientPositions()"),
+    "history":    (9984 + _OFF2, 10173 + _OFF2, "clientMenu='history'; loadClientHistory()"),  # excludes orphaned line (orig 10174)
 }
 
 # ── Convert tab-click handlers (in the SHARED fragments) to real navigation ──
