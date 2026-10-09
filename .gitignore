@@ -72,3 +72,8 @@ tools/revert_to_nifty.py
 tools/start_crude_test.py
 .agents/skills/fix-btc-sell-straddle-workflow.skill
 .worktrees/
+
+# 2026-10-09, direct user spec: tests stay local-only, never shipped to
+# EC2/production. Run them from here same as always -- they are just no
+# longer committed/pulled on the server.
+tests/
