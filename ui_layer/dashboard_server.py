@@ -531,6 +531,15 @@ _MONITOR_HTML       = os.path.join(_TEMPLATE_DIR, "monitor.html")
 _BACKTEST_HTML      = os.path.join(_TEMPLATE_DIR, "backtest.html")
 _BACKTEST_NIFTY_HTML = os.path.join(_TEMPLATE_DIR, "backtest_nifty.html")
 
+# 2026-10-09, direct user spec: monitor.html split into separate admin/client
+# per-tab pages so a visitor only downloads the markup for their own role and
+# tab, instead of the full ~681KB monolithic file every time. Each page
+# shares the same login screen + top navbar + Alpine `terminal` JS component
+# (that part is NOT split -- see build_pages.py's own docstring for why).
+_PAGES_DIR = os.path.join(_TEMPLATE_DIR, "pages")
+_ADMIN_TABS = ("dashboard", "strategies", "feeder", "trap", "clients")
+_CLIENT_TABS = ("dashboard", "strategies", "brokers", "positions", "history")
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Historical replay helpers  (pure functions — no I/O, no imports at module level)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -929,6 +938,33 @@ class DashboardServer:
                     status_code=503,
                 )
             return FileResponse(_MONITOR_HTML, media_type="text/html",
+                                headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
+
+        # 2026-10-09, direct user spec: split per-tab pages (built by
+        # build_pages.py from monitor.html) -- each serves only that role's
+        # own markup, not the full ~681KB monolithic file. No new auth
+        # surface: these are static files just like monitor.html itself,
+        # unauthenticated at the page level same as today (real data stays
+        # behind the existing _require_admin/_require_client-gated API
+        # endpoints, same security model, zero change there).
+        @app.get("/admin/{tab}", include_in_schema=False)
+        async def admin_page(tab: str):
+            if tab not in _ADMIN_TABS:
+                return HTMLResponse(f"<h1>Unknown admin tab: {tab}</h1>", status_code=404)
+            path = os.path.join(_PAGES_DIR, f"admin_{tab}.html")
+            if not os.path.exists(path):
+                return HTMLResponse(f"<h1>admin_{tab}.html not found</h1>", status_code=503)
+            return FileResponse(path, media_type="text/html",
+                                headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
+
+        @app.get("/client/{tab}", include_in_schema=False)
+        async def client_page(tab: str):
+            if tab not in _CLIENT_TABS:
+                return HTMLResponse(f"<h1>Unknown client tab: {tab}</h1>", status_code=404)
+            path = os.path.join(_PAGES_DIR, f"client_{tab}.html")
+            if not os.path.exists(path):
+                return HTMLResponse(f"<h1>client_{tab}.html not found</h1>", status_code=503)
+            return FileResponse(path, media_type="text/html",
                                 headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
 
         @app.get("/backtest", include_in_schema=False)
