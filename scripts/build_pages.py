@@ -53,9 +53,11 @@ lines = open(SRC, encoding="utf-8").read().split("\n")
 def seg(a, b):
     return "\n".join(lines[a - 1:b])
 
-_OFF = 5  # 2026-10-09: monitor.html grew by 5 lines (login/session-restore
-          # redirect edits) after boundaries were originally mapped; every
-          # absolute line number below is shifted by this fixed offset.
+_OFF = 9  # 2026-10-09: monitor.html grew by 5 lines (login/session-restore
+          # redirect edits), then by 4 more (per-tab setInterval gating for
+          # loadTelemetry/loadIvMatrix/loadAdminEvents) after boundaries were
+          # originally mapped; every absolute line number below is shifted
+          # by this fixed, cumulative offset.
 
 HEAD_LOGIN_NAV = seg(1, 3582 + _OFF)       # head + shared JS + login + top navbar + mobile drawer
 ADMIN_SHELL    = seg(3583 + _OFF, 3646 + _OFF)    # admin subnav + <main admin> open + banner alerts

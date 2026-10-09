@@ -1227,8 +1227,12 @@ document.addEventListener('alpine:init', () => {
           if (this.screen === 'admin') { this.loadClientProfiles(); }
         }
       });
-      setInterval(() => { if (this.screen === 'admin') { this.loadTelemetry(); this.loadFeederStatus(); this.loadAuthAlerts(); this.loadAdminEvents(); } }, 10000);
-      setInterval(() => { if (this.screen === 'admin') this.loadIvMatrix(); }, 5000);
+      // loadTelemetry/loadIvMatrix only render on the feeder tab's own markup;
+      // loadAdminEvents only on dashboard's -- gated per-tab (2026-10-09) so the
+      // other 4 split admin pages don't poll data they never display.
+      setInterval(() => { if (this.screen === 'admin') { this.loadFeederStatus(); this.loadAuthAlerts(); } }, 10000);
+      setInterval(() => { if (this.screen === 'admin' && this.adminTab === 'dashboard') { this.loadAdminEvents(); } }, 10000);
+      setInterval(() => { if (this.screen === 'admin' && this.adminTab === 'feeder') { this.loadTelemetry(); this.loadIvMatrix(); } }, 5000);
       setInterval(() => { if (this.screen === 'admin' && this.adminTab === 'dashboard') { this.loadStrategyRegistry(); } }, 5000);
       setInterval(() => { if (this.screen === 'admin' && this.adminTab === 'strategies') { this.loadStrategyRegistry(); this.loadOiOrbDeployments(); } }, 5000);
       setInterval(() => { if (this.screen === 'admin' && this.adminTab === 'clients') { this.loadClientProfiles(); this.loadPendingClients(); this.loadRiskSummary(); } }, 5000);
