@@ -4,19 +4,15 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>TERMINUS — OptionChain AlgoTrader</title>
-
-  <!-- Fonts: Plus Jakarta Sans (UI), JetBrains Mono (data values) -->
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<script src="https://cdn.tailwindcss.com"></script>
 
-  <!-- Tailwind CDN — config uses CSS variables so all t.* classes auto-update on theme switch -->
-  <script src="https://cdn.tailwindcss.com"></script>
-  <!-- ApexCharts CDN — client-side multi-line straddle/strangle chart -->
-  <script src="https://cdn.jsdelivr.net/npm/apexcharts@3.45.2/dist/apexcharts.min.js"></script>
-  <!-- Alpine.js CDN -->
-  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.0/dist/cdn.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/apexcharts@3.45.2/dist/apexcharts.min.js"></script>
 
-  <script>
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.0/dist/cdn.min.js"></script>
+
+<script>
     tailwind.config = {
       theme: {
         extend: {
@@ -45,7 +41,6 @@
       }
     }
   </script>
-
   <style>
     /* ── CSS custom properties — Kite "Daylight" defaults (Zerodha palette) ──────
        Calm white surface, near-black text, Kite signature blue accent, buy-green /
@@ -70,7 +65,6 @@
       --t-red-rgb:   255, 87, 34;
       --t-amber-rgb: 245, 166, 35;
     }
-
     [x-cloak] { display: none !important; }
     * { box-sizing: border-box; }
     html, body { height: 100%; margin: 0; }
@@ -82,7 +76,6 @@
       overflow-x: hidden;
       transition: background-color 0.3s, color 0.3s;
     }
-
     /* ── Card ─────────────────────────────────────────────────────────── */
     .t-card {
       background: var(--t-card);
@@ -93,14 +86,12 @@
       transition: background 0.3s, border-color 0.3s, box-shadow 0.2s;
     }
     .t-card:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.09); }
-
     /* ── Section label ────────────────────────────────────────────────── */
     .sec-label {
       font-family: 'Plus Jakarta Sans', sans-serif;
       font-size: 11px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
       color: var(--t-muted);
     }
-
     /* ── Input ────────────────────────────────────────────────────────── */
     .t-input {
       font-family: 'Plus Jakarta Sans', sans-serif; font-size: 13px;
@@ -111,7 +102,6 @@
     }
     .t-input:focus { border-color: rgba(var(--t-cyan-rgb),0.6); box-shadow: 0 0 0 3px rgba(var(--t-cyan-rgb),0.12); }
     .t-input option { background: var(--t-card); color: var(--t-bright); }
-
     /* ── Buttons ──────────────────────────────────────────────────────── */
     .btn-primary {
       font-family: 'Plus Jakarta Sans', sans-serif;
@@ -159,7 +149,6 @@
       color: var(--t-green); cursor: pointer; transition: all 0.15s; width: 100%;
     }
     .btn-add:hover { background: rgba(var(--t-green-rgb),0.14); }
-
     /* ── Badges ───────────────────────────────────────────────────────── */
     .badge-live {
       font-family: 'Plus Jakarta Sans', sans-serif; font-size: 11px; font-weight: 600; letter-spacing: 0.04em;
@@ -181,11 +170,9 @@
       padding: 2px 10px; border-radius: 20px;
       background: rgba(var(--t-cyan-rgb),0.10); border: 1px solid rgba(var(--t-cyan-rgb),0.3); color: var(--t-cyan);
     }
-
     /* ── Gauges ───────────────────────────────────────────────────────── */
     .gauge-track { background: var(--t-surface); border: 1px solid var(--t-border); border-radius: 4px; overflow: hidden; }
     .gauge-fill { transition: width 0.5s ease; border-radius: 4px; }
-
     /* ── Index tab ────────────────────────────────────────────────────── */
     .idx-tab {
       font-family: 'Plus Jakarta Sans', sans-serif; font-size: 13px; font-weight: 600; letter-spacing: 0.02em;
@@ -194,7 +181,6 @@
     }
     .idx-tab:hover { color: var(--t-text); background: var(--t-surface); }
     .idx-tab.active { color: var(--t-cyan); background: rgba(var(--t-cyan-rgb),0.08); border-color: rgba(var(--t-cyan-rgb),0.25); }
-
     /* ── Theme tab ────────────────────────────────────────────────────── */
     .theme-tab {
       font-family: 'Plus Jakarta Sans', sans-serif; font-size: 11px; font-weight: 600; letter-spacing: 0.04em;
@@ -203,7 +189,6 @@
     }
     .theme-tab:hover { color: var(--t-text); background: var(--t-surface); }
     .theme-tab.active { color: var(--t-cyan); border-color: rgba(var(--t-cyan-rgb),0.3); background: rgba(var(--t-cyan-rgb),0.07); }
-
     /* ── Admin sub-nav tabs ───────────────────────────────────────────── */
     .admin-tab {
       font-family: 'Plus Jakarta Sans', sans-serif;
@@ -217,7 +202,6 @@
     }
     .admin-tab:hover:not(.active) { color: var(--t-text); }
     .admin-tab.active { color: var(--t-cyan); border-bottom-color: var(--t-cyan); }
-
     .login-tab {
       flex: 1; font-family: 'Plus Jakarta Sans', sans-serif; font-size: 13px; font-weight: 600; letter-spacing: 0.03em;
       padding: 9px; text-transform: uppercase; text-align: center;
@@ -226,7 +210,6 @@
     }
     .login-tab:last-child { border-left: none; }
     .login-tab.active { color: var(--t-cyan); background: rgba(var(--t-cyan-rgb),0.08); border-color: rgba(var(--t-cyan-rgb),0.35); }
-
     /* ── Kill ring countdown ──────────────────────────────────────────── */
     .kill-ring {
       position: absolute; inset: -3px; border-radius: 4px; border: 2px solid transparent;
@@ -236,7 +219,6 @@
       0%   { border-color: var(--t-red); box-shadow: 0 0 8px rgba(var(--t-red-rgb),0.8); }
       100% { border-color: rgba(var(--t-red-rgb),0.1); box-shadow: none; }
     }
-
     /* ── Animations ───────────────────────────────────────────────────── */
     @keyframes spin {
       to { transform: rotate(360deg); }
@@ -269,7 +251,6 @@
       to   { opacity: 1; transform: scale(1) translateY(0); }
     }
     .slide-in { animation: slide-in 0.25s ease both; }
-
     /* ── Feed row ─────────────────────────────────────────────────────── */
     .feed-row {
       font-family: 'JetBrains Mono', monospace; font-size: 11px;
@@ -277,13 +258,11 @@
       display: flex; gap: 8px; align-items: baseline;
     }
     .feed-row:hover { background: rgba(var(--t-cyan-rgb),0.04); }
-
     /* ── Worker row ───────────────────────────────────────────────────── */
     .worker-row {
       display: flex; justify-content: space-between; align-items: center;
       padding: 5px 10px; border-bottom: 1px solid var(--t-border); font-size: 12px;
     }
-
     /* ── Data row — clean table rows ─────────────────────────────────── */
     .data-row {
       display: flex; justify-content: space-between; align-items: baseline;
@@ -291,37 +270,30 @@
       font-family: 'JetBrains Mono', monospace; font-size: 11px;
     }
     .data-row:last-child { border-bottom: none; }
-
     /* ── Diagonal accent — subtle, light-mode friendly ───────────────── */
     .diag-accent {
       position: absolute; top: 0; right: 0; width: 0; height: 0; border-style: solid;
       border-width: 0 14px 14px 0;
       border-color: transparent rgba(var(--t-cyan-rgb),0.15) transparent transparent;
     }
-
     /* ── EMA signals ──────────────────────────────────────────────────── */
     .ema-bull { color: var(--t-green); }
     .ema-bear { color: var(--t-red); }
     .ema-neutral { color: var(--t-muted); }
-
     /* ── RSI zone ─────────────────────────────────────────────────────── */
     .rsi-ob { color: var(--t-red);   font-weight: 600; }
     .rsi-os { color: var(--t-green); font-weight: 600; }
     .rsi-n  { color: var(--t-cyan);  }
-
     /* ── Drawdown bar ─────────────────────────────────────────────────── */
     .drawdown-bar { transition: width 0.6s ease; }
-
     /* ── Zone approach blink ─────────────────────────────────────────── */
     @keyframes zone-approach {
       0%, 100% { opacity: 1; }
       50%       { opacity: 0.5; }
     }
     .zone-approach-blink { animation: zone-approach 0.7s ease-in-out infinite; }
-
     /* ── IV wide-spread row highlight ────────────────────────────────── */
     .iv-wide-spread td { background: rgba(var(--t-amber-rgb),0.06); }
-
     /* ── Broker config modals ────────────────────────────────────────── */
     .modal-overlay {
       position: fixed; inset: 0; z-index: 200;
@@ -398,16 +370,13 @@
     }
     .vis-toggle:hover { color: var(--t-text); }
     .iv-wide-spread td:nth-child(4) { color: var(--t-amber) !important; font-weight: bold; }
-
     /* ── Scrollbar ────────────────────────────────────────────────────── */
     ::-webkit-scrollbar { width: 3px; height: 3px; }
     ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { background: var(--t-dim); border-radius: 2px; }
     ::-webkit-scrollbar-thumb:hover { background: var(--t-muted); }
-
     /* ── Navbar height ────────────────────────────────────────────────── */
     .navbar-h { height: 52px; }
-
     /* ── Modal overlay ────────────────────────────────────────────────── */
     .modal-box {
       background: var(--t-card); border: 1px solid var(--t-border);
@@ -415,11 +384,9 @@
       overflow-y: auto; padding: 24px; position: relative;
       box-shadow: 0 20px 60px rgba(0,0,0,0.15), 0 4px 16px rgba(0,0,0,0.07);
     }
-
     /* ── Horizontal scroll track (tab rows that must never break layout width) ── */
     .mobile-track { display: flex; }
     .mobile-track::-webkit-scrollbar { height: 0; display: none; }
-
     /* ── Mobile hamburger + slide-out drawer ────────────────────────────────
        Both the burger and the drawer are display:none on desktop (the drawer
        would otherwise sit off-screen-right and create a horizontal scrollbar).
@@ -439,13 +406,11 @@
       flex-direction: column;
     }
     .mobile-drawer.open { transform: translateX(0); }
-
     /* ── Position leg matrix: scrolls as a unit on narrow screens (header+rows aligned) ── */
     .pos-legs { overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: thin; }
     .pos-legs::-webkit-scrollbar { height: 4px; }
     .pos-legs::-webkit-scrollbar-thumb { background: var(--t-border); border-radius: 2px; }
     .pos-legs-inner { min-width: 460px; }
-
     /* ─────────────────────────────────────────────────────────────────────
        MOBILE / SMALL-SCREEN LAYOUT  (≤768px)
        Root causes of the clipped/half-blank dashboard on phones:
@@ -457,12 +422,10 @@
        ───────────────────────────────────────────────────────────────────── */
     @media (max-width: 768px) {
       html, body { overflow-x: hidden; }            /* kill horizontal clipping */
-
       /* Navbar: wrap into rows instead of overflowing; auto height */
       .navbar-h { height: auto; min-height: 52px; }
       header.navbar-h { flex-wrap: wrap; gap: 8px; padding: 8px 12px; }
       header.navbar-h .text-xl { font-size: 1.05rem; }   /* shrink the IST clock */
-
       /* On phones the whole right-side cluster + the horizontal sub-navs move into
          the hamburger drawer (single clean navigation surface, professional look). */
       .navbar-right { display: none !important; }
@@ -470,27 +433,22 @@
       .navbar-burger { display: inline-flex; align-items: center; justify-content: center; }
       .mobile-drawer { display: flex; }
       .mobile-drawer-backdrop { display: block; }
-
       /* Client top bar (name · TODAY'S P&L · status · start/stop) stacks cleanly */
       .client-topbar { gap: 10px !important; }
       .client-topbar > * { min-width: 0; }
-
       /* Tab rows → independent horizontal scroll, never widen the container */
       .mobile-track {
         flex-wrap: nowrap; overflow-x: auto; white-space: nowrap;
         -webkit-overflow-scrolling: touch; scrollbar-width: none; max-width: 100%;
       }
-
       /* Admin sub-nav: let the whole bar scroll, keep the right-side pills inline */
       .admin-subnav { overflow-x: auto; scrollbar-width: none; }
       .admin-subnav::-webkit-scrollbar { display: none; }
-
       /* Collapse rigid multi-column grids on phones. grid-cols-3/4 → 2-up (denser,
          Kite-like tiles, less endless scrolling); grid-cols-2 stays 2-up.
          (Responsive utilities like `grid-cols-1 lg:grid-cols-2` are unaffected —
          their base class is already grid-cols-1; only the bare desktop grids fold.) */
       .grid-cols-3, .grid-cols-4 { grid-template-columns: repeat(2, minmax(0,1fr)) !important; }
-
       /* FORM grids → single column: any grid that holds inputs/selects becomes one
          full-width field per row (standard mobile form UX, like Kite). Targets only
          grids containing a .t-input, so stat-tile grids (no inputs) stay 2-up. */
@@ -498,11 +456,9 @@
       /* Never let a fixed min-width input/select push past the viewport on phones. */
       input, select, textarea, .t-input { max-width: 100% !important; }
       [class*="min-w-["] { min-width: 0 !important; }
-
       /* Full-width content + tighter padding so cards fit a 320px viewport */
       main { padding: 12px !important; }
       .max-w-\[1800px\] { max-width: 100% !important; }
-
       /* ── Responsive table → stacked cards (Kite-style) ──────────────────────
          Any <table class="t-table"> with data-label on each <td>: on phones the
          header row is hidden and every row becomes a label↔value card. No sideways
@@ -535,10 +491,6 @@
     }
   </style>
 </head>
-
-<!-- ════════════════════════════════════════════════════════════════════════════
-     ALPINE COMPONENT
-════════════════════════════════════════════════════════════════════════════ -->
 <script>
 document.addEventListener('alpine:init', () => {
   Alpine.data('terminal', () => ({
@@ -3225,39 +3177,24 @@ function amoTest() {
 }
 
 </script>
-
-<!-- ════════════════════════════════════════════════════════════════════════════
-     BODY
-════════════════════════════════════════════════════════════════════════════ -->
 <body x-data="terminal" x-cloak x-init="adminTab='trap'" class="relative">
 <div class="relative z-10 flex flex-col min-h-screen">
-
-<!-- ═══════════════════════════════════════════════════════════════════════════
-     LOGIN SCREEN
-════════════════════════════════════════════════════════════════════════════ -->
 <div x-show="screen === 'login'"
      class="fixed inset-0 z-50 flex items-center justify-center p-4"
      style="background: var(--t-bg)">
-
   <div class="w-full max-w-sm slide-in">
-    <!-- Logo -->
     <div class="text-center mb-8">
       <div class="flex items-center justify-center gap-3 mb-2">
         <div class="font-display font-extrabold tracking-tight" style="font-size:2.5rem; color:var(--t-cyan); line-height:1">TERMINUS</div>
       </div>
       <div class="font-mono text-xs tracking-widest" style="color:var(--t-muted)">OPTIONCHAIN ALGOTRADER · NSE</div>
     </div>
-
-    <!-- Login card -->
     <div class="t-card p-6">
-      <!-- Role tabs -->
       <div class="flex gap-1 mb-5">
         <button class="login-tab" :class="{ active: loginTab==='admin' }" @click="loginTab='admin'">ADMIN</button>
         <button class="login-tab" :class="{ active: loginTab==='client' }" @click="loginTab='client'">CLIENT</button>
         <button class="login-tab" :class="{ active: loginTab==='register' }" @click="loginTab='register'">REGISTER</button>
       </div>
-
-      <!-- Admin form -->
       <div x-show="loginTab === 'admin'" class="space-y-3">
         <div>
           <div class="sec-label mb-1">USERNAME</div>
@@ -3270,8 +3207,6 @@ function amoTest() {
                  x-model="loginPass" @keydown.enter="login()" autocomplete="current-password" />
         </div>
       </div>
-
-      <!-- Client form -->
       <div x-show="loginTab === 'client'" class="space-y-3">
         <div>
           <div class="sec-label mb-1">CLIENT ID</div>
@@ -3284,8 +3219,6 @@ function amoTest() {
                  x-model="loginPin" @keydown.enter="login()" autocomplete="current-password" />
         </div>
       </div>
-
-      <!-- Registration form -->
       <div x-show="loginTab === 'register'" class="space-y-2.5">
         <div class="grid grid-cols-2 gap-2">
           <div>
@@ -3323,26 +3256,19 @@ function amoTest() {
           After registering, log in as CLIENT. Admin must approve before trading begins.
         </div>
       </div>
-
-      <!-- Error (admin/client login) -->
       <div x-show="loginTab !== 'register' && loginError" class="mt-3 font-mono text-xs px-2 py-1.5 rounded"
            style="color:var(--t-red); background:rgba(var(--t-red-rgb),0.08); border:1px solid rgba(var(--t-red-rgb),0.2)"
            x-text="loginError"></div>
-
       <button x-show="loginTab !== 'register'" class="btn-primary mt-5" @click="login()" :disabled="loginLoading">
         <span x-show="!loginLoading">LOGIN</span>
         <span x-show="loginLoading">AUTHENTICATING…</span>
       </button>
-
-      <!-- Forgot password link -->
       <div x-show="loginTab !== 'register' && !showReset" class="mt-3 text-center">
         <button type="button" @click="showReset=true; resetMsg=''"
                 class="text-xs text-blue-400 hover:text-blue-300 underline">
           Forgot password?
         </button>
       </div>
-
-      <!-- Password Reset Panel -->
       <div x-show="showReset" x-cloak class="mt-4 border-t border-gray-600 pt-4">
         <p class="text-xs text-gray-400 mb-3">Enter the reset token provided by your administrator.</p>
         <div x-show="resetMsg" x-text="resetMsg" class="mb-2 text-sm text-green-400"></div>
@@ -3372,31 +3298,19 @@ function amoTest() {
         </p>
       </div>
     </div>
-
-    <!-- Theme switcher on login screen -->
     <div class="flex flex-wrap justify-center gap-2 mt-4">
       <template x-for="k in ['daylight','light_pro','midnight','matrix','cyberpunk']" :key="k">
         <button class="theme-tab" :class="{ active: currentTheme===k }" @click="applyTheme(k)" x-text="themeLabel(k)"></button>
       </template>
     </div>
-
     <div class="text-center mt-4">
       <span class="font-mono text-xs" style="color:var(--t-muted)">Default admin: admin / admin123 · Default client PIN = client ID</span>
     </div>
   </div>
 </div>
-
-
-<!-- ═══════════════════════════════════════════════════════════════════════════
-     DASHBOARD (admin + client share the navbar)
-════════════════════════════════════════════════════════════════════════════ -->
 <div x-show="screen !== 'login'" class="flex flex-col min-h-screen">
-
-<!-- ── NAVBAR ──────────────────────────────────────────────────────────────── -->
 <header class="navbar-h sticky top-0 z-50 flex items-center justify-between px-4 border-b shrink-0"
         style="background:var(--t-bg); border-color:var(--t-border); border-bottom:1px solid var(--t-border); box-shadow: 0 1px 0 rgba(var(--t-cyan-rgb),0.12);">
-
-  <!-- Left: Logo + index tabs -->
   <div class="flex items-center gap-4">
     <div class="flex items-center gap-2">
       <div style="width:3px; height:22px; background:var(--t-cyan); border-radius:2px; flex-shrink:0;"></div>
@@ -3405,8 +3319,6 @@ function amoTest() {
         <span class="font-display text-xs tracking-widest ml-1" style="color:var(--t-muted)">v6</span>
       </div>
     </div>
-    <!-- Index tabs — ADMIN only. Clients pick the index inside the Positions section
-         (the SPOT/ATM card), so showing them in the navbar too is redundant clutter. -->
     <div class="w-px h-6 hide-on-mobile" style="background:var(--t-border)" x-show="authRole==='admin'"></div>
     <div class="mobile-track hide-on-mobile gap-1" x-show="authRole==='admin'">
       <template x-for="idx in indices" :key="idx">
@@ -3414,8 +3326,6 @@ function amoTest() {
       </template>
     </div>
   </div>
-
-  <!-- Mobile hamburger — opens the drawer (desktop: hidden via CSS) -->
   <button class="navbar-burger w-9 h-9 rounded-md border" @click="mobileNav = true"
           style="border-color:var(--t-border); background:var(--t-surface); color:var(--t-text)"
           aria-label="Open menu">
@@ -3423,10 +3333,7 @@ function amoTest() {
       <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
     </svg>
   </button>
-
-  <!-- Right: theme + role + IST + WS + logout (hidden on mobile → moved into drawer) -->
   <div class="navbar-right flex items-center gap-3">
-    <!-- Theme switcher -->
     <div class="relative">
       <button @click="showThemeMenu = !showThemeMenu"
               class="font-mono text-xs px-2 py-1 rounded border flex items-center gap-1.5"
@@ -3444,24 +3351,16 @@ function amoTest() {
         </template>
       </div>
     </div>
-
     <div class="w-px h-4" style="background:var(--t-border)"></div>
-
-    <!-- Role badge -->
     <div :class="authRole==='admin' ? 'badge-role-admin' : 'badge-role-client'"
          x-text="authRole==='admin' ? 'ADMIN' : authClientName || authClientId"></div>
-
-    <!-- IST Clock — large mono display -->
     <div class="flex flex-col items-end">
       <div class="font-mono text-xl font-medium tracking-widest leading-none"
            style="color:var(--t-bright)"
            x-text="istTime"></div>
       <div class="font-mono text-xs tracking-wider" style="color:var(--t-muted)">IST</div>
     </div>
-
     <div class="w-px h-6" style="background:var(--t-border)"></div>
-
-    <!-- WS badge -->
     <div class="flex items-center gap-1.5">
       <div class="w-2 h-2 rounded-full" :class="wsConnected ? 'conn-live' : ''"
            :style="`background:${wsConnected ? 'var(--t-green)' : 'var(--t-red)'}`"></div>
@@ -3469,10 +3368,7 @@ function amoTest() {
             :style="`color:${wsConnected ? 'var(--t-green)' : 'var(--t-red)'}`"
             x-text="wsConnected ? 'LIVE' : 'OFFLINE'"></span>
     </div>
-
     <div class="w-px h-6" style="background:var(--t-border)"></div>
-
-    <!-- Logout -->
     <button @click="logout()"
             class="font-ui text-xs font-semibold px-3 py-1.5 border rounded-md"
             style="color:var(--t-muted); border-color:var(--t-border); background:transparent;">
@@ -3480,18 +3376,13 @@ function amoTest() {
     </button>
   </div>
 </header>
-
-<!-- ── MOBILE NAV DRAWER (slide-out from right; phones only) ─────────────────── -->
 <div class="mobile-drawer-backdrop" :class="{open: mobileNav}" @click="mobileNav=false"></div>
 <aside class="mobile-drawer" :class="{open: mobileNav}">
-  <!-- Header -->
   <div class="flex items-center justify-between px-4 py-3 border-b" style="border-color:var(--t-border)">
     <span class="font-display font-extrabold tracking-tight" style="color:var(--t-cyan)">MENU</span>
     <button @click="mobileNav=false" class="w-8 h-8 rounded-md border flex items-center justify-center"
             style="border-color:var(--t-border); color:var(--t-muted)" aria-label="Close menu">✕</button>
   </div>
-
-  <!-- Identity + live status -->
   <div class="px-4 py-3 border-b" style="border-color:var(--t-border)">
     <div class="font-ui font-bold text-sm" style="color:var(--t-bright)"
          x-text="authRole==='admin' ? 'ADMIN' : (authClientName || authClientId)"></div>
@@ -3503,8 +3394,6 @@ function amoTest() {
       <span class="font-mono text-xs ml-auto" style="color:var(--t-muted)" x-text="istTime + ' IST'"></span>
     </div>
   </div>
-
-  <!-- CLIENT navigation -->
   <template x-if="authRole!=='admin' && clientPhase==='active'">
     <div class="py-2 border-b" style="border-color:var(--t-border)">
       <template x-for="m in [
@@ -3522,8 +3411,6 @@ function amoTest() {
       </template>
     </div>
   </template>
-
-  <!-- ADMIN navigation -->
   <template x-if="authRole==='admin'">
     <div class="py-2 border-b" style="border-color:var(--t-border)">
       <template x-for="m in [
@@ -3538,8 +3425,6 @@ function amoTest() {
       </template>
     </div>
   </template>
-
-  <!-- ADMIN active-index selector (moved out of the cramped header) -->
   <template x-if="authRole==='admin'">
     <div class="px-4 py-3 border-b" style="border-color:var(--t-border)">
       <div class="sec-label mb-2">Active Index</div>
@@ -3555,8 +3440,6 @@ function amoTest() {
       </div>
     </div>
   </template>
-
-  <!-- Theme picker -->
   <div class="px-4 py-3 border-b" style="border-color:var(--t-border)">
     <div class="sec-label mb-2">Theme</div>
     <div class="grid grid-cols-2 gap-1.5">
@@ -3570,8 +3453,6 @@ function amoTest() {
       </template>
     </div>
   </div>
-
-  <!-- Logout — right after theme so it's always reachable (not under the iOS toolbar) -->
   <div class="px-4 py-4">
     <button @click="logout(); mobileNav=false"
             class="w-full font-ui text-sm font-semibold px-3 py-2.5 border rounded-md"
@@ -3581,8 +3462,6 @@ function amoTest() {
   </div>
   <div style="height:env(safe-area-inset-bottom)"></div>
 </aside>
-
-<!-- ── ADMIN SUB-NAV ───────────────────────────────────────────────────────── -->
 <div x-show="screen === 'admin'" x-cloak
      class="admin-subnav hide-on-mobile sticky z-40 flex items-center border-b shrink-0"
      style="top:52px; background:var(--t-surface); border-color:var(--t-border)">
@@ -3598,9 +3477,7 @@ function amoTest() {
     <button class="admin-tab" :class="{active: adminTab==='clients'}"
             @click="window.location='/admin/clients'">&#x1F465; CLIENT PROFILES</button>
   </div>
-  <!-- Live feed status pills pinned to the right -->
   <div class="ml-auto flex items-center gap-4 px-5">
-    <!-- Active provider badge -->
     <span class="font-mono text-xs px-2 py-0.5 rounded"
           :style="systemStatus.connected
             ? 'color:var(--t-green);background:rgba(var(--t-green-rgb),0.08);border:1px solid rgba(var(--t-green-rgb),0.25)'
@@ -3626,14 +3503,8 @@ function amoTest() {
     </div>
   </div>
 </div>
-
-<!-- ═══════════════════════════════════════════════════════════════════════════
-     ADMIN LAYOUT
-════════════════════════════════════════════════════════════════════════════ -->
 <main x-show="screen === 'admin'"
       class="flex-1 flex flex-col gap-3 p-3 max-w-[1800px] w-full mx-auto">
-
-  <!-- ── Feeder auth failure banner ──────────────────────────────────────── -->
   <div x-show="authAlerts.feeder" x-cloak
        class="flex items-start gap-3 px-4 py-3 rounded font-mono text-xs"
        style="background:rgba(var(--t-red-rgb),0.12);border:1px solid rgba(var(--t-red-rgb),0.4);color:var(--t-red)">
@@ -3644,14 +3515,9 @@ function amoTest() {
     </div>
     <button @click="authAlerts.feeder=''" class="ml-auto text-lg leading-none" style="color:var(--t-muted)">&times;</button>
   </div>
-
-  <!-- ════════════════════ DASHBOARD TAB ════════════════════════════════════ -->
   <div x-show="adminTab === 'trap'" class="flex flex-col gap-3 flex-1">
-
-  <!-- ── TrapEngine Config Panel (Admin only) ──────────────────────── -->
   <div x-data="trapConfig()" x-init="load()" class="mt-4 bg-gray-900 rounded-lg p-4 border border-gray-700">
     <h4 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">TrapEngine Parameters</h4>
-
     <div class="grid grid-cols-2 gap-3 text-xs">
       <label class="flex flex-col gap-1">
         <span class="text-gray-400">HTF Minutes</span>
@@ -3684,7 +3550,6 @@ function amoTest() {
                class="bg-gray-800 border border-gray-600 rounded px-2 py-1 text-white w-full" />
       </label>
     </div>
-
     <div class="flex items-center gap-3 mt-3">
       <button @click="save()"
               class="px-3 py-1 bg-blue-700 hover:bg-blue-600 rounded text-xs text-white font-semibold">
@@ -3698,10 +3563,6 @@ function amoTest() {
       </span>
     </div>
   </div>
-
-
-
-  <!-- ── AMO Broker Connectivity Test ────────────────────────────────── -->
   <div x-data="amoTest()" x-init="init()" class="mt-4 bg-gray-900 rounded-lg border border-yellow-800 overflow-hidden">
     <div class="flex items-center justify-between px-4 py-2.5 border-b border-yellow-800 bg-yellow-950/30">
       <div>
@@ -3782,7 +3643,6 @@ function amoTest() {
           Qty: <span class="text-gray-300" x-text="result && result.qty"></span>
           (<span x-text="result && result.lots"></span> lots × <span x-text="result && result.lot_size"></span>)
         </div>
-        <!-- Full response dump — always shown so every field / error is visible -->
         <div class="mt-2 pt-2 border-t border-gray-700">
           <div class="text-gray-500 mb-1">Full server response:</div>
           <pre class="text-gray-300 whitespace-pre-wrap break-all" x-text="JSON.stringify(result, null, 2)"></pre>
@@ -3790,20 +3650,13 @@ function amoTest() {
       </div>
     </div>
   </div>
-
-  </div><!-- end trap tab -->
-
-  <!-- ════════════════════ CLIENT PROFILES TAB ══════════════════════════════ -->
-</main><!-- closes admin main, orig line 6415 -->
-<!-- ── FOOTER ─────────────────────────────────────────────────────────────── -->
+  </div>
+</main>
 <footer class="shrink-0 border-t px-5 py-2 flex items-center justify-between" style="border-color:var(--t-border)">
   <span class="font-mono text-xs" style="color:var(--t-muted)">TERMINUS · OptionChain AlgoTrader · NSE Options</span>
   <span class="font-mono text-xs" style="color:var(--t-muted)" x-text="'IST ' + istTime"></span>
 </footer>
-</div><!-- close screen!=login wrapper (orig ~10185) -->
-</div><!-- close z-10 flex-col outer wrapper (orig ~10186) -->
-
-
-
+</div>
+</div>
 </body>
 </html>

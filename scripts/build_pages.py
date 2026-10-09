@@ -116,6 +116,25 @@ CLIENT_SHELL = CLIENT_SHELL.replace(_CLIENT_DESKTOP_OLD, _CLIENT_DESKTOP_NEW)
 
 os.makedirs(OUT_DIR, exist_ok=True)
 
+# Shrink output size (faster download, smaller disk footprint) without
+# touching <script> contents -- regex-editing live JS is not worth the risk
+# on a trading dashboard for a cosmetic byte-count win. Only strips HTML
+# comments and blank/whitespace-only lines outside <script> blocks.
+_SCRIPT_SPLIT = re.compile(r"(<script\b[^>]*>.*?</script>)", re.S | re.I)
+_HTML_COMMENT = re.compile(r"<!--.*?-->", re.S)
+
+def _shrink(html: str) -> str:
+    chunks = _SCRIPT_SPLIT.split(html)
+    out = []
+    for i, chunk in enumerate(chunks):
+        if i % 2 == 1:  # a <script>...</script> block -- leave byte-for-byte
+            out.append(chunk)
+            continue
+        chunk = _HTML_COMMENT.sub("", chunk)
+        lines = [ln for ln in chunk.split("\n") if ln.strip()]
+        out.append("\n".join(lines))
+    return "\n".join(out)
+
 def write_admin_page(fname: str, body_init: str, tab_html: str):
     head = HEAD_LOGIN_NAV.replace(
         '<body x-data="terminal" x-cloak class="relative">',
@@ -130,7 +149,7 @@ def write_admin_page(fname: str, body_init: str, tab_html: str):
         '</div><!-- close z-10 flex-col outer wrapper (orig ~10186) -->',
         FINAL_CLOSE,
     ]
-    out = "\n".join(parts)
+    out = _shrink("\n".join(parts))
     with open(os.path.join(OUT_DIR, fname), "w", encoding="utf-8") as f:
         f.write(out)
     print(f"wrote {fname}: {len(out)} bytes")
@@ -161,7 +180,7 @@ def write_client_page(fname: str, body_init: str, tab_html: str, is_positions: b
         BROKER_MODAL,
         FINAL_CLOSE,
     ]
-    out = "\n".join(parts)
+    out = _shrink("\n".join(parts))
     with open(os.path.join(OUT_DIR, fname), "w", encoding="utf-8") as f:
         f.write(out)
     print(f"wrote {fname}: {len(out)} bytes")

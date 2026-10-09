@@ -4,19 +4,15 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>TERMINUS — OptionChain AlgoTrader</title>
-
-  <!-- Fonts: Plus Jakarta Sans (UI), JetBrains Mono (data values) -->
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<script src="https://cdn.tailwindcss.com"></script>
 
-  <!-- Tailwind CDN — config uses CSS variables so all t.* classes auto-update on theme switch -->
-  <script src="https://cdn.tailwindcss.com"></script>
-  <!-- ApexCharts CDN — client-side multi-line straddle/strangle chart -->
-  <script src="https://cdn.jsdelivr.net/npm/apexcharts@3.45.2/dist/apexcharts.min.js"></script>
-  <!-- Alpine.js CDN -->
-  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.0/dist/cdn.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/apexcharts@3.45.2/dist/apexcharts.min.js"></script>
 
-  <script>
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.0/dist/cdn.min.js"></script>
+
+<script>
     tailwind.config = {
       theme: {
         extend: {
@@ -45,7 +41,6 @@
       }
     }
   </script>
-
   <style>
     /* ── CSS custom properties — Kite "Daylight" defaults (Zerodha palette) ──────
        Calm white surface, near-black text, Kite signature blue accent, buy-green /
@@ -70,7 +65,6 @@
       --t-red-rgb:   255, 87, 34;
       --t-amber-rgb: 245, 166, 35;
     }
-
     [x-cloak] { display: none !important; }
     * { box-sizing: border-box; }
     html, body { height: 100%; margin: 0; }
@@ -82,7 +76,6 @@
       overflow-x: hidden;
       transition: background-color 0.3s, color 0.3s;
     }
-
     /* ── Card ─────────────────────────────────────────────────────────── */
     .t-card {
       background: var(--t-card);
@@ -93,14 +86,12 @@
       transition: background 0.3s, border-color 0.3s, box-shadow 0.2s;
     }
     .t-card:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.09); }
-
     /* ── Section label ────────────────────────────────────────────────── */
     .sec-label {
       font-family: 'Plus Jakarta Sans', sans-serif;
       font-size: 11px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
       color: var(--t-muted);
     }
-
     /* ── Input ────────────────────────────────────────────────────────── */
     .t-input {
       font-family: 'Plus Jakarta Sans', sans-serif; font-size: 13px;
@@ -111,7 +102,6 @@
     }
     .t-input:focus { border-color: rgba(var(--t-cyan-rgb),0.6); box-shadow: 0 0 0 3px rgba(var(--t-cyan-rgb),0.12); }
     .t-input option { background: var(--t-card); color: var(--t-bright); }
-
     /* ── Buttons ──────────────────────────────────────────────────────── */
     .btn-primary {
       font-family: 'Plus Jakarta Sans', sans-serif;
@@ -159,7 +149,6 @@
       color: var(--t-green); cursor: pointer; transition: all 0.15s; width: 100%;
     }
     .btn-add:hover { background: rgba(var(--t-green-rgb),0.14); }
-
     /* ── Badges ───────────────────────────────────────────────────────── */
     .badge-live {
       font-family: 'Plus Jakarta Sans', sans-serif; font-size: 11px; font-weight: 600; letter-spacing: 0.04em;
@@ -181,11 +170,9 @@
       padding: 2px 10px; border-radius: 20px;
       background: rgba(var(--t-cyan-rgb),0.10); border: 1px solid rgba(var(--t-cyan-rgb),0.3); color: var(--t-cyan);
     }
-
     /* ── Gauges ───────────────────────────────────────────────────────── */
     .gauge-track { background: var(--t-surface); border: 1px solid var(--t-border); border-radius: 4px; overflow: hidden; }
     .gauge-fill { transition: width 0.5s ease; border-radius: 4px; }
-
     /* ── Index tab ────────────────────────────────────────────────────── */
     .idx-tab {
       font-family: 'Plus Jakarta Sans', sans-serif; font-size: 13px; font-weight: 600; letter-spacing: 0.02em;
@@ -194,7 +181,6 @@
     }
     .idx-tab:hover { color: var(--t-text); background: var(--t-surface); }
     .idx-tab.active { color: var(--t-cyan); background: rgba(var(--t-cyan-rgb),0.08); border-color: rgba(var(--t-cyan-rgb),0.25); }
-
     /* ── Theme tab ────────────────────────────────────────────────────── */
     .theme-tab {
       font-family: 'Plus Jakarta Sans', sans-serif; font-size: 11px; font-weight: 600; letter-spacing: 0.04em;
@@ -203,7 +189,6 @@
     }
     .theme-tab:hover { color: var(--t-text); background: var(--t-surface); }
     .theme-tab.active { color: var(--t-cyan); border-color: rgba(var(--t-cyan-rgb),0.3); background: rgba(var(--t-cyan-rgb),0.07); }
-
     /* ── Admin sub-nav tabs ───────────────────────────────────────────── */
     .admin-tab {
       font-family: 'Plus Jakarta Sans', sans-serif;
@@ -217,7 +202,6 @@
     }
     .admin-tab:hover:not(.active) { color: var(--t-text); }
     .admin-tab.active { color: var(--t-cyan); border-bottom-color: var(--t-cyan); }
-
     .login-tab {
       flex: 1; font-family: 'Plus Jakarta Sans', sans-serif; font-size: 13px; font-weight: 600; letter-spacing: 0.03em;
       padding: 9px; text-transform: uppercase; text-align: center;
@@ -226,7 +210,6 @@
     }
     .login-tab:last-child { border-left: none; }
     .login-tab.active { color: var(--t-cyan); background: rgba(var(--t-cyan-rgb),0.08); border-color: rgba(var(--t-cyan-rgb),0.35); }
-
     /* ── Kill ring countdown ──────────────────────────────────────────── */
     .kill-ring {
       position: absolute; inset: -3px; border-radius: 4px; border: 2px solid transparent;
@@ -236,7 +219,6 @@
       0%   { border-color: var(--t-red); box-shadow: 0 0 8px rgba(var(--t-red-rgb),0.8); }
       100% { border-color: rgba(var(--t-red-rgb),0.1); box-shadow: none; }
     }
-
     /* ── Animations ───────────────────────────────────────────────────── */
     @keyframes spin {
       to { transform: rotate(360deg); }
@@ -269,7 +251,6 @@
       to   { opacity: 1; transform: scale(1) translateY(0); }
     }
     .slide-in { animation: slide-in 0.25s ease both; }
-
     /* ── Feed row ─────────────────────────────────────────────────────── */
     .feed-row {
       font-family: 'JetBrains Mono', monospace; font-size: 11px;
@@ -277,13 +258,11 @@
       display: flex; gap: 8px; align-items: baseline;
     }
     .feed-row:hover { background: rgba(var(--t-cyan-rgb),0.04); }
-
     /* ── Worker row ───────────────────────────────────────────────────── */
     .worker-row {
       display: flex; justify-content: space-between; align-items: center;
       padding: 5px 10px; border-bottom: 1px solid var(--t-border); font-size: 12px;
     }
-
     /* ── Data row — clean table rows ─────────────────────────────────── */
     .data-row {
       display: flex; justify-content: space-between; align-items: baseline;
@@ -291,37 +270,30 @@
       font-family: 'JetBrains Mono', monospace; font-size: 11px;
     }
     .data-row:last-child { border-bottom: none; }
-
     /* ── Diagonal accent — subtle, light-mode friendly ───────────────── */
     .diag-accent {
       position: absolute; top: 0; right: 0; width: 0; height: 0; border-style: solid;
       border-width: 0 14px 14px 0;
       border-color: transparent rgba(var(--t-cyan-rgb),0.15) transparent transparent;
     }
-
     /* ── EMA signals ──────────────────────────────────────────────────── */
     .ema-bull { color: var(--t-green); }
     .ema-bear { color: var(--t-red); }
     .ema-neutral { color: var(--t-muted); }
-
     /* ── RSI zone ─────────────────────────────────────────────────────── */
     .rsi-ob { color: var(--t-red);   font-weight: 600; }
     .rsi-os { color: var(--t-green); font-weight: 600; }
     .rsi-n  { color: var(--t-cyan);  }
-
     /* ── Drawdown bar ─────────────────────────────────────────────────── */
     .drawdown-bar { transition: width 0.6s ease; }
-
     /* ── Zone approach blink ─────────────────────────────────────────── */
     @keyframes zone-approach {
       0%, 100% { opacity: 1; }
       50%       { opacity: 0.5; }
     }
     .zone-approach-blink { animation: zone-approach 0.7s ease-in-out infinite; }
-
     /* ── IV wide-spread row highlight ────────────────────────────────── */
     .iv-wide-spread td { background: rgba(var(--t-amber-rgb),0.06); }
-
     /* ── Broker config modals ────────────────────────────────────────── */
     .modal-overlay {
       position: fixed; inset: 0; z-index: 200;
@@ -398,16 +370,13 @@
     }
     .vis-toggle:hover { color: var(--t-text); }
     .iv-wide-spread td:nth-child(4) { color: var(--t-amber) !important; font-weight: bold; }
-
     /* ── Scrollbar ────────────────────────────────────────────────────── */
     ::-webkit-scrollbar { width: 3px; height: 3px; }
     ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { background: var(--t-dim); border-radius: 2px; }
     ::-webkit-scrollbar-thumb:hover { background: var(--t-muted); }
-
     /* ── Navbar height ────────────────────────────────────────────────── */
     .navbar-h { height: 52px; }
-
     /* ── Modal overlay ────────────────────────────────────────────────── */
     .modal-box {
       background: var(--t-card); border: 1px solid var(--t-border);
@@ -415,11 +384,9 @@
       overflow-y: auto; padding: 24px; position: relative;
       box-shadow: 0 20px 60px rgba(0,0,0,0.15), 0 4px 16px rgba(0,0,0,0.07);
     }
-
     /* ── Horizontal scroll track (tab rows that must never break layout width) ── */
     .mobile-track { display: flex; }
     .mobile-track::-webkit-scrollbar { height: 0; display: none; }
-
     /* ── Mobile hamburger + slide-out drawer ────────────────────────────────
        Both the burger and the drawer are display:none on desktop (the drawer
        would otherwise sit off-screen-right and create a horizontal scrollbar).
@@ -439,13 +406,11 @@
       flex-direction: column;
     }
     .mobile-drawer.open { transform: translateX(0); }
-
     /* ── Position leg matrix: scrolls as a unit on narrow screens (header+rows aligned) ── */
     .pos-legs { overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: thin; }
     .pos-legs::-webkit-scrollbar { height: 4px; }
     .pos-legs::-webkit-scrollbar-thumb { background: var(--t-border); border-radius: 2px; }
     .pos-legs-inner { min-width: 460px; }
-
     /* ─────────────────────────────────────────────────────────────────────
        MOBILE / SMALL-SCREEN LAYOUT  (≤768px)
        Root causes of the clipped/half-blank dashboard on phones:
@@ -457,12 +422,10 @@
        ───────────────────────────────────────────────────────────────────── */
     @media (max-width: 768px) {
       html, body { overflow-x: hidden; }            /* kill horizontal clipping */
-
       /* Navbar: wrap into rows instead of overflowing; auto height */
       .navbar-h { height: auto; min-height: 52px; }
       header.navbar-h { flex-wrap: wrap; gap: 8px; padding: 8px 12px; }
       header.navbar-h .text-xl { font-size: 1.05rem; }   /* shrink the IST clock */
-
       /* On phones the whole right-side cluster + the horizontal sub-navs move into
          the hamburger drawer (single clean navigation surface, professional look). */
       .navbar-right { display: none !important; }
@@ -470,27 +433,22 @@
       .navbar-burger { display: inline-flex; align-items: center; justify-content: center; }
       .mobile-drawer { display: flex; }
       .mobile-drawer-backdrop { display: block; }
-
       /* Client top bar (name · TODAY'S P&L · status · start/stop) stacks cleanly */
       .client-topbar { gap: 10px !important; }
       .client-topbar > * { min-width: 0; }
-
       /* Tab rows → independent horizontal scroll, never widen the container */
       .mobile-track {
         flex-wrap: nowrap; overflow-x: auto; white-space: nowrap;
         -webkit-overflow-scrolling: touch; scrollbar-width: none; max-width: 100%;
       }
-
       /* Admin sub-nav: let the whole bar scroll, keep the right-side pills inline */
       .admin-subnav { overflow-x: auto; scrollbar-width: none; }
       .admin-subnav::-webkit-scrollbar { display: none; }
-
       /* Collapse rigid multi-column grids on phones. grid-cols-3/4 → 2-up (denser,
          Kite-like tiles, less endless scrolling); grid-cols-2 stays 2-up.
          (Responsive utilities like `grid-cols-1 lg:grid-cols-2` are unaffected —
          their base class is already grid-cols-1; only the bare desktop grids fold.) */
       .grid-cols-3, .grid-cols-4 { grid-template-columns: repeat(2, minmax(0,1fr)) !important; }
-
       /* FORM grids → single column: any grid that holds inputs/selects becomes one
          full-width field per row (standard mobile form UX, like Kite). Targets only
          grids containing a .t-input, so stat-tile grids (no inputs) stay 2-up. */
@@ -498,11 +456,9 @@
       /* Never let a fixed min-width input/select push past the viewport on phones. */
       input, select, textarea, .t-input { max-width: 100% !important; }
       [class*="min-w-["] { min-width: 0 !important; }
-
       /* Full-width content + tighter padding so cards fit a 320px viewport */
       main { padding: 12px !important; }
       .max-w-\[1800px\] { max-width: 100% !important; }
-
       /* ── Responsive table → stacked cards (Kite-style) ──────────────────────
          Any <table class="t-table"> with data-label on each <td>: on phones the
          header row is hidden and every row becomes a label↔value card. No sideways
@@ -535,10 +491,6 @@
     }
   </style>
 </head>
-
-<!-- ════════════════════════════════════════════════════════════════════════════
-     ALPINE COMPONENT
-════════════════════════════════════════════════════════════════════════════ -->
 <script>
 document.addEventListener('alpine:init', () => {
   Alpine.data('terminal', () => ({
@@ -3225,39 +3177,24 @@ function amoTest() {
 }
 
 </script>
-
-<!-- ════════════════════════════════════════════════════════════════════════════
-     BODY
-════════════════════════════════════════════════════════════════════════════ -->
 <body x-data="terminal" x-cloak x-init="adminTab='strategies'; loadStrategyConfig(); loadStrategyRegistry(); loadIndexConfig(adminSelectedIndex)" class="relative">
 <div class="relative z-10 flex flex-col min-h-screen">
-
-<!-- ═══════════════════════════════════════════════════════════════════════════
-     LOGIN SCREEN
-════════════════════════════════════════════════════════════════════════════ -->
 <div x-show="screen === 'login'"
      class="fixed inset-0 z-50 flex items-center justify-center p-4"
      style="background: var(--t-bg)">
-
   <div class="w-full max-w-sm slide-in">
-    <!-- Logo -->
     <div class="text-center mb-8">
       <div class="flex items-center justify-center gap-3 mb-2">
         <div class="font-display font-extrabold tracking-tight" style="font-size:2.5rem; color:var(--t-cyan); line-height:1">TERMINUS</div>
       </div>
       <div class="font-mono text-xs tracking-widest" style="color:var(--t-muted)">OPTIONCHAIN ALGOTRADER · NSE</div>
     </div>
-
-    <!-- Login card -->
     <div class="t-card p-6">
-      <!-- Role tabs -->
       <div class="flex gap-1 mb-5">
         <button class="login-tab" :class="{ active: loginTab==='admin' }" @click="loginTab='admin'">ADMIN</button>
         <button class="login-tab" :class="{ active: loginTab==='client' }" @click="loginTab='client'">CLIENT</button>
         <button class="login-tab" :class="{ active: loginTab==='register' }" @click="loginTab='register'">REGISTER</button>
       </div>
-
-      <!-- Admin form -->
       <div x-show="loginTab === 'admin'" class="space-y-3">
         <div>
           <div class="sec-label mb-1">USERNAME</div>
@@ -3270,8 +3207,6 @@ function amoTest() {
                  x-model="loginPass" @keydown.enter="login()" autocomplete="current-password" />
         </div>
       </div>
-
-      <!-- Client form -->
       <div x-show="loginTab === 'client'" class="space-y-3">
         <div>
           <div class="sec-label mb-1">CLIENT ID</div>
@@ -3284,8 +3219,6 @@ function amoTest() {
                  x-model="loginPin" @keydown.enter="login()" autocomplete="current-password" />
         </div>
       </div>
-
-      <!-- Registration form -->
       <div x-show="loginTab === 'register'" class="space-y-2.5">
         <div class="grid grid-cols-2 gap-2">
           <div>
@@ -3323,26 +3256,19 @@ function amoTest() {
           After registering, log in as CLIENT. Admin must approve before trading begins.
         </div>
       </div>
-
-      <!-- Error (admin/client login) -->
       <div x-show="loginTab !== 'register' && loginError" class="mt-3 font-mono text-xs px-2 py-1.5 rounded"
            style="color:var(--t-red); background:rgba(var(--t-red-rgb),0.08); border:1px solid rgba(var(--t-red-rgb),0.2)"
            x-text="loginError"></div>
-
       <button x-show="loginTab !== 'register'" class="btn-primary mt-5" @click="login()" :disabled="loginLoading">
         <span x-show="!loginLoading">LOGIN</span>
         <span x-show="loginLoading">AUTHENTICATING…</span>
       </button>
-
-      <!-- Forgot password link -->
       <div x-show="loginTab !== 'register' && !showReset" class="mt-3 text-center">
         <button type="button" @click="showReset=true; resetMsg=''"
                 class="text-xs text-blue-400 hover:text-blue-300 underline">
           Forgot password?
         </button>
       </div>
-
-      <!-- Password Reset Panel -->
       <div x-show="showReset" x-cloak class="mt-4 border-t border-gray-600 pt-4">
         <p class="text-xs text-gray-400 mb-3">Enter the reset token provided by your administrator.</p>
         <div x-show="resetMsg" x-text="resetMsg" class="mb-2 text-sm text-green-400"></div>
@@ -3372,31 +3298,19 @@ function amoTest() {
         </p>
       </div>
     </div>
-
-    <!-- Theme switcher on login screen -->
     <div class="flex flex-wrap justify-center gap-2 mt-4">
       <template x-for="k in ['daylight','light_pro','midnight','matrix','cyberpunk']" :key="k">
         <button class="theme-tab" :class="{ active: currentTheme===k }" @click="applyTheme(k)" x-text="themeLabel(k)"></button>
       </template>
     </div>
-
     <div class="text-center mt-4">
       <span class="font-mono text-xs" style="color:var(--t-muted)">Default admin: admin / admin123 · Default client PIN = client ID</span>
     </div>
   </div>
 </div>
-
-
-<!-- ═══════════════════════════════════════════════════════════════════════════
-     DASHBOARD (admin + client share the navbar)
-════════════════════════════════════════════════════════════════════════════ -->
 <div x-show="screen !== 'login'" class="flex flex-col min-h-screen">
-
-<!-- ── NAVBAR ──────────────────────────────────────────────────────────────── -->
 <header class="navbar-h sticky top-0 z-50 flex items-center justify-between px-4 border-b shrink-0"
         style="background:var(--t-bg); border-color:var(--t-border); border-bottom:1px solid var(--t-border); box-shadow: 0 1px 0 rgba(var(--t-cyan-rgb),0.12);">
-
-  <!-- Left: Logo + index tabs -->
   <div class="flex items-center gap-4">
     <div class="flex items-center gap-2">
       <div style="width:3px; height:22px; background:var(--t-cyan); border-radius:2px; flex-shrink:0;"></div>
@@ -3405,8 +3319,6 @@ function amoTest() {
         <span class="font-display text-xs tracking-widest ml-1" style="color:var(--t-muted)">v6</span>
       </div>
     </div>
-    <!-- Index tabs — ADMIN only. Clients pick the index inside the Positions section
-         (the SPOT/ATM card), so showing them in the navbar too is redundant clutter. -->
     <div class="w-px h-6 hide-on-mobile" style="background:var(--t-border)" x-show="authRole==='admin'"></div>
     <div class="mobile-track hide-on-mobile gap-1" x-show="authRole==='admin'">
       <template x-for="idx in indices" :key="idx">
@@ -3414,8 +3326,6 @@ function amoTest() {
       </template>
     </div>
   </div>
-
-  <!-- Mobile hamburger — opens the drawer (desktop: hidden via CSS) -->
   <button class="navbar-burger w-9 h-9 rounded-md border" @click="mobileNav = true"
           style="border-color:var(--t-border); background:var(--t-surface); color:var(--t-text)"
           aria-label="Open menu">
@@ -3423,10 +3333,7 @@ function amoTest() {
       <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
     </svg>
   </button>
-
-  <!-- Right: theme + role + IST + WS + logout (hidden on mobile → moved into drawer) -->
   <div class="navbar-right flex items-center gap-3">
-    <!-- Theme switcher -->
     <div class="relative">
       <button @click="showThemeMenu = !showThemeMenu"
               class="font-mono text-xs px-2 py-1 rounded border flex items-center gap-1.5"
@@ -3444,24 +3351,16 @@ function amoTest() {
         </template>
       </div>
     </div>
-
     <div class="w-px h-4" style="background:var(--t-border)"></div>
-
-    <!-- Role badge -->
     <div :class="authRole==='admin' ? 'badge-role-admin' : 'badge-role-client'"
          x-text="authRole==='admin' ? 'ADMIN' : authClientName || authClientId"></div>
-
-    <!-- IST Clock — large mono display -->
     <div class="flex flex-col items-end">
       <div class="font-mono text-xl font-medium tracking-widest leading-none"
            style="color:var(--t-bright)"
            x-text="istTime"></div>
       <div class="font-mono text-xs tracking-wider" style="color:var(--t-muted)">IST</div>
     </div>
-
     <div class="w-px h-6" style="background:var(--t-border)"></div>
-
-    <!-- WS badge -->
     <div class="flex items-center gap-1.5">
       <div class="w-2 h-2 rounded-full" :class="wsConnected ? 'conn-live' : ''"
            :style="`background:${wsConnected ? 'var(--t-green)' : 'var(--t-red)'}`"></div>
@@ -3469,10 +3368,7 @@ function amoTest() {
             :style="`color:${wsConnected ? 'var(--t-green)' : 'var(--t-red)'}`"
             x-text="wsConnected ? 'LIVE' : 'OFFLINE'"></span>
     </div>
-
     <div class="w-px h-6" style="background:var(--t-border)"></div>
-
-    <!-- Logout -->
     <button @click="logout()"
             class="font-ui text-xs font-semibold px-3 py-1.5 border rounded-md"
             style="color:var(--t-muted); border-color:var(--t-border); background:transparent;">
@@ -3480,18 +3376,13 @@ function amoTest() {
     </button>
   </div>
 </header>
-
-<!-- ── MOBILE NAV DRAWER (slide-out from right; phones only) ─────────────────── -->
 <div class="mobile-drawer-backdrop" :class="{open: mobileNav}" @click="mobileNav=false"></div>
 <aside class="mobile-drawer" :class="{open: mobileNav}">
-  <!-- Header -->
   <div class="flex items-center justify-between px-4 py-3 border-b" style="border-color:var(--t-border)">
     <span class="font-display font-extrabold tracking-tight" style="color:var(--t-cyan)">MENU</span>
     <button @click="mobileNav=false" class="w-8 h-8 rounded-md border flex items-center justify-center"
             style="border-color:var(--t-border); color:var(--t-muted)" aria-label="Close menu">✕</button>
   </div>
-
-  <!-- Identity + live status -->
   <div class="px-4 py-3 border-b" style="border-color:var(--t-border)">
     <div class="font-ui font-bold text-sm" style="color:var(--t-bright)"
          x-text="authRole==='admin' ? 'ADMIN' : (authClientName || authClientId)"></div>
@@ -3503,8 +3394,6 @@ function amoTest() {
       <span class="font-mono text-xs ml-auto" style="color:var(--t-muted)" x-text="istTime + ' IST'"></span>
     </div>
   </div>
-
-  <!-- CLIENT navigation -->
   <template x-if="authRole!=='admin' && clientPhase==='active'">
     <div class="py-2 border-b" style="border-color:var(--t-border)">
       <template x-for="m in [
@@ -3522,8 +3411,6 @@ function amoTest() {
       </template>
     </div>
   </template>
-
-  <!-- ADMIN navigation -->
   <template x-if="authRole==='admin'">
     <div class="py-2 border-b" style="border-color:var(--t-border)">
       <template x-for="m in [
@@ -3538,8 +3425,6 @@ function amoTest() {
       </template>
     </div>
   </template>
-
-  <!-- ADMIN active-index selector (moved out of the cramped header) -->
   <template x-if="authRole==='admin'">
     <div class="px-4 py-3 border-b" style="border-color:var(--t-border)">
       <div class="sec-label mb-2">Active Index</div>
@@ -3555,8 +3440,6 @@ function amoTest() {
       </div>
     </div>
   </template>
-
-  <!-- Theme picker -->
   <div class="px-4 py-3 border-b" style="border-color:var(--t-border)">
     <div class="sec-label mb-2">Theme</div>
     <div class="grid grid-cols-2 gap-1.5">
@@ -3570,8 +3453,6 @@ function amoTest() {
       </template>
     </div>
   </div>
-
-  <!-- Logout — right after theme so it's always reachable (not under the iOS toolbar) -->
   <div class="px-4 py-4">
     <button @click="logout(); mobileNav=false"
             class="w-full font-ui text-sm font-semibold px-3 py-2.5 border rounded-md"
@@ -3581,8 +3462,6 @@ function amoTest() {
   </div>
   <div style="height:env(safe-area-inset-bottom)"></div>
 </aside>
-
-<!-- ── ADMIN SUB-NAV ───────────────────────────────────────────────────────── -->
 <div x-show="screen === 'admin'" x-cloak
      class="admin-subnav hide-on-mobile sticky z-40 flex items-center border-b shrink-0"
      style="top:52px; background:var(--t-surface); border-color:var(--t-border)">
@@ -3598,9 +3477,7 @@ function amoTest() {
     <button class="admin-tab" :class="{active: adminTab==='clients'}"
             @click="window.location='/admin/clients'">&#x1F465; CLIENT PROFILES</button>
   </div>
-  <!-- Live feed status pills pinned to the right -->
   <div class="ml-auto flex items-center gap-4 px-5">
-    <!-- Active provider badge -->
     <span class="font-mono text-xs px-2 py-0.5 rounded"
           :style="systemStatus.connected
             ? 'color:var(--t-green);background:rgba(var(--t-green-rgb),0.08);border:1px solid rgba(var(--t-green-rgb),0.25)'
@@ -3626,14 +3503,8 @@ function amoTest() {
     </div>
   </div>
 </div>
-
-<!-- ═══════════════════════════════════════════════════════════════════════════
-     ADMIN LAYOUT
-════════════════════════════════════════════════════════════════════════════ -->
 <main x-show="screen === 'admin'"
       class="flex-1 flex flex-col gap-3 p-3 max-w-[1800px] w-full mx-auto">
-
-  <!-- ── Feeder auth failure banner ──────────────────────────────────────── -->
   <div x-show="authAlerts.feeder" x-cloak
        class="flex items-start gap-3 px-4 py-3 rounded font-mono text-xs"
        style="background:rgba(var(--t-red-rgb),0.12);border:1px solid rgba(var(--t-red-rgb),0.4);color:var(--t-red)">
@@ -3644,11 +3515,7 @@ function amoTest() {
     </div>
     <button @click="authAlerts.feeder=''" class="ml-auto text-lg leading-none" style="color:var(--t-muted)">&times;</button>
   </div>
-
-  <!-- ════════════════════ DASHBOARD TAB ════════════════════════════════════ -->
   <div x-show="adminTab === 'strategies'" class="flex flex-col gap-3 flex-1">
-
-  <!-- ── Instrument Selector ───────────────────────────────────────────── -->
   <div class="flex items-center gap-2 px-4 pt-3 pb-1 border-b" style="border-color:var(--t-border)">
     <span class="sec-label mr-2">INSTRUMENT</span>
     <template x-for="idx in ['NIFTY','BANKNIFTY','FINNIFTY','SENSEX','MIDCPNIFTY','CRUDEOIL','GOLDM','BTC','ETH']" :key="idx">
@@ -3662,13 +3529,8 @@ function amoTest() {
     <span x-show="indexConfigLoading" class="font-mono text-xs ml-2" style="color:var(--t-amber)">loading…</span>
     <span class="ml-auto font-mono text-xs" style="color:var(--t-muted)" x-text="adminSelectedIndex + ' — SELECT INSTRUMENT TO CONFIGURE'"></span>
   </div>
-
   <div class="grid grid-cols-1 xl:grid-cols-2 gap-4 p-4">
-
-  <!-- ══ LEFT COLUMN — Live Telemetry (selected index only) ════════════════ -->
   <div class="flex flex-col gap-3">
-
-    <!-- Strategy Status Cards -->
     <div class="t-card rounded p-4">
       <div class="flex items-center justify-between mb-3">
         <div class="sec-label">LIVE STRATEGY STATUS</div>
@@ -3695,7 +3557,6 @@ function amoTest() {
                   :style="`color:${s.running?'var(--t-green)':'var(--t-red)'}`"
                   x-text="s.running ? '● RUN' : '○ STOP'"></span>
           </div>
-          <!-- Sell Straddle V3: entry via rule builder; RSI/ADX shown as live reference only -->
           <template x-if="s.type==='sell_straddle'">
             <div class="grid grid-cols-4 gap-2 mb-2">
               <div class="text-center">
@@ -3716,10 +3577,6 @@ function amoTest() {
                      :style="`color:${s.entry_allowed?'var(--t-green)':'var(--t-red)'}`"
                      x-text="s.entry_allowed ? '✓ OK' : '✗ NO'"></div>
               </div>
-              <!-- 2026-08-26 fix: this 4th cell only shows plain SPOT when the
-                   underlying does NOT use mean-ATM -- for a futures_atm underlying,
-                   SPOT/FUT/MEAN are shown together in the row below instead, so
-                   SPOT is never rendered twice (was reported as "overlapping"). -->
               <div class="text-center" x-show="!s.uses_mean_atm">
                 <div class="font-mono text-xs" style="color:var(--t-muted)" title="Real spot index">SPOT</div>
                 <div class="font-mono text-xs" style="color:var(--t-text)"
@@ -3727,9 +3584,6 @@ function amoTest() {
               </div>
             </div>
           </template>
-          <!-- 2026-08-26, direct user spec: futures_atm underlyings trade off the MEAN
-               of real spot and futures, not either alone -- show all three so it's
-               visible which value actually drove strike selection. -->
           <template x-if="s.type==='sell_straddle' && s.uses_mean_atm">
             <div class="grid grid-cols-3 gap-2 mb-2">
               <div class="text-center">
@@ -3766,7 +3620,6 @@ function amoTest() {
               </div>
             </template>
           </div>
-          <!-- Granular tick-by-tick exit audit (admin-gated; only present when enabled) -->
           <template x-if="s.type==='sell_straddle' && _auditFor(s.underlying)">
             <div class="rounded p-2 mt-2" style="background:rgba(var(--t-cyan-rgb),0.04);border:1px solid rgba(var(--t-cyan-rgb),0.2)">
               <div class="flex items-center justify-between cursor-pointer"
@@ -3794,18 +3647,11 @@ function amoTest() {
         </div>
       </template>
     </div>
-
-  </div><!-- end left col -->
-
-  <!-- ══ RIGHT COLUMN — Rule Builder & Config ══════════════════════════════ -->
+  </div>
   <div class="flex flex-col gap-3">
-
-    <!-- Save result banner -->
     <div x-show="indexConfigMsg" class="rounded px-3 py-2 font-mono text-xs"
          :style="`background:${indexConfigOk?'rgba(16,185,129,0.1)':'rgba(239,68,68,0.1)'};border:1px solid ${indexConfigOk?'rgba(16,185,129,0.3)':'rgba(239,68,68,0.3)'};color:${indexConfigOk?'var(--t-green)':'var(--t-red)'}`"
          x-text="indexConfigMsg"></div>
-
-    <!-- ── Strategy tabs: SELL STRADDLE ──── -->
     <div class="t-card rounded" style="overflow:hidden">
       <div class="flex border-b" style="border-color:var(--t-border)">
         <button @click="adminStrategyTab='sell_straddle'"
@@ -3833,8 +3679,6 @@ function amoTest() {
           <span class="font-mono text-xs" style="color:var(--t-muted)" x-text="adminSelectedIndex"></span>
         </div>
       </div>
-
-      <!-- ══ D1 TRAP ZONES live monitor ═══════════════════════════════════ -->
       <div x-show="adminStrategyTab==='d1_trap'" class="p-3 flex flex-col gap-2"
            x-data="{
              books: [],
@@ -3867,26 +3711,17 @@ function amoTest() {
             </button>
           </div>
         </div>
-
-        <!-- No books -->
         <div x-show="!loading && books.length === 0" class="text-center py-4 font-mono text-xs" style="color:var(--t-muted)">
           No active D1 trap books — deploy a d1_trap_index or d1_trap_fno strategy first.
         </div>
-
-        <!-- One card per book -->
         <template x-for="b in books" :key="b.underlying">
           <div class="rounded p-2" style="background:var(--t-surface);border:1px solid var(--t-border)">
-            <!-- Header row -->
             <div class="flex items-center gap-2 cursor-pointer" @click="toggle(b.underlying)">
-              <!-- Status dot -->
               <span class="w-2 h-2 rounded-full flex-shrink-0"
                     :style="'background:'+(b.pending?'var(--t-green)':b.zones.some(z=>z.state==='MONITORING')?'var(--t-yellow,#facc15)':'var(--t-muted)')"></span>
-              <!-- Symbol -->
               <span class="font-display font-bold text-xs" style="color:var(--t-text)" x-text="b.underlying"></span>
-              <!-- Spot -->
               <span class="font-mono text-xs ml-1" style="color:var(--t-cyan)"
                     x-text="b.spot ? b.spot.toLocaleString('en-IN') : '—'"></span>
-              <!-- Status badge -->
               <span x-show="b.pending" class="font-mono text-xs px-1 rounded"
                     style="background:rgba(34,197,94,0.15);color:var(--t-green)">
                 ⚡ PENDING <span x-text="b.pending && b.pending.direction"></span>
@@ -3897,19 +3732,14 @@ function amoTest() {
               </span>
               <span x-show="b.position" class="font-mono text-xs px-1 rounded"
                     style="background:rgba(var(--t-cyan-rgb),0.12);color:var(--t-cyan)">IN TRADE</span>
-              <!-- Zone count -->
               <span class="ml-auto font-mono text-xs" style="color:var(--t-muted)"
                     x-text="b.total_zones + ' zones'"></span>
               <span class="font-mono text-xs" style="color:var(--t-muted)" x-text="expanded[b.underlying] ? '▲' : '▼'"></span>
             </div>
-
-            <!-- Pending trigger detail -->
             <div x-show="b.pending" class="mt-1 ml-4 font-mono text-xs" style="color:var(--t-green)">
               Trigger <span x-text="b.pending && b.pending.trigger"></span>
               · SL <span style="color:var(--t-red)" x-text="b.pending && b.pending.sl"></span>
             </div>
-
-            <!-- Zone table (collapsed by default) -->
             <div x-show="expanded[b.underlying]" class="mt-2 overflow-x-auto">
               <table class="w-full font-mono text-xs border-collapse">
                 <thead>
@@ -3949,8 +3779,6 @@ function amoTest() {
           </div>
         </template>
       </div>
-
-      <!-- ══ OI-ORB SCREENER per-deployment config ═════════════════════════ -->
       <div x-show="adminStrategyTab==='oi_orb_screener'" class="p-4 flex flex-col gap-3">
         <div x-show="oiOrbDeployments.length === 0 && !oiOrbConfigLoading" class="text-center py-4 font-mono text-xs" style="color:var(--t-muted)">
           No OI-ORB Screener deployments found — seed one via scripts/seed_oi_orb_screener_deployment.py first.
@@ -3970,7 +3798,6 @@ function amoTest() {
                 <span x-text="oiOrbConfigLoading ? '…' : '⟳'"></span>
               </button>
             </div>
-
             <div class="grid grid-cols-4 gap-2 t-card rounded p-3">
               <div class="col-span-4 sec-label" style="color:var(--t-amber)">SHORTLIST FILTERS</div>
               <div><div class="sec-label mb-1">OI SPURT MIN %</div>
@@ -3981,7 +3808,6 @@ function amoTest() {
                 <input class="t-input font-mono text-xs" type="number" step="0.1" x-model.number="oiOrbConfig.stock_move_abort_pct"/></div>
               <div><div class="sec-label mb-1">TOP N PER SIDE</div>
                 <input class="t-input font-mono text-xs" type="number" step="1" x-model.number="oiOrbConfig.top_n_per_side"/></div>
-
               <div class="col-span-4 sec-label mt-2" style="color:var(--t-amber)">TOP GAINER/LOSER PIPELINE (standalone, verify-only -- not wired into entries)</div>
               <div><div class="sec-label mb-1">OI SPURT MIN % (gainer/loser)</div>
                 <input class="t-input font-mono text-xs" type="number" step="0.1" x-model.number="oiOrbConfig.top_gainer_loser_oi_spurt_min_pct"/></div>
@@ -3991,13 +3817,11 @@ function amoTest() {
                 <div class="sec-label mb-1">PCHANGE MAX FILTER (Step 4)</div>
                 <input type="checkbox" x-model="oiOrbConfig.top_gainer_loser_pchange_filter_enabled"/>
               </div>
-
               <div class="col-span-4 sec-label mt-2" style="color:var(--t-amber)">REGIME (informational -- no entry mechanic currently reads this)</div>
               <div><div class="sec-label mb-1">NIFTY BULLISH %</div>
                 <input class="t-input font-mono text-xs" type="number" step="0.05" x-model.number="oiOrbConfig.nifty_bullish_pct"/></div>
               <div><div class="sec-label mb-1">NIFTY BEARISH %</div>
                 <input class="t-input font-mono text-xs" type="number" step="0.05" x-model.number="oiOrbConfig.nifty_bearish_pct"/></div>
-
               <div class="col-span-4 sec-label mt-2" style="color:var(--t-amber)">TIMING — SESSION 1 (MORNING, single point-in-time scan)</div>
               <div><div class="sec-label mb-1">ORB START</div>
                 <input class="t-input font-mono text-xs" type="text" placeholder="HH:MM" x-model="oiOrbConfig.orb_start"/></div>
@@ -4007,7 +3831,6 @@ function amoTest() {
                 <input class="t-input font-mono text-xs" type="text" placeholder="HH:MM" x-model="oiOrbConfig.scan_start"/></div>
               <div><div class="sec-label mb-1">POLL SECONDS</div>
                 <input class="t-input font-mono text-xs" type="number" step="1" x-model.number="oiOrbConfig.poll_seconds"/></div>
-
               <div class="col-span-4 sec-label mt-2" style="color:var(--t-amber)">TIMING — SESSION 2 (AFTERNOON re-scan, adds new stocks only)</div>
               <div class="flex items-center gap-2">
                 <div class="sec-label mb-1">TWO-SESSION SCAN</div>
@@ -4022,7 +3845,6 @@ function amoTest() {
               <div class="col-span-4 text-[10px]" style="color:var(--t-muted)">
                 No scanning happens outside these two windows — entry evaluation (VWAP retest) for whatever's already shortlisted keeps running continuously all day regardless of the scan gaps.
               </div>
-
               <div class="col-span-4 sec-label mt-2" style="color:var(--t-amber)">ENTRY / CANCEL</div>
               <div><div class="sec-label mb-1">ENTRY WINDOW START</div>
                 <input class="t-input font-mono text-xs" type="text" placeholder="HH:MM" x-model="oiOrbConfig.entry_window_start"/></div>
@@ -4035,7 +3857,6 @@ function amoTest() {
               <div class="col-span-3 text-[10px]" style="color:var(--t-amber)" x-show="oiOrbConfig.ignore_time_windows">
                 ⚠ Connectivity-test mode — bypasses real ORB/entry-window/scan-session timing. Turn OFF for real trading days.
               </div>
-
               <div class="col-span-4 sec-label mt-2" style="color:var(--t-amber)">EXIT RULES / STRIKE</div>
               <div><div class="sec-label mb-1">MAX MONITOR MIN</div>
                 <input class="t-input font-mono text-xs" type="number" step="1" x-model.number="oiOrbConfig.max_monitor_minutes"/></div>
@@ -4053,26 +3874,16 @@ function amoTest() {
                 SL/target now track the OPTION'S OWN premium (its own VWAP/bars), not the underlying stock's spot price. A bar closing below the option's own VWAP re-arms the SL at that bar's low; target = entry + (RR multiple × the armed SL's own distance from entry).
               </div>
             </div>
-
-            <!-- ── EXPERIMENTAL FILTERS (2026-08-25) ──────────────────────────
-                 All 5 always evaluate + log to their OWN dedicated file
-                 (logs/clients/oiorb_filter_{name}_{client}_{binding}_{date}.log)
-                 regardless of the toggle below -- the toggle ONLY controls
-                 whether that filter's verdict actually blocks a trade.
-                 Default OFF everywhere: compare the logs across a real
-                 session before enabling any of these as a real gate. -->
             <div class="grid grid-cols-4 gap-2 t-card rounded p-3" style="border:1px dashed rgba(var(--t-amber-rgb),0.35)">
               <div class="col-span-4 flex items-center justify-between">
                 <span class="sec-label" style="color:var(--t-amber)">EXPERIMENTAL FILTERS (log-only until enabled)</span>
                 <span class="text-[10px]" style="color:var(--t-muted)">Each always logs to its own file — toggle only controls whether it blocks a trade</span>
               </div>
-
               <div><div class="sec-label mb-1">CHAIN WATCH MAX STOCKS</div>
                 <input class="t-input font-mono text-xs" type="number" step="1" min="0" x-model.number="oiOrbConfig.chain_watch_max_stocks"/></div>
               <div class="col-span-3 text-[10px]" style="color:var(--t-amber)">
                 ⚠ Shared WS feed budget (~50 symbols/broker connection, across ALL strategies). Only the top N shortlisted stocks get chain-watching (OI Wall/Distance/PCR) — the rest still get OI-Spurt/price-move/Volume/OI-ROC. Raise only once a dedicated feeder exists for this strategy.
               </div>
-
               <div class="flex items-center gap-2">
                 <input type="checkbox" x-model="oiOrbConfig.oi_wall_check_enabled"/>
                 <div class="sec-label">OI WALL CHECK</div>
@@ -4080,7 +3891,6 @@ function amoTest() {
               <div><div class="sec-label mb-1">DOMINANCE RATIO</div>
                 <input class="t-input font-mono text-xs" type="number" step="0.1" x-model.number="oiOrbConfig.oi_wall_dominance_ratio"/></div>
               <div class="col-span-2 text-[10px]" style="color:var(--t-muted)">Blocks if the nearest resistance-side OI strike is ≥ this many× the average of other tracked strikes.</div>
-
               <div class="flex items-center gap-2">
                 <input type="checkbox" x-model="oiOrbConfig.distance_to_wall_enabled"/>
                 <div class="sec-label">DISTANCE TO WALL</div>
@@ -4088,7 +3898,6 @@ function amoTest() {
               <div><div class="sec-label mb-1">MIN DISTANCE %</div>
                 <input class="t-input font-mono text-xs" type="number" step="0.1" x-model.number="oiOrbConfig.distance_to_wall_min_pct"/></div>
               <div class="col-span-2 text-[10px]" style="color:var(--t-muted)">Blocks if the nearest OI wall sits closer than this % to the entry strike.</div>
-
               <div class="flex items-center gap-2">
                 <input type="checkbox" x-model="oiOrbConfig.pcr_gate_enabled"/>
                 <div class="sec-label">PCR GATE</div>
@@ -4098,7 +3907,6 @@ function amoTest() {
               <div><div class="sec-label mb-1">MIN PCR (PUT)</div>
                 <input class="t-input font-mono text-xs" type="number" step="0.05" x-model.number="oiOrbConfig.pcr_min_for_put"/></div>
               <div></div>
-
               <div class="flex items-center gap-2">
                 <input type="checkbox" x-model="oiOrbConfig.volume_confirmation_enabled"/>
                 <div class="sec-label">VOLUME CONFIRM</div>
@@ -4106,7 +3914,6 @@ function amoTest() {
               <div><div class="sec-label mb-1">MIN RATIO vs TRAILING AVG</div>
                 <input class="t-input font-mono text-xs" type="number" step="0.1" x-model.number="oiOrbConfig.volume_confirmation_min_ratio"/></div>
               <div class="col-span-2 text-[10px]" style="color:var(--t-muted)">Blocks if the breakout candle's volume is below this multiple of its trailing average.</div>
-
               <div class="flex items-center gap-2">
                 <input type="checkbox" x-model="oiOrbConfig.oi_roc_enabled"/>
                 <div class="sec-label">OI RATE-OF-CHANGE</div>
@@ -4117,7 +3924,6 @@ function amoTest() {
                 <input class="t-input font-mono text-xs" type="number" step="30" x-model.number="oiOrbConfig.oi_roc_lookback_sec"/></div>
               <div class="text-[10px]" style="color:var(--t-muted)">Additive to OI-Spurt% — does not replace it.</div>
             </div>
-
             <div class="grid grid-cols-4 gap-2 items-end">
               <div class="col-span-4 sec-label mt-2" style="color:var(--t-amber)">OPTION-CONTRACT-NATIVE MECHANIC (opt-in — replaces the 20-min VWAP-close SL for any position it opens)</div>
               <div class="flex items-center gap-2">
@@ -4142,7 +3948,6 @@ function amoTest() {
                 <input class="t-input font-mono text-xs" type="number" step="30" min="30" x-model.number="oiOrbConfig.option_native_poll_seconds"/></div>
               <div class="col-span-4 text-[10px]" style="color:var(--t-muted)">Target delta is fixed at +0.55 (CE) / -0.55 (PE) — the band above only widens/narrows which strikes are considered.</div>
             </div>
-
             <div class="flex items-center gap-3">
               <button class="btn-primary" style="max-width:200px" @click="saveOiOrbConfig()" :disabled="oiOrbConfigSaving">
                 <span x-show="!oiOrbConfigSaving">Save Config</span>
@@ -4156,11 +3961,7 @@ function amoTest() {
           </div>
         </template>
       </div>
-
-      <!-- ══ SELL STRADDLE config ══════════════════════════════════════════ -->
       <div x-show="adminStrategyTab==='sell_straddle'" class="p-4 flex flex-col gap-3">
-
-        <!-- Time settings -->
         <div class="grid grid-cols-3 gap-2">
           <div>
             <label class="sec-label">Entry Start</label>
@@ -4178,8 +3979,6 @@ function amoTest() {
                    x-model="(indexConfig[adminSelectedIndex]||{sell_straddle:{}}).sell_straddle.squareoff_time">
           </div>
         </div>
-
-        <!-- Workflow mode + max trades + min LTP -->
         <div class="grid grid-cols-3 gap-2">
           <div>
             <label class="sec-label">Entry Mode</label>
@@ -4250,8 +4049,6 @@ function amoTest() {
           </div>
           <div>
             <label class="sec-label">PRODUCT TYPE</label>
-            <!-- Toggle buttons (not a native <select>) so MIS/NRML stay readable & selectable on
-                 dark themes where the browser's native option list renders dark-on-dark. -->
             <div class="flex gap-2 mt-0.5 h-[34px]"
                  x-data="{ get _pt(){ return ((indexConfig[adminSelectedIndex]||{sell_straddle:{}}).sell_straddle.product_type)||'MIS'; } }">
               <template x-for="opt in ['MIS','NRML']" :key="opt">
@@ -4269,8 +4066,6 @@ function amoTest() {
             </p>
           </div>
         </div>
-
-        <!-- Sub-tabs for rule sections -->
         <div class="flex gap-1 mt-1 flex-wrap">
           <template x-for="[tab,label] in [['entry_begin','ENTRY (BEGIN)'],['reentry','RE-ENTRY'],['exit','EXIT'],['guardrails','GUARDRAILS'],['tsl','TSL'],['per_day','PER DAY']]" :key="tab">
             <button @click="adminSubTab=tab"
@@ -4281,8 +4076,6 @@ function amoTest() {
                     x-text="label"></button>
           </template>
         </div>
-
-        <!-- ── ENTRY (BEGIN) rules ───────────────────────────── -->
         <template x-if="adminSubTab==='entry_begin'">
           <div>
             <div class="sec-label mb-2">ENTRY CONDITIONS — BEGINNING OF SESSION</div>
@@ -4352,8 +4145,6 @@ function amoTest() {
             </template>
           </div>
         </template>
-
-        <!-- ── RE-ENTRY rules ────────────────────────────────── -->
         <template x-if="adminSubTab==='reentry'">
           <div>
             <div class="sec-label mb-2">RE-ENTRY CONDITIONS</div>
@@ -4419,8 +4210,6 @@ function amoTest() {
             </template>
           </div>
         </template>
-
-        <!-- ── EXIT rules ────────────────────────────────────── -->
         <template x-if="adminSubTab==='exit'">
           <div>
             <div class="sec-label mb-2">EXIT CONDITIONS</div>
@@ -4486,14 +4275,10 @@ function amoTest() {
             </template>
           </div>
         </template>
-
-        <!-- ── GUARDRAILS toggles ────────────────────────────── -->
         <template x-if="adminSubTab==='guardrails'">
           <template x-if="indexConfig[adminSelectedIndex] && indexConfig[adminSelectedIndex].sell_straddle">
             <div class="flex flex-col gap-2">
               <div class="sec-label mb-1">EXIT GUARDRAILS &amp; TARGETS</div>
-
-              <!-- ITM Pair Gate -->
               <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
                 <div class="flex items-center justify-between mb-1">
                   <span class="font-display font-bold text-xs" style="color:var(--t-amber)">ITM PAIR GATE
@@ -4508,8 +4293,6 @@ function amoTest() {
                 </div>
                 <p class="font-mono text-xs" style="color:var(--t-muted)">After any rollover: if CE &amp; PE are both ITM and cumulative P&amp;L &gt; 0 → close both, re-enter fresh. If cumulative ≤ 0 → watch each eval cycle until profit arrives, then close + re-enter.</p>
               </div>
-
-              <!-- ITM Roll Protection (70% budget) -->
               <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
                 <div class="flex items-center justify-between mb-1">
                   <span class="font-display font-bold text-xs" style="color:var(--t-amber)">ITM ROLL PROTECTION (70% BUDGET)
@@ -4524,8 +4307,6 @@ function amoTest() {
                 </div>
                 <p class="font-mono text-xs" style="color:var(--t-muted)">Applies to EVERY single-side roll (ltp_decay/ratio/vwap_rise/exit_rules/scalable_tsl/ITM pair gate), not just the ITM pair gate. Default OFF (2026-09-22) — the never-rolled leg on the same position gets no equivalent protection, an inconsistency under review.</p>
               </div>
-
-              <!-- Day-Low Reversal Exit -->
               <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
                 <div class="flex items-center justify-between mb-2">
                   <span class="font-display font-bold text-xs" style="color:var(--t-amber)">DAY-LOW REVERSAL EXIT
@@ -4545,8 +4326,6 @@ function amoTest() {
                   <span class="font-mono text-xs" style="color:var(--t-muted)">tracks the day's lowest CE+PE combined premium from entry to this time, then closes full &amp; stops for the day the moment the rate returns to that low</span>
                 </div>
               </div>
-
-              <!-- Post-15:00 Per-Leg R1 Exit (2026-08-28) -->
               <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
                 <div class="flex items-center justify-between mb-2">
                   <span class="font-display font-bold text-xs" style="color:var(--t-amber)">POST-15:00 PER-LEG R1 EXIT
@@ -4561,8 +4340,6 @@ function amoTest() {
                 </div>
                 <p class="font-mono text-xs" style="color:var(--t-muted)">From 15:00: arms when the rate hits the day-low (above) OR at/after 15:15 if the overall day P&amp;L is positive. Once armed, each leg closes independently the instant its own 1-min R1 breaches — the other leg keeps running solo on its own R1 until EOD. Uses the SAME frozen day-low value as the card above; turn ON only ONE of the two "close both" vs "per-leg" actions for a given binding.</p>
               </div>
-
-              <!-- Shadow VWAP (2026-08-28) -->
               <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
                 <div class="flex items-center justify-between mb-2">
                   <span class="font-display font-bold text-xs" style="color:var(--t-amber)">SHADOW VWAP
@@ -4577,8 +4354,6 @@ function amoTest() {
                 </div>
                 <p class="font-mono text-xs" style="color:var(--t-muted)">NEVER affects any live trading decision — purely logs cum(LTP×volume)/cum(volume) per strike every 60s next to the real ATP VWAP in this binding's own log file, for reviewing after market close which VWAP source is better.</p>
               </div>
-
-              <!-- Ratio Exit -->
               <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
                 <div class="flex items-center justify-between mb-2">
                   <span class="font-display font-bold text-xs" style="color:var(--t-amber)">RATIO EXIT</span>
@@ -4601,8 +4376,6 @@ function amoTest() {
                   <span class="font-mono text-xs" style="color:var(--t-muted)">block entry if CE/PE already skewed ≥ this (0 = off)</span>
                 </div>
               </div>
-
-              <!-- LTP Decay -->
               <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
                 <div class="flex items-center justify-between mb-2">
                   <span class="font-display font-bold text-xs" style="color:var(--t-amber)">LTP DECAY EXIT</span>
@@ -4619,8 +4392,6 @@ function amoTest() {
                   <span class="font-mono text-xs" style="color:var(--t-muted)">exit/roll when either leg LTP &lt; this</span>
                 </div>
               </div>
-
-              <!-- VWAP Rise SL -->
               <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
                 <div class="flex items-center justify-between mb-2">
                   <span class="font-display font-bold text-xs" style="color:var(--t-amber)">VWAP RISE SL</span>
@@ -4644,8 +4415,6 @@ function amoTest() {
                   <span class="font-mono text-xs" style="color:var(--t-muted)">exit when combined VWAP rises ≥ threshold% from session low</span>
                 </div>
               </div>
-
-              <!-- SL Cooldown -->
               <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
                 <div class="mb-2">
                   <span class="font-display font-bold text-xs" style="color:var(--t-cyan)">RE-ENTRY COOLDOWN (MINUTES)</span>
@@ -4661,19 +4430,13 @@ function amoTest() {
                   <span class="font-mono text-xs" style="color:var(--t-muted)">0 = disabled</span>
                 </div>
               </div>
-
-
             </div>
           </template>
         </template>
-
-        <!-- ── TSL config ────────────────────────────────────── -->
         <template x-if="adminSubTab==='tsl'">
           <template x-if="indexConfig[adminSelectedIndex] && indexConfig[adminSelectedIndex].sell_straddle">
             <div class="flex flex-col gap-2">
               <div class="sec-label mb-1">TRAILING STOP LOSS</div>
-
-              <!-- Trailing SL (% of credit) -->
               <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
                 <div class="flex items-center justify-between mb-2">
                   <span class="font-display font-bold text-xs" style="color:var(--t-cyan)">TRAILING SL</span>
@@ -4723,8 +4486,6 @@ function amoTest() {
                   Example: Lock=12.5, Floor=20 → activates at 12.5% profit; exits if it drops 20% below the peak.
                 </p>
               </div>
-
-              <!-- Scalable TSL -->
               <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
                 <div class="flex items-center justify-between mb-2">
                   <span class="font-display font-bold text-xs" style="color:var(--t-cyan)">SCALABLE TSL</span>
@@ -4776,12 +4537,9 @@ function amoTest() {
             </div>
           </template>
         </template>
-
-        <!-- ── PER DAY overrides ─────────────────────────────── -->
         <template x-if="adminSubTab==='per_day'">
           <template x-if="indexConfig[adminSelectedIndex] && indexConfig[adminSelectedIndex].sell_straddle">
             <div class="flex flex-col gap-3">
-              <!-- Global day-level % guardrails -->
               <div class="rounded p-3" style="background:var(--t-surface);border:1px solid rgba(var(--t-cyan-rgb),0.2)">
                 <div class="sec-label mb-2">GLOBAL DAY-LEVEL % GUARDRAILS
                   <span style="color:var(--t-muted);font-weight:400"> — based on % of initial trade credit. 0 = disabled.</span>
@@ -4803,7 +4561,6 @@ function amoTest() {
                   </div>
                 </div>
               </div>
-
               <div class="sec-label mb-1">PER-DAY OVERRIDES
                 <span style="color:var(--t-muted);font-weight:400"> — 0 falls back to global values above</span>
               </div>
@@ -4851,16 +4608,10 @@ function amoTest() {
             </div>
           </template>
         </template>
-
-      </div><!-- end sell_straddle config -->
-
-
-    </div><!-- end strategy tabs card -->
-
-    <!-- ── Control strip ───────────────────────────────────────────────── -->
+      </div>
+    </div>
     <div class="t-card rounded p-4" style="border:1px solid var(--t-border)">
       <div class="flex flex-col sm:flex-row gap-3">
-        <!-- Per-index save -->
         <button @click="saveIndexConfig()"
                 :disabled="indexConfigSaving"
                 class="flex-1 font-mono text-xs font-bold py-2.5 px-4 rounded transition-all"
@@ -4869,7 +4620,6 @@ function amoTest() {
           <span x-show="!indexConfigSaving" x-text="'SAVE & APPLY — ' + adminSelectedIndex"></span>
           <span x-show="indexConfigSaving">DEPLOYING…</span>
         </button>
-        <!-- Global RMS / indicators save -->
         <button @click="submitStrategyConfig()"
                 :disabled="strategyConfigSaving"
                 class="font-mono text-xs font-bold py-2.5 px-4 rounded transition-all"
@@ -4894,22 +4644,15 @@ function amoTest() {
            :style="`background:${strategyConfigOk?'rgba(16,185,129,0.1)':'rgba(239,68,68,0.1)'};border:1px solid ${strategyConfigOk?'rgba(16,185,129,0.3)':'rgba(239,68,68,0.3)'};color:${strategyConfigOk?'var(--t-green)':'var(--t-red)'}`"
            x-text="strategyConfigMsg"></div>
     </div>
-
-  </div><!-- end right col -->
-  </div><!-- end grid -->
-  </div><!-- end strategies tab -->
-
-  <!-- ════════════════════ FEEDER TAB ═══════════════════════════════════════ -->
-</main><!-- closes admin main, orig line 6415 -->
-<!-- ── FOOTER ─────────────────────────────────────────────────────────────── -->
+  </div>
+  </div>
+  </div>
+</main>
 <footer class="shrink-0 border-t px-5 py-2 flex items-center justify-between" style="border-color:var(--t-border)">
   <span class="font-mono text-xs" style="color:var(--t-muted)">TERMINUS · OptionChain AlgoTrader · NSE Options</span>
   <span class="font-mono text-xs" style="color:var(--t-muted)" x-text="'IST ' + istTime"></span>
 </footer>
-</div><!-- close screen!=login wrapper (orig ~10185) -->
-</div><!-- close z-10 flex-col outer wrapper (orig ~10186) -->
-
-
-
+</div>
+</div>
 </body>
 </html>
