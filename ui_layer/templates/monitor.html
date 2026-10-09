@@ -1241,7 +1241,10 @@ document.addEventListener('alpine:init', () => {
       // was aborted and is now awaiting the client's own manual price entry --
       // low frequency is fine, this isn't a fast-moving feed, just needs to
       // surface promptly enough for the client to notice and act.
-      setInterval(() => { if (this.screen === 'client') this.checkPendingManualEntries(); }, 10000);
+      // Only the positions tab renders pendingManualEntry[] -- gated (2026-10-09)
+      // so the other 4 client pages don't fire one API call per sell_straddle
+      // deployment every 10s for a result they never display.
+      setInterval(() => { if (this.screen === 'client' && this.clientMenu === 'positions') this.checkPendingManualEntries(); }, 10000);
       // Background P&L refresh for positions tab. Trade events (entry/exit/roll) are
       // pushed instantly via WebSocket, so this poll only needs to catch P&L drift.
       setInterval(() => { if (this.screen === 'client' && this.clientMenu === 'positions') this.loadClientPositions(); }, 2000);
