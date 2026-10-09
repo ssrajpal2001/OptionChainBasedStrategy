@@ -8447,6 +8447,7 @@ function amoTest() {
                     <div x-data="{
                            _vp: null,
                            _checked: false,
+                           _remarksOpen: false,
                            async _load() {
                              try {
                                const tok = localStorage.getItem('terminus_token') || (authToken||'');
@@ -8496,6 +8497,28 @@ function amoTest() {
                               <span style="color:var(--t-cyan)">watching for re-entry: <span x-text="Object.keys(_vp.awaiting_reentry).filter(k=>_vp.awaiting_reentry[k]).join(',')"></span></span>
                             </template>
                           </div>
+                          <!-- 2026-10-09: tick-by-tick VP/OI decision trail (LVN check,
+                               POC-reversal check, which outcome fired) -- same role as the
+                               generic EXIT AUDIT panel above, but for the VP/OI gate
+                               specifically. Populated from VpOiRegimeAdapter.remarks via
+                               monitoring_state(). -->
+                          <template x-if="(_vp.remarks||[]).length">
+                            <div class="mt-2 pt-2" style="border-top:1px solid rgba(var(--t-purple-rgb,160,100,255),0.18)">
+                              <div class="flex items-center justify-between cursor-pointer"
+                                   @click="_remarksOpen = !_remarksOpen">
+                                <span style="color:var(--t-muted)">DECISION TRAIL <span x-text="'('+_vp.remarks.length+')'"></span></span>
+                                <span style="color:var(--t-muted)" x-text="_remarksOpen ? '▾' : '▸'"></span>
+                              </div>
+                              <div x-show="_remarksOpen" class="mt-1 space-y-0.5">
+                                <template x-for="r in [..._vp.remarks].reverse()" :key="r.ts">
+                                  <div class="flex gap-2">
+                                    <span style="color:var(--t-dim)" x-text="new Date(r.ts*1000).toLocaleTimeString()"></span>
+                                    <span style="color:var(--t-text)" x-text="r.text"></span>
+                                  </div>
+                                </template>
+                              </div>
+                            </div>
+                          </template>
                         </div>
                       </template>
                     </div>

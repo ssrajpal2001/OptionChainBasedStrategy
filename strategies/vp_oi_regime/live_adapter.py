@@ -15,8 +15,9 @@ regime classification both updating off real data).
 """
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import Deque, Dict, Optional
 
 from strategies.vp_oi_regime.decision_matrix import DecisionResult, NineEmaTrailingStop, decide
 from strategies.vp_oi_regime.futures_rollover import FuturesRolloverTracker
@@ -67,6 +68,12 @@ class VpOiRegimeAdapter:
     # one. Cleared on reset() and whenever the regime leaves Highly
     # Bearish/Bullish for that side.
     shifted_strike: Dict[str, int] = field(default_factory=dict, init=False)
+    # 2026-10-09, direct user spec: client-visible tick-by-tick trail of
+    # VP/OI decision-point reasoning (LVN check, POC-reversal check, which
+    # of the 3 outcomes fired) -- same "recent remarks" pattern OI-Flow's
+    # own telemetry already uses, surfaced via monitoring_state() ->
+    # GET /api/sellstraddle/vpoi_status -> monitor.html's VP/OI panel.
+    remarks: Deque[str] = field(default_factory=lambda: deque(maxlen=30), init=False)
 
     def __post_init__(self) -> None:
         self._vp = SessionVolumeProfile(rows=80, value_area_pct=0.70)
@@ -89,6 +96,12 @@ class VpOiRegimeAdapter:
         self.last_poc = self.last_vah = self.last_val = None
         self.last_snapshot = None
         self.shifted_strike = {}
+        self.remarks = deque(maxlen=30)
+
+    def add_remark(self, text: str, ts: float = 0.0) -> None:
+        """Append one human-readable line to the client-visible trail."""
+        import time as _t
+        self.remarks.append({"ts": ts or _t.time(), "text": text})
 
     # ── Feed methods (called by the engine as ticks/bars arrive) ──────────
     def on_futures_bar(self, high: float, low: float, volume: float, oi: float, ts: float) -> None:
@@ -183,4 +196,5 @@ class VpOiRegimeAdapter:
             "naked_state": self.naked_state,
             "naked_entry_premium": dict(self.naked_entry_premium),
             "awaiting_reentry": dict(self.awaiting_reentry),
+            "remarks": list(self.remarks),
         }

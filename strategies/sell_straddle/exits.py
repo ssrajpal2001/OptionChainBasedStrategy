@@ -2971,12 +2971,18 @@ class ExitMixin:
             return  # Volume Profile not warm yet -- safe no-op, same as before this feature existed
         lvn_side = "below" if side == "PE" else "above"
         if snap.in_lvn(spot, lvn_side):
+            adapter.add_remark(
+                f"{side}: LVN acceptance confirmed {lvn_side} "
+                f"{'VAL' if side=='PE' else 'VAH'} (spot={spot:.2f}) -> exiting leg + hedge")
             adapter.shifted_strike.pop(side, None)
             await self._vp_oi_exit_leg(side, hedge, now)
             return
 
         reversed_through_poc = (spot >= snap.poc) if side == "PE" else (spot <= snap.poc)
         if reversed_through_poc:
+            adapter.add_remark(
+                f"{side}: price reversed back through POC ({snap.poc:.2f}, spot={spot:.2f}) "
+                f"without LVN confirmation -> thesis failed, exiting leg flat (no hedge)")
             adapter.shifted_strike.pop(side, None)
             await self._vp_oi_exit_leg_flat(side, now)
             return
@@ -2996,15 +3002,19 @@ class ExitMixin:
                 "live quote there yet; retrying next cycle", side, new_strike,
             )
             return
+        old_strike = int(leg.strike)
         close_ev = await self._close_leg(side, "vp_oi_regime_otm_shift", now)
         if getattr(close_ev, "close_aborted", False):
             return
         await self._open_leg(side, new_strike, new_ltp, now, "vp_oi_regime_otm_shift")
         adapter.shifted_strike[side] = new_strike
+        adapter.add_remark(
+            f"{side}: still in near zone (spot={spot:.2f}, POC={snap.poc:.2f}), no LVN "
+            f"confirmation yet -> shifted OTM {old_strike}->{new_strike}")
         self._persist()
         self._clog.info(
             "VP/OI REGIME — %s leg shifted OTM %d -> %d (no LVN confirmation yet; "
-            "watching for breakout)", side, leg.strike, new_strike,
+            "watching for breakout)", side, old_strike, new_strike,
         )
 
     async def _vp_oi_exit_leg_flat(self, side: str, now: datetime) -> None:
@@ -3067,6 +3077,9 @@ class ExitMixin:
             "NAKED_BOTH" if len(self._vp_oi_naked_leg) == 2 else f"NAKED_{side}",
             {s: d["entry"] for s, d in self._vp_oi_naked_leg.items()},
         )
+        self._vp_oi_adapter.add_remark(
+            f"{side}: hedge bought {h_strike}@{h_fill.fill_price:.2f} -- naked long armed, "
+            f"riding with 9-EMA trailing stop")
         self._clog.info("VP/OI REGIME — hedge %s%d BUY@%.2f confirmed (naked long armed, 9-EMA trailing)",
                          side, h_strike, h_fill.fill_price)
 
@@ -3145,6 +3158,9 @@ class ExitMixin:
                                  side)
             return
         pnl = float(fill.fill_price or 0.0) - leg_info["entry"]
+        self._vp_oi_adapter.add_remark(
+            f"{side}: 9-EMA stop hit on naked long {leg_info['strike']} @ {ltp:.2f} "
+            f"(pnl={pnl:+.2f}pts) -- Re-entry Rule now watching for POC reclaim")
         self._clog.info("VP/OI REGIME — naked long %s%d stopped out @ %.2f pnl=%.2fpts; "
                          "Re-entry Rule now watching", side, leg_info["strike"], ltp, pnl)
 
@@ -3198,6 +3214,8 @@ class ExitMixin:
             return
         strike, ltp = picked
         await self._open_leg(side, int(strike), float(ltp), now, "vp_oi_reentry_resell")
+        self._vp_oi_adapter.add_remark(
+            f"{side}: Re-entry Rule fired (fakeout confirmed) -- fresh short re-sold @ {int(strike)}")
         self._clog.info("VP/OI REGIME — Re-entry Rule fired, %s leg re-sold @ strike=%d", side, int(strike))
 
     async def _check_vp_oi_naked_legs_standalone(self, now: datetime) -> None:
