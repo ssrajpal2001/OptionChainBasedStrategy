@@ -1,4 +1,4 @@
-"""Build script: splits monitor.html into separate admin/client per-tab
+r"""Build script: splits monitor.html into separate admin/client per-tab
 pages (ui_layer/templates/pages/*.html), served by dashboard_server.py's
 /admin/{tab} and /client/{tab} routes -- so a visitor only downloads
 their own role's markup instead of the full ~681KB monolithic file.
@@ -8,39 +8,35 @@ generated artifacts, not hand-maintained -- editing them directly will
 be silently lost the next time this script runs. Run from the repo
 root: `python scripts/build_pages.py`.
 
-All line-number boundaries below are hardcoded against monitor.html's
-CURRENT structure (see _OFF below for the one-time-already-applied
-offset history) -- if monitor.html's line count changes anywhere BEFORE
-these boundaries (i.e. almost any edit to the login screen, navbar, or
-shared JS component), every boundary after that point shifts and this
-script's assertions will catch structural mismatches but NOT silently
-wrong output -- re-verify boundaries (grep for the x-show="screen==='
-admin'"/"client'" markers etc., same technique used to build this the
-first time) if assertions fail or output looks wrong after a big edit.
+All line-number boundaries below are ABSOLUTE line numbers in the current
+monitor.html, found by grepping stable, unique text anchors (not a
+hand-tracked offset from some earlier baseline -- that approach was used
+through 2026-10-09 and became unreliable once edits started landing in the
+MIDDLE of the file instead of only before all boundaries, since different
+regions then shift by different amounts). RUN THIS AGAIN AFTER EVERY
+monitor.html EDIT, and if an assertion fails, re-derive ALL boundaries
+fresh the same way rather than patching one number:
 
-Verified structure (via stack-based div-depth tracing, not the original
-file's own HTML comments, several of which are stale/mislabeled):
-  <body>
-    <div class="z-10 flex-col">          [3228]  OUTERMOST, closes @10186
-      <div x-show="screen!=='login'">    [3388]  closes @10185
-        <header> navbar+drawer </header> [3391-3581]
-        admin subnav + <main admin>      [3583-6415] self-contained, balanced
-        <main x-show="screen==='client'">[6421]  closes @10176 (</main>)
-          <div x-show="clientPhase==='active'"> [6664]  closes @10174
-            topbar + subnav              [6667-6706]
-            5 sibling tabs               [6709-10173]
-        <footer>                         [10179-10183]
-      [broker-add modal -- client only, sibling of the z-10 div]  [10189-10272]
+    grep -n '<body x-data="terminal"' ui_layer/templates/monitor.html
+    grep -n 'x-show="adminTab === .dashboard.\|strategies.\|feeder.\|trap.\|clients.'"'"' ui_layer/templates/monitor.html
+    grep -n 'x-show="clientMenu === .dashboard.\|strategies.\|brokers.\|positions.\|history.'"'"' ui_layer/templates/monitor.html
+    grep -n '<main x-show="screen === .client.'"'"'\|^<footer\|end admin layout\|end clients tab\|BROKER ADD MODAL\|^</body>' ui_layer/templates/monitor.html
 
-  CONFIRMED PRE-EXISTING BUG (not introduced by this split): within the
-  "positions" tab (7894-9983), two divs never close inside that range --
-  div(7894) itself (the tab wrapper) and div(7931) (a nested "broker
-  tabs" wrapper). In the original monolithic file this is silently
-  absorbed by the browser's forgiving parser; in split files it must be
-  patched explicitly so client_positions.html is well-formed on its own.
-  The orphaned closing tag this produces downstream (original line 10174,
-  commented "end active") is EXCLUDED from history's extracted range
-  since its true matching open no longer exists in that file.
+Each tab's content ends exactly one line before the NEXT tab's own
+x-show/x-if marker (or, for the last tab in each group, at the line noted
+below). ADMIN_SHELL/CLIENT_SHELL are everything between the shared chrome
+and the first tab's own marker.
+
+CONFIRMED PRE-EXISTING BUG (not introduced by this split, still present):
+within the "positions" tab, two divs never close inside that range -- the
+tab's own outer wrapper div and a nested "broker tabs" wrapper div, each
+paired with an unclosed x-for template. In the original monolithic file
+this is silently absorbed by the browser's forgiving parser; in split
+files it must be patched explicitly (see the 4 PATCH lines in
+write_client_page) so client_positions.html is well-formed on its own.
+The orphaned closing tag this produces downstream (commented "end active"
+in the source) is EXCLUDED from history's extracted range since its true
+matching open no longer exists in that file.
 """
 import os
 import re
@@ -53,42 +49,30 @@ lines = open(SRC, encoding="utf-8").read().split("\n")
 def seg(a, b):
     return "\n".join(lines[a - 1:b])
 
-_OFF = -12  # 2026-10-09: monitor.html grew by 5 lines (login/session-restore
-            # redirect edits), then 4 more (per-tab gating for loadTelemetry/
-            # loadIvMatrix/loadAdminEvents), then 3 more (gating
-            # checkPendingManualEntries to the positions tab), then shrank by
-            # 24 (CDN Tailwind script + inline config replaced with one
-            # <link> to the static build) -- cumulative offset for every
-            # boundary AT OR BEFORE original line ~8471 (inside the
-            # positions tab's own content).
-_OFF2 = _OFF + 18 + 23  # same as _OFF, plus 18 lines (raw Call/Put/Future OI
-                        # trend row) plus 23 more (prev->current/diff/%/
-                        # threshold-distance breakdown row), both inserted
-                        # at original line ~8471-ish -- use for every
-                        # boundary AFTER that insertion point, since a
-                        # mid-file insertion shifts only what comes after
-                        # it, not what comes before.
-
-HEAD_LOGIN_NAV = seg(1, 3582 + _OFF)       # head + shared JS + login + top navbar + mobile drawer
-ADMIN_SHELL    = seg(3583 + _OFF, 3646 + _OFF)    # admin subnav + <main admin> open + banner alerts
-CLIENT_SHELL   = seg(6417 + _OFF, 6708 + _OFF)    # <main client> open + alerts + onboarding/pending + topbar + subnav
-FOOTER_ONLY    = seg(10179 + _OFF2, 10183 + _OFF2)  # just <footer>...</footer>, no surrounding div-closes
-BROKER_MODAL   = seg(10189 + _OFF2, 10272 + _OFF2)  # client-only broker-add modal
-FINAL_CLOSE    = seg(10273 + _OFF2, 10277 + _OFF2)  # blank lines + </body></html>
+# 2026-10-10: re-derived as absolute line numbers (see the module docstring
+# for the grep commands used) after the previous hand-tracked-offset scheme
+# broke on an edit landing between ADMIN_SHELL and CLIENT_SHELL instead of
+# before both.
+HEAD_LOGIN_NAV = seg(1, 3573)         # head + shared JS + login + top navbar + mobile drawer
+ADMIN_SHELL    = seg(3574, 3637)      # admin subnav + <main admin> open + banner alerts
+CLIENT_SHELL   = seg(6433, 6720)      # <main client> open + alerts + onboarding/pending + topbar + subnav
+FOOTER_ONLY    = seg(10232, 10236)    # just <footer>...</footer>, no surrounding div-closes
+BROKER_MODAL   = seg(10242, 10325)    # client-only broker-add modal
+FINAL_CLOSE    = seg(10326, 10330)    # blank lines + </body></html>
 
 ADMIN_TABS = {
-    "dashboard":  (3647 + _OFF, 4096 + _OFF, "adminTab='dashboard'"),
-    "strategies": (4097 + _OFF, 5350 + _OFF, "adminTab='strategies'; loadStrategyConfig(); loadStrategyRegistry(); loadIndexConfig(adminSelectedIndex)"),
-    "feeder":     (5351 + _OFF, 5782 + _OFF, "adminTab='feeder'"),
-    "trap":       (5783 + _OFF, 5930 + _OFF, "adminTab='trap'"),
-    "clients":    (5931 + _OFF, 6414 + _OFF, "adminTab='clients'; loadClientProfiles(); loadRiskSummary()"),
+    "dashboard":  (3638, 4087, "adminTab='dashboard'"),
+    "strategies": (4088, 5362, "adminTab='strategies'; loadStrategyConfig(); loadStrategyRegistry(); loadIndexConfig(adminSelectedIndex)"),
+    "feeder":     (5363, 5794, "adminTab='feeder'"),
+    "trap":       (5795, 5942, "adminTab='trap'"),
+    "clients":    (5943, 6425, "adminTab='clients'; loadClientProfiles(); loadRiskSummary()"),
 }
 CLIENT_TABS = {
-    "dashboard":  (6709 + _OFF, 6785 + _OFF, "clientMenu='dashboard'; loadClientPositions()"),
-    "strategies": (6786 + _OFF, 6920 + _OFF, "clientMenu='strategies'"),
-    "brokers":    (6921 + _OFF, 7893 + _OFF, "clientMenu='brokers'"),
-    "positions":  (7894 + _OFF, 9983 + _OFF2, "clientMenu='positions'; loadClientPositions()"),
-    "history":    (9984 + _OFF2, 10173 + _OFF2, "clientMenu='history'; loadClientHistory()"),  # excludes orphaned line (orig 10174)
+    "dashboard":  (6721, 6797, "clientMenu='dashboard'; loadClientPositions()"),
+    "strategies": (6798, 6932, "clientMenu='strategies'"),
+    "brokers":    (6933, 7905, "clientMenu='brokers'"),
+    "positions":  (7906, 10036, "clientMenu='positions'; loadClientPositions()"),
+    "history":    (10037, 10225, "clientMenu='history'; loadClientHistory()"),  # excludes orphaned line
 }
 
 # ── Convert tab-click handlers (in the SHARED fragments) to real navigation ──
@@ -179,10 +163,10 @@ def write_client_page(fname: str, body_init: str, tab_html: str, is_positions: b
         # loop (7940), "broker tabs" div wrapper (7931), or its own outer
         # tab-wrapper div (7894) within its extracted range. LIFO order,
         # innermost first.
-        parts.append('</template><!-- PATCH: closes per-deployment loop (orig template@7981) -->')
-        parts.append('</template><!-- PATCH: closes per-broker loop (orig template@7940) -->')
-        parts.append('</div><!-- PATCH: closes nested broker-tabs wrapper (orig div@7931) -->')
-        parts.append('</div><!-- PATCH: closes positions tab wrapper (orig div@7894) -->')
+        parts.append('</template><!-- PATCH: closes per-deployment loop -->')
+        parts.append('</template><!-- PATCH: closes per-broker loop -->')
+        parts.append('</div><!-- PATCH: closes nested broker-tabs wrapper -->')
+        parts.append('</div><!-- PATCH: closes positions tab wrapper -->')
     parts += [
         '</div><!-- close clientPhase==active wrapper (orig ~10174) -->',
         '</main><!-- closes client main, orig line 10176 -->',

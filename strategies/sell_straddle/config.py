@@ -100,6 +100,18 @@ class SellStraddleConfig:
     # omits this key and is byte-for-byte unaffected.
     vp_oi_enabled: bool
 
+    # 2026-10-10, direct user ask: was hardcoded inside OiRegimeTracker
+    # (strikes below this % of the band's peak OI are dropped before
+    # summing into the Call/Put OI total) -- exposed here so it's tunable
+    # from the admin Guardrails tab without a code change, since the user
+    # wants to optimize this value against real forward data.
+    vp_oi_noise_floor_pct: float
+    # 2026-10-10, same ask: the wall-hold override threshold -- when spot is
+    # within hard_wall_pts of the strike holding the most OI on a side, that
+    # wall's own OI must move more than this % before its trend overrides
+    # the band-wide calculation (otherwise forced to "No Change").
+    vp_oi_override_pct: float
+
 
 def _apply_client_overrides(
     cfg: SellStraddleConfig,
@@ -259,6 +271,8 @@ def load_sell_straddle_config(
     day_low_freeze_time = _parse_time(ss.get("day_low_freeze_time", "15:00"))
 
     vp_oi_enabled = bool(ss.get("vp_oi_enabled", False))
+    vp_oi_noise_floor_pct = float(ss.get("vp_oi_noise_floor_pct", 15.0))
+    vp_oi_override_pct = float(ss.get("vp_oi_override_pct", 30.0))
 
     # Post-15:00 per-leg R1 exit (2026-08-28, direct user spec): replaces the
     # old day-low-reversal-exit's own action ("close both legs") for
@@ -364,6 +378,8 @@ def load_sell_straddle_config(
         day_low_exit_enabled=day_low_exit_enabled,
         day_low_freeze_time=day_low_freeze_time,
         vp_oi_enabled=vp_oi_enabled,
+        vp_oi_noise_floor_pct=vp_oi_noise_floor_pct,
+        vp_oi_override_pct=vp_oi_override_pct,
         post1500_exit_enabled=post1500_exit_enabled,
         shadow_vwap_enabled=shadow_vwap_enabled,
         vwap_source=vwap_source,
@@ -463,7 +479,9 @@ class ConfigMixin:
             if getattr(self, "_vp_oi_adapter", None) is None:
                 from strategies.vp_oi_regime.live_adapter import VpOiRegimeAdapter
                 step = self._cfg.exchange.strike_steps.get(self._underlying, 50.0) if self._cfg else 50.0
-                self._vp_oi_adapter = VpOiRegimeAdapter(strike_step=step)
+                self._vp_oi_adapter = VpOiRegimeAdapter(
+                    strike_step=step, noise_floor_pct=cfg.vp_oi_noise_floor_pct,
+                    override_pct=cfg.vp_oi_override_pct)
         else:
             self._vp_oi_adapter = None
 

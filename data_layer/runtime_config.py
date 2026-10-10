@@ -60,6 +60,16 @@ _SS_INDEX_DEFAULT: Dict[str, Any] = {
     # to that frozen low. Opt-in, unvalidated -- default OFF.
     "day_low_exit_enabled": False,
     "day_low_freeze_time": "15:00",
+    # VP/OI regime (2026-10-04): strikes below this % of the band's own peak
+    # OI are dropped before summing into the Call/Put OI total. 2026-10-10,
+    # direct user ask: exposed here (tunable from the admin Guardrails tab)
+    # instead of a hardcoded constant, to optimize against real forward data.
+    "vp_oi_noise_floor_pct": 15.0,
+    # Wall-hold override: when spot is within 50pts of the strike holding the
+    # most OI on a side, that wall's own OI must move more than this % before
+    # its reading overrides the band-wide Call/Put OI trend (otherwise forced
+    # to "No Change"). Same tunability ask as noise_floor_pct above.
+    "vp_oi_override_pct": 30.0,
     # Post-15:00 per-leg R1 exit (2026-08-28): replaces day_low_exit's own
     # "close both legs" action with an independent per-leg R1 watch for a
     # binding that opts into this instead. 2026-08-31, direct user spec:

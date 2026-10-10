@@ -1858,6 +1858,7 @@ document.addEventListener('alpine:init', () => {
         itm_roll_protection_enabled: false,
         day_low_exit_enabled: false, day_low_freeze_time: '15:00',
         post1500_exit_enabled: true, shadow_vwap_enabled: true,
+        vp_oi_noise_floor_pct: 15.0, vp_oi_override_pct: 30.0,
         ratio_exit:    { enabled: false, threshold: 3.0, max_entry_ratio: 0 },
         ltp_decay:     { enabled: false, ltp_exit_min: 20.0 },
         vwap_rise_sl:  { enabled: false, tf: 1, threshold: 1.0 },
@@ -1902,6 +1903,8 @@ document.addEventListener('alpine:init', () => {
       if (ss.day_low_freeze_time === undefined) ss.day_low_freeze_time = '15:00';
       if (ss.post1500_exit_enabled === undefined) ss.post1500_exit_enabled = true;
       if (ss.shadow_vwap_enabled === undefined) ss.shadow_vwap_enabled = true;
+      if (ss.vp_oi_noise_floor_pct === undefined) ss.vp_oi_noise_floor_pct = 15.0;
+      if (ss.vp_oi_override_pct === undefined) ss.vp_oi_override_pct = 30.0;
       // Migrate legacy tf-multiplier → direct minutes (× 5) if the new field is absent.
       if (ss.sl_cooldown_minutes === undefined)
         ss.sl_cooldown_minutes = (ss.sl_cooldown_tf_multiplier !== undefined ? ss.sl_cooldown_tf_multiplier * 5 : 5);
@@ -4300,6 +4303,25 @@ function amoTest() {
                   <input type="time" class="t-input" style="width:110px"
                          x-model="indexConfig[adminSelectedIndex].sell_straddle.day_low_freeze_time">
                   <span class="font-mono text-xs" style="color:var(--t-muted)">tracks the day's lowest CE+PE combined premium from entry to this time, then closes full &amp; stops for the day the moment the rate returns to that low</span>
+                </div>
+              </div>
+              <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
+                <div class="flex items-center justify-between mb-2">
+                  <span class="font-display font-bold text-xs" style="color:var(--t-amber)">VP/OI REGIME — NOISE FLOOR
+                    <span style="color:var(--t-muted);font-weight:400"> — strikes below this % of the band's own peak OI are dropped before summing into the Call/Put OI total</span>
+                  </span>
+                </div>
+                <div class="flex items-center gap-2">
+                  <label class="sec-label">Noise Floor %</label>
+                  <input type="number" step="0.5" min="0" max="100" class="t-input" style="width:90px"
+                         x-model.number="indexConfig[adminSelectedIndex].sell_straddle.vp_oi_noise_floor_pct">
+                  <span class="font-mono text-xs" style="color:var(--t-muted)">applies to any binding with VP/OI enabled (strategy_params.vp_oi_enabled); default 15%</span>
+                </div>
+                <div class="flex items-center gap-2 mt-2">
+                  <label class="sec-label">Wall-Hold Override %</label>
+                  <input type="number" step="0.5" min="0" max="100" class="t-input" style="width:90px"
+                         x-model.number="indexConfig[adminSelectedIndex].sell_straddle.vp_oi_override_pct">
+                  <span class="font-mono text-xs" style="color:var(--t-muted)">when spot is within 50pts of the dominant-OI strike, that wall's own OI must move more than this % before overriding the band trend; default 30%</span>
                 </div>
               </div>
               <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">

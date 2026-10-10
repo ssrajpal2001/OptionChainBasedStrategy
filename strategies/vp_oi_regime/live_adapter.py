@@ -35,6 +35,15 @@ class VpOiRegimeAdapter:
     strike_step: float = 50.0
     change_window_min: int = 5
     is_expiry_week: bool = False
+    # 2026-10-10, direct user ask: exposed as an admin-tunable setting
+    # (SellStraddleConfig.vp_oi_noise_floor_pct) instead of a hardcoded
+    # constant, since the user wants to optimize this value against real
+    # forward data.
+    noise_floor_pct: float = 15.0
+    # 2026-10-10, same ask: the wall-hold override threshold (how much the
+    # dominant-OI strike's own OI must move, while spot sits near it, before
+    # its reading overrides the band-wide trend).
+    override_pct: float = 30.0
 
     _vp: SessionVolumeProfile = field(init=False)
     _oi: OiRegimeTracker = field(init=False)
@@ -96,7 +105,8 @@ class VpOiRegimeAdapter:
 
     def __post_init__(self) -> None:
         self._vp = SessionVolumeProfile(rows=80, value_area_pct=0.70)
-        self._oi = OiRegimeTracker(strike_step=self.strike_step, change_window_min=self.change_window_min)
+        self._oi = OiRegimeTracker(strike_step=self.strike_step, change_window_min=self.change_window_min,
+                                    noise_floor_pct=self.noise_floor_pct, override_pct=self.override_pct)
         self._rollover = FuturesRolloverTracker(change_window_min=self.change_window_min)
         self._ema = {"CE": NineEmaTrailingStop(period=9), "PE": NineEmaTrailingStop(period=9)}
 
