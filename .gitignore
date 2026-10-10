@@ -78,3 +78,5 @@ tools/start_crude_test.py
 # longer committed/pulled on the server.
 tests/
 .tailwind_cli/
+.zerodha_test_creds.local.py
+.backtest_scratch/
