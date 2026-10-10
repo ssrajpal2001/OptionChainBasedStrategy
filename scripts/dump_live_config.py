@@ -8,7 +8,10 @@ e.g.:  python scripts/dump_live_config.py ssrajpal2001 NIFTY
 """
 import dataclasses
 import json
+import os
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config.global_config import GlobalConfig
 from strategies.sell_straddle.config import load_sell_straddle_config
