@@ -15,6 +15,23 @@ real day. vp_oi_enabled is set directly on the strategy instance (bypassing
 RuntimeConfig/ClientProfile, which a backtest has no real DB row for) --
 same construction VpOiRegimeAdapter(strike_step=step) config.py itself uses.
 
+Determinism (found live, 2026-10-10, via a real user catching static OI
+values and a late data-start in the first report built from this script):
+the engine runs _tick_loop/_option_loop/_candle_loop/_eod_backstop_loop as
+INDEPENDENT asyncio tasks, each on its own EventBus queue, plus a real
+5s-wall-clock backstop timer -- none of that matters at real market pace
+(ticks arrive seconds to minutes apart), but compressing a whole day into a
+few real seconds of replay turns those into genuine races. Fixed by (1)
+cancelling the real-time backstop task entirely, (2) an explicit
+queue-drain barrier after every publish batch, (3) patching asyncio.to_thread
+to run synchronously for the duration of this backtest (record_snapshot's
+real OS-thread-pool dispatch was, even alone, enough jitter to change the
+outcome run to run -- confirmed: 0, 44, 22, 28, 201, 25 Highly/Volatile
+occurrences across six runs of IDENTICAL code and data before this fix).
+Verified stable after the fix: 3 consecutive runs produced a byte-identical
+regime timeline. This is a backtest-harness-only concern -- production is
+unaffected, since none of these races exist at real tick pace.
+
 Usage: python scripts/sell_straddle_oct9_vp_oi_backtest.py
 """
 from __future__ import annotations
@@ -110,6 +127,31 @@ async def main():
         print(f"REGISTRY.load_sync failed (non-fatal for this backtest, strike resolution "
               f"for exec legs may be limited): {exc}")
 
+    # CRITICAL: _check_vp_oi_regime calls `await asyncio.to_thread(record_snapshot,
+    # ...)` on every cycle (added earlier tonight) -- a REAL OS thread-pool
+    # dispatch with genuinely unpredictable completion timing that no amount of
+    # asyncio.sleep(0) draining can account for. This backtest doesn't need its
+    # own run recorded to the real DB; stub it to a fast no-op so the handler
+    # chain has no real-time-dependent await left in it at all.
+    # exits.py imports record_snapshot LOCALLY inside the function (re-resolved
+    # by name from its source module on every call) -- patch it there, not on
+    # the exits module, or the stub is silently ignored.
+    import strategies.vp_oi_regime.recorder as _vp_oi_recorder
+    _vp_oi_recorder.record_snapshot = lambda **kwargs: None
+
+    # Even stubbed, `await asyncio.to_thread(record_snapshot, ...)` still
+    # dispatches to a REAL OS thread pool on every cycle -- confirmed this
+    # alone is still enough real-scheduling jitter to make results vary run
+    # to run (tried: 0, 44, 22, 28, 201, 25 Highly/Volatile occurrences
+    # across six runs of identical code+data, even after cancelling the
+    # backstop loop and adding a queue-drain barrier). This backtest needs
+    # NO real threading anywhere -- patch asyncio.to_thread globally to run
+    # synchronously in-place, removing the whole category of nondeterminism
+    # at its root instead of chasing each call site individually.
+    async def _sync_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+    asyncio.to_thread = _sync_to_thread
+
     from strategies.sell_straddle import SellStraddleStrategy
     from strategies.vp_oi_regime.live_adapter import VpOiRegimeAdapter
     from data_layer import position_store as ps
@@ -175,6 +217,22 @@ async def main():
         "vp_oi_enabled monkeypatch didn't take -- _load_thresholds() hasn't "
         "run yet or patched the wrong reference")
 
+    # CRITICAL: start() spawns _eod_backstop_loop as an independent task that
+    # fires every REAL 5 seconds (wall-clock, not sim-time) and calls
+    # _check_exits() -> _check_vp_oi_regime() using whatever sim state
+    # happens to exist at that real instant. Since this whole backtest runs
+    # in a handful of real seconds, that loop fires 0-3+ times at essentially
+    # random points in the REPLAYED timeline depending on real CPU/scheduler
+    # speed -- a genuine, confirmed source of run-to-run nondeterminism
+    # (reproduced directly: identical code + data produced 0 Highly/Volatile
+    # occurrences on one run and 44 on the next). Cancel it; the main
+    # replay loop already calls _check_exits() deterministically on every
+    # simulated tick, so nothing real is lost.
+    for task in asyncio.all_tasks():
+        if task.get_name().endswith("_eod_backstop"):
+            task.cancel()
+            print(f"Cancelled nondeterministic real-time backstop task: {task.get_name()}")
+
     # _check_vp_oi_regime only runs while a position is open (matches live
     # behavior exactly -- confirmed in the real log, the VP/OI heartbeat
     # started the instant of the real 09:17 entry). This backtest's own
@@ -197,6 +255,25 @@ async def main():
         lot_size=65,
     )
     ss._trades_today = 1
+
+    async def _drain():
+        """Barrier: _tick_loop/_option_loop/_candle_loop are three INDEPENDENT
+        asyncio tasks, each draining its own EventBus queue -- nothing
+        otherwise guarantees _option_loop has finished processing a minute's
+        34 option ticks before _candle_loop's own _check_exits() ->
+        _check_vp_oi_regime() fires for that same minute. Confirmed as a
+        real, reproducible source of run-to-run nondeterminism (three runs
+        on identical data/code gave 0, 44, then 22 Highly/Volatile
+        occurrences). Wait until every relevant queue is empty, then yield
+        a further margin so a consumer that just dequeued its last item
+        finishes the (synchronous, no real I/O) body of that handler too."""
+        qs = [q for k, q in ss._loop_queues.items() if k in ("tick", "option", "candle")]
+        for _ in range(200):
+            if all(q.qsize() == 0 for q in qs):
+                break
+            await asyncio.sleep(0)
+        for _ in range(20):
+            await asyncio.sleep(0)
 
     last_known_opt: dict = {}
     print(f"\n{'='*78}\nReplaying REAL 2026-10-09 session with GENUINE (never-frozen) OI\n{'='*78}")
@@ -237,13 +314,14 @@ async def main():
                     change_oi=0, volume=int(bar["volume"] or 0), iv=0.0, delta=0.0,
                     timestamp=sim_t, atp=px,
                 ))
-            await asyncio.sleep(0.001)
+            await _drain()
 
         await bus.publish(Topic.CANDLE_CLOSE, CandleEvent(
             symbol="NIFTY", timeframe=1, open=sbar["open"], high=sbar["high"],
             low=sbar["low"], close=sbar["close"], volume=0,
             timestamp=bar_ts.replace(second=0, microsecond=0),
         ))
+        await _drain()
 
         # Snapshot VP/OI state every bar for the full-resolution timeline.
         adapter = ss._vp_oi_adapter
