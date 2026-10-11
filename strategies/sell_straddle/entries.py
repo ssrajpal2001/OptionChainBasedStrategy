@@ -343,6 +343,25 @@ class EntryMixin:
             )
             return
 
+        # 2026-10-11, direct PDF spec (decision-matrix rows 9/18/27, the
+        # three Volatile rows): "Wait for a new POC formation before
+        # re-entering. Enter as per entry logic." -- a Volatile-regime full
+        # close (strategies/sell_straddle/exits.py's _vp_oi_exit_both) arms
+        # this gate; it clears itself the first time the live POC is
+        # observed to differ from the value recorded at exit time. Checked
+        # here, ahead of every dispatch path below, since "enter as per
+        # entry logic" means the NORMAL entry/re-entry rule should simply
+        # resume once this additional condition is satisfied, not a
+        # separate entry mechanism of its own.
+        _vp_oi_adapter = getattr(self, "_vp_oi_adapter", None)
+        if _vp_oi_adapter is not None and _vp_oi_adapter.reentry_blocked_for_new_poc():
+            self._clog.info(
+                "WAIT — re-entry blocked: waiting for a new POC to form after the Volatile-"
+                "regime exit (current POC=%.2f still equals the exit anchor)",
+                _vp_oi_adapter.last_poc or 0.0,
+            )
+            return
+
         ss = RuntimeConfig.index_section(self._underlying, "sell_straddle")
         workflow_mode = ss.get("entry_workflow_mode", "hybrid")
         is_beginning = (self._trades_today == 0)

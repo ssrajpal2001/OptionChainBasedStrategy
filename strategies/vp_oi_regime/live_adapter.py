@@ -103,6 +103,21 @@ class VpOiRegimeAdapter:
     # GET /api/sellstraddle/vpoi_status -> monitor.html's VP/OI panel.
     remarks: Deque[str] = field(default_factory=lambda: deque(maxlen=30), init=False)
 
+    # 2026-10-11, direct user spec (PDF decision-matrix rows 9/18/27, the
+    # three Volatile rows): hedge buys on a Volatile full-close are
+    # CONDITIONAL -- "Buy a Call hedge IF VAH broken in 5 mins" / "Buy a Put
+    # hedge IF VAL broken in 5 mins" -- not immediate. Armed by
+    # arm_volatile_watch() right after the straddle closes; each side's
+    # entry removed once its 5-minute window resolves (break -> hedge
+    # bought by the caller, or timeout -> no hedge, per spec). Keyed "CE"
+    # (watches VAH, hedge is a Call) / "PE" (watches VAL, hedge is a Put).
+    volatile_watch: Dict[str, dict] = field(default_factory=dict, init=False)
+    # Re-entry Rule for all three Volatile rows: "Wait for a new POC
+    # formation before re-entering. Enter as per entry logic." -- the POC
+    # value AT THE MOMENT of the Volatile exit; normal re-entry stays
+    # blocked while the live POC hasn't yet moved off this anchor.
+    reentry_poc_anchor: Optional[float] = field(default=None, init=False)
+
     def __post_init__(self) -> None:
         self._vp = SessionVolumeProfile(rows=80, value_area_pct=0.70)
         self._oi = OiRegimeTracker(strike_step=self.strike_step, change_window_min=self.change_window_min,
@@ -130,11 +145,81 @@ class VpOiRegimeAdapter:
         self.last_put_oi_now = self.last_put_oi_anchor = self.last_put_oi_pct = None
         self.shifted_strike = {}
         self.remarks = deque(maxlen=30)
+        self.volatile_watch = {}
+        self.reentry_poc_anchor = None
 
     def add_remark(self, text: str, ts: float = 0.0) -> None:
         """Append one human-readable line to the client-visible trail."""
         import time as _t
         self.remarks.append({"ts": ts or _t.time(), "text": text})
+
+    # ── Volatile-regime conditional hedge watch + POC re-entry gate ───────
+    # (PDF decision-matrix rows 9/18/27 -- the three Volatile rows, 2026-10-11)
+    def arm_volatile_watch(self, ce_entry_premium: float, pe_entry_premium: float,
+                            ce_hedge, pe_hedge, now_ts: float, window_sec: float = 300.0) -> None:
+        """Called right after a Volatile-regime full close. Arms a 5-minute
+        watch per side (CE watches for a VAH break -> Call hedge; PE watches
+        for a VAL break -> Put hedge) instead of buying either hedge
+        immediately, and records the POC at this moment as the re-entry
+        gate's anchor -- normal re-entry stays blocked until the POC
+        genuinely moves off this value (a "new POC formation"). ce_hedge/
+        pe_hedge are the DecisionResult's own HedgeSpend objects, carried
+        through since `dr` itself is out of scope by the time a window
+        resolves (could be several minutes later)."""
+        self.volatile_watch = {
+            "CE": {"level": self.last_vah, "deadline_ts": now_ts + window_sec,
+                   "entry_premium": ce_entry_premium, "hedge": ce_hedge},
+            "PE": {"level": self.last_val, "deadline_ts": now_ts + window_sec,
+                   "entry_premium": pe_entry_premium, "hedge": pe_hedge},
+        }
+        self.reentry_poc_anchor = self.last_poc
+
+    def check_volatile_hedge_triggers(self, spot: float, now_ts: float) -> list:
+        """Call every cycle while volatile_watch is non-empty. Returns a list
+        of (side, "break" | "timeout", entry_premium, hedge_spec) for every
+        side whose window just resolved this call -- "break" means the
+        caller should buy that side's hedge now (VAH/VAL genuinely broken
+        within the 5-minute window); "timeout" means the window elapsed
+        with no break, so per spec NO hedge is bought for that side. Each
+        resolved side is removed from volatile_watch so it's only reported
+        once."""
+        if spot <= 0:
+            return []
+        resolved = []
+        for side in list(self.volatile_watch.keys()):
+            w = self.volatile_watch[side]
+            level = w.get("level")
+            broke = (level is not None) and (
+                (spot > level) if side == "CE" else (spot < level)
+            )
+            if broke:
+                resolved.append((side, "break", w["entry_premium"], w["hedge"]))
+                del self.volatile_watch[side]
+            elif now_ts >= w["deadline_ts"]:
+                resolved.append((side, "timeout", w["entry_premium"], w["hedge"]))
+                del self.volatile_watch[side]
+        return resolved
+
+    def reentry_blocked_for_new_poc(self) -> bool:
+        """True while normal re-entry must stay blocked per the Volatile
+        rows' own Re-entry Rule ("wait for a new POC formation"). Clears
+        itself (returns False from then on) the first time the live POC is
+        observed to differ from the anchor recorded at exit time -- a
+        genuinely NEW POC has formed, not just a reading of the old one."""
+        if self.reentry_poc_anchor is None:
+            return False
+        if self.last_poc is not None and self.last_poc != self.reentry_poc_anchor:
+            self.reentry_poc_anchor = None
+            return False
+        return True
+
+    def in_value_area(self, price: float) -> bool:
+        """"Exit immediately if price re-enters the Value Area" -- the
+        Volatile rows' own fakeout-exit clause for a naked long bought off
+        the conditional hedge watch above."""
+        if self.last_snapshot is None or price <= 0:
+            return False
+        return self.last_snapshot.location(price) == "inside_va"
 
     # ── Feed methods (called by the engine as ticks/bars arrive) ──────────
     def on_futures_bar(self, high: float, low: float, volume: float, oi: float, ts: float) -> None:
@@ -286,5 +371,7 @@ class VpOiRegimeAdapter:
             "naked_state": self.naked_state,
             "naked_entry_premium": dict(self.naked_entry_premium),
             "awaiting_reentry": dict(self.awaiting_reentry),
+            "volatile_watch": {s: dict(w) for s, w in self.volatile_watch.items()},
+            "reentry_poc_anchor": self.reentry_poc_anchor,
             "remarks": list(self.remarks),
         }

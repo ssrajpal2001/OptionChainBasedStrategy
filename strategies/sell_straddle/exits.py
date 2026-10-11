@@ -2873,6 +2873,52 @@ class ExitMixin:
         except Exception as exc:
             self._clog.warning("VP/OI REST seed failed: %s", exc)
 
+    def _feed_vp_oi_volume_profile_bar(self, adapter, now: datetime) -> None:
+        """Feed the Volume Profile off the futures/spot price every tick,
+        bucketed into 1-min bars. Real traded volume isn't plumbed to this
+        engine today (see live_adapter.py's own docstring) -- every tick
+        within a bar is weighted equally (tick count as a volume proxy), a
+        documented, honest simplification, not fabricated volume data.
+
+        2026-10-11 CRITICAL FIX, real gap confirmed via direct user
+        challenge ("don't you think POC should change on market movement?"):
+        this used to live INSIDE _check_vp_oi_regime, AFTER its own
+        `if not pos or pos.status != "open": return` guard -- meaning POC/
+        VAH/VAL genuinely stopped receiving any new price data the instant
+        a position closed (Volatile exit included), for as long as the
+        book stayed flat. The new "wait for a new POC formation" re-entry
+        gate this same session added was then waiting on something that
+        was structurally incapable of ever happening while no position was
+        open -- confirmed live in a real backtest: POC frozen at the exact
+        exit-time value for 5 straight hours of real, genuinely-moving
+        market data. Split out so it can run unconditionally (called from
+        _check_vp_oi_naked_legs_standalone, which is itself now called
+        every cycle regardless of position state) -- a real Session Volume
+        Profile has to track the whole session's price action, not just
+        the minutes a position happens to be open."""
+        fut_px = float(getattr(self, "_futures_spot", 0.0) or getattr(self, "_spot", 0.0) or 0.0)
+        if fut_px <= 0:
+            return
+        minute = now.replace(second=0, microsecond=0)
+        acc = getattr(self, "_vp_oi_fut_bar", None)
+        if acc is None:
+            self._vp_oi_fut_bar = {"minute": minute, "h": fut_px, "l": fut_px, "n": 1}
+        elif acc["minute"] != minute:
+            # 2026-10-04: real futures OI, when the primary feeder
+            # populates it (see IndexTick.oi's own docstring) -- 0.0
+            # otherwise (non-futures_atm underlying, or a provider that
+            # doesn't send it), in which case FuturesRolloverTracker
+            # degrades to "No Change" forever, same honest fallback this
+            # module already had before OI capture existed.
+            adapter.on_futures_bar(acc["h"], acc["l"], volume=float(acc["n"]),
+                                    oi=float(getattr(self, "_futures_oi", 0.0) or 0.0),
+                                    ts=acc["minute"].timestamp())
+            self._vp_oi_fut_bar = {"minute": minute, "h": fut_px, "l": fut_px, "n": 1}
+        else:
+            acc["h"] = max(acc["h"], fut_px)
+            acc["l"] = min(acc["l"], fut_px)
+            acc["n"] += 1
+
     async def _check_vp_oi_regime(self, now: datetime) -> None:
         adapter = getattr(self, "_vp_oi_adapter", None)
         if not getattr(self, "_vp_oi_enabled", False) or adapter is None:
@@ -2880,6 +2926,7 @@ class ExitMixin:
         if not getattr(self, "_vp_oi_seeded", False):
             self._vp_oi_seeded = True
             await self._seed_vp_oi_volume_profile()
+        self._feed_vp_oi_volume_profile_bar(adapter, now)
         pos = self._position
         if not pos or pos.status != "open":
             return
@@ -2887,33 +2934,6 @@ class ExitMixin:
             self._vp_oi_naked_leg: dict = {}
         if not hasattr(self, "_vp_oi_last_exited_strike"):
             self._vp_oi_last_exited_strike: dict = {}
-
-        # Feed the Volume Profile off the futures/spot price every tick, bucketed
-        # into 1-min bars. Real traded volume isn't plumbed to this engine today
-        # (see live_adapter.py's own docstring) -- every tick within a bar is
-        # weighted equally (tick count as a volume proxy), a documented, honest
-        # simplification, not fabricated volume data.
-        fut_px = float(getattr(self, "_futures_spot", 0.0) or getattr(self, "_spot", 0.0) or 0.0)
-        if fut_px > 0:
-            minute = now.replace(second=0, microsecond=0)
-            acc = getattr(self, "_vp_oi_fut_bar", None)
-            if acc is None:
-                self._vp_oi_fut_bar = {"minute": minute, "h": fut_px, "l": fut_px, "n": 1}
-            elif acc["minute"] != minute:
-                # 2026-10-04: real futures OI, when the primary feeder
-                # populates it (see IndexTick.oi's own docstring) -- 0.0
-                # otherwise (non-futures_atm underlying, or a provider that
-                # doesn't send it), in which case FuturesRolloverTracker
-                # degrades to "No Change" forever, same honest fallback this
-                # module already had before OI capture existed.
-                adapter.on_futures_bar(acc["h"], acc["l"], volume=float(acc["n"]),
-                                        oi=float(getattr(self, "_futures_oi", 0.0) or 0.0),
-                                        ts=acc["minute"].timestamp())
-                self._vp_oi_fut_bar = {"minute": minute, "h": fut_px, "l": fut_px, "n": 1}
-            else:
-                acc["h"] = max(acc["h"], fut_px)
-                acc["l"] = min(acc["l"], fut_px)
-                acc["n"] += 1
 
         # Any side currently naked or awaiting re-entry owns this tick --
         # don't also re-evaluate a fresh regime decision the same cycle.
@@ -3144,12 +3164,17 @@ class ExitMixin:
                          side, h_strike, h_fill.fill_price)
 
     async def _vp_oi_exit_both(self, dr, now: datetime) -> None:
-        """Volatile regime: close the whole straddle, then buy both hedges.
-
-        Called from _check_vp_oi_regime; naked-leg management (9-EMA stop +
-        Hedge Exit Rule) for the resulting naked longs runs via
-        _check_vp_oi_naked_legs_standalone, unconditionally, even with
-        self._position == None after this closes the whole position."""
+        """Volatile regime: close the whole straddle, then ARM a 5-minute
+        conditional hedge watch per side -- direct user spec 2026-10-11,
+        matching the PDF decision matrix's three Volatile rows (9/18/27)
+        exactly: "Buy a Call hedge IF VAH broken in 5 mins" / "Buy a Put
+        hedge IF VAL broken in 5 mins", NOT an immediate buy. The watch
+        itself is checked every cycle by _check_vp_oi_volatile_watch
+        (called from _check_vp_oi_naked_legs_standalone, unconditionally,
+        even with self._position == None after this closes the whole
+        position). Also arms the Re-entry Rule's "wait for a new POC
+        formation" gate (see VpOiRegimeAdapter.reentry_poc_anchor), checked
+        by entries.py before any normal re-entry attempt."""
         pos = self._position
         ce_entry = float(pos.ce_leg.entry_price or 0.0)
         pe_entry = float(pos.pe_leg.entry_price or 0.0)
@@ -3157,38 +3182,90 @@ class ExitMixin:
         self._vp_oi_last_exited_strike["PE"] = int(pos.pe_leg.strike)
         await self._close_position("vp_oi_regime_exit_volatile")
         if self._position is not None:
-            return  # close_position aborted (still "closing"/"open") -- don't hedge a live position
-        for side, hedge, entry_premium in (("CE", dr.call_hedge, ce_entry), ("PE", dr.put_hedge, pe_entry)):
-            if not (hedge.enabled and entry_premium > 0):
+            return  # close_position aborted (still "closing"/"open") -- don't arm a watch on a live position
+        self._vp_oi_adapter.arm_volatile_watch(ce_entry, pe_entry, dr.call_hedge, dr.put_hedge, now.timestamp())
+        self._vp_oi_adapter.add_remark(
+            f"Volatile exit — watching for VAH break (Call hedge) / VAL break (Put hedge) "
+            f"over the next 5 min; re-entry blocked until a new POC forms")
+        self._clog.info(
+            "VP/OI REGIME (Volatile) — straddle closed, watching VAH=%.2f/VAL=%.2f for 5 min "
+            "(conditional hedge) — re-entry blocked until a new POC forms (anchor=%.2f)",
+            self._vp_oi_adapter.last_vah or 0.0, self._vp_oi_adapter.last_val or 0.0,
+            self._vp_oi_adapter.reentry_poc_anchor or 0.0,
+        )
+
+    async def _buy_vp_oi_hedge(self, side: str, hedge, entry_premium: float, now: datetime) -> bool:
+        """Shared hedge-buy primitive: given a HedgeSpend (enabled + premium
+        %-band) and the closed leg's own entry premium, finds a strike in
+        that premium band and buys it. Returns True iff a naked long was
+        actually opened (and self._vp_oi_naked_leg/adapter.mark_naked
+        updated) -- used by both the single-leg Highly Bearish/Bullish path
+        (_vp_oi_exit_single_side) and the Volatile conditional-watch path
+        (_check_vp_oi_volatile_watch) so the strike-matching/order/naked-
+        state logic exists in exactly one place."""
+        if not (hedge.enabled and entry_premium > 0):
+            return False
+        from strategies.vp_oi_regime.decision_matrix import hedge_target_premium, pick_strike_by_premium_match
+        target = hedge_target_premium(hedge, entry_premium)
+        if not target:
+            return False
+        chain = {s: v.get("ltp", 0.0) for (s, sd), v in self._strike_prem.items() if sd == side}
+        picked = pick_strike_by_premium_match(chain, target[0], target[1])
+        if not picked:
+            self._clog.info("VP/OI REGIME — no strike in [%.2f,%.2f] premium band for %s hedge; "
+                             "staying flat on this side, no naked long opened", target[0], target[1], side)
+            return False
+        h_strike, h_ltp = picked
+        expiry = getattr(self, "_entry_expiry_date", None)
+        h_fill = await self._dispatch_hedge_order("BUY", side, int(h_strike), h_ltp, h_ltp, expiry, "vp_oi_hedge")
+        if h_fill is None or getattr(h_fill, "entry_aborted", False) or h_fill.fill_price <= 0:
+            self._clog.critical("VP/OI REGIME — hedge %s BUY failed/unconfirmed -- staying flat, "
+                                 "no naked long opened (needs review)", side)
+            return False
+        self._vp_oi_naked_leg[side] = {"strike": int(h_strike), "entry": float(h_fill.fill_price)}
+        self._vp_oi_adapter.mark_naked(
+            "NAKED_BOTH" if len(self._vp_oi_naked_leg) == 2 else f"NAKED_{side}",
+            {s: d["entry"] for s, d in self._vp_oi_naked_leg.items()},
+        )
+        self._vp_oi_adapter.add_remark(
+            f"{side}: hedge bought {h_strike}@{h_fill.fill_price:.2f} -- naked long armed, "
+            f"riding with 9-EMA trailing stop")
+        self._clog.info("VP/OI REGIME — hedge %s%d BUY@%.2f confirmed (naked long armed, 9-EMA trailing)",
+                         side, h_strike, h_fill.fill_price)
+        return True
+
+    async def _check_vp_oi_volatile_watch(self, now: datetime) -> None:
+        """Every cycle while the adapter's volatile_watch is armed: check
+        whether spot has broken VAH (Call side) / VAL (Put side) within the
+        5-minute window, buy the corresponding hedge on a genuine break, or
+        let the window lapse with NO hedge on a timeout -- exactly the
+        conditional "IF VAH/VAL broken in 5 mins" the PDF's Volatile rows
+        specify, never an immediate/unconditional buy."""
+        adapter = self._vp_oi_adapter
+        if not adapter.volatile_watch:
+            return
+        spot = float(getattr(self, "_spot", 0.0) or 0.0)
+        for side, reason, entry_premium, hedge in adapter.check_volatile_hedge_triggers(spot, now.timestamp()):
+            if reason == "timeout":
+                self._clog.info("VP/OI REGIME (Volatile) — %s hedge watch timed out with no "
+                                 "VAH/VAL break; staying flat on this side", side)
+                adapter.add_remark(f"{side}: 5-min hedge watch timed out with no break — no hedge")
                 continue
-            from strategies.vp_oi_regime.decision_matrix import hedge_target_premium, pick_strike_by_premium_match
-            target = hedge_target_premium(hedge, entry_premium)
-            if not target:
-                continue
-            chain = {s: v.get("ltp", 0.0) for (s, sd), v in self._strike_prem.items() if sd == side}
-            picked = pick_strike_by_premium_match(chain, target[0], target[1])
-            if not picked:
-                continue
-            h_strike, h_ltp = picked
-            expiry = getattr(self, "_entry_expiry_date", None)
-            h_fill = await self._dispatch_hedge_order("BUY", side, int(h_strike), h_ltp, h_ltp, expiry, "vp_oi_hedge")
-            if h_fill is None or getattr(h_fill, "entry_aborted", False) or h_fill.fill_price <= 0:
-                self._clog.critical("VP/OI REGIME (Volatile) — hedge %s BUY failed/unconfirmed", side)
-                continue
-            self._vp_oi_naked_leg[side] = {"strike": int(h_strike), "entry": float(h_fill.fill_price)}
-        if self._vp_oi_naked_leg:
-            self._vp_oi_adapter.mark_naked(
-                "NAKED_BOTH" if len(self._vp_oi_naked_leg) == 2 else
-                f"NAKED_{next(iter(self._vp_oi_naked_leg))}",
-                {s: d["entry"] for s, d in self._vp_oi_naked_leg.items()},
-            )
+            self._clog.info("VP/OI REGIME (Volatile) — %s side's level broken within 5 min, buying hedge",
+                             side)
+            await self._buy_vp_oi_hedge(side, hedge, entry_premium, now)
 
     async def _vp_oi_manage_naked_legs(self, pos: "StraddlePosition", now: datetime) -> None:
         """Every tick while any side is naked: feed its live LTP into the
         9-EMA trailing stop; on a stop-hit, sell the naked long and arm the
-        Re-entry Rule. Every tick while a side is merely awaiting re-entry
-        (no naked long currently open on it), watch for the POC-crossing
-        fakeout confirmation and re-sell a fresh short leg if it fires."""
+        Re-entry Rule. ALSO (2026-10-11, direct PDF spec, all three Volatile
+        rows' own Hedge Exit Rule text): exit the naked long immediately,
+        same as a stop-hit, if price re-enters the Value Area -- treated as
+        a fakeout breakout, checked BEFORE the 9-EMA stop so a same-tick
+        fakeout-reentry doesn't wait for the EMA to catch up. Every tick
+        while a side is merely awaiting re-entry (no naked long currently
+        open on it), watch for the POC-crossing fakeout confirmation and
+        re-sell a fresh short leg if it fires."""
         adapter = self._vp_oi_adapter
         spot = float(getattr(self, "_spot", 0.0) or 0.0)
         for side in ("CE", "PE"):
@@ -3198,7 +3275,12 @@ class ExitMixin:
                 if ltp <= 0:
                     continue
                 adapter.on_naked_leg_price(side, ltp)
-                if adapter.stop_hit(side, ltp):
+                if spot > 0 and adapter.in_value_area(spot):
+                    adapter.add_remark(f"{side}: naked long exited — price re-entered the Value "
+                                        f"Area (fakeout)")
+                    await self._vp_oi_close_naked(side, leg_info, now)
+                    adapter.on_naked_stopped(side)
+                elif adapter.stop_hit(side, ltp):
                     await self._vp_oi_close_naked(side, leg_info, now)
                     adapter.on_naked_stopped(side)
             elif adapter.awaiting_reentry.get(side):
@@ -3284,10 +3366,39 @@ class ExitMixin:
         _vp_oi_manage_naked_legs itself never actually reads its `pos` arg
         (every lookup goes through self._vp_oi_naked_leg/self._strike_prem),
         so passing self._position (possibly None, e.g. right after a
-        Volatile-regime full close) through unchanged is safe."""
+        Volatile-regime full close) through unchanged is safe.
+
+        2026-10-11 CRITICAL FIX, real gap confirmed via direct user review
+        against the PDF decision matrix: this early-return used to gate on
+        ONLY naked_leg/awaiting_reentry -- but a Volatile-regime close now
+        arms adapter.volatile_watch (the conditional 5-min VAH/VAL hedge
+        window) WITHOUT ever touching either of those two, so this function
+        (and therefore the whole hedge-watch/re-entry machinery) went
+        permanently dormant the instant a Volatile close fired with no
+        hedge bought yet -- confirmed live in a real backtest: zero activity
+        for the rest of the trading day after a 09:58 Volatile close. Now
+        also checks volatile_watch so the watch itself keeps running."""
         adapter = getattr(self, "_vp_oi_adapter", None)
         if not getattr(self, "_vp_oi_enabled", False) or adapter is None:
             return
+        if self._position is None:
+            # 2026-10-11 CRITICAL FIX (companion to the bar-feed split
+            # above): while flat, _check_vp_oi_regime (the normal path that
+            # feeds the Volume Profile and calls adapter.evaluate()) never
+            # runs at all -- it lives inside _check_exits(), which the tick
+            # loop only calls when a position exists. Do both here instead,
+            # gated on self._position is None specifically so a position
+            # that IS open never gets double-fed (that case is already
+            # fully handled by _check_vp_oi_regime itself). This is what
+            # lets last_poc/last_vah/last_val -- and therefore the "wait
+            # for a new POC formation" re-entry gate -- actually keep
+            # moving with the real market while the book is flat, instead
+            # of freezing at whatever they read the instant a position
+            # last closed.
+            self._feed_vp_oi_volume_profile_bar(adapter, now)
+            adapter.evaluate(spot=float(getattr(self, "_spot", 0.0) or 0.0), now_ts=now.timestamp())
+        if adapter.volatile_watch:
+            await self._check_vp_oi_volatile_watch(now)
         if not getattr(self, "_vp_oi_naked_leg", None) and not adapter.awaiting_reentry:
             return
         await self._vp_oi_manage_naked_legs(self._position, now)

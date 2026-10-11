@@ -1494,6 +1494,22 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                         await self._check_exits()
                     else:
                         await self._maybe_try_entry(datetime.now(IST))
+                        # 2026-10-11 CRITICAL FIX, real gap confirmed via direct user
+                        # review against the PDF decision matrix (backtest showed
+                        # total engine silence for 5+ hours after a Volatile-regime
+                        # full close): _check_vp_oi_naked_legs_standalone's own
+                        # docstring claims it's called "UNCONDITIONALLY" from
+                        # _check_exits() -- true WITHIN _check_exits(), but this
+                        # if/else is the real outer gate, and it skips calling
+                        # _check_exits() AT ALL once self._position is None (exactly
+                        # the state a Volatile close -- or any naked-long state --
+                        # leaves the book in). The 2026-10-05 "structural fix" never
+                        # accounted for this outer gate, so the whole naked-leg/
+                        # hedge-watch/re-entry machinery was silently dead in this
+                        # exact scenario the whole time. Call it directly here too,
+                        # harmless when vp_oi is disabled or nothing is armed (its
+                        # own first line is an early-return for both cases).
+                        await self._check_vp_oi_naked_legs_standalone(datetime.now(IST))
                 except Exception as _exc:
                     logger.exception("SellStraddle[%s]: tick-handler error (recovered, engine alive): %s",
                                      self._underlying, _exc)
