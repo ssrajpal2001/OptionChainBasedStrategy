@@ -1271,9 +1271,22 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         self._sl_cooldown_until = None
         self._market_open_dt = None
         self._primed = False
-        self._session_realized_pnl_pts = 0.0
-        self._initial_net_credit = 0.0
-        self._initial_entry_time_value = 0.0
+        # 2026-10-12 CRITICAL FIX, real live incident: a carried hedge-and-
+        # carry position's booked P&L (session_realized_pnl_pts) and initial
+        # credit were unconditionally wiped here, every single day-boundary
+        # tick on a long-running (no-restart) process -- even though
+        # _carried_hedge just above correctly kept self._position itself
+        # alive. The restart path (_restore_session) already has the right
+        # carry-forward exception for this exact state; this live,
+        # no-restart day-boundary path never got the same one. Confirmed:
+        # user reported booked profit from a real Friday hedge-and-carry
+        # position missing on Monday despite the position itself coming
+        # back correctly with live data. Only reset for a genuinely fresh
+        # (non-carried) book.
+        if _carried_hedge is None:
+            self._session_realized_pnl_pts = 0.0
+            self._initial_net_credit = 0.0
+            self._initial_entry_time_value = 0.0
         self._stop_for_day = False
         self._eod_decision_in_progress = False
         self._prehedge_attempted_today = False
@@ -1324,12 +1337,22 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         # computed against yesterday's last combined ATP. Same rebuild used
         # by both expiry-shift paths -- a day boundary is exactly as much a
         # "genuine instrument-history change" as an expiry shift.
-        from strategies.pool_indicator_engine import PoolIndicatorEngine
-        _old_pool = self._pool_engine
-        self._pool_engine = PoolIndicatorEngine(
-            rsi_len=_old_pool._rsi_len, roc_len=_old_pool._roc_len, maxlen=_old_pool._maxlen)
-        self._prev_vwap_atp = None
-        self._prev_slope = None
+        # 2026-10-12 CRITICAL FIX, same real incident as session_realized_pnl_pts
+        # above: a carried hedge-and-carry position needs its warm RSI/ROC/
+        # VWAP/SLOPE history for its OWN still-open strikes to survive the day
+        # boundary too -- the 2026-09-06 rebuild below exists to stop a FRESH
+        # pair inheriting a DIFFERENT, no-longer-relevant strike's stale tail
+        # bars, which doesn't apply here: _carried_hedge's strikes are exactly
+        # the same strikes this pool engine was already tracking. Matches the
+        # restart path's own _restore_pool_engine carry-forward exception --
+        # this is the equivalent for a live (no-restart) day-boundary tick.
+        if _carried_hedge is None:
+            from strategies.pool_indicator_engine import PoolIndicatorEngine
+            _old_pool = self._pool_engine
+            self._pool_engine = PoolIndicatorEngine(
+                rsi_len=_old_pool._rsi_len, roc_len=_old_pool._roc_len, maxlen=_old_pool._maxlen)
+            self._prev_vwap_atp = None
+            self._prev_slope = None
         # Reset the low-anchor-LTP expiry-shift sticky flag BEFORE recomputing --
         # a fresh trading day starts back on the normal current-week expiry,
         # never inheriting yesterday's shift.
