@@ -2977,62 +2977,28 @@ class DashboardServer:
                     if sname in ("sell_straddle", "sell_straddle_calc_vwap"):
                         strat = _srv._find_ss_book(cid, bid, underlying, sname)
                         pos = getattr(strat, "_position", None) if strat else None
-                        # Booked = sum of TODAY's closed-trade P&L from the History ledger (the
-                        # source of truth shown in the History tab; survives restarts). Falls back
-                        # to the in-memory session counter only if History is unavailable.
+                        # 2026-10-12 CRITICAL FIX, direct user spec (superseding the
+                        # 2026-09-17 one below): "whole day's cumulative total to
+                        # persist across a same-day full-close + re-entry too" --
+                        # Booked P&L must be the WHOLE trading session's running
+                        # total (today's own real-time entries/rolls/full-closes,
+                        # PLUS whatever carried in from an overnight hedge-and-carry
+                        # position), continuing right through a same-day full close
+                        # and fresh re-entry, not reset per-cycle. This is exactly
+                        # what ss._session_realized_pnl_pts already correctly tracks
+                        # (confirmed live: it only resets at a genuine new calendar
+                        # day via reset_session(), after today's own restore/
+                        # double-unwrap fixes -- never on a same-day roll, full
+                        # close, or re-entry). Reading it directly instead of the
+                        # old History-ledger reconstruction (removed: that approach
+                        # required per-cycle scoping via a real position's own
+                        # open_time to avoid bleeding a PREVIOUS cycle's total into
+                        # a fresh one -- the opposite of what's now wanted -- and
+                        # had its own separate real bug carrying Friday's booked
+                        # P&L across the weekend, since fixed in this same file's
+                        # sibling commit but now moot with this simpler source).
                         _ls = int(_srv._cfg.exchange.lot_sizes.get(underlying, 0) or 0)
-                        try:
-                            from data_layer import trade_history as _th
-                            _today = datetime.now(IST).date().isoformat()
-                            # 2026-09-17, direct user spec: "when we close the 4 leg
-                            # concept that profit or loss should not be added to this
-                            # running fresh position -- cumulative profit will not be
-                            # shown here, that is only used when we are in same cycle."
-                            # Booked P&L must be scoped to the CURRENT cycle (this
-                            # position's own open_time onward), not the whole
-                            # calendar day -- otherwise a fresh position opened right
-                            # after a hedge_cumulative_profit (or any other full)
-                            # close kept showing the PREVIOUS cycle's already-booked
-                            # total, confirmed live (₹3062 bleeding into a brand-new
-                            # position). A same-cycle roll/re-entry's own closed leg
-                            # still has a close ts strictly after this position's own
-                            # open_time, so it correctly stays included.
-                            _cycle_start = getattr(pos, "open_time", None) if pos else None
-                            _recs = _th.load(cid, 500)
-                            def _in_cycle(r) -> bool:
-                                # 2026-10-12 CRITICAL FIX, real live incident: a carried
-                                # hedge-and-carry position's own cycle genuinely starts on
-                                # a PRIOR calendar day (open_time=Friday), but the old
-                                # `!= _today: return False` pre-check below unconditionally
-                                # excluded every record whose own date wasn't literally
-                                # today -- wiping out Friday's real booked P&L from this
-                                # exact same still-open cycle. The _cycle_start comparison
-                                # already correctly scopes to "this position's own cycle,
-                                # same-day or carried" on its own; the separate _today
-                                # equality check was redundant for a same-day cycle (any
-                                # record >= today's open_time is already today) and
-                                # actively wrong for a carried one. Removed; _cycle_start
-                                # is now the only real scoping boundary. Falls back to
-                                # today-only ONLY when there's no position at all to scope
-                                # against (the pre-existing, narrower no-position case).
-                                if _cycle_start is None:
-                                    return str(r.get("ts", ""))[:10] == _today
-                                try:
-                                    _r_ts = datetime.fromisoformat(str(r.get("ts", "")))
-                                    if _r_ts.tzinfo is None:
-                                        _r_ts = _r_ts.replace(tzinfo=IST)
-                                    return _r_ts >= _cycle_start
-                                except Exception:
-                                    return True
-                            booked = round(sum(
-                                float(r.get("pnl", 0) or 0) for r in _recs
-                                if _in_cycle(r)
-                                and r.get("strategy") == sname
-                                and str(r.get("instrument", "")).upper() == str(underlying).upper()
-                                and str(r.get("binding_id", "")) == bid
-                            ), 2)
-                        except Exception:
-                            booked = round(float(getattr(strat, "_session_realized_pnl_pts", 0.0) or 0.0) * _ls, 2)
+                        booked = round(float(getattr(strat, "_session_realized_pnl_pts", 0.0) or 0.0) * _ls, 2)
                         if pos and getattr(pos, "status", "open") == "open":
                             try:
                                 from data_layer.runtime_config import RuntimeConfig as _RC2
