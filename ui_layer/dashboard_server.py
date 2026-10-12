@@ -3000,10 +3000,23 @@ class DashboardServer:
                             _cycle_start = getattr(pos, "open_time", None) if pos else None
                             _recs = _th.load(cid, 500)
                             def _in_cycle(r) -> bool:
-                                if str(r.get("ts", ""))[:10] != _today:
-                                    return False
+                                # 2026-10-12 CRITICAL FIX, real live incident: a carried
+                                # hedge-and-carry position's own cycle genuinely starts on
+                                # a PRIOR calendar day (open_time=Friday), but the old
+                                # `!= _today: return False` pre-check below unconditionally
+                                # excluded every record whose own date wasn't literally
+                                # today -- wiping out Friday's real booked P&L from this
+                                # exact same still-open cycle. The _cycle_start comparison
+                                # already correctly scopes to "this position's own cycle,
+                                # same-day or carried" on its own; the separate _today
+                                # equality check was redundant for a same-day cycle (any
+                                # record >= today's open_time is already today) and
+                                # actively wrong for a carried one. Removed; _cycle_start
+                                # is now the only real scoping boundary. Falls back to
+                                # today-only ONLY when there's no position at all to scope
+                                # against (the pre-existing, narrower no-position case).
                                 if _cycle_start is None:
-                                    return True
+                                    return str(r.get("ts", ""))[:10] == _today
                                 try:
                                     _r_ts = datetime.fromisoformat(str(r.get("ts", "")))
                                     if _r_ts.tzinfo is None:
