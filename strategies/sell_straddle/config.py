@@ -112,6 +112,17 @@ class SellStraddleConfig:
     # the band-wide calculation (otherwise forced to "No Change").
     vp_oi_override_pct: float
 
+    # 2026-10-12, direct client spec (replaces the old EOD-only, independent-per-leg
+    # find_hedge_strike approach for whichever deployment opts in): continuously
+    # monitor combined MTM; the instant it goes negative, buy an equal-strike-distance
+    # CE+PE hedge pair whose combined cost fits inside the current unrealised loss.
+    # Opt-in, default OFF -- the existing EOD hedge_carry_enabled path is untouched for
+    # every deployment that doesn't explicitly turn this on.
+    dynamic_hedge_enabled: bool
+    # Minimum loss (₹) that must exist before even searching for a hedge pair --
+    # avoids churning tiny, barely-negative MTM blips into a real hedge purchase.
+    dynamic_hedge_min_loss_inr: float
+
 
 def _apply_client_overrides(
     cfg: SellStraddleConfig,
@@ -274,6 +285,9 @@ def load_sell_straddle_config(
     vp_oi_noise_floor_pct = float(ss.get("vp_oi_noise_floor_pct", 15.0))
     vp_oi_override_pct = float(ss.get("vp_oi_override_pct", 30.0))
 
+    dynamic_hedge_enabled = bool(ss.get("dynamic_hedge_enabled", False))
+    dynamic_hedge_min_loss_inr = float(ss.get("dynamic_hedge_min_loss_inr", 500.0))
+
     # Post-15:00 per-leg R1 exit (2026-08-28, direct user spec): replaces the
     # old day-low-reversal-exit's own action ("close both legs") for
     # bindings that opt into this instead -- the day-low condition (and a
@@ -387,6 +401,8 @@ def load_sell_straddle_config(
         hedge_carry_enabled=hedge_carry_enabled,
         r1_breach_reentry_enabled=r1_breach_reentry_enabled,
         roll_fail_hedge_enabled=roll_fail_hedge_enabled,
+        dynamic_hedge_enabled=dynamic_hedge_enabled,
+        dynamic_hedge_min_loss_inr=dynamic_hedge_min_loss_inr,
     )
 
     # Apply per-client risk overrides if a client_id is provided.
@@ -458,6 +474,8 @@ class ConfigMixin:
 
         self._r1_breach_reentry_enabled = cfg.r1_breach_reentry_enabled
         self._roll_fail_hedge_enabled = cfg.roll_fail_hedge_enabled
+        self._dynamic_hedge_enabled = cfg.dynamic_hedge_enabled
+        self._dynamic_hedge_min_loss_inr = cfg.dynamic_hedge_min_loss_inr
 
         self._itm_pair_gate_enabled = cfg.itm_pair_gate_enabled
         self._itm_pair_gate_profit_inr = cfg.itm_pair_gate_profit_inr

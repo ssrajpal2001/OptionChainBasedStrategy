@@ -48,6 +48,77 @@ def find_hedge_strike(
     return None
 
 
+def generate_equal_distance_hedge_pairs(
+    strike_prem: Dict[Key, dict],
+    sc: float, sp: float,
+    step: float,
+    max_distance_steps: int = 20,
+) -> List[Tuple[int, int, float, int, float]]:
+    """2026-10-12, direct client spec: for every common strike distance D
+    (in `step` increments), build the Call hedge at SC+D and the Put hedge
+    at SP-D -- the SAME D on both sides, unlike the old independent-per-leg
+    find_hedge_strike() above. Returns a list of
+    (D, ce_strike, ce_ltp, pe_strike, pe_ltp) for every D where BOTH legs
+    have a real positive quote. The caller (filter_hedges_by_budget) decides
+    which of these fit inside the available budget."""
+    if step <= 0:
+        return []
+    out = []
+    for i in range(1, max_distance_steps + 1):
+        d = i * step
+        ce_strike = int(sc + d)
+        pe_strike = int(sp - d)
+        ce = strike_prem.get((ce_strike, "CE"))
+        pe = strike_prem.get((pe_strike, "PE"))
+        if not ce or not pe:
+            continue
+        ce_ltp = float(ce.get("ltp", 0.0) or 0.0)
+        pe_ltp = float(pe.get("ltp", 0.0) or 0.0)
+        if ce_ltp <= 0 or pe_ltp <= 0:
+            continue
+        out.append((int(d), ce_strike, ce_ltp, pe_strike, pe_ltp))
+    return out
+
+
+def calculate_hedge_cost(ce_ltp: float, pe_ltp: float, qty: int, txn_cost_rs: float = 0.0) -> float:
+    """Total ₹ expenditure to buy one hedge pair at the given quantity."""
+    return (ce_ltp + pe_ltp) * qty + txn_cost_rs
+
+
+def filter_hedges_by_budget(
+    candidates: List[Tuple[int, int, float, int, float]],
+    qty: int,
+    budget_rs: float,
+    txn_cost_rs: float = 0.0,
+) -> List[Tuple[int, int, float, int, float, float]]:
+    """Keep only candidates whose combined cost fits the current unrealised-loss
+    budget. Returns each eligible candidate with its cost appended:
+    (D, ce_strike, ce_ltp, pe_strike, pe_ltp, cost_rs)."""
+    out = []
+    for d, ce_s, ce_ltp, pe_s, pe_ltp in candidates:
+        cost = calculate_hedge_cost(ce_ltp, pe_ltp, qty, txn_cost_rs)
+        if cost <= budget_rs:
+            out.append((d, ce_s, ce_ltp, pe_s, pe_ltp, cost))
+    return out
+
+
+def rank_hedge_candidates(
+    eligible: List[Tuple[int, int, float, int, float, float]],
+) -> Optional[Tuple[int, int, float, int, float, float]]:
+    """2026-10-12: pick the best eligible (budget-fitting) pair. Client spec
+    recommends 'balance protection and cost' (option C in their doc) but
+    leaves the exact scoring function open ("finalise with your developer").
+    Simplest defensible heuristic until a real scenario-based loss model
+    exists: SMALLEST common distance D wins -- a closer hedge starts
+    offsetting the sold legs' further losses sooner (more protection), and
+    among same-D candidates there's only one (D uniquely determines both
+    strikes). This is the open/configurable part the client flagged --
+    revisit once real forward data exists to compare protection outcomes."""
+    if not eligible:
+        return None
+    return min(eligible, key=lambda c: c[0])
+
+
 def _available_strikes(strike_prem: Dict[Key, dict], side: str) -> List[int]:
     """Return all available strike prices for `side` with positive LTP."""
     return [

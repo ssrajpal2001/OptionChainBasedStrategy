@@ -64,7 +64,7 @@ class FuturesRolloverTracker:
         self._near: Deque[Tuple[float, float, float]] = deque(maxlen=maxlen)  # (ts, oi, volume)
         self._next: Deque[Tuple[float, float, float]] = deque(maxlen=maxlen)
         self._active_contract = "near"
-        self._future_oi_latch = StickyTrendLatch(trend_pct=3.0, eval_window_min=change_window_min)
+        self._future_oi_latch = StickyTrendLatch(trend_pct=10.0, eval_window_min=change_window_min)
 
     def reset(self) -> None:
         self._near.clear()

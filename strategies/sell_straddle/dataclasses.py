@@ -91,6 +91,14 @@ class StraddlePosition:
     ce_leg_closed: bool = False
     pe_leg_closed: bool = False
 
+    # Unique per-position-lifecycle ID (2026-10-12, direct user spec): generated
+    # once at a fresh BEGINNING entry, carried verbatim through every rollover,
+    # hedge-and-carry EOD/day-boundary, and restart (it rides the existing
+    # to_dict/from_dict + position_store persistence, no separate storage).
+    # Lets History/logs trace one continuous position across multiple calendar
+    # days until it's genuinely closed flat -- that's when the cycle ends.
+    cycle_id: str = ""
+
     def to_dict(self) -> dict:
         """JSON-serialisable snapshot for PositionStore."""
         def _leg(l: StraddleLeg) -> dict:
@@ -125,6 +133,7 @@ class StraddlePosition:
             "is_hedged_positional": self.is_hedged_positional,
             "ce_leg_closed": self.ce_leg_closed,
             "pe_leg_closed": self.pe_leg_closed,
+            "cycle_id": self.cycle_id,
         }
 
     @classmethod
@@ -156,6 +165,7 @@ class StraddlePosition:
             is_hedged_positional=bool(d.get("is_hedged_positional", False)),
             ce_leg_closed=bool(d.get("ce_leg_closed", False)),
             pe_leg_closed=bool(d.get("pe_leg_closed", False)),
+            cycle_id=d.get("cycle_id", ""),
         )
 
     @property

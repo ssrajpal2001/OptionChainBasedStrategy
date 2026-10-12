@@ -355,6 +355,11 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         # otherwise two books trading the SAME (client,binding,underlying) for an
         # A/B VWAP-source comparison would produce indistinguishable history rows.
         ev.strategy_name = self._strategy_name
+        # 2026-10-12, direct user spec: stamp the position's own cycle_id (set once
+        # at BEGINNING entry, survives rolls/hedge-carry) so trade_history rows can
+        # be traced as one continuous position across a day boundary.
+        if self._position is not None:
+            ev.cycle_id = getattr(self._position, "cycle_id", "") or ""
         await self._order_emitter.emit(Topic.ORDER_REQUEST, ev)
 
     def _current_product_type(self) -> str:

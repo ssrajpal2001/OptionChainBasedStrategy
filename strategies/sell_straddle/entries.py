@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from datetime import datetime, timedelta
 from typing import List, Optional, Tuple
 
@@ -1001,6 +1002,7 @@ class EntryMixin:
             entry_indicators=self._pair_indicators(ce_strike, pe_strike) or dict(self._ind),
             lot_size=self._lot_size * self._lot_multiplier,
             expiry_date=expiry_date,
+            cycle_id=uuid.uuid4().hex[:8],
         )
         self._position.entry_time_value = _ctv(ce_strike, pe_strike, self._spot, ce_ltp, pe_ltp)
 
@@ -1175,6 +1177,7 @@ class EntryMixin:
             entry_indicators=self._pair_indicators(ce_strike, pe_strike) or dict(self._ind),
             lot_size=self._lot_size * self._lot_multiplier,
             expiry_date=expiry_date,
+            cycle_id=uuid.uuid4().hex[:8],
         )
         # 2026-09-06, direct user follow-up (stale-value audit F9): this used
         # self._spot (the CURRENT spot, at confirm time) to split the

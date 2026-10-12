@@ -40,6 +40,7 @@ def record(
     ts: Optional[str] = None,
     legs: Optional[list] = None,
     exit_remark: str = "",
+    cycle_id: str = "",
 ) -> None:
     """Append one closed-trade record for a client (append-only, capped).
 
@@ -59,6 +60,7 @@ def record(
             "exit_reason": exit_reason,
             "exit_remark": exit_remark,
             "pnl": round(float(pnl), 2),
+            "cycle_id": cycle_id,
         }
         if legs:
             rec["legs"] = [

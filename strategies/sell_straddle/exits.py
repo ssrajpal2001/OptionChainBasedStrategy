@@ -727,6 +727,116 @@ class ExitMixin:
         self._persist()
         return True
 
+    async def _check_dynamic_hedge(self, now: datetime) -> None:
+        """2026-10-12, direct client spec: continuously (every exit-check cycle,
+        not just EOD) monitor the open position's own unrealised MTM. The
+        instant it's negative (past a minimum-loss floor so tiny blips don't
+        churn into a real purchase), find an equal-strike-distance CE+PE hedge
+        pair whose combined cost fits inside the current unrealised loss, and
+        buy it. Duplicate-prevention: never runs again once hedge legs already
+        exist on this position -- same single-purchase contract as the EOD
+        hedge-and-carry path (_try_build_hedge above)."""
+        pos = self._position
+        if not pos or pos.status != "open":
+            return
+        if pos.hedge_ce_leg is not None or pos.hedge_pe_leg is not None:
+            return  # already hedged -- never buy a second pair on top of it
+        loss_pts = pos.unrealized_pnl
+        if loss_pts >= 0:
+            return  # not in loss -- nothing to hedge
+        loss_inr = abs(self._pnl_rs(loss_pts))
+        min_loss = float(getattr(self, "_dynamic_hedge_min_loss_inr", 500.0))
+        if loss_inr < min_loss:
+            return
+        await self._try_build_dynamic_hedge(pos, now, loss_inr)
+
+    async def _try_build_dynamic_hedge(self, pos: "StraddlePosition", now: datetime,
+                                        budget_rs: float) -> bool:
+        """Equal-strike-distance hedge purchase, budget-capped at the position's
+        current unrealised loss (₹). Mirrors _try_build_hedge's execution/pin/
+        persist mechanics exactly -- only the SELECTION logic differs (equal
+        distance + budget filter + rank, instead of an independent per-leg
+        50%-of-LTP walk)."""
+        from strategies.sell_straddle.selection import (
+            generate_equal_distance_hedge_pairs, filter_hedges_by_budget, rank_hedge_candidates,
+        )
+        from strategies.sell_straddle.dataclasses import StraddleLeg
+
+        step = self._cfg.exchange.strike_steps.get(self._underlying, 50.0) if self._cfg else 50.0
+        qty = self._lot_size * self._lot_multiplier
+        candidates = generate_equal_distance_hedge_pairs(
+            self._strike_prem, pos.ce_leg.strike, pos.pe_leg.strike, step,
+        )
+        eligible = filter_hedges_by_budget(candidates, qty, budget_rs)
+        best = rank_hedge_candidates(eligible)
+        if best is None:
+            self._clog.info(
+                "DYNAMIC HEDGE — no equal-distance pair fits within loss budget ₹%.2f -- retrying next cycle",
+                budget_rs,
+            )
+            return False
+        d, ce_strike, ce_hedge_ltp, pe_strike, pe_hedge_ltp, cost_rs = best
+
+        if int(ce_strike) == int(pos.ce_leg.strike) or int(pe_strike) == int(pos.pe_leg.strike):
+            self._clog.info(
+                "DYNAMIC HEDGE — computed hedge strike collided with its own sold leg (CE %d vs %d, "
+                "PE %d vs %d) -- skipping",
+                ce_strike, int(pos.ce_leg.strike), pe_strike, int(pos.pe_leg.strike),
+            )
+            return False
+
+        ce_fill = await self._dispatch_hedge_order(
+            "BUY", "CE", ce_strike, ce_hedge_ltp, ce_hedge_ltp, pos.expiry_date, "dynamic_hedge",
+        )
+        if ce_fill is None or ce_fill.entry_aborted or ce_fill.routing_failed or ce_fill.fill_price <= 0:
+            self._clog.critical("DYNAMIC HEDGE — CE %d BUY failed/unconfirmed -- aborting", ce_strike)
+            return False
+
+        if not self._is_crypto and self._rebalancer:
+            try:
+                self._rebalancer.pin_strike(self._underlying, float(ce_strike))
+                self._rebalancer.pin_strike(self._underlying, float(pe_strike))
+            except Exception as exc:
+                logger.warning("SellStraddle[%s]: pin_strike for dynamic hedge legs failed: %s",
+                               self._underlying, exc)
+
+        pe_fill = await self._dispatch_hedge_order(
+            "BUY", "PE", pe_strike, pe_hedge_ltp, pe_hedge_ltp, pos.expiry_date, "dynamic_hedge",
+        )
+        pos.hedge_ce_leg = StraddleLeg("CE", ce_strike, ce_fill.fill_price, ce_fill.fill_price,
+                                       open_time=now, open_reason="dynamic_hedge")
+        if pe_fill is None or pe_fill.entry_aborted or pe_fill.routing_failed or pe_fill.fill_price <= 0:
+            # CE already genuinely bought -- do NOT discard it (same partial-fill
+            # handling as _try_build_hedge).
+            logger.critical(
+                "SellStraddle[%s]: DYNAMIC HEDGE PE %d BUY failed/unconfirmed AFTER CE already "
+                "filled -- position is PARTIALLY hedged (CE only). Needs manual review.",
+                self._underlying, pe_strike,
+            )
+            self._clog.critical(
+                "DYNAMIC HEDGE PE %d BUY failed AFTER CE%d already filled @ %.2f -- PARTIALLY hedged, "
+                "needs manual review", pe_strike, ce_strike, ce_fill.fill_price,
+            )
+            pos.is_hedged_positional = True
+            self._persist()
+            return True
+
+        pos.hedge_pe_leg = StraddleLeg("PE", pe_strike, pe_fill.fill_price, pe_fill.fill_price,
+                                       open_time=now, open_reason="dynamic_hedge")
+        pos.is_hedged_positional = True
+        logger.info(
+            "SellStraddle[%s]: DYNAMIC HEDGE BUILT — D=%d CE%d@%.2f PE%d@%.2f cost=₹%.2f "
+            "within budget ₹%.2f (unrealised loss).",
+            self._underlying, d, ce_strike, ce_fill.fill_price, pe_strike, pe_fill.fill_price,
+            cost_rs, budget_rs,
+        )
+        self._clog.info(
+            "DYNAMIC HEDGE BUILT — D=%d CE%d@%.2f PE%d@%.2f cost=₹%.2f within budget ₹%.2f",
+            d, ce_strike, ce_fill.fill_price, pe_strike, pe_fill.fill_price, cost_rs, budget_rs,
+        )
+        self._persist()
+        return True
+
     async def _close_hedge_legs(self, pos: "StraddlePosition", reason: str) -> None:
         """Close (SELL) both hedge legs, if any. Never touches the sold legs --
         caller is responsible for closing those separately (_close_position)."""
@@ -1953,6 +2063,16 @@ class ExitMixin:
                 self._clog.info("DAY LOSS SL — no hedge activated (%s); holding position unchanged", _why)
                 return
 
+        # 2026-10-12, direct client spec: dynamic equal-distance hedge buying, opt-in
+        # (default OFF). Runs BEFORE the ITM-pair-gate/roll-protection block below for
+        # the same reason they themselves run early -- a protective hedge purchase
+        # must get first look before any rollover/exit check can act on a position
+        # whose real risk this hedge is about to reduce.
+        if getattr(self, "_dynamic_hedge_enabled", False):
+            await self._check_dynamic_hedge(now)
+            if not (self._position and self._position.status == "open"):
+                return
+
         # 2b. ITM PAIR GATE + 70% ROLL PROTECTION -- must run BEFORE the generic
         # ratio/ltp_decay/TSL/exit_rules/vwap_rise checks below, each of which
         # `return`s immediately the moment its own condition fires. An itm-pair-gate
@@ -2682,13 +2802,17 @@ class ExitMixin:
             # is_beginning (entries.py: self._trades_today == 0) is true again on
             # the next cycle -- the strategy has not genuinely completed its first
             # real trade of the day, so it should still be treated as one.
-            if reason == "post_restore_data_stale" and self._trades_today > 0:
+            # 2026-10-12, direct user spec: an ITM-pair-gate full close is a genuine
+            # profit-driven exit, but the user explicitly wants the restart after it
+            # to use BEGINNING entry's own selection logic (select_balanced_pair_at),
+            # not the RE-ENTRY pool-scan -- same revert mechanism already used for
+            # post_restore_data_stale above, just a different trigger reason.
+            if reason in ("post_restore_data_stale", "itm_pair_gate_profit") and self._trades_today > 0:
                 self._trades_today -= 1
                 logger.info(
-                    "SellStraddle[%s]: post_restore_data_stale close was not a genuine "
-                    "trading decision -- trades_today reverted to %d so the next entry "
-                    "is evaluated as BEGINNING, not RE-ENTRY.",
-                    self._underlying, self._trades_today,
+                    "SellStraddle[%s]: %s close -- trades_today reverted to %d so the next "
+                    "entry is evaluated as BEGINNING, not RE-ENTRY.",
+                    self._underlying, reason, self._trades_today,
                 )
             # Cooldown is for organic SL events; forced liquidation / deployment removal
             # should not penalise future entries (and kill-switch means no future entries).

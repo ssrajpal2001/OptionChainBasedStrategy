@@ -602,9 +602,11 @@ class RollingMixin:
         Only activates (arms/watches) when both legs are ITM AND the point-distance between
         the two ITM strikes is > itm_pair_gate_min_strike_gap -- a narrow both-ITM pair is
         left alone entirely (no arm, no watch, no action).
-        Once armed, when cumulative P&L in INR >= itm_pair_gate_profit_inr, attempt a
-        rollover via _single_side_roll first; only if no valid partner is found does this
-        fall back to closing both legs fully and restarting via re-entry.
+        Once armed, when cumulative P&L in INR >= itm_pair_gate_profit_inr * lot_multiplier
+        (2026-10-12: per-lot threshold, not flat), closes the COMPLETE position (sold legs +
+        hedge legs if any) unconditionally and restarts fresh via BEGINNING entry logic --
+        no rollover attempt on this path (that was the old 2026-08 behaviour; direct user
+        correction removed it).
         Does nothing if the toggle is OFF, the pair is not both ITM, or the gap is too small.
         """
         if not getattr(self, "_itm_pair_gate_enabled", False):
@@ -628,50 +630,36 @@ class RollingMixin:
 
         cumulative_pts = self._cumulative_pnl_pts()
         cumulative_inr = self._pnl_rs(cumulative_pts)
-        threshold_inr = float(getattr(self, "_itm_pair_gate_profit_inr", 500.0))
+        # 2026-10-12, direct user correction: ₹500 is a PER-LOT threshold, not a flat
+        # total regardless of size -- scale by lot_multiplier so a 20-lot deployment
+        # needs ₹10,000 total profit to trigger, same per-lot bar as a 1-lot deployment.
+        threshold_inr = (float(getattr(self, "_itm_pair_gate_profit_inr", 500.0))
+                          * float(getattr(self, "_lot_multiplier", 1) or 1))
 
         if cumulative_inr >= threshold_inr:
-            # 2026-08-06 CRITICAL FIX: _single_side_roll's own tail unconditionally
-            # re-calls _check_itm_pair_gate after every successful roll. When the
-            # reason IS itm_pair_gate_profit_rollover, that reentrant call can see
-            # the SAME still-both-ITM, still-over-threshold pair and attempt to
-            # roll AGAIN with the identical reason -- but _last_roll_attempt's 60s
-            # throttle (just set by the roll still unwinding) blocks it, and
-            # _single_side_roll's "no partner found" return is indistinguishable
-            # from that throttle block. Net effect: close 1 leg -> open 1 leg ->
-            # (misread as "no partner") -> close both -> reopen fresh -- 4 real
-            # orders instead of 2, immediately after the roll that just succeeded.
-            # Guarded so the reentrant call this exact path triggers is a clean
-            # no-op instead of a second attempt.
             if getattr(self, "_itm_gate_rolling", False):
                 return
             self._itm_gate_armed = False
+            # 2026-10-12, direct user correction: no rollover attempt at all once the
+            # gate's profit threshold is crossed -- close the complete position
+            # (sold legs + hedge legs if any) immediately and restart fresh. The
+            # single-side-roll path used to run first and only fall back to a full
+            # close when no partner existed; the user explicitly wants the full
+            # close every time, unconditionally.
             logger.info(
                 "SellStraddle[%s]: ITM-PAIR GATE — both legs ITM & gap=%d>%.0f (CE%d/PE%d) spot=%.0f "
-                "cumulative=%.2f pts (₹%.2f) >= threshold ₹%.2f → attempting rollover.",
+                "cumulative=%.2f pts (₹%.2f) >= threshold ₹%.2f → closing complete position, restarting fresh.",
                 self._underlying, strike_gap, min_gap, ce_s, pe_s, self._spot,
                 cumulative_pts, cumulative_inr, threshold_inr,
-            )
-            self._itm_gate_rolling = True
-            try:
-                rolled = await self._single_side_roll(now, "itm_pair_gate_profit_rollover")
-            finally:
-                self._itm_gate_rolling = False
-            if rolled:
-                return
-            logger.info(
-                "SellStraddle[%s]: ITM-PAIR GATE — no rollover partner found; closing both and restarting.",
-                self._underlying,
             )
             # 2026-08-28 fix: close-fallback (no roll partner found) is a FULL
             # exit, not a rollover -- must also close any standing hedge legs
             # (same "treat all 4 legs as one" fix as the Day%/TSL guardrails).
             await self._close_position_and_hedge("itm_pair_gate_profit")
-            # No cooldown — restart immediately. Already goes via re-entry (not
-            # beginning) since trades_today >= 1 at this point (a trade already
-            # happened earlier today to reach this position) -- is_beginning is
-            # trades_today==0, already False here regardless of _beginning_failed
-            # (removed 2026-08-05: was a redundant belt-and-suspenders write).
+            # No cooldown — restart immediately. trades_today is reverted in
+            # _close_position's own itm_pair_gate_profit branch (exits.py) so the
+            # next entry is evaluated with BEGINNING selection logic, not re-entry
+            # pool-scan, per direct user spec.
             return
 
         # Below threshold: arm the gate and hold.  We wait for either the cumulative P&L

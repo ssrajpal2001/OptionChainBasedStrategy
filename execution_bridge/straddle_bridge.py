@@ -94,6 +94,10 @@ class StraddleOrderEvent:
     # not a hardcoded "sell_straddle" literal. Two books can now share the same
     # (client,binding,underlying) for a deliberate VWAP-source A/B comparison.
     strategy_name:  str  = "sell_straddle"
+    # 2026-10-12, direct user spec: carries the position's own cycle_id (set once at
+    # a fresh BEGINNING entry, survives rolls/hedge-carry) so trade_history rows can
+    # be grouped into one continuous position across a day boundary, not just by date.
+    cycle_id:       str  = ""
     # Set by the STRATEGY (never by the bridge) after the fact, on the order_ev it already
     # returned to a caller — True when this EXIT's fill was never confirmed (bridge couldn't
     # route it, or the wait timed out). Callers (e.g. single-side roll code in rolling.py) must
@@ -306,6 +310,7 @@ class TradeLogger:
                     ev.close_reason, sum(l["pnl"] for l in _legs),
                     binding_id=binding_id, legs=_legs,
                     exit_remark=getattr(ev, "close_remark", "") or "",
+                    cycle_id=getattr(ev, "cycle_id", "") or "",
                 )
         except Exception:
             pass

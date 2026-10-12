@@ -62,7 +62,7 @@ class OiRegimeTracker:
         strike_step: float = 50.0,
         band: int = 5,                 # ATM +/- 5 strikes, confirmed fixed
         change_window_min: int = 5,    # 5 or 15, per spec row 2
-        trend_pct: float = 3.0,
+        trend_pct: float = 10.0,
         noise_floor_pct: float = 15.0,
         hard_wall_pts: float = 50.0,
         override_pct: float = 30.0,
@@ -83,19 +83,17 @@ class OiRegimeTracker:
         self._session_start_oi: Dict[Tuple[int, Side], float] = {}
         self._maxlen = 240  # ~4h of 1-min bars, plenty for a 15-min window
 
-        # 2026-10-03 CRITICAL FIX, direct user spec: sticky/latched trend
-        # state machine (classic hysteresis), replacing the old stateless
-        # "compare to N-minutes-ago" calc. A fixed reference ANCHOR is kept
-        # per side; the trend only updates (and the anchor only moves) when
-        # the current band total crosses +/-trend_pct away from that anchor.
-        # A reading that falls back inside the band does NOT reset the
-        # trend to "No Change" -- it holds whatever was last confirmed
-        # (Rise/Fall/No Change), against the SAME anchor, until a genuine
-        # new crossing happens. This also makes the trend self-paced on its
-        # OWN change_window_min cadence regardless of how often classify()
-        # itself is called (e.g. every real tick in production) -- a new
-        # evaluation only actually happens once that many minutes have
-        # elapsed since the side's own last evaluation.
+        # 2026-10-03, REVISED 2026-10-12 direct user spec: a fixed reference
+        # ANCHOR is kept per side; the anchor only moves (resets to the
+        # current value) when the current band total crosses +/-trend_pct
+        # away from it. The trend label is re-evaluated fresh every time --
+        # beyond the threshold either way confirms Rise/Fall and resets the
+        # anchor; inside the band reverts to "No Change" (no hold-over).
+        # Threshold raised 3% -> 10%, same date. This also makes the trend
+        # self-paced on its OWN change_window_min cadence regardless of how
+        # often classify() itself is called (e.g. every real tick in
+        # production) -- a new evaluation only actually happens once that
+        # many minutes have elapsed since the side's own last evaluation.
         self._latches: Dict[Side, StickyTrendLatch] = {
             "CE": StickyTrendLatch(trend_pct=trend_pct, eval_window_min=change_window_min),
             "PE": StickyTrendLatch(trend_pct=trend_pct, eval_window_min=change_window_min),
