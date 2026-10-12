@@ -684,7 +684,15 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                             self._underlying, self._session_realized_pnl_pts, self._trades_today,
                             self._initial_net_credit, self._stop_for_day)
         except Exception as exc:
-            logger.debug("SellStraddle[%s]: session restore failed: %s", self._underlying, exc)
+            # 2026-10-12 diagnostic upgrade, real live incident: this was DEBUG
+            # level, invisible in the production log, while _restore_session
+            # silently failed on every single restart with zero trace -- four
+            # real restarts in one morning produced not even the function's
+            # own "no carry-forward state found" fallback log line, meaning
+            # it's throwing before reaching any of its own logger.info calls.
+            # Upgraded to logger.exception (ERROR level + full traceback) so
+            # the actual failure is visible instead of guessed at.
+            logger.exception("SellStraddle[%s]: session restore failed: %s", self._underlying, exc)
 
     def _persist_pool_engine(self) -> None:
         """Persists self._pool_engine's rolling VWAP/SLOPE/RSI/ROC series
@@ -772,7 +780,9 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
             self._pool_engine.load_dict(_saved.get("pool_state") or {})
             logger.info("SellStraddle[%s]: restored pool-engine VWAP/SLOPE/RSI/ROC state.", self._underlying)
         except Exception as exc:
-            logger.debug("SellStraddle[%s]: pool engine restore failed: %s", self._underlying, exc)
+            # 2026-10-12 diagnostic upgrade, same real incident as
+            # _restore_session's own comment above.
+            logger.exception("SellStraddle[%s]: pool engine restore failed: %s", self._underlying, exc)
 
     async def _pool_engine_persist_loop(self) -> None:
         """Periodic save (independent of position state -- VWAP/SLOPE matter
