@@ -57,21 +57,31 @@ def check_upstox() -> None:
     with urllib.request.urlopen(url, timeout=30) as resp:
         raw = gzip.decompress(resp.read())
     instruments = json.loads(raw)
-    one_year_ago = datetime.now() - timedelta(days=365)
     candidates = [
         i for i in instruments
         if i.get("name") == "NIFTY" and i.get("instrument_type") in ("CE", "PE")
         and i.get("expiry")
     ]
-    # expiry is epoch millis in this master; find one closest to 1 year ago.
-    candidates.sort(key=lambda i: abs((i["expiry"] / 1000.0) - one_year_ago.timestamp()))
     if not candidates:
         print("No NIFTY option instruments found in the master at all -- aborting Upstox check.")
         return
-    inst = candidates[0]
+    # Sort by expiry ascending -- the FIRST one is the oldest contract this
+    # downloadable master knows about at all. This directly answers "does
+    # the master even contain anything expired ~1yr ago" before worrying
+    # about whether the historical-candle API itself would return OI for it.
+    candidates.sort(key=lambda i: i["expiry"])
+    oldest = candidates[0]
+    oldest_expiry = datetime.fromtimestamp(oldest["expiry"] / 1000.0)
+    print(f"OLDEST NIFTY option expiry present in this downloadable master: "
+          f"{oldest.get('trading_symbol', oldest['instrument_key'])} -> {oldest_expiry.date()}")
+    print("(If this is only days/weeks in the past, the master does NOT carry "
+          "genuinely old expired contracts -- there is no instrument_key to even "
+          "query a 1-year-old option by, regardless of what the candle API itself returns.)")
+
+    inst = oldest
     key = inst["instrument_key"]
-    expiry_dt = datetime.fromtimestamp(inst["expiry"] / 1000.0)
-    print(f"Using {inst.get('trading_symbol', key)} (key={key}, expiry={expiry_dt.date()})")
+    expiry_dt = oldest_expiry
+    print(f"\nUsing {inst.get('trading_symbol', key)} (key={key}, expiry={expiry_dt.date()}) for the actual API test below.")
 
     for interval, frm, to in (
         ("day", expiry_dt - timedelta(days=30), expiry_dt),
@@ -99,8 +109,8 @@ def check_zerodha(client_id: str, binding_id: str) -> None:
     print("ZERODHA -- expired NIFTY option/future, ~1 year back, day + minute, oi=True")
     print("=" * 70)
     b = _get_binding(client_id, binding_id)
-    if (b.get("broker") or "").lower() != "zerodha":
-        print(f"Binding {binding_id!r} is {b.get('broker')!r}, not zerodha -- skipping.")
+    if (b.get("provider") or "").lower() != "zerodha":
+        print(f"Binding {binding_id!r} is {b.get('provider')!r}, not zerodha -- skipping.")
         return
     api_key, token = b.get("api_key") or "", b.get("access_token") or ""
     if not api_key or not token:
