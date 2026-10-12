@@ -20,7 +20,8 @@ conn = sqlite3.connect("data/vp_oi_regime.db")
 rows = conn.execute(
     "SELECT ts, future_oi_now, call_oi_now, put_oi_now, regime "
     "FROM snapshots WHERE underlying=? AND trade_date=? "
-    "AND future_oi_now IS NOT NULL ORDER BY ts",
+    "AND future_oi_now IS NOT NULL AND call_oi_now IS NOT NULL AND put_oi_now IS NOT NULL "
+    "ORDER BY ts",
     (underlying, trade_date),
 ).fetchall()
 conn.close()
