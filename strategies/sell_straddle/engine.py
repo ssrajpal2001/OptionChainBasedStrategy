@@ -575,8 +575,20 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
             # self._position) because this runs BEFORE start() restores
             # self._position -- see start()'s own call order (same pattern
             # _restore_pool_engine() already uses).
+            # 2026-10-12 CRITICAL FIX, real live incident: position_store.load()
+            # already returns the UNWRAPPED inner "position" dict (confirmed in
+            # position_store.py's own load(): `return payload.get("position")`)
+            # -- the `.get("position")` below was unwrapping an ALREADY-unwrapped
+            # dict, which always returns None. is_hedged_positional has
+            # therefore ALWAYS evaluated False here, on every restart, for as
+            # long as this code has existed -- the whole carry-forward restore
+            # mechanism (this function AND _restore_pool_engine's matching bug)
+            # has never actually worked. Confirmed live: a real hedge-and-carry
+            # position's is_hedged_positional=true in the raw file, but this
+            # check still read False, silently falling through to the
+            # non-carry branch and discarding the booked P&L.
             _raw_pos = _ps.load(self._persist_key)
-            _hedged = bool(_raw_pos and (_raw_pos.get("position") or {}).get("is_hedged_positional"))
+            _hedged = bool(_raw_pos and _raw_pos.get("is_hedged_positional"))
             if _hedged:
                 _sess = _ps.load(self._persist_key + "_session_carry")
                 if _sess:
@@ -731,8 +743,11 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
             # Peeked from the RAW saved position file directly (not
             # self._position) because this runs BEFORE start() restores
             # self._position -- see start()'s own call order.
+            # 2026-10-12 CRITICAL FIX: same double-unwrap bug as _restore_session's
+            # own identical peek -- see that function's comment for the full
+            # explanation. _ps.load() already returns the unwrapped dict.
             _raw_pos = _ps.load(self._persist_key)
-            if _raw_pos and (_raw_pos.get("position") or {}).get("is_hedged_positional"):
+            if _raw_pos and _raw_pos.get("is_hedged_positional"):
                 _carry = _ps.load(self._persist_key + "_pool_carry")
                 if _carry:
                     self._pool_engine.load_dict(_carry.get("pool_state") or {})
