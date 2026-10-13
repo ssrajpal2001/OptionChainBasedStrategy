@@ -2997,6 +2997,26 @@ class ExitMixin:
         except Exception as exc:
             self._clog.warning("VP/OI REST seed failed: %s", exc)
 
+    def _vp_oi_is_expiry_week(self, now: datetime) -> bool:
+        """2026-10-13, direct user spec (System_Guidelines.pdf rows 8-11):
+        'during the final week before expiry, monitor both Current Month
+        and Next Month Futures OI' -- this refers to the FUTURES contract's
+        own monthly expiry (NSE's last-Thursday-of-month cycle), not the
+        underlying's weekly options expiry. True from 6 calendar days before
+        that date through the expiry date itself (a 7-day window covering
+        the whole final week), same as the PDF's own 'final week' framing.
+        Degrades safely to False (standard near-month-only tracking) if the
+        registry doesn't have a futures expiry resolved yet."""
+        try:
+            from data_layer.instrument_registry import REGISTRY
+            fut_expiry = REGISTRY.get_futures_expiry(self._underlying)
+        except Exception:
+            return False
+        if not fut_expiry:
+            return False
+        today = now.date()
+        return fut_expiry - timedelta(days=6) <= today <= fut_expiry
+
     def _feed_vp_oi_volume_profile_bar(self, adapter, now: datetime) -> None:
         """Feed the Volume Profile off the futures/spot price every tick,
         bucketed into 1-min bars. Real traded volume isn't plumbed to this
@@ -3068,6 +3088,15 @@ class ExitMixin:
         if self._vp_oi_naked_leg or adapter.awaiting_reentry:
             return
 
+        # 2026-10-13, direct user spec (System_Guidelines.pdf rows 8-11): the
+        # futures rollover dual-tracking (near+next month OI, false-signal
+        # filter, contract switch) only ever activates during expiry week --
+        # but adapter.is_expiry_week defaults False and was NEVER set by any
+        # real caller anywhere in this codebase (confirmed via repo-wide
+        # grep), so that whole mechanic has been permanently dormant since
+        # it was built. The adapter itself is deliberately I/O-free (its own
+        # module docstring), so the real calendar check lives here instead.
+        adapter.is_expiry_week = self._vp_oi_is_expiry_week(now)
         dr = adapter.evaluate(spot=float(getattr(self, "_spot", 0.0) or 0.0), now_ts=now.timestamp())
 
         # 2026-10-09, direct user ask after the first live day: nothing was
@@ -3520,6 +3549,7 @@ class ExitMixin:
             # of freezing at whatever they read the instant a position
             # last closed.
             self._feed_vp_oi_volume_profile_bar(adapter, now)
+            adapter.is_expiry_week = self._vp_oi_is_expiry_week(now)
             adapter.evaluate(spot=float(getattr(self, "_spot", 0.0) or 0.0), now_ts=now.timestamp())
         if adapter.volatile_watch:
             await self._check_vp_oi_volatile_watch(now)
