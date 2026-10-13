@@ -2997,8 +2997,14 @@ class DashboardServer:
                         # had its own separate real bug carrying Friday's booked
                         # P&L across the weekend, since fixed in this same file's
                         # sibling commit but now moot with this simpler source).
+                        # 2026-10-13 fix, real user-found gap: _ls alone is the raw
+                        # 1-lot exchange size -- this silently under-reported Booked
+                        # P&L for any deployment running >1 lot (same class of bug
+                        # already fixed for the header's Running(Rs) total on
+                        # 2026-09-22), e.g. undercounted by 20x on a 20-lot binding.
                         _ls = int(_srv._cfg.exchange.lot_sizes.get(underlying, 0) or 0)
-                        booked = round(float(getattr(strat, "_session_realized_pnl_pts", 0.0) or 0.0) * _ls, 2)
+                        _lm_booked = float(dep.get("lot_multiplier", 1.0) or 1.0)
+                        booked = round(float(getattr(strat, "_session_realized_pnl_pts", 0.0) or 0.0) * _ls * _lm_booked, 2)
                         if pos and getattr(pos, "status", "open") == "open":
                             try:
                                 from data_layer.runtime_config import RuntimeConfig as _RC2
