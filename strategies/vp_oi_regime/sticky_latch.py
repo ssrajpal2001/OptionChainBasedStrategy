@@ -34,6 +34,21 @@ class StickyTrendLatch:
         self._trend = "No Change"
         self._last_eval_ts = None
 
+    def seed_anchor(self, anchor_value: float, ts: float) -> None:
+        """2026-10-13, direct user spec: a mid-day process restart used to
+        reset the anchor to whatever OI happened to be live at that exact
+        moment -- wiping out the real session peak tracked since market
+        open and making the very next reading look like a huge, fake move
+        off a wrong baseline. Call this ONCE right after construction (before
+        any real update()) with the true peak OI recorded so far today
+        (reconstructed from strategies/vp_oi_regime/recorder.py's own DB --
+        every real evaluation this session is already logged there). Sets
+        the anchor directly without emitting a Rise/Fall -- a cold seed, not
+        a crossing."""
+        self._anchor = anchor_value
+        self._last_eval_ts = ts
+        self._trend = "No Change"
+
     def update(self, now_value: float, ts: float) -> Tuple[str, float, float]:
         """Returns (trend, pct_vs_anchor, anchor_used_for_this_reading)."""
         if self._anchor is None:

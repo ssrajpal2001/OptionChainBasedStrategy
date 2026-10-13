@@ -500,6 +500,16 @@ class ConfigMixin:
                 self._vp_oi_adapter = VpOiRegimeAdapter(
                     strike_step=step, noise_floor_pct=cfg.vp_oi_noise_floor_pct,
                     override_pct=cfg.vp_oi_override_pct)
+                # 2026-10-13, direct user spec: on a mid-day restart, seed
+                # today's real peak OI (from recorder.py's own already-
+                # written history for THIS book) into the fresh adapter's
+                # latches, instead of letting the anchors reset to whatever
+                # OI happens to be live at this exact moment -- avoids a
+                # fake, huge-looking "move" off a wrong baseline right after
+                # restart. A genuine first-ever-today construction (no rows
+                # yet) is a safe no-op (load_today_peaks returns Nones).
+                import asyncio as _asyncio
+                _asyncio.create_task(self._seed_vp_oi_anchors())
         else:
             self._vp_oi_adapter = None
 
@@ -556,6 +566,38 @@ class ConfigMixin:
         self._same_day_expiry_enabled = cfg.same_day_expiry_enabled
 
         self._hedge_carry_enabled = cfg.hedge_carry_enabled
+
+    async def _seed_vp_oi_anchors(self) -> None:
+        """2026-10-13, direct user spec: seed a freshly-constructed VP/OI
+        adapter's latch anchors from today's real recorded peak OI (this
+        book's own already-written history in recorder.py's DB), right after
+        construction -- see live_adapter.VpOiRegimeAdapter.
+        seed_anchors_from_recorder's own docstring for the full rationale.
+        Fire-and-forget task, never blocks the config-apply call that
+        scheduled it."""
+        import asyncio
+        from datetime import datetime
+        from config.global_config import IST
+        from strategies.vp_oi_regime.recorder import load_today_peaks
+        adapter = getattr(self, "_vp_oi_adapter", None)
+        if adapter is None:
+            return
+        try:
+            peaks = await asyncio.to_thread(
+                load_today_peaks,
+                client_id=getattr(self, "_client_id", ""),
+                binding_id=getattr(self, "_binding_id", ""),
+                underlying=self._underlying,
+            )
+            adapter.seed_anchors_from_recorder(peaks, datetime.now(IST).timestamp())
+            logger.info(
+                "SellStraddle[%s]: VP/OI anchors seeded from today's recorded peaks "
+                "(call=%s put=%s future=%s).",
+                self._underlying, peaks.get("call_oi_peak"), peaks.get("put_oi_peak"),
+                peaks.get("future_oi_peak"),
+            )
+        except Exception as exc:
+            logger.warning("SellStraddle[%s]: VP/OI anchor seed failed: %s", self._underlying, exc)
 
     def reconfigure(self) -> None:
         self._load_thresholds()

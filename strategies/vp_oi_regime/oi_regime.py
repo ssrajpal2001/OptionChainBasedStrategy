@@ -105,6 +105,17 @@ class OiRegimeTracker:
         for latch in self._latches.values():
             latch.reset()
 
+    def seed_anchors(self, call_anchor: Optional[float], put_anchor: Optional[float], ts: float) -> None:
+        """2026-10-13 direct user spec: seed the CE/PE latches' anchors from
+        real recorded history (e.g. today's peak OI so far, reconstructed
+        from recorder.py's DB) right after a mid-day restart, instead of
+        letting them reset to whatever's live at that moment. Either side
+        may be None (no usable history for it) -- left untouched."""
+        if call_anchor is not None:
+            self._latches["CE"].seed_anchor(call_anchor, ts)
+        if put_anchor is not None:
+            self._latches["PE"].seed_anchor(put_anchor, ts)
+
     def _update_latch(self, side: Side, now_total: float, minute_ts: float) -> Tuple[str, float, float]:
         """Returns (trend, pct_vs_anchor, anchor_used_for_this_reading)."""
         return self._latches[side].update(now_total, minute_ts)

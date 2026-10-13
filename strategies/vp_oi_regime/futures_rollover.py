@@ -72,6 +72,12 @@ class FuturesRolloverTracker:
         self._active_contract = "near"
         self._future_oi_latch.reset()
 
+    def seed_anchor(self, anchor_value: float, ts: float) -> None:
+        """2026-10-13 direct user spec: seed the Future-OI latch's anchor from
+        real recorded history on a mid-day restart -- see StickyTrendLatch.
+        seed_anchor's own docstring for the full rationale."""
+        self._future_oi_latch.seed_anchor(anchor_value, ts)
+
     def update_near(self, ts: float, oi: float, volume: float) -> None:
         self._near.append((ts, oi, volume))
 

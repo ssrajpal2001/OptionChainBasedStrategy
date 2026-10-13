@@ -125,6 +125,19 @@ class VpOiRegimeAdapter:
         self._rollover = FuturesRolloverTracker(change_window_min=self.change_window_min)
         self._ema = {"CE": NineEmaTrailingStop(period=9), "PE": NineEmaTrailingStop(period=9)}
 
+    def seed_anchors_from_recorder(self, peaks: dict, now_ts: float) -> None:
+        """2026-10-13, direct user spec: call this ONCE, right after
+        construction on a mid-day restart (before any real update/evaluate),
+        with the dict returned by recorder.load_today_peaks(). Seeds each
+        latch's anchor to today's REAL peak OI so far, instead of letting it
+        reset to whatever's live at the exact restart moment -- avoids a
+        fake, huge-looking "move" off a wrong baseline right after restart.
+        No-op for any side with no real history yet today (None)."""
+        self._oi.seed_anchors(peaks.get("call_oi_peak"), peaks.get("put_oi_peak"), now_ts)
+        fut_peak = peaks.get("future_oi_peak")
+        if fut_peak is not None:
+            self._rollover.seed_anchor(fut_peak, now_ts)
+
     def reset(self) -> None:
         """New trading day -- fresh everything, same lifecycle as the
         engine's other per-session trackers."""

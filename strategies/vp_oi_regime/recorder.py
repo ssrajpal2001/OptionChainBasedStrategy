@@ -65,6 +65,32 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
+def load_today_peaks(
+    *, client_id: str, binding_id: str, underlying: str,
+) -> dict:
+    """2026-10-13, direct user spec: on a mid-day restart, the live
+    StickyTrendLatch anchors used to reset to whatever OI happened to be
+    live at that exact moment -- wiping the real session peak tracked since
+    market open. Returns today's real MAX(call_oi_now)/MAX(put_oi_now)/
+    MAX(future_oi_now) from this book's own already-recorded snapshots
+    (full resolution, written every real evaluate() cycle since whenever
+    this was first deployed) -- None for any value with no rows yet today.
+    Synchronous (sqlite3) -- caller must wrap with asyncio.to_thread()."""
+    from datetime import datetime
+    trade_date = datetime.now(IST).strftime("%Y-%m-%d")
+    conn = _connect()
+    try:
+        row = conn.execute(
+            """SELECT MAX(call_oi_now), MAX(put_oi_now), MAX(future_oi_now)
+               FROM snapshots WHERE client_id=? AND binding_id=? AND underlying=? AND trade_date=?""",
+            (client_id, binding_id, underlying, trade_date),
+        ).fetchone()
+    finally:
+        conn.close()
+    call_max, put_max, future_max = row if row else (None, None, None)
+    return {"call_oi_peak": call_max, "put_oi_peak": put_max, "future_oi_peak": future_max}
+
+
 def record_snapshot(
     *, client_id: str, binding_id: str, underlying: str, state: dict,
 ) -> None:
