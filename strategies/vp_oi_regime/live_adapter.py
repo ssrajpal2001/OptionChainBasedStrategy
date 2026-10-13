@@ -348,11 +348,12 @@ class VpOiRegimeAdapter:
             # 2026-10-09, direct user ask: previous (anchor) OI, current OI,
             # the %-move between them, and the threshold that %-move is
             # judged against -- the "why" behind the trend labels above.
-            # Future's own threshold is a separate hardcoded 3.0 in
-            # futures_rollover.py (currently identical to call/put's
-            # configurable self._oi.trend_pct, but a distinct constant --
-            # exposed separately rather than assumed equal).
-            "future_oi_trend_threshold_pct": 3.0,
+            # 2026-10-13 fix, real user-found gap: this used to be a hardcoded
+            # literal 3.0, disconnected from futures_rollover.py's own real
+            # latch -- it never reflected the actual threshold in use (stayed
+            # "3.00%" in the UI even after the 2026-10-12 change to 10%). Now
+            # reads the real live value directly.
+            "future_oi_trend_threshold_pct": self._rollover._future_oi_latch.trend_pct,
             "oi_trend_threshold_pct": self._oi.trend_pct,
             "future_oi_now": self.last_future_oi_now,
             "future_oi_anchor": self.last_future_oi_anchor,
