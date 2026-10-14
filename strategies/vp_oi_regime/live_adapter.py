@@ -125,6 +125,15 @@ class VpOiRegimeAdapter:
         self._rollover = FuturesRolloverTracker(change_window_min=self.change_window_min)
         self._ema = {"CE": NineEmaTrailingStop(period=9), "PE": NineEmaTrailingStop(period=9)}
 
+    def freeze_atm_for_day(self, atm: int) -> None:
+        """2026-10-14, direct user spec: freeze the OI tracker's ATM±band to
+        a fixed strike set for the whole trading day (off the real 9:15
+        session-open price), instead of re-centering on live spot every
+        evaluation -- see OiRegimeTracker.freeze_atm's own docstring for the
+        full rationale. Call once, at session start or right after a
+        mid-day restart."""
+        self._oi.freeze_atm(atm)
+
     def seed_anchors_from_recorder(self, peaks: dict, now_ts: float) -> None:
         """2026-10-13, direct user spec: call this ONCE, right after
         construction on a mid-day restart (before any real update/evaluate),

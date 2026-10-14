@@ -2994,6 +2994,23 @@ class ExitMixin:
                     "VP/OI volume profile seeded from REST — %d bars (%s to %s).",
                     len(bars), bars[0]["ts"], bars[-1]["ts"],
                 )
+                # 2026-10-14, direct user spec: freeze the OI tracker's
+                # ATM±band off the real 9:15 session-open price -- bars[0]
+                # is already today's FIRST 1-min bar from this exact REST
+                # call (no second fetch needed), so its own "open" is
+                # literally the 9:15 open. Works identically whether this
+                # is a genuine fresh-day start or a mid-day restart (the
+                # REST history is the same either way) -- unlike live spot,
+                # which would be wrong for a mid-day restart.
+                step = self._cfg.exchange.strike_steps.get(self._underlying, 50.0) if self._cfg else 50.0
+                open_px = float(bars[0]["open"])
+                if open_px > 0 and step > 0:
+                    atm = int(round(open_px / step) * step)
+                    self._vp_oi_adapter.freeze_atm_for_day(atm)
+                    self._clog.info(
+                        "VP/OI OI-band frozen for the day — ATM=%d (off 9:15 open=%.2f).",
+                        atm, open_px,
+                    )
         except Exception as exc:
             self._clog.warning("VP/OI REST seed failed: %s", exc)
 

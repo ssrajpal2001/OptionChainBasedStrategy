@@ -82,6 +82,10 @@ class OiRegimeTracker:
         self._series: Dict[Tuple[int, Side], Deque[Tuple[float, float]]] = {}
         self._session_start_oi: Dict[Tuple[int, Side], float] = {}
         self._maxlen = 240  # ~4h of 1-min bars, plenty for a 15-min window
+        # 2026-10-14, direct user spec: ATM±band frozen off the real 9:15
+        # session-open price (see freeze_atm's own docstring) -- None means
+        # "not frozen yet," falls back to live-spot-recentering until frozen.
+        self._frozen_atm: Optional[int] = None
 
         # 2026-10-03, REVISED 2026-10-12 direct user spec: a fixed reference
         # ANCHOR is kept per side; the anchor only moves (resets to the
@@ -102,6 +106,7 @@ class OiRegimeTracker:
     def reset(self) -> None:
         self._series.clear()
         self._session_start_oi.clear()
+        self._frozen_atm = None
         for latch in self._latches.values():
             latch.reset()
 
@@ -132,7 +137,24 @@ class OiRegimeTracker:
         if key not in self._session_start_oi:
             self._session_start_oi[key] = oi
 
+    def freeze_atm(self, atm: int) -> None:
+        """2026-10-14, direct user spec: the ATM±band strike SET used to
+        re-center on live spot every single classify() call -- as spot
+        drifted, a strike could enter/leave the band purely from that
+        drift, making the Call/Put OI totals jump for a reason that has
+        nothing to do with any real OI change at those strikes. Freezing
+        the band once, off the real 9:15 session-open price, means every
+        later OI change genuinely reflects writers acting at the SAME
+        strikes all day -- never a band-shift artifact. Call once, at
+        session start (fresh day) or right after a mid-day restart (seeded
+        from the real 9:15 open via REST, see the caller's own docstring).
+        """
+        self._frozen_atm = int(atm)
+
     def _atm(self, spot: float) -> int:
+        frozen = getattr(self, "_frozen_atm", None)
+        if frozen is not None:
+            return frozen
         return int(round(spot / self.strike_step) * self.strike_step)
 
     def _band_strikes(self, atm: int) -> List[int]:
