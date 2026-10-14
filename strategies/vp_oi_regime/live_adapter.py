@@ -125,6 +125,21 @@ class VpOiRegimeAdapter:
         self._rollover = FuturesRolloverTracker(change_window_min=self.change_window_min)
         self._ema = {"CE": NineEmaTrailingStop(period=9), "PE": NineEmaTrailingStop(period=9)}
 
+    def is_regime_action_ready(self, min_cycles: int = 2) -> bool:
+        """2026-10-14, direct user spec: right after a restart (or the
+        initial seed), the regime can be computed and displayed immediately,
+        but must NOT be trusted to drive a real exit/hedge decision until
+        each of the three latches (Future/Call/Put OI) has gone through at
+        least `min_cycles` genuine cadence-gated evaluations since the last
+        reset/seed -- a single fresh reading (or none at all) isn't enough
+        confirmation to act on. The caller still computes/logs/displays the
+        regime either way (full transparency); this only gates ACTION."""
+        return (
+            self._oi._latches["CE"].confirmed_cycles >= min_cycles
+            and self._oi._latches["PE"].confirmed_cycles >= min_cycles
+            and self._rollover._future_oi_latch.confirmed_cycles >= min_cycles
+        )
+
     def freeze_atm_for_day(self, atm: int) -> None:
         """2026-10-14, direct user spec: freeze the OI tracker's ATM±band to
         a fixed strike set for the whole trading day (off the real 9:15

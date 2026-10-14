@@ -28,11 +28,20 @@ class StickyTrendLatch:
         self._anchor: Optional[float] = None
         self._trend: str = "No Change"
         self._last_eval_ts: Optional[float] = None
+        # 2026-10-14, direct user spec: a restart (or the initial seed) only
+        # establishes a BASELINE -- it must not count as a confirmed reading
+        # of the trend. Only incremented on a genuine cadence-gated
+        # re-evaluation (never on the first anchor-establishment, never on
+        # a seed, never on an early-return inside the cadence window).
+        # confirmed_cycles lets the caller require N real evaluations since
+        # the last reset/seed before trusting this latch enough to ACT on.
+        self.confirmed_cycles: int = 0
 
     def reset(self) -> None:
         self._anchor = None
         self._trend = "No Change"
         self._last_eval_ts = None
+        self.confirmed_cycles = 0
 
     def seed_anchor(self, anchor_value: float, ts: float) -> None:
         """2026-10-13, direct user spec: a mid-day process restart used to
@@ -54,6 +63,7 @@ class StickyTrendLatch:
         self._anchor = anchor_value
         self._last_eval_ts = ts
         self._trend = "No Change"
+        self.confirmed_cycles = 0
 
     def update(self, now_value: float, ts: float) -> Tuple[str, float, float]:
         """Returns (trend, pct_vs_anchor, anchor_used_for_this_reading)."""
@@ -67,6 +77,7 @@ class StickyTrendLatch:
             return self._trend, pct, self._anchor
 
         self._last_eval_ts = ts
+        self.confirmed_cycles += 1
         if now_value > self._anchor:
             # New peak -- anchor ratchets up, unconditionally labeled Rise.
             self._anchor = now_value

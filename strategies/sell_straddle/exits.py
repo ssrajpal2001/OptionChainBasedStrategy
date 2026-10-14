@@ -3163,6 +3163,29 @@ class ExitMixin:
         if dr is None:
             return
 
+        # 2026-10-14, direct user spec: right after a restart (or the
+        # initial seed), the regime is computed and recorded/displayed
+        # immediately above -- full transparency -- but must NOT be trusted
+        # to drive a real exit/hedge decision until each of the three OI
+        # latches has gone through at least 2 genuine evaluation cycles
+        # since the last reset/seed. A single fresh post-restart reading
+        # isn't enough confirmation to act on (confirmed live, 2026-10-14:
+        # a Highly-Bearish single-leg exit fired off only ONE confirmed
+        # cycle, 59 seconds after the first post-restart evaluation).
+        if not adapter.is_regime_action_ready():
+            if _t_vpoi.monotonic() - getattr(self, "_vp_oi_last_not_ready_log", 0.0) > 60.0:
+                self._vp_oi_last_not_ready_log = _t_vpoi.monotonic()
+                self._clog.info(
+                    "VP/OI REGIME — regime=%s computed but NOT yet acted on "
+                    "(need 2 confirmed cycles per side since last restart/seed; "
+                    "CE=%d PE=%d FUT=%d so far) — holding.",
+                    dr.regime,
+                    adapter._oi._latches["CE"].confirmed_cycles,
+                    adapter._oi._latches["PE"].confirmed_cycles,
+                    adapter._rollover._future_oi_latch.confirmed_cycles,
+                )
+            return
+
         if dr.regime.startswith("Highly Bearish") and not pos.pe_leg_closed:
             await self._vp_oi_handle_directional(pos, "PE", dr.put_hedge, now)
         elif dr.regime.startswith("Highly Bullish") and not pos.ce_leg_closed:
