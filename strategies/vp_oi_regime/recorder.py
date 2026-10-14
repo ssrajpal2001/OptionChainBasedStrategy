@@ -80,8 +80,17 @@ def load_today_peaks(
     trade_date = datetime.now(IST).strftime("%Y-%m-%d")
     conn = _connect()
     try:
+        # 2026-10-14 real incident fix: a row can genuinely have future_oi_now=0.0
+        # (not NULL) from a window where the futures feed simply wasn't
+        # subscribed yet (e.g. --futures-oi-underlyings missing at that start) --
+        # a literal 0 there means "no real data," never a genuine peak. MAX()
+        # alone would happily return that 0 and seed the anchor to it, creating
+        # a huge false "Rise" the instant a real reading finally arrives.
+        # Filtering to > 0 before MAX() treats a stored 0 the same as NULL.
         row = conn.execute(
-            """SELECT MAX(call_oi_now), MAX(put_oi_now), MAX(future_oi_now)
+            """SELECT MAX(CASE WHEN call_oi_now > 0 THEN call_oi_now END),
+                      MAX(CASE WHEN put_oi_now > 0 THEN put_oi_now END),
+                      MAX(CASE WHEN future_oi_now > 0 THEN future_oi_now END)
                FROM snapshots WHERE client_id=? AND binding_id=? AND underlying=? AND trade_date=?""",
             (client_id, binding_id, underlying, trade_date),
         ).fetchone()

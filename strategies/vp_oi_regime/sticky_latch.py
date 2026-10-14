@@ -45,6 +45,12 @@ class StickyTrendLatch:
         every real evaluation this session is already logged there). Sets
         the anchor directly without emitting a Rise/Fall -- a cold seed, not
         a crossing."""
+        # 2026-10-14 real incident: a stored 0/negative value means "no real
+        # data was ever captured," never a genuine reading -- seeding from
+        # it would freeze the anchor at 0 and make the next real tick look
+        # like a huge false Rise. Guard here too, not just at the query layer.
+        if anchor_value is None or anchor_value <= 0:
+            return
         self._anchor = anchor_value
         self._last_eval_ts = ts
         self._trend = "No Change"
