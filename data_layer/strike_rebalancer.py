@@ -240,11 +240,39 @@ class StrikeRebalancer:
             # method was already fixed for once (sell_straddle's own pool
             # depth), extended generically rather than re-copy-pasting a
             # 4th special case.
+            #
+            # 2026-10-15 real incident fix: this widened NIFTY to ATM+/-20
+            # (82 symbols, over Fyers' ~50/connection cap, broker silently
+            # dropped the excess -- confirmed blocking the VP/OI OI tracker
+            # from ever receiving ticks) purely because a stale
+            # chain_depth=20 value was still sitting in RuntimeConfig from a
+            # PAST Iron Fly test deployment (2026-09-14) -- Iron Fly has had
+            # ZERO running deployments on this underlying since, and
+            # _widen_chain_depth only ever gets called from _spawn_book
+            # (i.e. only while a real Iron Fly book is active), so nothing
+            # was ever going to clear that stale value back down on its own.
+            # Only trust ironfly's configured depth while Iron Fly actually
+            # HAS a running deployment on this underlying -- a cheap,
+            # indexed sqlite check, same cost class as every other sync
+            # ClientDB call already made inline elsewhere in this codebase.
             ironfly = RuntimeConfig.index_section(underlying, "iron_fly")
             ironfly_depth = int(ironfly.get("chain_depth", 0) or 0)
+            if ironfly_depth > 0 and not self._iron_fly_has_running_deployment(underlying):
+                ironfly_depth = 0
             return max(base, otm, itm, ironfly_depth)
         except Exception:
             return base
+
+    def _iron_fly_has_running_deployment(self, underlying: str) -> bool:
+        try:
+            from data_layer.client_db import ClientDB
+            rows = ClientDB().get_running_deployments_by_strategy_sync("iron_fly") or []
+            return any(str(r.get("underlying") or "").upper() == underlying.upper() for r in rows)
+        except Exception:
+            # Can't confirm either way -- fail safe toward the OLD behavior
+            # (trust the configured depth) rather than silently narrowing a
+            # window a genuinely-running Iron Fly book might still need.
+            return True
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
