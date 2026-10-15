@@ -68,13 +68,19 @@ def generate_key(force: bool = False) -> Path:
     if KEY_PATH.exists() and not force:
         raise FileExistsError(f"{KEY_PATH} already exists")
     KEY_PATH.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        os.chmod(KEY_PATH.parent, 0o700)
-    except OSError:
-        pass
     fd = os.open(KEY_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "wb") as f:
         f.write(Fernet.generate_key())
+    # 2026-10-15 real incident: os.open()'s own mode param is umask-dependent
+    # and was observed producing 644/755 instead of the requested 600/700 on
+    # one real EC2 host (confirmed umask=0022, which cannot explain that gap
+    # on its own -- root cause not fully pinned down). Explicit chmod() here
+    # doesn't depend on umask at all, so it's a hard guarantee either way.
+    try:
+        os.chmod(KEY_PATH.parent, 0o700)
+        os.chmod(KEY_PATH, 0o600)
+    except OSError:
+        pass
     return KEY_PATH
 
 
