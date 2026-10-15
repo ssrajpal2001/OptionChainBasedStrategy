@@ -3038,6 +3038,15 @@ class ExitMixin:
                         "VP/OI OI-band frozen for the day — ATM=%d (off 9:15 open=%.2f).",
                         atm, open_px,
                     )
+            else:
+                # 2026-10-15: previously silent -- the whole freeze attempt
+                # would just no-op with zero trace in this case. Caller
+                # (_check_vp_oi_regime) retries on the next tick since
+                # _frozen_atm stays None.
+                self._clog.warning(
+                    "VP/OI REST seed got 0 bars for %s futures — ATM freeze "
+                    "deferred, will retry next tick.", self._underlying,
+                )
         except Exception as exc:
             self._clog.warning("VP/OI REST seed failed: %s", exc)
 
@@ -3111,8 +3120,16 @@ class ExitMixin:
         adapter = getattr(self, "_vp_oi_adapter", None)
         if not getattr(self, "_vp_oi_enabled", False) or adapter is None:
             return
-        if not getattr(self, "_vp_oi_seeded", False):
-            self._vp_oi_seeded = True
+        # 2026-10-15 CRITICAL FIX, real incident: _vp_oi_seeded used to be set
+        # True BEFORE the seed attempt, burning the one-shot forever if
+        # Upstox's REST intraday-1m history came back empty (common right at
+        # 9:15-9:18, before the API has a completed first bar) -- the ATM
+        # freeze then never happened all day, confirmed via zero log lines
+        # for "VP/OI OI-band frozen"/"seeded from REST"/"REST seed failed" on
+        # 2026-10-15 despite the freeze code path existing. Now only marks
+        # seeded once freeze_atm_for_day has genuinely been called -- every
+        # tick retries until a real REST bar is available.
+        if getattr(adapter._oi, "_frozen_atm", None) is None:
             await self._seed_vp_oi_volume_profile()
         self._feed_vp_oi_volume_profile_bar(adapter, now)
         pos = self._position

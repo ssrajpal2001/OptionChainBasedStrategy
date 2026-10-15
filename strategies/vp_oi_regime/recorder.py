@@ -65,39 +65,40 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
-def load_today_peaks(
+def load_latest_oi(
     *, client_id: str, binding_id: str, underlying: str,
 ) -> dict:
-    """2026-10-13, direct user spec: on a mid-day restart, the live
-    StickyTrendLatch anchors used to reset to whatever OI happened to be
-    live at that exact moment -- wiping the real session peak tracked since
-    market open. Returns today's real MAX(call_oi_now)/MAX(put_oi_now)/
-    MAX(future_oi_now) from this book's own already-recorded snapshots
-    (full resolution, written every real evaluate() cycle since whenever
-    this was first deployed) -- None for any value with no rows yet today.
+    """2026-10-13, direct user spec, REVISED 2026-10-15 for the
+    rolling-checkpoint StickyTrendLatch design: on a mid-day restart, the
+    live anchors used to reset to whatever OI happened to be live at that
+    exact moment -- wiping the real last-confirmed-checkpoint value tracked
+    since market open. Returns this book's most recent recorded
+    call_oi_now/put_oi_now/future_oi_now (by ts, independently per column --
+    one feed can go stale while the others keep updating) -- None for any
+    value with no rows yet today. A literal stored 0 is treated the same as
+    NULL (same 2026-10-14 real-incident guard as before: 0 means "no real
+    data yet," never a genuine reading -- seeding from it would create a
+    huge false Rise/Fall the instant a real reading finally arrives).
     Synchronous (sqlite3) -- caller must wrap with asyncio.to_thread()."""
     from datetime import datetime
     trade_date = datetime.now(IST).strftime("%Y-%m-%d")
     conn = _connect()
     try:
-        # 2026-10-14 real incident fix: a row can genuinely have future_oi_now=0.0
-        # (not NULL) from a window where the futures feed simply wasn't
-        # subscribed yet (e.g. --futures-oi-underlyings missing at that start) --
-        # a literal 0 there means "no real data," never a genuine peak. MAX()
-        # alone would happily return that 0 and seed the anchor to it, creating
-        # a huge false "Rise" the instant a real reading finally arrives.
-        # Filtering to > 0 before MAX() treats a stored 0 the same as NULL.
-        row = conn.execute(
-            """SELECT MAX(CASE WHEN call_oi_now > 0 THEN call_oi_now END),
-                      MAX(CASE WHEN put_oi_now > 0 THEN put_oi_now END),
-                      MAX(CASE WHEN future_oi_now > 0 THEN future_oi_now END)
-               FROM snapshots WHERE client_id=? AND binding_id=? AND underlying=? AND trade_date=?""",
-            (client_id, binding_id, underlying, trade_date),
-        ).fetchone()
+        def _last(col: str):
+            r = conn.execute(
+                f"""SELECT {col} FROM snapshots
+                    WHERE client_id=? AND binding_id=? AND underlying=? AND trade_date=?
+                      AND {col} > 0
+                    ORDER BY ts DESC LIMIT 1""",
+                (client_id, binding_id, underlying, trade_date),
+            ).fetchone()
+            return r[0] if r else None
+        call_last = _last("call_oi_now")
+        put_last = _last("put_oi_now")
+        future_last = _last("future_oi_now")
     finally:
         conn.close()
-    call_max, put_max, future_max = row if row else (None, None, None)
-    return {"call_oi_peak": call_max, "put_oi_peak": put_max, "future_oi_peak": future_max}
+    return {"call_oi_last": call_last, "put_oi_last": put_last, "future_oi_last": future_last}
 
 
 def record_snapshot(

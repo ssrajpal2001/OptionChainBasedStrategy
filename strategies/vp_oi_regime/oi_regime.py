@@ -42,14 +42,20 @@ class OiRegimeResult:
     put_trend: str
     wall_notes: List[str]
     rollover_suppressed: bool = False
-    # 2026-10-03, direct user spec: the sticky-latch calculation shown for
-    # audit/chart-cross-check purposes -- the anchor OI each side's trend is
-    # currently measured against, and the raw %-move off that anchor that
-    # produced (or failed to produce) the displayed trend this tick.
-    call_anchor_oi: float = 0.0
-    put_anchor_oi: float = 0.0
-    call_pct_vs_anchor: float = 0.0
-    put_pct_vs_anchor: float = 0.0
+    # 2026-10-03, REVISED 2026-10-15 for the dual high/low-anchor design:
+    # the sticky-latch calculation shown for audit/chart-cross-check
+    # purposes -- the HIGH anchor (session-wide running peak) each side's
+    # Fall check is measured against, the LOW anchor (session-wide running
+    # trough) the Rise check is measured against, and the raw %-move off
+    # each that produced (or failed to produce) the displayed trend.
+    call_anchor_oi: float = 0.0        # HIGH anchor
+    put_anchor_oi: float = 0.0         # HIGH anchor
+    call_pct_vs_anchor: float = 0.0    # % vs HIGH anchor (Fall check)
+    put_pct_vs_anchor: float = 0.0     # % vs HIGH anchor (Fall check)
+    call_low_anchor_oi: float = 0.0
+    put_low_anchor_oi: float = 0.0
+    call_pct_vs_low_anchor: float = 0.0    # % vs LOW anchor (Rise check)
+    put_pct_vs_low_anchor: float = 0.0     # % vs LOW anchor (Rise check)
 
 
 class OiRegimeTracker:
@@ -62,7 +68,8 @@ class OiRegimeTracker:
         strike_step: float = 50.0,
         band: int = 5,                 # ATM +/- 5 strikes, confirmed fixed
         change_window_min: int = 5,    # 5 or 15, per spec row 2
-        trend_pct: float = 10.0,
+        rise_pct: float = 20.0,
+        fall_pct: float = 10.0,
         noise_floor_pct: float = 15.0,
         hard_wall_pts: float = 50.0,
         override_pct: float = 30.0,
@@ -72,7 +79,8 @@ class OiRegimeTracker:
         self.strike_step = strike_step
         self.band = band
         self.change_window_min = change_window_min
-        self.trend_pct = trend_pct
+        self.rise_pct = rise_pct
+        self.fall_pct = fall_pct
         self.noise_floor_pct = noise_floor_pct
         self.hard_wall_pts = hard_wall_pts
         self.override_pct = override_pct
@@ -87,20 +95,20 @@ class OiRegimeTracker:
         # "not frozen yet," falls back to live-spot-recentering until frozen.
         self._frozen_atm: Optional[int] = None
 
-        # 2026-10-03, REVISED 2026-10-12 direct user spec: a fixed reference
-        # ANCHOR is kept per side; the anchor only moves (resets to the
-        # current value) when the current band total crosses +/-trend_pct
-        # away from it. The trend label is re-evaluated fresh every time --
-        # beyond the threshold either way confirms Rise/Fall and resets the
-        # anchor; inside the band reverts to "No Change" (no hold-over).
-        # Threshold raised 3% -> 10%, same date. This also makes the trend
-        # self-paced on its OWN change_window_min cadence regardless of how
-        # often classify() itself is called (e.g. every real tick in
-        # production) -- a new evaluation only actually happens once that
-        # many minutes have elapsed since the side's own last evaluation.
+        # 2026-10-03, REVISED 2026-10-15 direct user spec (dual high/low
+        # ratcheting-anchor design, see StickyTrendLatch's own module
+        # docstring for the full mechanic): a session-wide HIGH anchor and
+        # LOW anchor are kept per side. Fall fires when the current reading
+        # is >= fall_pct below the high anchor; Rise fires when it's
+        # >= rise_pct above the low anchor (Fall checked first, wins any
+        # tie). This also makes the trend self-paced on its OWN
+        # change_window_min cadence regardless of how often classify()
+        # itself is called (e.g. every real tick in production) -- a new
+        # evaluation only actually happens once that many minutes have
+        # elapsed since the side's own last evaluation.
         self._latches: Dict[Side, StickyTrendLatch] = {
-            "CE": StickyTrendLatch(trend_pct=trend_pct, eval_window_min=change_window_min),
-            "PE": StickyTrendLatch(trend_pct=trend_pct, eval_window_min=change_window_min),
+            "CE": StickyTrendLatch(rise_pct=rise_pct, fall_pct=fall_pct, eval_window_min=change_window_min),
+            "PE": StickyTrendLatch(rise_pct=rise_pct, fall_pct=fall_pct, eval_window_min=change_window_min),
         }
 
     def reset(self) -> None:
@@ -121,8 +129,8 @@ class OiRegimeTracker:
         if put_anchor is not None:
             self._latches["PE"].seed_anchor(put_anchor, ts)
 
-    def _update_latch(self, side: Side, now_total: float, minute_ts: float) -> Tuple[str, float, float]:
-        """Returns (trend, pct_vs_anchor, anchor_used_for_this_reading)."""
+    def _update_latch(self, side: Side, now_total: float, minute_ts: float) -> Tuple[str, float, float, float, float]:
+        """Returns (trend, pct_vs_high, pct_vs_low, high_anchor, low_anchor)."""
         return self._latches[side].update(now_total, minute_ts)
 
     def update_tick(self, strike: int, side: Side, oi: float, minute_ts: float) -> None:
@@ -213,8 +221,10 @@ class OiRegimeTracker:
 
         # Sticky-latch trend (2026-10-03 fix, see _update_latch's own
         # docstring) replaces the old stateless N-minutes-ago comparison.
-        call_trend, call_pct, call_anchor = self._update_latch("CE", call_total_now, minute_ts)
-        put_trend, put_pct, put_anchor = self._update_latch("PE", put_total_now, minute_ts)
+        call_trend, call_pct_hi, call_pct_lo, call_anchor, call_low_anchor = \
+            self._update_latch("CE", call_total_now, minute_ts)
+        put_trend, put_pct_hi, put_pct_lo, put_anchor, put_low_anchor = \
+            self._update_latch("PE", put_total_now, minute_ts)
 
         # Rule 2 / Rule 3: hard wall + momentum override, evaluated per side
         # for whichever wall spot sits within hard_wall_pts of. These still
@@ -271,5 +281,7 @@ class OiRegimeTracker:
             call_trend=call_trend, put_trend=put_trend,
             wall_notes=wall_notes, rollover_suppressed=rollover_suppressed,
             call_anchor_oi=call_anchor, put_anchor_oi=put_anchor,
-            call_pct_vs_anchor=call_pct, put_pct_vs_anchor=put_pct,
+            call_pct_vs_anchor=call_pct_hi, put_pct_vs_anchor=put_pct_hi,
+            call_low_anchor_oi=call_low_anchor, put_low_anchor_oi=put_low_anchor,
+            call_pct_vs_low_anchor=call_pct_lo, put_pct_vs_low_anchor=put_pct_lo,
         )

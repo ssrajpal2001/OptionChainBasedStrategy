@@ -111,6 +111,12 @@ class SellStraddleConfig:
     # wall's own OI must move more than this % before its trend overrides
     # the band-wide calculation (otherwise forced to "No Change").
     vp_oi_override_pct: float
+    # 2026-10-15, direct user spec: the rolling-checkpoint interval (minutes)
+    # StickyTrendLatch waits between re-evaluations -- e.g. 5 means compare
+    # 9:20's OI to 9:15's, then 9:25's to 9:20's, and so on. Tunable per
+    # deployment from the admin Guardrails tab, same pattern as the two
+    # fields above.
+    vp_oi_change_window_min: int
 
     # 2026-10-12, direct client spec (replaces the old EOD-only, independent-per-leg
     # find_hedge_strike approach for whichever deployment opts in): continuously
@@ -284,6 +290,7 @@ def load_sell_straddle_config(
     vp_oi_enabled = bool(ss.get("vp_oi_enabled", False))
     vp_oi_noise_floor_pct = float(ss.get("vp_oi_noise_floor_pct", 15.0))
     vp_oi_override_pct = float(ss.get("vp_oi_override_pct", 30.0))
+    vp_oi_change_window_min = int(ss.get("vp_oi_change_window_min", 5))
 
     dynamic_hedge_enabled = bool(ss.get("dynamic_hedge_enabled", False))
     dynamic_hedge_min_loss_inr = float(ss.get("dynamic_hedge_min_loss_inr", 500.0))
@@ -394,6 +401,7 @@ def load_sell_straddle_config(
         vp_oi_enabled=vp_oi_enabled,
         vp_oi_noise_floor_pct=vp_oi_noise_floor_pct,
         vp_oi_override_pct=vp_oi_override_pct,
+        vp_oi_change_window_min=vp_oi_change_window_min,
         post1500_exit_enabled=post1500_exit_enabled,
         shadow_vwap_enabled=shadow_vwap_enabled,
         vwap_source=vwap_source,
@@ -499,7 +507,8 @@ class ConfigMixin:
                 step = self._cfg.exchange.strike_steps.get(self._underlying, 50.0) if self._cfg else 50.0
                 self._vp_oi_adapter = VpOiRegimeAdapter(
                     strike_step=step, noise_floor_pct=cfg.vp_oi_noise_floor_pct,
-                    override_pct=cfg.vp_oi_override_pct)
+                    override_pct=cfg.vp_oi_override_pct,
+                    change_window_min=cfg.vp_oi_change_window_min)
                 # 2026-10-13, direct user spec: on a mid-day restart, seed
                 # today's real peak OI (from recorder.py's own already-
                 # written history for THIS book) into the fresh adapter's
@@ -568,33 +577,34 @@ class ConfigMixin:
         self._hedge_carry_enabled = cfg.hedge_carry_enabled
 
     async def _seed_vp_oi_anchors(self) -> None:
-        """2026-10-13, direct user spec: seed a freshly-constructed VP/OI
-        adapter's latch anchors from today's real recorded peak OI (this
-        book's own already-written history in recorder.py's DB), right after
-        construction -- see live_adapter.VpOiRegimeAdapter.
+        """2026-10-13, direct user spec, REVISED 2026-10-15 for the
+        rolling-checkpoint design: seed a freshly-constructed VP/OI
+        adapter's latch anchors from today's last recorded checkpoint value
+        (this book's own already-written history in recorder.py's DB),
+        right after construction -- see live_adapter.VpOiRegimeAdapter.
         seed_anchors_from_recorder's own docstring for the full rationale.
         Fire-and-forget task, never blocks the config-apply call that
         scheduled it."""
         import asyncio
         from datetime import datetime
         from config.global_config import IST
-        from strategies.vp_oi_regime.recorder import load_today_peaks
+        from strategies.vp_oi_regime.recorder import load_latest_oi
         adapter = getattr(self, "_vp_oi_adapter", None)
         if adapter is None:
             return
         try:
-            peaks = await asyncio.to_thread(
-                load_today_peaks,
+            latest = await asyncio.to_thread(
+                load_latest_oi,
                 client_id=getattr(self, "_client_id", ""),
                 binding_id=getattr(self, "_binding_id", ""),
                 underlying=self._underlying,
             )
-            adapter.seed_anchors_from_recorder(peaks, datetime.now(IST).timestamp())
+            adapter.seed_anchors_from_recorder(latest, datetime.now(IST).timestamp())
             logger.info(
-                "SellStraddle[%s]: VP/OI anchors seeded from today's recorded peaks "
-                "(call=%s put=%s future=%s).",
-                self._underlying, peaks.get("call_oi_peak"), peaks.get("put_oi_peak"),
-                peaks.get("future_oi_peak"),
+                "SellStraddle[%s]: VP/OI anchors seeded from today's last recorded "
+                "checkpoint (call=%s put=%s future=%s).",
+                self._underlying, latest.get("call_oi_last"), latest.get("put_oi_last"),
+                latest.get("future_oi_last"),
             )
         except Exception as exc:
             logger.warning("SellStraddle[%s]: VP/OI anchor seed failed: %s", self._underlying, exc)

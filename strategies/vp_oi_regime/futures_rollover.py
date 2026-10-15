@@ -64,7 +64,7 @@ class FuturesRolloverTracker:
         self._near: Deque[Tuple[float, float, float]] = deque(maxlen=maxlen)  # (ts, oi, volume)
         self._next: Deque[Tuple[float, float, float]] = deque(maxlen=maxlen)
         self._active_contract = "near"
-        self._future_oi_latch = StickyTrendLatch(trend_pct=10.0, eval_window_min=change_window_min)
+        self._future_oi_latch = StickyTrendLatch(rise_pct=20.0, fall_pct=10.0, eval_window_min=change_window_min)
 
     def reset(self) -> None:
         self._near.clear()
@@ -97,9 +97,9 @@ class FuturesRolloverTracker:
             # Standard tracking: near-month only, no rollover possible by
             # definition outside expiry week (spec row 6, "Standard Tracking").
             near_now = self._near[-1][1] if self._near else None
-            f_trend, f_pct, f_anchor = (
+            f_trend, f_pct, _f_pct_lo, f_anchor, _f_low_anchor = (
                 self._future_oi_latch.update(near_now, now_ts) if near_now is not None
-                else ("No Change", 0.0, 0.0)
+                else ("No Change", 0.0, 0.0, 0.0, 0.0)
             )
             return RolloverState(
                 is_expiry_week=is_expiry_week, active_contract="near",
@@ -161,9 +161,9 @@ class FuturesRolloverTracker:
                     )
 
         active_oi = next_now if self._active_contract == "next" else near_now
-        f_trend, f_pct, f_anchor = (
+        f_trend, f_pct, _f_pct_lo, f_anchor, _f_low_anchor = (
             self._future_oi_latch.update(active_oi, now_ts) if active_oi is not None
-            else ("No Change", 0.0, 0.0)
+            else ("No Change", 0.0, 0.0, 0.0, 0.0)
         )
 
         return RolloverState(

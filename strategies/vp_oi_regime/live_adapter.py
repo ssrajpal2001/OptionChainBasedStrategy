@@ -149,18 +149,19 @@ class VpOiRegimeAdapter:
         mid-day restart."""
         self._oi.freeze_atm(atm)
 
-    def seed_anchors_from_recorder(self, peaks: dict, now_ts: float) -> None:
-        """2026-10-13, direct user spec: call this ONCE, right after
-        construction on a mid-day restart (before any real update/evaluate),
-        with the dict returned by recorder.load_today_peaks(). Seeds each
-        latch's anchor to today's REAL peak OI so far, instead of letting it
-        reset to whatever's live at the exact restart moment -- avoids a
-        fake, huge-looking "move" off a wrong baseline right after restart.
-        No-op for any side with no real history yet today (None)."""
-        self._oi.seed_anchors(peaks.get("call_oi_peak"), peaks.get("put_oi_peak"), now_ts)
-        fut_peak = peaks.get("future_oi_peak")
-        if fut_peak is not None:
-            self._rollover.seed_anchor(fut_peak, now_ts)
+    def seed_anchors_from_recorder(self, latest: dict, now_ts: float) -> None:
+        """2026-10-13, direct user spec, REVISED 2026-10-15 for the
+        rolling-checkpoint design: call this ONCE, right after construction
+        on a mid-day restart (before any real update/evaluate), with the
+        dict returned by recorder.load_latest_oi(). Seeds each latch's
+        anchor to today's last recorded checkpoint value, instead of
+        letting it reset to whatever's live at the exact restart moment --
+        avoids a fake, huge-looking "move" off a wrong baseline right after
+        restart. No-op for any side with no real history yet today (None)."""
+        self._oi.seed_anchors(latest.get("call_oi_last"), latest.get("put_oi_last"), now_ts)
+        fut_last = latest.get("future_oi_last")
+        if fut_last is not None:
+            self._rollover.seed_anchor(fut_last, now_ts)
 
     def reset(self) -> None:
         """New trading day -- fresh everything, same lifecycle as the
@@ -387,11 +388,14 @@ class VpOiRegimeAdapter:
             # judged against -- the "why" behind the trend labels above.
             # 2026-10-13 fix, real user-found gap: this used to be a hardcoded
             # literal 3.0, disconnected from futures_rollover.py's own real
-            # latch -- it never reflected the actual threshold in use (stayed
-            # "3.00%" in the UI even after the 2026-10-12 change to 10%). Now
-            # reads the real live value directly.
-            "future_oi_trend_threshold_pct": self._rollover._future_oi_latch.trend_pct,
-            "oi_trend_threshold_pct": self._oi.trend_pct,
+            # latch -- it never reflected the actual threshold in use. Now
+            # reads the real live values directly. REVISED 2026-10-15 for the
+            # dual high/low-anchor design: Rise and Fall now use different
+            # thresholds (asymmetric), so both are exposed separately.
+            "future_oi_rise_threshold_pct": self._rollover._future_oi_latch.rise_pct,
+            "future_oi_fall_threshold_pct": self._rollover._future_oi_latch.fall_pct,
+            "oi_rise_threshold_pct": self._oi.rise_pct,
+            "oi_fall_threshold_pct": self._oi.fall_pct,
             "future_oi_now": self.last_future_oi_now,
             "future_oi_anchor": self.last_future_oi_anchor,
             "future_oi_pct": self.last_future_oi_pct,
