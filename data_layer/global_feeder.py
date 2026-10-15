@@ -1217,6 +1217,15 @@ class FyersFeeder(BaseFeeder):
                 logger.info("FyersFeeder: INDEX %s (%s) sym=%s ltp=%.2f",
                             internal, _source, symbol_fyers, float(ltp))
             t0 = time.monotonic()
+            # 2026-10-15 real gap found and fixed (primary feeder switched to
+            # fyers, day of): this branch never wired open interest into the
+            # futures IndexTick at all -- Fyers' own option-tick parsing a few
+            # lines below already reads raw.get("oi") from the identical
+            # SymbolUpdate full-mode payload schema, just never applied here.
+            # Without this, vp_oi_regime's Future OI leg would go permanently
+            # flat with Fyers as primary (Topic.INDEX_TICK is only published
+            # from whichever feeder is primary -- a standby's real OI, e.g.
+            # Upstox's, never reaches it under normal conditions).
             tick = IndexTick(
                 symbol=internal,
                 ltp=float(ltp),
@@ -1227,6 +1236,7 @@ class FyersFeeder(BaseFeeder):
                 volume=int(raw.get("vol_traded_today") or 0),
                 timestamp=datetime.now(IST),
                 source=_source,
+                oi=int(raw.get("oi") or 0) if _source == "futures" else 0,
             )
             await self._publish_index(tick)
             if hasattr(self, "_latency_dict"):
