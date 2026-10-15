@@ -2742,7 +2742,19 @@ class ExitMixin:
             pos.ce_leg.close_time = close_time
             pos.pe_leg.close_time = close_time
             pos.status = "closed"
-            self._unpin_position_legs(pos)
+            self._unpin_position_legs(pos)   # crypto-only (DeltaChainManager) -- no-op for NIFTY/NSE
+            # 2026-10-15 real incident fix: _unpin_position_legs above is
+            # crypto-only and does nothing here -- the StrikeRebalancer's own
+            # pin (set on every restore/restart, engine.py) was never
+            # released on a full close either, same gap as the single-leg
+            # roll path (_close_leg, fixed the same day).
+            if not self._is_crypto and self._rebalancer:
+                try:
+                    self._rebalancer.unpin_strike(self._underlying, float(pos.ce_leg.strike))
+                    self._rebalancer.unpin_strike(self._underlying, float(pos.pe_leg.strike))
+                except Exception as exc:
+                    logger.warning("SellStraddle[%s]: unpin_strike on full close failed: %s",
+                                   self._underlying, exc)
 
             logger.info(
                 "SellStraddle[%s|%s|%s]: CLOSED — reason=%s pnl=%s%.4f (%.2f pts) confirmed "
@@ -2936,6 +2948,21 @@ class ExitMixin:
                     self._underlying, _cid, _bid, side, leg.strike, leg_pnl, reason)
         self._clog.info("CLOSE LEG %s strike=%.0f pnl=%.2fpts [%s] confirmed",
                         side, leg.strike, leg_pnl, reason)
+        # 2026-10-15 real incident fix: pin_strike() is called for sold legs
+        # on every restore (engine.py), but unpin_strike() was NEVER called
+        # for a sold leg's own close -- only hedge legs had the matching
+        # unpin (exits.py's _close_hedge_legs). Every single roll/close over
+        # 3+ days of real trading permanently pinned its old strike forever,
+        # ballooning the live WS subscription to 82 symbols (well past
+        # Fyers' ~50/connection cap, confirmed via real logs showing the
+        # broker silently dropping the excess). Mirrors the hedge-leg
+        # pattern exactly.
+        if not self._is_crypto and self._rebalancer:
+            try:
+                self._rebalancer.unpin_strike(self._underlying, float(leg.strike))
+            except Exception as exc:
+                logger.warning("SellStraddle[%s]: unpin_strike for closed sold leg failed: %s",
+                               self._underlying, exc)
         return order_ev
 
     # ── VP/OI REGIME (2026-10-04, opt-in, see config.py's vp_oi_enabled) ──────
