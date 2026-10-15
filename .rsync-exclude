@@ -1,0 +1,9 @@
+.git/
+data/
+logs/
+__pycache__/
+*.pyc
+.venv/
+.keys/
+scratch_*
+.claude/

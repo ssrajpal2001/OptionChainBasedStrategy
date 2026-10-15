@@ -30,6 +30,13 @@ logs/
 .env
 config/client_profiles.json
 
+# Fernet master key for data_layer/secure_store.py — generated once per environment,
+# never synced via git OR the direct-deploy script (scripts/deploy_direct.sh's own
+# .rsync-exclude also excludes this). A repo clone or a code deploy must NEVER carry
+# a working key — losing it means every stored credential becomes unrecoverable, which
+# is the deliberate, correct failure mode (matches Option_Buying/algo's own .keys/).
+.keys/
+
 # IDE
 .vscode/
 .idea/

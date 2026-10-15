@@ -11,11 +11,13 @@ Schema:
                     assignment, token timestamps, trade enable switch
 
 Security model:
-  API keys/secrets are XOR-obfuscated with a key derived from the
-  TERMINUS_CIPHER_KEY env var before being written.  For on-premises
-  deployments the primary security boundary is filesystem permissions on
-  the data/ directory.  Set TERMINUS_CIPHER_KEY in the environment to a
-  strong random value before production deployment.
+  2026-10-15: API keys/secrets are now encrypted with Fernet (AES-128-CBC +
+  HMAC-SHA256) via data_layer/secure_store.py, whose master key lives
+  out-of-repo in .keys/master.key (never committed, never deployed) --
+  replaces the old reversible XOR-obfuscation scheme (TERMINUS_CIPHER_KEY
+  env var). A not-yet-migrated value (written under the old scheme) is
+  still transparently readable; see secure_store.py's own docstring and
+  scripts/migrate_creds_to_fernet.py for the one-time migration.
 
 All write operations route through asyncio.to_thread() — the event loop
 is never stalled by a disk write.  Synchronous helpers (_exec, get_*_sync)
@@ -27,7 +29,6 @@ No time.sleep.  All async.
 from __future__ import annotations
 
 import asyncio
-import base64
 import hashlib
 import json
 import logging
@@ -43,32 +44,22 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_DB_PATH = "data/clients.db"
 
-# ── Credential obfuscation ────────────────────────────────────────────────────
-
-_CIPHER_KEY = hashlib.sha256(
-    os.environ.get("TERMINUS_CIPHER_KEY", "terminus-key-change-in-production").encode()
-).digest()
-
+# ── Credential encryption ────────────────────────────────────────────────────
+# 2026-10-15: real Fernet encryption (data_layer/secure_store.py), replacing the
+# reversible XOR obfuscation this used to do inline -- see that module's own
+# docstring for the full rationale (out-of-repo master key, legacy-XOR-aware
+# decrypt() so a not-yet-migrated DB keeps working, scripts/migrate_creds_to_
+# fernet.py for the one-time migration). Same function names/signatures kept
+# here so every existing call site in this file needs zero changes.
 
 def _encode_cred(plaintext: str) -> str:
-    """XOR-obfuscate credential before DB storage."""
-    if not plaintext:
-        return ""
-    b = plaintext.encode("utf-8")
-    key = (_CIPHER_KEY * ((len(b) // len(_CIPHER_KEY)) + 1))[: len(b)]
-    return base64.b64encode(bytes(x ^ y for x, y in zip(b, key))).decode()
+    from data_layer.secure_store import encrypt
+    return encrypt(plaintext)
 
 
 def _decode_cred(encoded: str) -> str:
-    """Reverse XOR-obfuscate credential from DB storage."""
-    if not encoded:
-        return ""
-    try:
-        b = base64.b64decode(encoded)
-        key = (_CIPHER_KEY * ((len(b) // len(_CIPHER_KEY)) + 1))[: len(b)]
-        return bytes(x ^ y for x, y in zip(b, key)).decode("utf-8")
-    except Exception:
-        return ""
+    from data_layer.secure_store import decrypt
+    return decrypt(encoded)
 
 
 # ── Password hashing ──────────────────────────────────────────────────────────

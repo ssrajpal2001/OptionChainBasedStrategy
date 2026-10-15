@@ -1190,6 +1190,10 @@ def main() -> None:
         args.mode, args.index, args.capital,
         f"  dashboard=http://localhost:{args.port}" if args.ui else "",
     )
+    # 2026-10-15: trivial marker line for deploy_direct.sh's own first real-world
+    # verification test -- confirms a direct-SSH deploy (no git pull on the server)
+    # actually lands and takes effect. Safe to remove any time after confirmed.
+    logger.info("deploy-direct pipeline check: v1 (scripts/deploy_direct.sh)")
 
     # ── Mode dispatch ─────────────────────────────────────────────────────────
     if args.mode in ("paper", "live"):

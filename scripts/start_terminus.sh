@@ -13,15 +13,22 @@
 # fresh_start.sh -- carried-forward hedge-and-carry positions and today's
 # booked P&L must survive a restart, never be wiped.
 #
-# Usage: bash scripts/start_terminus.sh
+# Usage: bash scripts/start_terminus.sh             # pulls latest code via git first
+#        bash scripts/start_terminus.sh --no-pull    # skips the git pull -- use when code
+#                                                     # was already synced another way (e.g.
+#                                                     # scripts/deploy_direct.sh's rsync step)
 
 set -e
 cd "$(dirname "$0")/.."
 
 echo "=== terminus daily start $(date '+%Y-%m-%d %H:%M:%S') ==="
 
-echo "[1/4] Pulling latest code..."
-git pull origin nifty-cascade-v4-indicators
+if [ "${1:-}" = "--no-pull" ]; then
+    echo "[1/4] Skipping git pull (--no-pull)."
+else
+    echo "[1/4] Pulling latest code..."
+    git pull origin nifty-cascade-v4-indicators
+fi
 
 echo "[2/4] Checking dependencies..."
 pip install -q -r requirements.txt 2>/dev/null || true
@@ -30,10 +37,13 @@ echo "[3/4] Stopping old terminus process (if running)..."
 pm2 delete terminus 2>/dev/null || true
 
 echo "[4/4] Starting terminus..."
+# 2026-10-15: real production strategy lineup (confirmed throughout this session's
+# restarts) -- was stale here (missing oi_bias_rsi_exit/cag_straddle/iron_fly).
 pm2 start run_system.py \
     --name terminus \
-    --interpreter python \
-    -- --mode live --ui --port 5000 --index NIFTY --strategies sell_straddle --futures-oi-underlyings NIFTY
+    --interpreter python3 \
+    -- --mode live --ui --port 5000 --index NIFTY --futures-oi-underlyings NIFTY \
+       --strategies sell_straddle,oi_bias_rsi_exit,cag_straddle,iron_fly
 
 pm2 save
 
