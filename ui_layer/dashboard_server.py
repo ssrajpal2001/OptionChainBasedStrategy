@@ -318,6 +318,9 @@ try:
         current_password: str
         new_password:     str
 
+    class _TotpConfirmSchema(_PydanticBase):
+        totp_code: str
+
     class _EditEntryPriceSchema(_PydanticBase):
         ce_entry_price: Optional[float] = None
         pe_entry_price: Optional[float] = None
@@ -1191,6 +1194,19 @@ class DashboardServer:
                 else:
                     if not hmac.compare_digest(password, auth_cfg.admin_password):
                         raise HTTPException(status_code=401, detail="Invalid admin credentials.")
+                # 2026-10-15: TOTP 2FA, opt-in via /api/admin/totp/setup+confirm.
+                # Checked only AFTER the password already verified above, so a
+                # bad password still fails with the same generic message (never
+                # leaks whether 2FA is enabled to an unauthenticated guess).
+                if _srv._client_db and _srv._client_db.get_setting_sync("admin_totp_enabled", "0") == "1":
+                    import pyotp
+                    from data_layer.secure_store import decrypt as _dec
+                    totp_code = str(raw.get("totp_code") or "").strip()
+                    if not totp_code:
+                        raise HTTPException(status_code=401, detail="TOTP code required.")
+                    secret = _dec(_srv._client_db.get_setting_sync("admin_totp_secret", ""))
+                    if not secret or not pyotp.TOTP(secret).verify(totp_code, valid_window=1):
+                        raise HTTPException(status_code=401, detail="Invalid TOTP code.")
                 token = create_token(username, "admin")
                 return {"access_token": token, "token_type": "bearer", "role": "admin"}
 
@@ -1250,6 +1266,50 @@ class DashboardServer:
                 raise HTTPException(status_code=401, detail="Current password is incorrect.")
             await _srv._client_db.set_admin_password_hash(_hp(new_pwd))
             return {"ok": True, "message": "Admin password updated."}
+
+        # ── Admin TOTP 2FA (2026-10-15) ─────────────────────────────────────
+        # Secret stored Fernet-encrypted (data_layer/secure_store.py) in
+        # system_settings, never plaintext. Two-step enable (setup -> confirm)
+        # so a mistake while scanning the QR code can't lock the admin out --
+        # "admin_totp_enabled" only flips to "1" once a real code has verified
+        # against the pending secret. /api/auth/login's admin branch checks
+        # this flag; every other role/flow is completely unaffected.
+        @app.post("/api/admin/totp/setup", tags=["Admin"])
+        async def admin_totp_setup(_: dict = Depends(_require_admin)):
+            import pyotp
+            from data_layer.secure_store import encrypt as _enc
+            secret = pyotp.random_base32()
+            await _srv._client_db.set_setting("admin_totp_secret", _enc(secret))
+            await _srv._client_db.set_setting("admin_totp_enabled", "0")
+            uri = pyotp.TOTP(secret).provisioning_uri(
+                name=_srv._cfg.auth.admin_username, issuer_name="OptionChain AlgoTrader")
+            # Returned ONCE, at setup time only -- never re-exposed afterward
+            # (this response is the only place the raw secret is ever shown).
+            return {"ok": True, "secret": secret, "provisioning_uri": uri}
+
+        @app.post("/api/admin/totp/confirm", tags=["Admin"])
+        async def admin_totp_confirm(body: _TotpConfirmSchema, _: dict = Depends(_require_admin)):
+            import pyotp
+            from data_layer.secure_store import decrypt as _dec
+            stored = _srv._client_db.get_setting_sync("admin_totp_secret", "")
+            if not stored:
+                raise HTTPException(status_code=400, detail="No TOTP setup in progress — call /api/admin/totp/setup first.")
+            secret = _dec(stored)
+            if not pyotp.TOTP(secret).verify(body.totp_code, valid_window=1):
+                raise HTTPException(status_code=401, detail="Invalid TOTP code.")
+            await _srv._client_db.set_setting("admin_totp_enabled", "1")
+            return {"ok": True, "message": "TOTP 2FA enabled — required on every future admin login."}
+
+        @app.post("/api/admin/totp/disable", tags=["Admin"])
+        async def admin_totp_disable(_: dict = Depends(_require_admin)):
+            await _srv._client_db.set_setting("admin_totp_enabled", "0")
+            await _srv._client_db.set_setting("admin_totp_secret", "")
+            return {"ok": True, "message": "TOTP 2FA disabled."}
+
+        @app.get("/api/admin/totp/status", tags=["Admin"])
+        async def admin_totp_status(_: dict = Depends(_require_admin)):
+            enabled = _srv._client_db.get_setting_sync("admin_totp_enabled", "0") == "1"
+            return {"ok": True, "enabled": enabled}
 
         @app.post("/api/admin/system-settings", tags=["Admin"])
         async def set_system_setting(body: _SystemSettingSchema, _: dict = Depends(_require_admin)):
