@@ -59,9 +59,15 @@ def check_fyers() -> None:
             jwt = parts[1]
     auth_header = f"{api_key}:{jwt}" if api_key else token
 
+    # Fyers v3 trading/profile APIs live on api-t1.fyers.in, NOT api.fyers.in
+    # (that's the data-only host) -- the first attempt's 500 "please provide
+    # valid method" was a malformed-request error from hitting the wrong
+    # host/path, not a real auth failure (Fyers' genuine invalid-token
+    # response looks completely different -- s":"error" with a clear
+    # "Invalid authorization token" message and a negative error code).
     from curl_cffi import requests as cc
     r = cc.get(
-        "https://api.fyers.in/api/v3/profile",
+        "https://api-t1.fyers.in/api/v3/profile",
         headers={"Accept": "application/json", "Authorization": auth_header},
         impersonate="chrome131", timeout=10,
     )
@@ -75,7 +81,7 @@ def check_fyers() -> None:
     if ok:
         print("\n>>> FYERS TOKEN IS VALID")
     else:
-        print("\n>>> FYERS TOKEN IS INVALID / EXPIRED")
+        print("\n>>> FYERS TOKEN IS INVALID / EXPIRED (or still a request-format issue -- check the raw response above)")
 
 
 if __name__ == "__main__":
