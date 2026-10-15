@@ -111,15 +111,20 @@ async def _start_feeder_stream(feeder, provider: str, api_key: str, token: str, 
 
     from broker_auth.headless_auth import _token_is_fresh
 
-    primary   = (getattr(cfg, "primary_feeder_provider", "upstox") or "upstox").lower() if cfg else "upstox"
-    secondary = (getattr(cfg, "secondary_feeder_provider", "angelone") or "none").lower() if cfg else "angelone"
+    primary   = (getattr(cfg, "primary_feeder_provider", "fyers") or "fyers").lower() if cfg else "fyers"
+    secondary = (getattr(cfg, "secondary_feeder_provider", "upstox") or "none").lower() if cfg else "upstox"
     if secondary == primary:
         secondary = ""
-    # 2026-09-06: candidate set is now ALL THREE real data-feed providers
-    # (upstox2 excluded -- that's the separate CrudeOil-only feed, a
-    # different index entirely), not just the configured primary/secondary
-    # pair -- see this function's own docstring above.
-    _candidates = {primary, secondary, "upstox", "fyers", "angelone"} - {"", "none", "upstox2"}
+    # 2026-09-06: candidate set is both real data-feed providers (upstox2
+    # excluded -- that's the separate CrudeOil-only feed, a different index
+    # entirely), not just the configured primary/secondary pair -- see this
+    # function's own docstring above. 2026-10-15, direct user decision:
+    # angelone REMOVED from the default candidate set -- the user's
+    # AngelOne token is shared with a separate application of theirs, so
+    # even a hot-standby connection here would get silently kicked whenever
+    # that other app logs in. `primary`/`secondary` can still force
+    # angelone back in if explicitly configured.
+    _candidates = {primary, secondary, "upstox", "fyers"} - {"", "none", "upstox2"}
 
     def _load_creds(p: str) -> dict:
         row = client_db.get_feeder_creds_sync(p) or {} if client_db is not None else {}

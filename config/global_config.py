@@ -417,19 +417,29 @@ class GlobalConfig:
     candle_timeframes: List[int] = field(default_factory=lambda: [1, 2, 5, 15, 75])
 
     # Primary feeder broker (admin-selected)
-    # 2026-09-09, direct user decision: promoted angelone -> primary, upstox ->
-    # secondary. Two independent pieces of evidence this same session pointed at
-    # Upstox specifically: (1) the user's own direct observation that Upstox gives
-    # wrong/stale LTP during SellStraddle; (2) an independent real-data replay of
-    # SellStraddle's post-15:00 R1 exit logic showed UPSTOX's live R1 phase
-    # transitions lagging ~11 bars behind what the real market data justified,
-    # while SA5770's (a different broker) matched almost exactly -- see CLAUDE.md's
-    # SellStraddle section for the full investigation. AngelOneFeeder's own
-    # blocking/unthrottled scrip-search bug (real rate-limit + WS disconnect-cycle
-    # incident, same session) was found and fixed in data_layer/global_feeder.py
-    # BEFORE this promotion, but has not yet had a full clean live session to
-    # confirm the fix holds -- watch the first live day closely.
-    primary_feeder_provider: Literal["upstox", "upstox2", "fyers", "dhan", "angelone", "mock", "shared"] = "angelone"
+    # 2026-10-15, direct user decision: demoted angelone -> REMOVED ENTIRELY
+    # (not just demoted), promoted fyers -> primary. Reason: the user's
+    # AngelOne token is shared with a separate application of theirs --
+    # since AngelOne (like most Indian brokers) allows only one active
+    # WebSocket session per token, this app's own AngelOne connection would
+    # get silently kicked whenever the other application logs in, making it
+    # unsafe even as a backup/shadow feeder, not just as primary. Fyers was
+    # never implicated in any of this session's real data-quality incidents
+    # (unlike Upstox -- see the superseded 2026-09-09 note below, kept for
+    # history); Upstox stays as secondary. AngelOneFeeder's own code is left
+    # in place (still a valid, working feeder) in case the token conflict is
+    # ever resolved and it needs to come back -- just excluded from the
+    # default candidate set in data_layer/global_feeder.py's start()/
+    # ui_layer/dashboard_server.py's admin-toggle candidate lists.
+    #
+    # SUPERSEDED 2026-09-09 note: promoted angelone -> primary, upstox ->
+    # secondary. Two independent pieces of evidence that session pointed at
+    # Upstox specifically: (1) the user's own direct observation that Upstox
+    # gives wrong/stale LTP during SellStraddle; (2) an independent real-data
+    # replay of SellStraddle's post-15:00 R1 exit logic showed UPSTOX's live
+    # R1 phase transitions lagging ~11 bars behind what the real market data
+    # justified, while SA5770's (a different broker) matched almost exactly.
+    primary_feeder_provider: Literal["upstox", "upstox2", "fyers", "dhan", "angelone", "mock", "shared"] = "fyers"
 
     # Secondary / backup feeder. Used in dual-feed mode when its token is also valid.
     secondary_feeder_provider: Literal["angelone", "fyers", "upstox2", "upstox", "none"] = "upstox"

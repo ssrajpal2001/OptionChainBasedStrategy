@@ -2236,7 +2236,14 @@ class GlobalFeeder:
                 return bool(creds.get("client_id") and creds.get("password"))
             return bool(creds.get("access_token"))
 
-        candidates = {primary, "upstox", "fyers", "angelone"} - {"", "mock", "shared", "upstox2"}
+        # 2026-10-15, direct user decision: angelone REMOVED from the default
+        # candidate set (was always included regardless of primary/secondary
+        # config, per the 2026-09-06 "run all three parallel" spec above) --
+        # the user's AngelOne token is shared with a separate application,
+        # so even running it as a hot standby would get it silently kicked
+        # whenever that other app logs in. `primary` itself can still force
+        # angelone back in if explicitly configured as primary/secondary.
+        candidates = {primary, "upstox", "fyers"} - {"", "mock", "shared", "upstox2"}
         creds_map: Dict[str, Dict[str, str]] = {}
         for p in candidates:
             creds = self._load_feeder_creds(p)
