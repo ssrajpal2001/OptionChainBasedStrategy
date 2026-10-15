@@ -151,6 +151,19 @@ class VpOiRegimeAdapter:
         self._pre_exit_bar: Dict[str, dict] = {}
         self._pre_exit_last_close: Dict[str, float] = {}
         self._pre_exit_last_ema: Dict[str, float] = {}
+        # 2026-10-15, direct user spec: the SAME 5-min/9-EMA confirmation,
+        # applied to the Volatile row's hedge buy. Unlike the Highly
+        # Bearish/Bullish case, the candidate strike here isn't known in
+        # advance -- it's picked dynamically by premium-match the moment
+        # VAH/VAL breaks (direct user call: pick the strike FIRST, then
+        # wait for THAT strike's own EMA to confirm before buying). Kept
+        # fully separate from _pre_exit_ema (a different mechanic, a
+        # different strike) to avoid any cross-contamination.
+        self._volatile_candidate: Dict[str, dict] = {}   # side -> {strike, entry_premium, hedge}
+        self._volatile_ema = {"CE": NineEmaTrailingStop(period=9), "PE": NineEmaTrailingStop(period=9)}
+        self._volatile_bar: Dict[str, dict] = {}
+        self._volatile_last_close: Dict[str, float] = {}
+        self._volatile_last_ema: Dict[str, float] = {}
 
     def is_regime_action_ready(self, min_cycles: int = 2) -> bool:
         """2026-10-14, direct user spec: right after a restart (or the
@@ -210,6 +223,58 @@ class VpOiRegimeAdapter:
             return False
         return close > ema_val
 
+    # ── Volatile-row hedge buy: same 5-min/9-EMA gate, dynamic candidate ──
+    def set_volatile_candidate(self, side: str, strike: int, entry_premium: float, hedge) -> None:
+        """Call once VAH/VAL has broken and a candidate strike has been
+        picked (by premium-match against entry_premium, same target band
+        _buy_vp_oi_hedge already uses). If this is a DIFFERENT strike than
+        whatever was being tracked for this side, resets the EMA tracker --
+        a stale bar history from a different strike must never carry over
+        (same discipline as this codebase's other wall-drift/strike-change
+        accumulator resets)."""
+        prior = self._volatile_candidate.get(side)
+        if prior is None or prior["strike"] != strike:
+            self._volatile_ema[side].reset()
+            self._volatile_bar.pop(side, None)
+            self._volatile_last_close.pop(side, None)
+            self._volatile_last_ema.pop(side, None)
+        self._volatile_candidate[side] = {"strike": strike, "entry_premium": entry_premium, "hedge": hedge}
+
+    def get_volatile_candidate(self, side: str) -> Optional[dict]:
+        return self._volatile_candidate.get(side)
+
+    def clear_volatile_candidate(self, side: str) -> None:
+        self._volatile_candidate.pop(side, None)
+        self._volatile_ema[side].reset()
+        self._volatile_bar.pop(side, None)
+        self._volatile_last_close.pop(side, None)
+        self._volatile_last_ema.pop(side, None)
+
+    def feed_volatile_candidate_premium(self, side: str, ltp: float, ts: float) -> None:
+        """Same 5-min-bar-close-into-9-EMA mechanic as feed_pre_exit_premium,
+        kept as a fully separate tracker (different strike, different
+        mechanic -- see this adapter's own __post_init__ comment)."""
+        if ltp <= 0:
+            return
+        minute = int(ts // 300) * 300
+        bar = self._volatile_bar.get(side)
+        if bar is None or bar["bucket"] != minute:
+            if bar is not None:
+                close = bar["close"]
+                ema_val = self._volatile_ema[side].update(close)
+                self._volatile_last_close[side] = close
+                self._volatile_last_ema[side] = ema_val
+            self._volatile_bar[side] = {"bucket": minute, "close": ltp}
+        else:
+            bar["close"] = ltp
+
+    def is_volatile_candidate_confirmed(self, side: str) -> bool:
+        close = self._volatile_last_close.get(side)
+        ema_val = self._volatile_last_ema.get(side)
+        if close is None or ema_val is None:
+            return False
+        return close > ema_val
+
     def seed_anchors_from_recorder(self, latest: dict, now_ts: float) -> None:
         """2026-10-13, direct user spec, REVISED 2026-10-15 for the
         rolling-checkpoint design: call this ONCE, right after construction
@@ -237,6 +302,12 @@ class VpOiRegimeAdapter:
         self._pre_exit_bar = {}
         self._pre_exit_last_close = {}
         self._pre_exit_last_ema = {}
+        for ema in self._volatile_ema.values():
+            ema.reset()
+        self._volatile_candidate = {}
+        self._volatile_bar = {}
+        self._volatile_last_close = {}
+        self._volatile_last_ema = {}
         self.naked_state = "NONE"
         self.naked_entry_premium = {}
         self.awaiting_reentry = {}

@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, time as dtime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from config.global_config import IST, Topic
 from strategies.core.rule_evaluator import eval_rules as _eval_rules
@@ -3454,7 +3454,8 @@ class ExitMixin:
             self._vp_oi_adapter.reentry_poc_anchor or 0.0,
         )
 
-    async def _buy_vp_oi_hedge(self, side: str, hedge, entry_premium: float, now: datetime) -> bool:
+    async def _buy_vp_oi_hedge(self, side: str, hedge, entry_premium: float, now: datetime,
+                                forced_strike: Optional[int] = None) -> bool:
         """Shared hedge-buy primitive: given a HedgeSpend (enabled + premium
         %-band) and the closed leg's own entry premium, finds a strike in
         that premium band and buys it. Returns True iff a naked long was
@@ -3462,18 +3463,30 @@ class ExitMixin:
         updated) -- used by both the single-leg Highly Bearish/Bullish path
         (_vp_oi_exit_single_side) and the Volatile conditional-watch path
         (_check_vp_oi_volatile_watch) so the strike-matching/order/naked-
-        state logic exists in exactly one place."""
+        state logic exists in exactly one place.
+
+        forced_strike (2026-10-15, direct user spec): when given, buys that
+        EXACT strike at its current live LTP, skipping the premium-match
+        search entirely -- used by the Volatile path once a candidate
+        strike's own 5-min/9-EMA has already confirmed, so the strike
+        actually bought is guaranteed to be the one the EMA was tracked
+        on (a fresh re-search at buy time could otherwise pick a DIFFERENT
+        strike if prices moved during the wait)."""
         if not (hedge.enabled and entry_premium > 0):
             return False
-        from strategies.vp_oi_regime.decision_matrix import hedge_target_premium, pick_strike_by_premium_match
-        target = hedge_target_premium(hedge, entry_premium)
-        if not target:
-            return False
-        chain = {s: v.get("ltp", 0.0) for (s, sd), v in self._strike_prem.items() if sd == side}
-        picked = pick_strike_by_premium_match(chain, target[0], target[1])
+        if forced_strike is not None:
+            h_ltp = float(self._strike_prem.get((int(forced_strike), side), {}).get("ltp", 0.0) or 0.0)
+            picked = (int(forced_strike), h_ltp) if h_ltp > 0 else None
+        else:
+            from strategies.vp_oi_regime.decision_matrix import hedge_target_premium, pick_strike_by_premium_match
+            target = hedge_target_premium(hedge, entry_premium)
+            picked = None
+            if target:
+                chain = {s: v.get("ltp", 0.0) for (s, sd), v in self._strike_prem.items() if sd == side}
+                picked = pick_strike_by_premium_match(chain, target[0], target[1])
         if not picked:
-            self._clog.info("VP/OI REGIME — no strike in [%.2f,%.2f] premium band for %s hedge; "
-                             "staying flat on this side, no naked long opened", target[0], target[1], side)
+            self._clog.info("VP/OI REGIME — no usable strike for %s hedge (forced_strike=%s); "
+                             "staying flat on this side, no naked long opened", side, forced_strike)
             return False
         h_strike, h_ltp = picked
         expiry = getattr(self, "_entry_expiry_date", None)
@@ -3495,25 +3508,67 @@ class ExitMixin:
         return True
 
     async def _check_vp_oi_volatile_watch(self, now: datetime) -> None:
-        """Every cycle while the adapter's volatile_watch is armed: check
-        whether spot has broken VAH (Call side) / VAL (Put side) within the
-        5-minute window, buy the corresponding hedge on a genuine break, or
-        let the window lapse with NO hedge on a timeout -- exactly the
-        conditional "IF VAH/VAL broken in 5 mins" the PDF's Volatile rows
-        specify, never an immediate/unconditional buy."""
+        """Every cycle while the adapter's volatile_watch is armed (or a
+        candidate strike is already pending confirmation): check whether
+        spot has broken VAH (Call side) / VAL (Put side) within the
+        5-minute window, pick a candidate strike by premium-match on a
+        genuine break, or let the window lapse with NO hedge on a timeout
+        -- exactly the conditional "IF VAH/VAL broken in 5 mins" the PDF's
+        Volatile rows specify. 2026-10-15, direct user spec: a break no
+        longer buys immediately -- it only PICKS the candidate strike; the
+        actual buy waits for that strike's own 5-min close to confirm above
+        its own 9-EMA (same gate as the Highly Bearish/Bullish path, applied
+        here to a dynamically-picked strike instead of a fixed one)."""
         adapter = self._vp_oi_adapter
-        if not adapter.volatile_watch:
+        if not adapter.volatile_watch and not any(
+            adapter.get_volatile_candidate(s) for s in ("CE", "PE")
+        ):
             return
         spot = float(getattr(self, "_spot", 0.0) or 0.0)
+        from strategies.vp_oi_regime.decision_matrix import hedge_target_premium, pick_strike_by_premium_match
         for side, reason, entry_premium, hedge in adapter.check_volatile_hedge_triggers(spot, now.timestamp()):
             if reason == "timeout":
                 self._clog.info("VP/OI REGIME (Volatile) — %s hedge watch timed out with no "
                                  "VAH/VAL break; staying flat on this side", side)
                 adapter.add_remark(f"{side}: 5-min hedge watch timed out with no break — no hedge")
                 continue
-            self._clog.info("VP/OI REGIME (Volatile) — %s side's level broken within 5 min, buying hedge",
-                             side)
-            await self._buy_vp_oi_hedge(side, hedge, entry_premium, now)
+            target = hedge_target_premium(hedge, entry_premium)
+            chain = {s: v.get("ltp", 0.0) for (s, sd), v in self._strike_prem.items() if sd == side}
+            picked = pick_strike_by_premium_match(chain, target[0], target[1]) if target else None
+            if not picked:
+                self._clog.info("VP/OI REGIME (Volatile) — %s level broken but no strike in "
+                                 "[%.2f,%.2f] premium band; staying flat", side,
+                                 target[0] if target else 0.0, target[1] if target else 0.0)
+                continue
+            cand_strike, _cand_ltp = picked
+            adapter.set_volatile_candidate(side, int(cand_strike), entry_premium, hedge)
+            self._clog.info(
+                "VP/OI REGIME (Volatile) — %s level broken, candidate %d picked -- "
+                "waiting for 5-min close above 9-EMA before buying", side, cand_strike)
+            adapter.add_remark(
+                f"{side}: VAH/VAL broken, candidate {cand_strike} picked — waiting for "
+                f"5-min close above its own 9-EMA before buying")
+
+        # Feed + check every pending candidate, every cycle, until confirmed.
+        for side in ("CE", "PE"):
+            cand = adapter.get_volatile_candidate(side)
+            if cand is None:
+                continue
+            ltp = float(self._strike_prem.get((cand["strike"], side), {}).get("ltp", 0.0) or 0.0)
+            if ltp <= 0:
+                continue
+            adapter.feed_volatile_candidate_premium(side, ltp, now.timestamp())
+            if not adapter.is_volatile_candidate_confirmed(side):
+                continue
+            bought = await self._buy_vp_oi_hedge(
+                side, cand["hedge"], cand["entry_premium"], now, forced_strike=cand["strike"])
+            if bought:
+                adapter.clear_volatile_candidate(side)
+            else:
+                # Buy failed/unconfirmed (broker rejection, strike vanished,
+                # etc.) -- clear so this doesn't retry forever on a dead
+                # strike; a future break (if any) will re-pick fresh.
+                adapter.clear_volatile_candidate(side)
 
     async def _vp_oi_manage_naked_legs(self, pos: "StraddlePosition", now: datetime) -> None:
         """Every tick while any side is naked: feed its live LTP into the
