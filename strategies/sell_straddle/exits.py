@@ -588,18 +588,23 @@ class ExitMixin:
 
     async def _dispatch_hedge_order(
         self, action: str, side: str, strike: int, price: float, entry_price: float,
-        expiry, reason: str, entry_ts=None,
+        expiry, reason: str, entry_ts=None, qty: Optional[int] = None,
     ):
         """BUY (open) or SELL (close) one hedge leg via the standalone
         StraddleHedgeExecutionBridge (Topic.STRADDLE_HEDGE_ORDER_REQUEST/FILL) --
         never touches the sold-leg StraddleOrderEvent/StraddleFillEvent flow.
         Waits (confirm-then-finalize, same contract every bridge in this codebase
         uses) for the matching StraddleHedgeFillEvent. Returns that event, or None
-        on a 15s confirm timeout."""
+        on a 15s confirm timeout.
+
+        `qty` (2026-10-15, direct user spec): overrides the default 1x lot
+        quantity -- used by the Highly Bearish/Bullish double-buy mechanic
+        (_vp_oi_exit_leg), which needs 2x the sold quantity in one order."""
         from strategies.sell_straddle.hedge_events import StraddleHedgeOrderEvent
         self._event_counter += 1
         eid = f"{self._underlying}_HEDGE_{action}_{side}{int(strike)}_{self._event_counter}"
-        qty = self._lot_size * self._lot_multiplier
+        if qty is None:
+            qty = self._lot_size * self._lot_multiplier
         order_ev = StraddleHedgeOrderEvent(
             client_id=self._client_id, binding_id=self._binding_id, action=action,
             underlying=self._underlying, option_type=side, strike=int(strike),
@@ -3373,51 +3378,49 @@ class ExitMixin:
         )
 
     async def _vp_oi_exit_leg(self, side: str, hedge, now: datetime) -> None:
-        """Close one SOLD leg (Highly Bearish/Bullish row) and, if the
-        matrix row's hedge is enabled, buy a premium-matched replacement
-        long -- tracked as a naked position via self._vp_oi_naked_leg."""
+        """2026-10-15 CORRECTED, direct user spec (Highly Bearish/Bullish
+        row): a SINGLE BUY order for DOUBLE the currently sold quantity, at
+        the SAME strike -- not two separate orders at two different
+        strikes (the old design closed the sold leg, then separately
+        bought a premium-matched hedge at a different strike; that read
+        the sheet's "...so that u have 1 buy" wrong). Half the double-buy
+        covers/closes the short; the other half becomes a fresh long,
+        tracked via self._vp_oi_naked_leg and ridden with the existing
+        9-EMA trailing stop, exactly as before -- only the entry mechanic
+        changed, not the exit side. `hedge` param kept for call-site
+        signature compatibility but no longer used (no separate hedge-
+        strike sizing exists anymore for this row)."""
         pos = self._position
         leg = pos.ce_leg if side == "CE" else pos.pe_leg
-        entry_premium = float(leg.entry_price or 0.0)
-        exited_strike = int(leg.strike)
-        order_ev = await self._close_leg(side, "vp_oi_regime_exit", now)
-        if getattr(order_ev, "close_aborted", False):
+        strike = int(leg.strike)
+        ltp = float(self._strike_prem.get((strike, side), {}).get("ltp", 0.0) or 0.0)
+        if ltp <= 0:
+            self._clog.info("VP/OI REGIME — %s double-buy deferred: no live LTP yet "
+                             "for strike=%d", side, strike)
+            return
+        double_qty = 2 * self._lot_size * self._lot_multiplier
+        fill = await self._dispatch_hedge_order(
+            "BUY", side, strike, ltp, ltp, pos.expiry_date, "vp_oi_regime_double_buy",
+            qty=double_qty,
+        )
+        if fill is None or getattr(fill, "entry_aborted", False) or fill.fill_price <= 0:
+            self._clog.critical("VP/OI REGIME — %s double-buy FAILED/unconfirmed -- leg "
+                                 "stays sold, no action taken (needs review)", side)
             return
         setattr(pos, f"{side.lower()}_leg_closed", True)
-        self._vp_oi_last_exited_strike[side] = exited_strike
-        self._persist()
-        self._clog.info("VP/OI REGIME — exited %s leg (strike=%.0f, regime-driven)",
-                         side, leg.strike)
-
-        if not (hedge.enabled and entry_premium > 0):
-            return
-        from strategies.vp_oi_regime.decision_matrix import hedge_target_premium, pick_strike_by_premium_match
-        target = hedge_target_premium(hedge, entry_premium)
-        if not target:
-            return
-        chain = {s: v.get("ltp", 0.0) for (s, sd), v in self._strike_prem.items() if sd == side}
-        picked = pick_strike_by_premium_match(chain, target[0], target[1])
-        if not picked:
-            self._clog.info("VP/OI REGIME — no strike in [%.2f,%.2f] premium band for %s hedge; "
-                             "leg stays fully closed, no naked long opened", target[0], target[1], side)
-            return
-        h_strike, h_ltp = picked
-        h_fill = await self._dispatch_hedge_order(
-            "BUY", side, int(h_strike), h_ltp, h_ltp, pos.expiry_date, "vp_oi_hedge")
-        if h_fill is None or getattr(h_fill, "entry_aborted", False) or h_fill.fill_price <= 0:
-            self._clog.critical("VP/OI REGIME — hedge %s BUY failed/unconfirmed -- leg left "
-                                 "closed with NO naked long opened (needs review)", side)
-            return
-        self._vp_oi_naked_leg[side] = {"strike": int(h_strike), "entry": float(h_fill.fill_price)}
+        self._vp_oi_last_exited_strike[side] = strike
+        self._vp_oi_naked_leg[side] = {"strike": strike, "entry": float(fill.fill_price)}
         self._vp_oi_adapter.mark_naked(
             "NAKED_BOTH" if len(self._vp_oi_naked_leg) == 2 else f"NAKED_{side}",
             {s: d["entry"] for s, d in self._vp_oi_naked_leg.items()},
         )
+        self._persist()
         self._vp_oi_adapter.add_remark(
-            f"{side}: hedge bought {h_strike}@{h_fill.fill_price:.2f} -- naked long armed, "
-            f"riding with 9-EMA trailing stop")
-        self._clog.info("VP/OI REGIME — hedge %s%d BUY@%.2f confirmed (naked long armed, 9-EMA trailing)",
-                         side, h_strike, h_fill.fill_price)
+            f"{side}: double-buy {strike}@{fill.fill_price:.2f} (2x qty) -- short "
+            f"covered, now naked long, riding with 9-EMA trailing stop")
+        self._clog.info(
+            "VP/OI REGIME — %s double-buy %d@%.2f confirmed (2x qty=%d: short covered "
+            "+ naked long armed, 9-EMA trailing)", side, strike, fill.fill_price, double_qty)
 
     async def _vp_oi_arm_volatile_hedge(self, dr, now: datetime) -> None:
         """2026-10-15 CORRECTED, direct user spec: Volatile regime does NOT
@@ -3626,16 +3629,27 @@ class ExitMixin:
                          "Re-entry Rule now watching", side, leg_info["strike"], ltp, pnl)
 
     async def _vp_oi_resell_leg(self, side: str, now: datetime) -> None:
-        """Re-entry Rule fired (price closed back on the fakeout side of
-        POC) -- re-sell a fresh short leg on this side.
+        """Re-entry Rule fired, 2026-10-15 CORRECTED direct user spec: OI on
+        this side has risen 20% from its low (VpOiRegimeAdapter.check_reentry,
+        itself already corrected the same day to be a pure OI-trend flip,
+        not POC-crossing) -- re-sell a fresh short leg on this side.
+
+        2026-10-15 direct user spec: the fresh strike must clear the SAME
+        entry-grade bar a genuine BEGINNING/RE-ENTRY trade would -- the dual
+        LTP/theta floor (leg_passes_dual_floor) and the balance-ratio metric
+        -- not just a loose rollover-style match. The still-open OTHER leg
+        is kept completely untouched (not replaced) and used as the fixed
+        reference point, same as a roll. select_partner_for (the same
+        anchor-ring search a single-side roll already uses) is reused for
+        the search mechanics, but with rule_pass now enforcing the dual
+        floor explicitly, since select_partner_for's own docstring says it
+        deliberately does NOT enforce that floor by itself (a rollover-only
+        relaxation that doesn't belong at a re-entry's own quality bar).
 
         NOTE: _single_side_roll is NOT reusable here -- it picks WHICH side
-        to roll by comparing both legs' own P&L and assumes both are
-        currently open, neither of which holds for a side that's already
-        fully closed. Instead this reuses select_rollover_partner_directional
-        the same way a roll does, balancing the new strike against the
-        OTHER leg (if it's still open) as the reference "kept" leg, then
-        places it via _open_leg (the same primitive every roll path uses)."""
+        to roll by comparing both legs' own running P&L and assumes both
+        are currently open, neither of which holds for a side that's
+        already fully closed."""
         pos = self._position
         if pos is None:
             # Volatile-regime double exit: the whole StraddlePosition is gone,
@@ -3661,17 +3675,27 @@ class ExitMixin:
                              "also flat (no reference leg); not re-selling -- needs a fresh "
                              "pair-selection path, not yet implemented", side)
             return
-        from strategies.sell_straddle.selection import select_rollover_partner_directional
+        from strategies.sell_straddle.selection import select_partner_for, leg_passes_dual_floor
         step = self._cfg.exchange.strike_steps.get(self._underlying, 50.0) if self._cfg else 50.0
         old_strike = self._vp_oi_last_exited_strike.get(side, other_leg.strike)
-        picked = select_rollover_partner_directional(
+        spot = float(getattr(self, "_spot", 0.0) or 0.0)
+        ltp_target = self._ltp_target if self._ltp_target > 0 else 50.0
+        theta_target = self._theta_target
+
+        def _entry_grade_rule_pass(ce_strike, pe_strike) -> bool:
+            cand_strike = ce_strike if side == "CE" else pe_strike
+            cand_ltp = float(self._strike_prem.get((cand_strike, side), {}).get("ltp", 0.0) or 0.0)
+            return leg_passes_dual_floor(side, cand_strike, cand_ltp, spot, ltp_target, theta_target)
+
+        picked = select_partner_for(
             self._strike_prem, side, int(other_leg.strike), float(other_leg.ltp or 0.0),
-            int(old_strike), float(getattr(self, "_spot", 0.0) or 0.0), step,
-            min_gap_pts=100.0, rule_pass=True,
+            spot, step, offset=7, ltp_target=ltp_target, rule_pass=_entry_grade_rule_pass,
+            theta_target=theta_target, metric="balanced_ratio",
+            anchor_strike=int(old_strike),
         )
         if not picked:
-            self._clog.info("VP/OI REGIME — Re-entry Rule fired for %s but no valid re-sell "
-                             "strike found; staying flat on this side", side)
+            self._clog.info("VP/OI REGIME — Re-entry Rule fired for %s but no strike passed "
+                             "the entry-grade dual floor/balance bar; staying flat on this side", side)
             return
         strike, ltp = picked
         await self._open_leg(side, int(strike), float(ltp), now, "vp_oi_reentry_resell")
