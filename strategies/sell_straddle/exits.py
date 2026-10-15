@@ -3140,6 +3140,18 @@ class ExitMixin:
         if not hasattr(self, "_vp_oi_last_exited_strike"):
             self._vp_oi_last_exited_strike: dict = {}
 
+        # 2026-10-15, direct user spec: feed the currently-sold legs' own
+        # live premium into the pre-exit 9-EMA (5-min bars) continuously,
+        # regardless of naked/awaiting-reentry state below -- warms up the
+        # EMA ahead of time so is_pre_exit_ema_confirmed() has real history
+        # by the time a Highly Bearish/Bullish regime actually needs it.
+        for _side, _leg in (("CE", pos.ce_leg), ("PE", pos.pe_leg)):
+            if getattr(pos, f"{_side.lower()}_leg_closed", False):
+                continue
+            _ltp = float(self._strike_prem.get((int(_leg.strike), _side), {}).get("ltp", 0.0) or 0.0)
+            if _ltp > 0:
+                adapter.feed_pre_exit_premium(_side, _ltp, now.timestamp())
+
         # Any side currently naked or awaiting re-entry owns this tick --
         # don't also re-evaluate a fresh regime decision the same cycle.
         # (Naked-leg management itself already ran this tick, unconditionally,
@@ -3288,9 +3300,20 @@ class ExitMixin:
             return  # Volume Profile not warm yet -- safe no-op, same as before this feature existed
         lvn_side = "below" if side == "PE" else "above"
         if snap.in_lvn(spot, lvn_side):
+            # 2026-10-15, direct user spec (OI_Combinations_v2.pdf): an
+            # ADDITIONAL gate on top of the LVN confirmation above -- the
+            # sold leg's own premium must have a confirmed 5-min close
+            # above its own 9-EMA before exiting+buying the replacement
+            # (confirms the option's own momentum, not just spot location).
+            if not adapter.is_pre_exit_ema_confirmed(side):
+                adapter.add_remark(
+                    f"{side}: LVN confirmed but waiting for a 5-min close above the "
+                    f"9-EMA on its own premium before exiting+buying")
+                return
             adapter.add_remark(
                 f"{side}: LVN acceptance confirmed {lvn_side} "
-                f"{'VAL' if side=='PE' else 'VAH'} (spot={spot:.2f}) -> exiting leg + hedge")
+                f"{'VAL' if side=='PE' else 'VAH'} (spot={spot:.2f}), premium 5-min close "
+                f"above 9-EMA confirmed -> exiting leg + hedge")
             adapter.shifted_strike.pop(side, None)
             await self._vp_oi_exit_leg(side, hedge, now)
             return

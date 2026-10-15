@@ -138,6 +138,19 @@ class VpOiRegimeAdapter:
                                     noise_floor_pct=self.noise_floor_pct, override_pct=self.override_pct)
         self._rollover = FuturesRolloverTracker(change_window_min=self.change_window_min)
         self._ema = {"CE": NineEmaTrailingStop(period=9), "PE": NineEmaTrailingStop(period=9)}
+        # 2026-10-15, direct user spec (OI_Combinations_v2.pdf, Highly
+        # Bearish/Bullish rows): before exiting the currently-sold leg and
+        # buying its replacement, a 5-min candle on that SAME strike's own
+        # premium must close above its own 9-EMA -- an ADDITIONAL gate on
+        # top of the existing LVN-confirmed-breakout check (exits.py's
+        # _vp_oi_handle_directional), not a replacement for it. Separate
+        # from self._ema above, which only starts once a leg is ALREADY
+        # naked (post-exit trailing stop) -- this one runs continuously
+        # while the leg is still sold, building toward the entry decision.
+        self._pre_exit_ema = {"CE": NineEmaTrailingStop(period=9), "PE": NineEmaTrailingStop(period=9)}
+        self._pre_exit_bar: Dict[str, dict] = {}
+        self._pre_exit_last_close: Dict[str, float] = {}
+        self._pre_exit_last_ema: Dict[str, float] = {}
 
     def is_regime_action_ready(self, min_cycles: int = 2) -> bool:
         """2026-10-14, direct user spec: right after a restart (or the
@@ -163,6 +176,40 @@ class VpOiRegimeAdapter:
         mid-day restart."""
         self._oi.freeze_atm(atm)
 
+    def feed_pre_exit_premium(self, side: str, ltp: float, ts: float) -> None:
+        """2026-10-15, direct user spec: builds 5-min bars from the
+        currently-sold leg's own live premium ticks and feeds each bar's
+        CLOSE into that side's pre-exit 9-EMA. Call every tick while a
+        position is open and that side isn't already naked -- cheap no-op
+        math, so it's safe to call unconditionally; the EMA only matters
+        once is_pre_exit_ema_confirmed() is actually checked."""
+        if ltp <= 0:
+            return
+        minute = int(ts // 300) * 300   # 5-min bucket
+        bar = self._pre_exit_bar.get(side)
+        if bar is None or bar["bucket"] != minute:
+            if bar is not None:
+                close = bar["close"]
+                ema_val = self._pre_exit_ema[side].update(close)
+                self._pre_exit_last_close[side] = close
+                self._pre_exit_last_ema[side] = ema_val
+            self._pre_exit_bar[side] = {"bucket": minute, "close": ltp}
+        else:
+            bar["close"] = ltp
+
+    def is_pre_exit_ema_confirmed(self, side: str) -> bool:
+        """True once the side's own premium has a CONFIRMED (closed) 5-min
+        bar whose close sits above that side's own 9-EMA -- the extra gate
+        OI_Combinations_v2.pdf adds on top of the existing LVN-confirmed-
+        breakout check before exiting the sold leg and buying its
+        replacement. False (never guesses) until at least one real 5-min
+        bar has closed."""
+        close = self._pre_exit_last_close.get(side)
+        ema_val = self._pre_exit_last_ema.get(side)
+        if close is None or ema_val is None:
+            return False
+        return close > ema_val
+
     def seed_anchors_from_recorder(self, latest: dict, now_ts: float) -> None:
         """2026-10-13, direct user spec, REVISED 2026-10-15 for the
         rolling-checkpoint design: call this ONCE, right after construction
@@ -185,6 +232,11 @@ class VpOiRegimeAdapter:
         self._rollover.reset()
         for ema in self._ema.values():
             ema.reset()
+        for ema in self._pre_exit_ema.values():
+            ema.reset()
+        self._pre_exit_bar = {}
+        self._pre_exit_last_close = {}
+        self._pre_exit_last_ema = {}
         self.naked_state = "NONE"
         self.naked_entry_premium = {}
         self.awaiting_reentry = {}
