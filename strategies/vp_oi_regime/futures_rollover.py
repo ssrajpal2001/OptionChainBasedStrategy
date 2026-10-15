@@ -38,8 +38,10 @@ class RolloverState:
     # Contract Switch Rule has fired) so the matrix always reads the
     # currently-relevant contract's own momentum, not a stale one.
     future_oi_trend: str = "No Change"
-    future_oi_pct_vs_anchor: float = 0.0
-    future_oi_anchor: float = 0.0
+    future_oi_pct_vs_anchor: float = 0.0       # HIGH anchor (Fall check)
+    future_oi_anchor: float = 0.0              # HIGH anchor
+    future_oi_pct_vs_low_anchor: float = 0.0   # LOW anchor (Rise check)
+    future_oi_low_anchor: float = 0.0
 
 
 class FuturesRolloverTracker:
@@ -97,7 +99,7 @@ class FuturesRolloverTracker:
             # Standard tracking: near-month only, no rollover possible by
             # definition outside expiry week (spec row 6, "Standard Tracking").
             near_now = self._near[-1][1] if self._near else None
-            f_trend, f_pct, _f_pct_lo, f_anchor, _f_low_anchor = (
+            f_trend, f_pct, f_pct_lo, f_anchor, f_low_anchor = (
                 self._future_oi_latch.update(near_now, now_ts) if near_now is not None
                 else ("No Change", 0.0, 0.0, 0.0, 0.0)
             )
@@ -107,6 +109,7 @@ class FuturesRolloverTracker:
                 near_oi_change_pct=None, next_oi_change_pct=None,
                 rollover_detected=False, reason="standard tracking (near-month only)",
                 future_oi_trend=f_trend, future_oi_pct_vs_anchor=f_pct, future_oi_anchor=f_anchor,
+                future_oi_pct_vs_low_anchor=f_pct_lo, future_oi_low_anchor=f_low_anchor,
             )
 
         near_now = self._near[-1][1] if self._near else None
@@ -161,7 +164,7 @@ class FuturesRolloverTracker:
                     )
 
         active_oi = next_now if self._active_contract == "next" else near_now
-        f_trend, f_pct, _f_pct_lo, f_anchor, _f_low_anchor = (
+        f_trend, f_pct, f_pct_lo, f_anchor, f_low_anchor = (
             self._future_oi_latch.update(active_oi, now_ts) if active_oi is not None
             else ("No Change", 0.0, 0.0, 0.0, 0.0)
         )
@@ -172,4 +175,5 @@ class FuturesRolloverTracker:
             near_oi_change_pct=near_chg_pct, next_oi_change_pct=next_chg_pct,
             rollover_detected=rollover_detected, reason=reason,
             future_oi_trend=f_trend, future_oi_pct_vs_anchor=f_pct, future_oi_anchor=f_anchor,
+            future_oi_pct_vs_low_anchor=f_pct_lo, future_oi_low_anchor=f_low_anchor,
         )

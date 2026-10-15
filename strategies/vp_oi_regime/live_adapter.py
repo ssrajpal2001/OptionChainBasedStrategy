@@ -83,12 +83,26 @@ class VpOiRegimeAdapter:
     last_future_oi_now: Optional[float] = field(default=None, init=False)
     last_future_oi_anchor: Optional[float] = field(default=None, init=False)
     last_future_oi_pct: Optional[float] = field(default=None, init=False)
+    last_future_oi_low_anchor: Optional[float] = field(default=None, init=False)
+    last_future_oi_low_pct: Optional[float] = field(default=None, init=False)
     last_call_oi_now: Optional[float] = field(default=None, init=False)
     last_call_oi_anchor: Optional[float] = field(default=None, init=False)
     last_call_oi_pct: Optional[float] = field(default=None, init=False)
     last_put_oi_now: Optional[float] = field(default=None, init=False)
     last_put_oi_anchor: Optional[float] = field(default=None, init=False)
     last_put_oi_pct: Optional[float] = field(default=None, init=False)
+    # 2026-10-15, direct user ask: the dual high/low-anchor design's LOW
+    # anchor + its own %-move (the Rise check) -- call_oi_anchor/pct above
+    # are the HIGH anchor (the Fall check).
+    last_call_oi_low_anchor: Optional[float] = field(default=None, init=False)
+    last_call_oi_low_pct: Optional[float] = field(default=None, init=False)
+    last_put_oi_low_anchor: Optional[float] = field(default=None, init=False)
+    last_put_oi_low_pct: Optional[float] = field(default=None, init=False)
+    # 2026-10-15, direct user ask: which strikes the ATM+/-band OI totals
+    # above are actually summed over -- so the dashboard can show "checking
+    # strikes X..Y" instead of only the aggregated totals.
+    last_oi_atm: Optional[int] = field(default=None, init=False)
+    last_oi_strikes: list = field(default_factory=list, init=False)
     # Per-side OTM-shift state for the "shift to OTM while not yet LVN-
     # confirmed" interim action -- tracks the side's CURRENT strike after a
     # shift, so _check_vp_oi_regime only shifts once per regime episode
@@ -181,6 +195,10 @@ class VpOiRegimeAdapter:
         self.last_future_oi_now = self.last_future_oi_anchor = self.last_future_oi_pct = None
         self.last_call_oi_now = self.last_call_oi_anchor = self.last_call_oi_pct = None
         self.last_put_oi_now = self.last_put_oi_anchor = self.last_put_oi_pct = None
+        self.last_call_oi_low_anchor = self.last_call_oi_low_pct = None
+        self.last_put_oi_low_anchor = self.last_put_oi_low_pct = None
+        self.last_oi_atm = None
+        self.last_oi_strikes = []
         self.shifted_strike = {}
         self.remarks = deque(maxlen=30)
         self.volatile_watch = {}
@@ -320,6 +338,10 @@ class VpOiRegimeAdapter:
             self.last_call_oi_now = self.last_put_oi_now = None
             self.last_call_oi_anchor = self.last_put_oi_anchor = None
             self.last_call_oi_pct = self.last_put_oi_pct = None
+            self.last_call_oi_low_anchor = self.last_put_oi_low_anchor = None
+            self.last_call_oi_low_pct = self.last_put_oi_low_pct = None
+            self.last_oi_atm = None
+            self.last_oi_strikes = []
             return None
 
         self.last_call_trend = oi_res.call_trend
@@ -330,6 +352,12 @@ class VpOiRegimeAdapter:
         self.last_put_oi_anchor = oi_res.put_anchor_oi
         self.last_call_oi_pct = oi_res.call_pct_vs_anchor
         self.last_put_oi_pct = oi_res.put_pct_vs_anchor
+        self.last_call_oi_low_anchor = oi_res.call_low_anchor_oi
+        self.last_put_oi_low_anchor = oi_res.put_low_anchor_oi
+        self.last_call_oi_low_pct = oi_res.call_pct_vs_low_anchor
+        self.last_put_oi_low_pct = oi_res.put_pct_vs_low_anchor
+        self.last_oi_atm = oi_res.atm
+        self.last_oi_strikes = oi_res.strikes
         self.last_decision = decide(roll_state.future_oi_trend, oi_res.put_trend, oi_res.call_trend)
         return self.last_decision
 
@@ -405,6 +433,17 @@ class VpOiRegimeAdapter:
             "put_oi_now": self.last_put_oi_now,
             "put_oi_anchor": self.last_put_oi_anchor,
             "put_oi_pct": self.last_put_oi_pct,
+            # 2026-10-15, direct user ask: the LOW anchor (Rise check) for
+            # each side, alongside the HIGH anchor (Fall check) above --
+            # and which strikes the Call/Put OI totals are actually summed
+            # over (the frozen ATM+/-5 band), so the dashboard can show
+            # "checking strikes X..Y" instead of only the aggregated totals.
+            "call_oi_low_anchor": self.last_call_oi_low_anchor,
+            "call_oi_low_pct": self.last_call_oi_low_pct,
+            "put_oi_low_anchor": self.last_put_oi_low_anchor,
+            "put_oi_low_pct": self.last_put_oi_low_pct,
+            "oi_atm": self.last_oi_atm,
+            "oi_strikes": list(self.last_oi_strikes or []),
             "regime": dr.regime if dr else None,
             "call_action": dr.call_action if dr else None,
             "put_action": dr.put_action if dr else None,

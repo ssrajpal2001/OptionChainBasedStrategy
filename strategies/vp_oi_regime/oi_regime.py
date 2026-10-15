@@ -190,7 +190,20 @@ class OiRegimeTracker:
         flagged a confirmed near-month/next-month rollover in progress this
         window; suppresses a directional trend call (both sides forced to
         'No Change') per spec row 6's false-signal filter, since a rollover's
-        OI shuffling must never be read as Long Unwinding/Short Covering."""
+        OI shuffling must never be read as Long Unwinding/Short Covering.
+
+        2026-10-15 CRITICAL FIX, real incident: before freeze_atm() has
+        succeeded, _atm() recenters on live spot every call -- so the band
+        of strikes being summed can shift strike-by-strike between two
+        calls purely from spot drifting a few points, with ZERO real OI
+        change. That band-shift artifact looks exactly like a huge genuine
+        OI move (confirmed live: PUT OI total jumped +151% session-start,
+        before any freeze had fired) and can falsely feed/poison the
+        high/low anchors. Refuse to classify at all -- same as "not warm
+        yet" -- until the band is genuinely frozen; the caller's own
+        _seed_vp_oi_volume_profile() retries every tick until it succeeds."""
+        if self._frozen_atm is None:
+            return None
         atm = self._atm(spot)
         strikes = self._band_strikes(atm)
 
