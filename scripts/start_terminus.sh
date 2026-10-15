@@ -37,13 +37,15 @@ echo "[3/4] Stopping old terminus process (if running)..."
 pm2 delete terminus 2>/dev/null || true
 
 echo "[4/4] Starting terminus..."
-# 2026-10-15: real production strategy lineup (confirmed throughout this session's
-# restarts) -- was stale here (missing oi_bias_rsi_exit/cag_straddle/iron_fly).
+# 2026-10-15: briefly changed to the full 4-strategy lineup, same evening
+# REVERTED per direct user instruction -- "I ONLY WANT TO RUN SELL STRADDLE
+# TOMORROW, will let u know if I want to run any other strategy." The
+# sell_straddle-only lineup was the correct, deliberate choice all along.
 pm2 start run_system.py \
     --name terminus \
     --interpreter python3 \
     -- --mode live --ui --port 5000 --index NIFTY --futures-oi-underlyings NIFTY \
-       --strategies sell_straddle,oi_bias_rsi_exit,cag_straddle,iron_fly
+       --strategies sell_straddle
 
 pm2 save
 

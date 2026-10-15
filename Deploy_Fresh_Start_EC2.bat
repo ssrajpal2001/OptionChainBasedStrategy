@@ -55,15 +55,17 @@ echo Future-OI buildup/unwinding classification has real data -- does NOT
 echo blend futures into self._spot/_atm_ref for anyone (that side effect
 echo stays scoped to --futures-atm-underlyings, which is NOT re-added).
 echo.
-echo 2026-10-15, direct user decision: --strategies restored to the full
-echo production lineup -- sell_straddle,oi_bias_rsi_exit,cag_straddle,iron_fly
-echo (was silently stuck at just "sell_straddle" since 2026-10-05, which this
-echo script would have reverted live back down to tomorrow morning had this
-echo gone unfixed tonight -- caught and corrected same evening). Also:
+echo 2026-10-15: briefly "corrected" to the full 4-strategy lineup, same
+echo evening REVERTED back to sell_straddle-only per direct, explicit user
+echo instruction -- "I ONLY WANT TO RUN SELL STRADDLE TOMORROW, will let u
+echo know if I want to run any other strategy." The 2026-10-05 sell_straddle-
+echo only decision documented above was correct all along, not stale -- my
+echo mistake treating it as a bug. --futures-oi-underlyings NIFTY stays
+echo (Sell Straddle's own vp_oi_regime Future-OI tracking needs it). Also:
 echo angelone REMOVED from the feeder mix entirely (token shared with another
 echo app of the user's) -- primary feeder is now fyers, secondary upstox.
 echo.
-ssh -t -i "%USERPROFILE%\.ssh\algotrading_ec2" ec2-user@13.200.171.160 "cd ~/OptionChainBasedStrategy; git pull origin nifty-cascade-v4-indicators; pm2 delete terminus 2>/dev/null; pm2 start run_system.py --name terminus --interpreter python3 -- --mode live --ui --port 5000 --index NIFTY --strategies sell_straddle,oi_bias_rsi_exit,cag_straddle,iron_fly --futures-oi-underlyings NIFTY; pm2 save --force; sleep 8; echo; echo '=== VERIFY: actual running process args ==='; ps aux | grep run_system.py | grep -v grep; echo; echo '=== VERIFY: strategies the app itself parsed ==='; grep 'enabled strategies' ~/.pm2/logs/terminus-out.log | tail -1; echo; echo '=== VERIFY: any auth/startup failures? ==='; grep -iE 'auth failed|startup aborted' ~/.pm2/logs/terminus-out.log | tail -5; echo; echo '=== Recent log tail ==='; pm2 logs terminus --lines 40 --nostream; bash -l"
+ssh -t -i "%USERPROFILE%\.ssh\algotrading_ec2" ec2-user@13.200.171.160 "cd ~/OptionChainBasedStrategy; git pull origin nifty-cascade-v4-indicators; pm2 delete terminus 2>/dev/null; pm2 start run_system.py --name terminus --interpreter python3 -- --mode live --ui --port 5000 --index NIFTY --strategies sell_straddle --futures-oi-underlyings NIFTY; pm2 save --force; sleep 8; echo; echo '=== VERIFY: actual running process args ==='; ps aux | grep run_system.py | grep -v grep; echo; echo '=== VERIFY: strategies the app itself parsed ==='; grep 'enabled strategies' ~/.pm2/logs/terminus-out.log | tail -1; echo; echo '=== VERIFY: any auth/startup failures? ==='; grep -iE 'auth failed|startup aborted' ~/.pm2/logs/terminus-out.log | tail -5; echo; echo '=== Recent log tail ==='; pm2 logs terminus --lines 40 --nostream; bash -l"
 echo.
 echo Connection closed. Press any key to close this window.
 pause >nul
