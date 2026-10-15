@@ -59,27 +59,29 @@ _VOLATILE_SR = (
 _NA_REENTRY = "N/A - Leg not exited"
 _NA_HEDGE_EXIT = "N/A"
 
-# 2026-10-04, authoritative source document (38-entry workbook PDF): the
-# re-entry/hedge-exit text is NOT uniform across every Highly-Bearish or
-# Highly-Bullish row the way the earlier chat-pasted table implied -- the
-# source literally uses different reference levels per observation (POC vs
-# VAL vs VAH) and the "Buildup" rows (Future OI Rising) add an extra 10-min
-# OI-flip re-entry clause the "Unwinding/Covering" rows (Future OI Falling)
-# don't have. Kept verbatim per-row rather than forcing false consistency.
+# 2026-10-15 CORRECTED, direct user re-read of OI_Combinations_v2.pdf's own
+# text for all four Highly Bearish/Bullish rows -- "reenter once the oi
+# parameters change, that is put oi rises by 20 percent" (PE) / "...call oi
+# increases by 20 percent" (CE). Purely an OI-trend flip, identical across
+# all four rows (Long Unwinding / Short Buildup / Long Buildup / Short
+# Covering) -- no POC, no LVN, no price-action condition at all. Supersedes
+# the 2026-10-04 POC/LVN-based wording below (superseded, not deleted, for
+# history): "Re-enter Short Put ONLY IF price is rejected from LVN and
+# closes back above POC (Fake Breakdown confirmed)" -- that wording was
+# carried over from an earlier, superseded version of the spec and real
+# code (VpOiRegimeAdapter.check_reentry) now implements the OI-flip-only
+# condition described here, not POC-crossing.
 _PUT_REENTRY_BUILDUP = (
-    "Re-enter Short Put ONLY IF price is rejected from LVN and closes back "
-    "above POC (Fake Breakdown confirmed). ALSO re-enter if the OI logic "
-    "changes to Bullish within 10 minutes."
+    "Re-enter Short Put once the OI parameters change -- that is, Put OI "
+    "rises 20% from the day's low."
 )
 _CALL_REENTRY_BUILDUP = (
-    "Re-enter Short Call ONLY IF price is rejected from LVN and closes back "
-    "below POC (Fake Breakout confirmed)."
+    "Re-enter Short Call once the OI parameters change -- that is, Call OI "
+    "rises (increases) 20% from the day's low."
 )
-# 2026-10-04 SECOND correction: Obs 23/24 now reuse _PUT_REENTRY_BUILDUP/
-# _CALL_REENTRY_BUILDUP (Obs 5/6's own POC-based wording) rather than their
-# own VAL/VAH-based wording -- "identical to Obs 5/6" per direct user spec
-# means the whole row, not just the hedge split. The original VAL/VAH-based
-# constants this replaced are preserved in git history if ever needed.
+# Obs 23/24 reuse the SAME text as Obs 5/6 above -- the sheet gives
+# identical wording across all four Highly Bearish/Bullish rows regardless
+# of Future OI direction (Rise vs Fall).
 _PUT_HEDGE_EXIT = (
     "If Short Leg is open: Close hedge ONLY when short straddle is closed. "
     "If Short Leg is EXITED (Naked Long Put): Ride downside breakout using "

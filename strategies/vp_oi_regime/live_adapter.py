@@ -334,24 +334,29 @@ class VpOiRegimeAdapter:
 
     # ── Volatile-regime conditional hedge watch + POC re-entry gate ───────
     # (PDF decision-matrix rows 9/18/27 -- the three Volatile rows, 2026-10-11)
-    def arm_volatile_watch(self, ce_entry_premium: float, pe_entry_premium: float,
+    def arm_volatile_watch(self, ce_live_premium: float, pe_live_premium: float,
                             ce_hedge, pe_hedge, now_ts: float, window_sec: float = 300.0) -> None:
-        """Called right after a Volatile-regime full close. Arms a 5-minute
-        watch per side (CE watches for a VAH break -> Call hedge; PE watches
-        for a VAL break -> Put hedge) instead of buying either hedge
-        immediately, and records the POC at this moment as the re-entry
-        gate's anchor -- normal re-entry stays blocked until the POC
-        genuinely moves off this value (a "new POC formation"). ce_hedge/
-        pe_hedge are the DecisionResult's own HedgeSpend objects, carried
-        through since `dr` itself is out of scope by the time a window
-        resolves (could be several minutes later)."""
+        """2026-10-15 CORRECTED, direct user spec re-read of OI_Combinations_v2.pdf's
+        own Volatile-row text ("...>=50 percent of EXISTING sold leg LTP OF
+        THAT SIDE" -- "existing" meaning still-open, never closed): a
+        Volatile regime does NOT close the straddle at all. The sold CE/PE
+        legs keep running completely untouched; this only arms a 5-minute
+        watch per side (CE watches for a VAH break -> buy a Call hedge; PE
+        watches for a VAL break -> buy a Put hedge) ON TOP of the still-open
+        straddle. ce_live_premium/pe_live_premium are each STILL-OPEN leg's
+        CURRENT live LTP at arm time (the "existing sold leg LTP" the hedge's
+        own 50%-of-premium target band is sized against) -- NOT a historical
+        entry/exit price, since nothing was exited. No re-entry-of-the-
+        straddle concept applies here anymore (there is nothing to re-enter),
+        so this no longer touches reentry_poc_anchor at all -- that gate
+        naturally goes permanently dormant (entries.py's own check already
+        no-ops whenever reentry_poc_anchor is None)."""
         self.volatile_watch = {
             "CE": {"level": self.last_vah, "deadline_ts": now_ts + window_sec,
-                   "entry_premium": ce_entry_premium, "hedge": ce_hedge},
+                   "entry_premium": ce_live_premium, "hedge": ce_hedge},
             "PE": {"level": self.last_val, "deadline_ts": now_ts + window_sec,
-                   "entry_premium": pe_entry_premium, "hedge": pe_hedge},
+                   "entry_premium": pe_live_premium, "hedge": pe_hedge},
         }
-        self.reentry_poc_anchor = self.last_poc
 
     def check_volatile_hedge_triggers(self, spot: float, now_ts: float) -> list:
         """Call every cycle while volatile_watch is non-empty. Returns a list
@@ -508,18 +513,18 @@ class VpOiRegimeAdapter:
         self._ema[side].reset()
 
     def check_reentry(self, side: str, close_price: float) -> bool:
-        """Re-entry Rule: price closes back on the 'fakeout' side of the
-        matrix row's own reference level. Per the authoritative source
-        (CLAUDE.md Part 3), the reference is POC for the Rise-Future
-        'Buildup' rows and -- for every other row -- a Value-Area boundary.
-        This adapter checks against POC, which is the shared, always-
-        available level (VAH/VAL-specific nuance is left to the caller,
-        which has the full DecisionResult.reentry_rule text to inspect)."""
+        """Re-entry Rule, 2026-10-15 CORRECTED per direct user re-read of
+        OI_Combinations_v2.pdf's own Highly Bearish/Bullish row text --
+        "reenter once the oi parameters change, that is put oi rises by 20
+        percent" (PE) / "...call oi increases by 20 percent" (CE). Purely
+        an OI-trend flip to Rise, not a POC/price-action condition at all
+        (the previous POC-crossing check was carried over from an earlier,
+        superseded version of the spec). `close_price` is kept for call-
+        site signature compatibility but no longer read."""
         if not self.awaiting_reentry.get(side):
             return False
-        if self.last_poc is None:
-            return False
-        fired = (close_price > self.last_poc) if side == "PE" else (close_price < self.last_poc)
+        trend = self.last_put_trend if side == "PE" else self.last_call_trend
+        fired = trend == "Rise"
         if fired:
             self.awaiting_reentry[side] = False
         return fired

@@ -3254,17 +3254,13 @@ class ExitMixin:
             self._vp_oi_adapter.shifted_strike.pop("PE", None)
             self._vp_oi_adapter.shifted_strike.pop("CE", None)
         if dr.regime == "Volatile" and not (pos.ce_leg_closed or pos.pe_leg_closed):
-            # 2026-10-05: re-enabled now that _check_vp_oi_naked_legs_standalone
-            # runs unconditionally from the top of _check_exits (before the
-            # "no open position" early-return) -- a full close here sets
-            # self._position to None, but naked-leg management (9-EMA stop +
-            # Hedge Exit Rule) keeps running regardless. The Re-entry Rule's
-            # own re-SELL side still won't fire in this specific state (needs
-            # a fresh BEGINNING-style entry with no reference leg to balance
-            # against -- see _vp_oi_resell_leg's own pos-is-None branch,
-            # logged clearly rather than silently dropped), but the stop/
-            # hedge-exit side is fully managed.
-            await self._vp_oi_exit_both(dr, now)
+            # 2026-10-15 CORRECTED, direct user re-read of the sheet's own
+            # Volatile-row text ("...>=50 percent of EXISTING sold leg LTP
+            # OF THAT SIDE" -- never says "exit"): the straddle is NEVER
+            # closed on Volatile. Only arms the 5-min VAH/VAL hedge watch on
+            # top of the still-open legs -- see _vp_oi_arm_volatile_hedge's
+            # own docstring.
+            await self._vp_oi_arm_volatile_hedge(dr, now)
 
     async def _vp_oi_handle_directional(self, pos, side: str, hedge, now: datetime) -> None:
         """2026-10-09, direct user spec (closing the Volume-Profile
@@ -3423,35 +3419,43 @@ class ExitMixin:
         self._clog.info("VP/OI REGIME — hedge %s%d BUY@%.2f confirmed (naked long armed, 9-EMA trailing)",
                          side, h_strike, h_fill.fill_price)
 
-    async def _vp_oi_exit_both(self, dr, now: datetime) -> None:
-        """Volatile regime: close the whole straddle, then ARM a 5-minute
-        conditional hedge watch per side -- direct user spec 2026-10-11,
-        matching the PDF decision matrix's three Volatile rows (9/18/27)
-        exactly: "Buy a Call hedge IF VAH broken in 5 mins" / "Buy a Put
-        hedge IF VAL broken in 5 mins", NOT an immediate buy. The watch
-        itself is checked every cycle by _check_vp_oi_volatile_watch
-        (called from _check_vp_oi_naked_legs_standalone, unconditionally,
-        even with self._position == None after this closes the whole
-        position). Also arms the Re-entry Rule's "wait for a new POC
-        formation" gate (see VpOiRegimeAdapter.reentry_poc_anchor), checked
-        by entries.py before any normal re-entry attempt."""
+    async def _vp_oi_arm_volatile_hedge(self, dr, now: datetime) -> None:
+        """2026-10-15 CORRECTED, direct user spec: Volatile regime does NOT
+        close the straddle -- the sold CE/PE legs keep running completely
+        untouched. This ONLY arms a 5-minute conditional hedge watch per
+        side (CE watches for a VAH break -> buy a Call hedge; PE watches
+        for a VAL break -> buy a Put hedge), sized against each STILL-OPEN
+        leg's own CURRENT live LTP ("...>=50 percent of EXISTING sold leg
+        LTP OF THAT SIDE" -- the sheet's own wording, "existing" meaning
+        still-held, never exited). No re-entry concept applies here at all
+        (nothing was ever exited to re-enter) -- arm_volatile_watch no
+        longer touches reentry_poc_anchor, so that gate stays permanently
+        dormant for this path.
+
+        Guarded to only arm once per fresh Volatile episode: skips re-
+        arming while a watch is already active or a candidate hedge is
+        still pending confirmation (same discipline as the Highly Bearish/
+        Bullish path's own shifted_strike one-shot-per-episode guard) --
+        once the current window fully resolves (hedge bought, or timed
+        out with none), a later cycle with Volatile still showing will arm
+        a fresh window, which is intended (keep watching as long as
+        Volatile persists)."""
+        adapter = self._vp_oi_adapter
+        if adapter.volatile_watch or any(adapter.get_volatile_candidate(s) for s in ("CE", "PE")):
+            return  # already watching/pending this episode -- don't reset the window
         pos = self._position
-        ce_entry = float(pos.ce_leg.entry_price or 0.0)
-        pe_entry = float(pos.pe_leg.entry_price or 0.0)
-        self._vp_oi_last_exited_strike["CE"] = int(pos.ce_leg.strike)
-        self._vp_oi_last_exited_strike["PE"] = int(pos.pe_leg.strike)
-        await self._close_position("vp_oi_regime_exit_volatile")
-        if self._position is not None:
-            return  # close_position aborted (still "closing"/"open") -- don't arm a watch on a live position
-        self._vp_oi_adapter.arm_volatile_watch(ce_entry, pe_entry, dr.call_hedge, dr.put_hedge, now.timestamp())
-        self._vp_oi_adapter.add_remark(
-            f"Volatile exit — watching for VAH break (Call hedge) / VAL break (Put hedge) "
-            f"over the next 5 min; re-entry blocked until a new POC forms")
+        ce_ltp = float(self._strike_prem.get((int(pos.ce_leg.strike), "CE"), {}).get("ltp", 0.0) or 0.0)
+        pe_ltp = float(self._strike_prem.get((int(pos.pe_leg.strike), "PE"), {}).get("ltp", 0.0) or 0.0)
+        if ce_ltp <= 0 or pe_ltp <= 0:
+            return  # no live premium yet -- wait for a real tick rather than arm off a 0
+        adapter.arm_volatile_watch(ce_ltp, pe_ltp, dr.call_hedge, dr.put_hedge, now.timestamp())
+        adapter.add_remark(
+            f"Volatile — straddle stays open, watching for VAH break (Call hedge) / "
+            f"VAL break (Put hedge) over the next 5 min (CE LTP={ce_ltp:.2f}, PE LTP={pe_ltp:.2f})")
         self._clog.info(
-            "VP/OI REGIME (Volatile) — straddle closed, watching VAH=%.2f/VAL=%.2f for 5 min "
-            "(conditional hedge) — re-entry blocked until a new POC forms (anchor=%.2f)",
-            self._vp_oi_adapter.last_vah or 0.0, self._vp_oi_adapter.last_val or 0.0,
-            self._vp_oi_adapter.reentry_poc_anchor or 0.0,
+            "VP/OI REGIME (Volatile) — straddle NOT closed, watching VAH=%.2f/VAL=%.2f for 5 min "
+            "(conditional hedge, sized off live CE=%.2f/PE=%.2f)",
+            adapter.last_vah or 0.0, adapter.last_val or 0.0, ce_ltp, pe_ltp,
         )
 
     async def _buy_vp_oi_hedge(self, side: str, hedge, entry_premium: float, now: datetime,
