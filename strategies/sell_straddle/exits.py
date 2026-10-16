@@ -3780,6 +3780,20 @@ class ExitMixin:
             # moving with the real market while the book is flat, instead
             # of freezing at whatever they read the instant a position
             # last closed.
+            #
+            # 2026-10-16 CRITICAL FIX, direct user spec + real incident: the
+            # OI-band freeze/REST-seed call (_seed_vp_oi_volume_profile) was
+            # NEVER added here -- it only ever lived in _check_vp_oi_regime,
+            # meaning the whole ATM+/-band CALL/PUT OI tracker (and the
+            # immediate strike-pin/subscribe this session just added) could
+            # never even START while the book is flat, i.e. exactly the
+            # state right after every market-open/fresh-start, before the
+            # first trade. The user's own spec is "this data should come
+            # immediately" regardless of position state -- mirrored here
+            # the same way _feed_vp_oi_volume_profile_bar/evaluate() already
+            # were on 2026-10-11.
+            if getattr(adapter._oi, "_frozen_atm", None) is None:
+                await self._seed_vp_oi_volume_profile()
             self._feed_vp_oi_volume_profile_bar(adapter, now)
             adapter.is_expiry_week = self._vp_oi_is_expiry_week(now)
             adapter.evaluate(spot=float(getattr(self, "_spot", 0.0) or 0.0), now_ts=now.timestamp())
