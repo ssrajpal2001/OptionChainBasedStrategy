@@ -3058,9 +3058,32 @@ class ExitMixin:
                 if open_px > 0 and step > 0:
                     atm = int(round(open_px / step) * step)
                     self._vp_oi_adapter.freeze_atm_for_day(atm)
+                    # 2026-10-16, direct user spec: the moment the band is
+                    # known (it's deterministic off the 9:15 open -- no need
+                    # to wait for the live ATM-tracking rebalancer to drift
+                    # onto the same strikes), explicitly pin every strike in
+                    # it so real OI ticks for CALL/PUT start flowing
+                    # immediately instead of only whenever the general
+                    # live-spot ATM window happens to already cover them.
+                    # pin_strike's own catch-up path fires an immediate
+                    # subscribe for anything not already active (see its
+                    # docstring) -- band strikes NEVER get unpinned, so they
+                    # stay subscribed all session even if live spot later
+                    # drifts the regular ATM window elsewhere.
+                    band = getattr(self._vp_oi_adapter._oi, "band", 5)
+                    if not getattr(self, "_is_crypto", False) and getattr(self, "_rebalancer", None):
+                        for i in range(-band, band + 1):
+                            try:
+                                self._rebalancer.pin_strike(self._underlying, float(atm + i * step))
+                            except Exception as exc:
+                                self._clog.warning(
+                                    "VP/OI OI-band pin_strike(%d) failed: %s",
+                                    atm + i * step, exc,
+                                )
                     self._clog.info(
-                        "VP/OI OI-band frozen for the day — ATM=%d (off 9:15 open=%.2f).",
-                        atm, open_px,
+                        "VP/OI OI-band frozen for the day — ATM=%d (off 9:15 open=%.2f), "
+                        "%d strikes pinned for immediate OI subscription.",
+                        atm, open_px, 2 * band + 1,
                     )
             else:
                 # 2026-10-15: previously silent -- the whole freeze attempt
