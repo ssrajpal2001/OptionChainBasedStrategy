@@ -8517,7 +8517,7 @@ function amoTest() {
                                independent thresholds now, not one symmetric value. -->
                           <div class="mb-2 space-y-0.5" style="color:var(--t-dim)">
                             <template x-for="row in [
-                                       {label:'FUT', now:_vp.future_oi_now, hiAnchor:_vp.future_oi_anchor, pct:_vp.future_oi_pct, fallThr:_vp.future_oi_fall_threshold_pct, loAnchor:_vp.future_oi_anchor, pctLo:_vp.future_oi_pct, riseThr:_vp.future_oi_rise_threshold_pct},
+                                       {label:'FUT', now:_vp.future_oi_now, hiAnchor:_vp.future_oi_anchor, pct:_vp.future_oi_pct, fallThr:_vp.future_oi_fall_threshold_pct, loAnchor:_vp.future_oi_low_anchor, pctLo:_vp.future_oi_low_pct, riseThr:_vp.future_oi_rise_threshold_pct},
                                        {label:'CALL', now:_vp.call_oi_now, hiAnchor:_vp.call_oi_anchor, pct:_vp.call_oi_pct, fallThr:_vp.oi_fall_threshold_pct, loAnchor:_vp.call_oi_low_anchor, pctLo:_vp.call_oi_low_pct, riseThr:_vp.oi_rise_threshold_pct},
                                        {label:'PUT', now:_vp.put_oi_now, hiAnchor:_vp.put_oi_anchor, pct:_vp.put_oi_pct, fallThr:_vp.oi_fall_threshold_pct, loAnchor:_vp.put_oi_low_anchor, pctLo:_vp.put_oi_low_pct, riseThr:_vp.oi_rise_threshold_pct},
                                      ]" :key="row.label">

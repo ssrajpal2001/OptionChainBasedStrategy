@@ -316,6 +316,7 @@ class VpOiRegimeAdapter:
         self.last_snapshot = None
         self.last_future_trend = self.last_call_trend = self.last_put_trend = None
         self.last_future_oi_now = self.last_future_oi_anchor = self.last_future_oi_pct = None
+        self.last_future_oi_low_anchor = self.last_future_oi_low_pct = None
         self.last_call_oi_now = self.last_call_oi_anchor = self.last_call_oi_pct = None
         self.last_put_oi_now = self.last_put_oi_anchor = self.last_put_oi_pct = None
         self.last_call_oi_low_anchor = self.last_call_oi_low_pct = None
@@ -460,6 +461,14 @@ class VpOiRegimeAdapter:
         self.last_future_oi_now = roll_state.near_oi
         self.last_future_oi_anchor = roll_state.future_oi_anchor
         self.last_future_oi_pct = roll_state.future_oi_pct_vs_anchor
+        # 2026-10-16, real incident fix: these two were already real fields
+        # on RolloverState (same dual high/low-anchor design as CALL/PUT
+        # below) but never threaded through here -- the FUT row's "Rise"
+        # side was silently falling back to the HIGH anchor/pct instead of
+        # its own LOW anchor, both in this adapter and in monitor.html's
+        # display (fixed alongside this).
+        self.last_future_oi_low_anchor = roll_state.future_oi_low_anchor
+        self.last_future_oi_low_pct = roll_state.future_oi_pct_vs_low_anchor
         if oi_res is None:
             self.last_decision = None
             self.last_call_trend = self.last_put_trend = None
@@ -555,6 +564,12 @@ class VpOiRegimeAdapter:
             "future_oi_now": self.last_future_oi_now,
             "future_oi_anchor": self.last_future_oi_anchor,
             "future_oi_pct": self.last_future_oi_pct,
+            # 2026-10-16, real incident fix: FUT's own LOW anchor (Rise
+            # check) -- was computed on RolloverState all along but never
+            # exposed here, so the dashboard's FUT row silently fell back
+            # to reusing the HIGH anchor/pct for its "Rise" side too.
+            "future_oi_low_anchor": self.last_future_oi_low_anchor,
+            "future_oi_low_pct": self.last_future_oi_low_pct,
             "call_oi_now": self.last_call_oi_now,
             "call_oi_anchor": self.last_call_oi_anchor,
             "call_oi_pct": self.last_call_oi_pct,
