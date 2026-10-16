@@ -4223,25 +4223,42 @@ function amoTest() {
                                     x-text="_vp.put_oi_trend||'—'"></span>
                             </span>
                           </div>
+                          <!-- 2026-10-16 fix: this panel had fallen out of sync with
+                               monitor.html's own 2026-10-15 dual high/low-anchor
+                               redesign -- row.thr referenced old single-threshold
+                               field names (future_oi_trend_threshold_pct/
+                               oi_trend_threshold_pct) that no longer exist on the
+                               API response, rendering "NaN% to undefined% threshold"
+                               for every row. Brought in line with monitor.html's own
+                               current block (both HIGH anchor/Fall-check and LOW
+                               anchor/Rise-check, each with its own real threshold). -->
                           <div class="mb-2 space-y-0.5" style="color:var(--t-dim)">
                             <template x-for="row in [
-                                       {label:'FUT', now:_vp.future_oi_now, anchor:_vp.future_oi_anchor, pct:_vp.future_oi_pct, thr:_vp.future_oi_trend_threshold_pct},
-                                       {label:'CALL', now:_vp.call_oi_now, anchor:_vp.call_oi_anchor, pct:_vp.call_oi_pct, thr:_vp.oi_trend_threshold_pct},
-                                       {label:'PUT', now:_vp.put_oi_now, anchor:_vp.put_oi_anchor, pct:_vp.put_oi_pct, thr:_vp.oi_trend_threshold_pct},
+                                       {label:'FUT', now:_vp.future_oi_now, hiAnchor:_vp.future_oi_anchor, pct:_vp.future_oi_pct, fallThr:_vp.future_oi_fall_threshold_pct, loAnchor:_vp.future_oi_low_anchor, pctLo:_vp.future_oi_low_pct, riseThr:_vp.future_oi_rise_threshold_pct},
+                                       {label:'CALL', now:_vp.call_oi_now, hiAnchor:_vp.call_oi_anchor, pct:_vp.call_oi_pct, fallThr:_vp.oi_fall_threshold_pct, loAnchor:_vp.call_oi_low_anchor, pctLo:_vp.call_oi_low_pct, riseThr:_vp.oi_rise_threshold_pct},
+                                       {label:'PUT', now:_vp.put_oi_now, hiAnchor:_vp.put_oi_anchor, pct:_vp.put_oi_pct, fallThr:_vp.oi_fall_threshold_pct, loAnchor:_vp.put_oi_low_anchor, pctLo:_vp.put_oi_low_pct, riseThr:_vp.oi_rise_threshold_pct},
                                      ]" :key="row.label">
-                              <div x-show="row.now!=null" class="flex items-center gap-1.5">
+                              <div x-show="row.now!=null" class="flex items-center gap-1.5 flex-wrap">
                                 <span class="w-9 inline-block" style="color:var(--t-muted)" x-text="row.label"></span>
-                                <span x-text="(row.anchor||0).toFixed(0)"></span>
-                                <span>→</span>
                                 <span x-text="(row.now||0).toFixed(0)"></span>
-                                <span :style="(row.now-row.anchor)>=0?'color:var(--t-green)':'color:var(--t-red)'"
-                                      x-text="((row.now-row.anchor)>=0?'+':'')+(row.now-row.anchor).toFixed(0)"></span>
-                                <span :style="(row.pct||0)>=0?'color:var(--t-green)':'color:var(--t-red)'"
+                                <span style="color:var(--t-muted)">| HIGH</span>
+                                <span x-text="(row.hiAnchor||0).toFixed(0)"></span>
+                                <span :style="(row.pct||0)<=0?'color:var(--t-red)':'color:var(--t-dim)'"
                                       x-text="'('+((row.pct||0)>=0?'+':'')+(row.pct||0).toFixed(2)+'%)'"></span>
                                 <span style="color:var(--t-muted)"
-                                      x-text="Math.abs(row.pct||0)>=row.thr ? 'threshold crossed ('+row.thr+'%)' : (row.thr-Math.abs(row.pct||0)).toFixed(2)+'% to '+row.thr+'% threshold'"></span>
+                                      x-text="(row.fallThr!=null) ? (Math.abs(row.pct||0)>=row.fallThr && (row.pct||0)<0 ? 'FALL ('+row.fallThr+'%)' : (row.fallThr-Math.abs(Math.min(row.pct||0,0))).toFixed(2)+'% to Fall('+row.fallThr+'%)') : '—'"></span>
+                                <span style="color:var(--t-muted)">| LOW</span>
+                                <span x-text="(row.loAnchor||0).toFixed(0)"></span>
+                                <span :style="(row.pctLo||0)>=0?'color:var(--t-green)':'color:var(--t-dim)'"
+                                      x-text="'('+((row.pctLo||0)>=0?'+':'')+(row.pctLo||0).toFixed(2)+'%)'"></span>
+                                <span style="color:var(--t-muted)"
+                                      x-text="(row.riseThr!=null) ? (Math.abs(row.pctLo||0)>=row.riseThr && (row.pctLo||0)>0 ? 'RISE ('+row.riseThr+'%)' : (row.riseThr-Math.max(row.pctLo||0,0)).toFixed(2)+'% to Rise('+row.riseThr+'%)') : '—'"></span>
                               </div>
                             </template>
+                          </div>
+                          <div x-show="(_vp.oi_strikes||[]).length" class="mb-2" style="color:var(--t-muted)">
+                            OI BAND (ATM <span style="color:var(--t-cyan)" x-text="_vp.oi_atm"></span>):
+                            <span x-text="(_vp.oi_strikes||[]).join(', ')"></span>
                           </div>
                           <template x-if="_vp.regime">
                             <div class="mb-2" style="color:var(--t-muted)">
