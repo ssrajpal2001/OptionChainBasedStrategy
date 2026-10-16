@@ -3012,6 +3012,25 @@ class ExitMixin:
             from data_layer.client_db import ClientDB
             creds = await asyncio.to_thread(ClientDB().get_feeder_creds_sync, "upstox")
             token = (creds or {}).get("access_token", "")
+            # 2026-10-16 DIAGNOSTIC, real incident: both of these early
+            # returns were completely silent -- zero log trace either way --
+            # which is exactly how a real live session sat with oi_atm=null/
+            # future_oi stuck at 0 all morning with no way to tell from logs
+            # whether the upstox token or the futures-key resolution was the
+            # actual blocker. Throttled to once/60s per book so a genuinely
+            # stuck day doesn't spam the log the way the retry-every-tick
+            # caller otherwise would.
+            if not token or not REGISTRY.get_futures_upstox(self._underlying):
+                import time as _t_vpoiseed
+                _dk = "_vp_oi_seed_blocked_logged_at"
+                if _t_vpoiseed.monotonic() - getattr(self, _dk, 0.0) > 60.0:
+                    setattr(self, _dk, _t_vpoiseed.monotonic())
+                    self._clog.warning(
+                        "VP/OI REST seed BLOCKED — upstox_token=%s fut_key=%r "
+                        "(ATM freeze cannot proceed until both are non-empty).",
+                        "present" if token else "MISSING",
+                        REGISTRY.get_futures_upstox(self._underlying),
+                    )
             if not token:
                 return
             fut_key = REGISTRY.get_futures_upstox(self._underlying)
