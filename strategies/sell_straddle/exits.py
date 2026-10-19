@@ -3090,10 +3090,22 @@ class ExitMixin:
                 # would just no-op with zero trace in this case. Caller
                 # (_check_vp_oi_regime) retries on the next tick since
                 # _frozen_atm stays None.
-                self._clog.warning(
-                    "VP/OI REST seed got 0 bars for %s futures — ATM freeze "
-                    "deferred, will retry next tick.", self._underlying,
-                )
+                #
+                # 2026-10-19, real incident fix: this retries every single
+                # tick while flat/pre-market (0 bars is the EXPECTED answer
+                # before the exchange opens -- Upstox's intraday endpoint has
+                # nothing to return yet), so an un-throttled warning spammed
+                # the log continuously from process start until market open.
+                # Throttled to once/60s per book, same pattern as the BLOCKED
+                # diagnostic above -- still visible, no longer spam.
+                import time as _t_vpoinbars
+                _dk_bars = "_vp_oi_zero_bars_logged_at"
+                if _t_vpoinbars.monotonic() - getattr(self, _dk_bars, 0.0) > 60.0:
+                    setattr(self, _dk_bars, _t_vpoinbars.monotonic())
+                    self._clog.warning(
+                        "VP/OI REST seed got 0 bars for %s futures — ATM freeze "
+                        "deferred, will retry next tick.", self._underlying,
+                    )
         except Exception as exc:
             self._clog.warning("VP/OI REST seed failed: %s", exc)
 
