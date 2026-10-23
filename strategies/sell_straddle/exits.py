@@ -1268,37 +1268,55 @@ class ExitMixin:
         if total_pnl_rs < _threshold_rs:
             return False
         if pos.status != "open":
-            # 2026-09-17 CRITICAL FIX, real live incident: _tick_loop and
-            # _eod_backstop_loop are two INDEPENDENT asyncio tasks that can
-            # both reach _check_exits() for the same position around the
-            # same moment (see _eod_backstop_loop's own docstring -- this is
-            # already a documented, accepted risk for _close_position, which
-            # guards itself by setting pos.status="closing" SYNCHRONOUSLY
-            # before its first await). This method had NO equivalent guard:
-            # both tasks could independently pass the threshold check above
-            # and both call _close_hedge_legs before either one set any
-            # status flag. Confirmed live: PE22950's real SELL order was
-            # dispatched TWICE (two identical rows in the broker's own order
-            # book, both REJECTED only because this account has zero margin
-            # -- had margin existed, this would have doubled the real
-            # hedge-close size). Re-checking pos.status here (now genuinely
-            # racy-safe since the caller always re-reads self._position
-            # fresh) catches the second task before it repeats the dispatch.
             return False
-        pos.status = "closing"
-        logger.info(
-            "SellStraddle[%s]: HEDGE CUMULATIVE PROFIT — total=₹%.2f (%.2f pts, threshold=₹%.2f) "
-            "(booked=%.2f sold=%.2f hedge=%.2f pts) — closing all 4 legs, starting fresh.",
-            self._underlying, total_pnl_rs, total_pnl_pts, _threshold_rs, self._session_realized_pnl_pts,
-            pos.unrealized_pnl, pos.hedge_unrealized_pnl,
-        )
-        self._clog.info(
-            "HEDGE CUMULATIVE PROFIT total=₹%.2f (%.2f pts, booked=%.2f sold=%.2f hedge=%.2f pts) — "
-            "closing all 4 legs", total_pnl_rs, total_pnl_pts, self._session_realized_pnl_pts,
-            pos.unrealized_pnl, pos.hedge_unrealized_pnl,
-        )
-        await self._close_hedge_legs(pos, "hedge_cumulative_profit")
-        await self._close_position("hedge_cumulative_profit")
+        # 2026-09-17 CRITICAL FIX, real live incident: _tick_loop and
+        # _eod_backstop_loop are two INDEPENDENT asyncio tasks that can
+        # both reach _check_exits() for the same position around the
+        # same moment (see _eod_backstop_loop's own docstring). Both tasks
+        # could independently pass the threshold check above and both call
+        # _close_hedge_legs before either one set any guard. Confirmed live:
+        # PE22950's real SELL order was dispatched TWICE (two identical rows
+        # in the broker's own order book, both REJECTED only because this
+        # account has zero margin -- had margin existed, this would have
+        # doubled the real hedge-close size).
+        #
+        # 2026-10-23 CRITICAL FIX, real live incident: the original fix used
+        # pos.status="closing" itself as this reentrancy guard -- but
+        # _close_position() (called a few lines below, to close the SOLD
+        # legs) has its OWN guard that early-returns the instant
+        # pos.status != "open". Setting pos.status="closing" here before
+        # calling it made that guard trip immediately, so _close_position()
+        # silently no-op'd: only the hedge legs closed (a separate code path
+        # that doesn't check pos.status), the sold legs never got a close
+        # order dispatched at all, and the position sat permanently stuck in
+        # "closing" -- blocking every subsequent _check_exits() call (which
+        # itself returns early on status != "open") for the rest of the
+        # session, confirmed live for 20+ minutes straight before being
+        # caught. Fixed: a dedicated instance flag guards THIS function's
+        # own reentrancy, leaving pos.status alone so _close_position() can
+        # still do its own normal open -> closing transition when called.
+        if self._hedge_cum_profit_closing:
+            return False
+        self._hedge_cum_profit_closing = True
+        try:
+            logger.info(
+                "SellStraddle[%s]: HEDGE CUMULATIVE PROFIT — total=₹%.2f (%.2f pts, threshold=₹%.2f) "
+                "(booked=%.2f sold=%.2f hedge=%.2f pts) — closing all 4 legs, starting fresh.",
+                self._underlying, total_pnl_rs, total_pnl_pts, _threshold_rs, self._session_realized_pnl_pts,
+                pos.unrealized_pnl, pos.hedge_unrealized_pnl,
+            )
+            self._clog.info(
+                "HEDGE CUMULATIVE PROFIT total=₹%.2f (%.2f pts, booked=%.2f sold=%.2f hedge=%.2f pts) — "
+                "closing all 4 legs", total_pnl_rs, total_pnl_pts, self._session_realized_pnl_pts,
+                pos.unrealized_pnl, pos.hedge_unrealized_pnl,
+            )
+            await self._close_hedge_legs(pos, "hedge_cumulative_profit")
+            await self._close_position("hedge_cumulative_profit")
+        finally:
+            # Reset regardless of outcome -- this guard is only meant to
+            # stop the SAME in-flight close from double-dispatching, never
+            # to block every future close attempt on a later position.
+            self._hedge_cum_profit_closing = False
         # 2026-09-17, direct user spec, OVERRIDES the 2026-08-24 original
         # design (which deliberately cooled down before the next entry --
         # see this method's own opening docstring): "when we close complete

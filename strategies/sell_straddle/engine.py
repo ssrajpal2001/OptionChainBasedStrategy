@@ -214,6 +214,15 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         self._hedge_roll_pending: bool = False
         self._hedge_roll_reason: str = ""
         self._roll_in_progress: bool = False
+        # 2026-10-23 CRITICAL FIX, real live incident: dedicated reentrancy
+        # guard for _check_hedge_cumulative_profit_close, see that method's
+        # own comment for the bug this replaces (setting pos.status=
+        # "closing" there made the SUBSEQUENT _close_position() call for the
+        # sold legs silently no-op on its own "status != open" guard, so the
+        # sold legs never got a close order dispatched at all -- only the
+        # hedge legs closed, leaving the position permanently stuck in
+        # "closing" with zero further exit management).
+        self._hedge_cum_profit_closing: bool = False
         self._last_roll_attempt: Dict[str, datetime] = {}
         self._last_exit_rules_bucket: str = ""
         self._last_entry_bucket_b: str = ""
