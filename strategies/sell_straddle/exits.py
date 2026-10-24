@@ -391,8 +391,7 @@ class ExitMixin:
                         f"≥ threshold {self._ccy_symbol}{_thr:.0f} "
                         f"| CE{int(pos.ce_leg.strike)} PE{int(pos.pe_leg.strike)} spot={self._spot:.0f}")
 
-            if reason in ("itm_pair_gate_wide_profit", "itm_pair_gate_wide_t1_close",
-                          "itm_pair_gate_wide_hedge_failed"):
+            if reason in ("itm_pair_gate_wide_profit", "itm_pair_gate_wide_hedge_failed"):
                 _cum = pos.cycle_booked_pnl_pts + self._combined_pnl_pts(pos, pos.unrealized_pnl)
                 _inr = self._pnl_rs(_cum)
                 _thr = float(getattr(self, "_itm_pair_gate_profit_inr", 500.0))
@@ -400,13 +399,17 @@ class ExitMixin:
                 if reason == "itm_pair_gate_wide_hedge_failed":
                     return (f"ITM pair gate (wide, gap={_gap}>300) | hedge build failed -- closed "
                             f"complete position instead of leaving it unhedged with no rollover")
-                if reason == "itm_pair_gate_wide_profit":
-                    return (f"ITM pair gate (wide, gap={_gap}>300) | hedged, no rollover | "
-                            f"cumulative P&L this cycle {self._ccy_symbol}{_inr:+.0f} ≥ threshold "
-                            f"{self._ccy_symbol}{_thr:.0f} → closed complete position")
-                return (f"ITM pair gate (wide, gap={_gap}>300) | hedged, no rollover | T-1 from "
-                        f"expiry, cumulative P&L this cycle {self._ccy_symbol}{_inr:+.0f} never "
-                        f"reached threshold {self._ccy_symbol}{_thr:.0f} → force-closed")
+                return (f"ITM pair gate (wide, gap={_gap}>300) | hedged, no rollover | "
+                        f"cumulative P&L this cycle {self._ccy_symbol}{_inr:+.0f} ≥ threshold "
+                        f"{self._ccy_symbol}{_thr:.0f} → closed complete position")
+
+            if reason == "hedge_noon_expiry_close":
+                _cum = self._cumulative_hedge_pnl(pos, include_hedge=True)
+                _inr = self._pnl_rs(_cum)
+                _thr = _HEDGE_CLOSE_PROFIT_RS * self._lot_multiplier
+                return (f"Hedged position | 12:00 noon on expiry day reached, cumulative P&L this "
+                        f"cycle {self._ccy_symbol}{_inr:+.0f} never reached threshold "
+                        f"{self._ccy_symbol}{_thr:.0f} → force-closed (no rollover while hedged)")
 
             if reason == "day_low_reversal_exit":
                 _cv = pos.current_value
@@ -600,6 +603,19 @@ class ExitMixin:
         from data_layer.trading_calendar import previous_trading_day
         t1_trading_day = previous_trading_day(pos.expiry_date)
         return now.date() >= t1_trading_day
+
+    _HEDGE_NOON_EXPIRY_HOUR = 12
+
+    def _is_past_noon_on_expiry_day(self, pos: "StraddlePosition", now: datetime) -> bool:
+        """2026-10-24, direct user correction: a HEDGED position's force-close
+        deadline (when the ₹500/lot cumulative-profit target is never reached)
+        is 12:00 noon on the actual expiry day itself -- NOT T-1 EOD. The old
+        T-1 behavior was closing (and starting fresh) a full trading day before
+        it needed to, discarding a hedge that still had all of expiry morning
+        left to recover. True only on pos.expiry_date itself, at/after 12:00."""
+        if not pos.expiry_date:
+            return False
+        return now.date() == pos.expiry_date and now.hour >= self._HEDGE_NOON_EXPIRY_HOUR
 
     def _cumulative_hedge_pnl(self, pos: "StraddlePosition", include_hedge: bool = False) -> float:
         """2026-08-24, user spec correction: the hedge decision is driven by
@@ -940,17 +956,28 @@ class ExitMixin:
         legs and left the 2 hedge legs sitting exposed with nothing hedging
         them anymore).
 
-        Rollover (single-side roll: ltp_decay, ratio_exit, exit_rules,
-        vwap_rise, and ITM-pair-gate's own roll-ATTEMPT before this
-        fallback) is deliberately UNCHANGED -- it continues to operate on
-        the individual sold leg only, per direct user instruction ("only
-        rollover happens on individual sell leg") and the pre-existing
-        same-strike-collision guard's own precedent (rollover while hedged
-        is expected and already handled)."""
+        2026-10-24 CORRECTION, direct user spec, real incident (22 Oct
+        13:16, a vwap_rise_roll fired on a position that had been hedged
+        since 19 Oct 09:37 via day_loss_sl): the note above ("rollover while
+        hedged is expected and already handled") is now WRONG and
+        superseded -- while ANY hedge is standing (is_hedged_positional),
+        rollover of any kind (ltp_decay/ratio_exit/exit_rules/vwap_rise) is
+        now disabled entirely; see _single_side_roll's own early-return in
+        rolling.py. The only two ways out of a hedged position are the
+        ₹500/lot cumulative-profit target or 12:00 noon on the actual
+        expiry day (_check_hedge_cumulative_profit_close /
+        _check_hedge_noon_expiry_close, both every tick) -- never a roll,
+        never a T-1 EOD close.
+
+        Also resets _itm_pair_gate_wide_active -- every full-close path that
+        can fire while that gate is active routes through here, and the
+        flag must not survive into the position's next (flat) cycle, or it
+        would wrongly disable that cycle's rollover too."""
         pos = self._position
         if pos is not None and pos.is_hedged_positional:
             await self._close_hedge_legs(pos, reason)
         await self._close_position(reason)
+        self._itm_pair_gate_wide_active = False
 
     def _combined_pnl_pts(self, pos: "StraddlePosition", sold_pnl_pts: float) -> float:
         """Sold-legs P&L, PLUS the hedge legs' own running P&L when this
@@ -1138,34 +1165,31 @@ class ExitMixin:
             return
 
         if pos.is_hedged_positional:
-            if self._is_t1_from_expiry(pos, now):
-                # 2026-10-01 CRITICAL FIX, direct user correction: this used
-                # to roll the whole 4-leg position onto next week's expiry
-                # SAME DAY (_start_hedge_roll) instead of stopping the carry.
-                # Real intended behavior: a hedge that hasn't yet reached the
-                # ₹500/lot cumulative profit target (that case is handled
-                # separately, every tick, by _check_hedge_cumulative_profit_
-                # close -- including ON T-1 -- and already closes + starts
-                # fresh THE SAME DAY, unaffected by this change) should, once
-                # T-1 EOD genuinely arrives without having hit that target,
-                # simply close out for a loss and start completely fresh
-                # tomorrow -- no same-day roll/reopen. Tomorrow's normal
-                # entry_rules_beginning already has its own low-anchor-LTP-
-                # shift safety net to move to next week's expiry on its own
-                # if today's (now-expiring) contract's premiums are too
-                # decayed to clear the entry floor.
+            # 2026-10-24 CRITICAL FIX, direct user correction: this used to
+            # force-close at T-1 EOD (a full trading day before expiry) if
+            # the ₹500/lot cumulative-profit target hadn't yet been hit --
+            # discarding a hedge that still had all of expiry morning left to
+            # recover. The real rule: while hedged, the ONLY exits are the
+            # profit target (every tick, _check_hedge_cumulative_profit_close)
+            # or 12:00 noon on the ACTUAL EXPIRY DAY itself
+            # (_check_hedge_noon_expiry_close, also every tick) -- never T-1,
+            # never a rollover. Both of those tick-level checks run well
+            # before this EOD call ever would on expiry day itself, so this
+            # branch is now just a defensive fallback -- it leaves the
+            # position running on every day except expiry day itself, and on
+            # expiry day it will have already been force-closed by noon, long
+            # before EOD squareoff time.
+            if self._is_past_noon_on_expiry_day(pos, now):
                 logger.info(
-                    "SellStraddle[%s]: T-1 EOD CLOSE (hedge not yet profitable) — carried "
-                    "hedge's own sold legs expire tomorrow; closing out and starting fresh "
-                    "tomorrow (no same-day reopen).", self._underlying,
+                    "SellStraddle[%s]: EOD HEDGE FALLBACK CLOSE — still hedged past noon on "
+                    "expiry day %s at EOD; tick-level noon check should already have closed "
+                    "this -- closing now as a safety net.",
+                    self._underlying, pos.expiry_date.isoformat() if pos.expiry_date else "?",
                 )
-                self._clog.info(
-                    "T-1 EOD CLOSE (hedge not yet profitable) — carried hedge's own sold "
-                    "legs expire tomorrow; closing all 4 legs, starting fresh tomorrow."
-                )
-                await self._close_position_and_hedge("t1_hedge_eod_close")
+                self._clog.info("EOD HEDGE FALLBACK CLOSE -- still hedged past noon on expiry day at EOD")
+                await self._close_position_and_hedge("hedge_noon_expiry_close")
                 self._stop_for_day = True
-            # else: leave running -- tick-by-tick profit-close handles it.
+            # else: leave running -- tick-by-tick profit/noon checks handle it.
             return
 
         if await self._hedge_or_roll_if_eligible(pos, now):
@@ -1391,6 +1415,38 @@ class ExitMixin:
             # stop the SAME in-flight close from double-dispatching, never
             # to block every future close attempt on a later position.
             self._hedge_cum_profit_closing = False
+        # 2026-09-17, direct user spec, OVERRIDES the 2026-08-24 original
+        # design (which deliberately cooled down before the next entry --
+        # see this method's own opening docstring): "when we close complete
+        # 4 leg no cooldown needed immediate start to check for beginning
+        # entry logic." A hedge-cumulative-profit close is a genuine, clean,
+        # profit-driven exit (not an SL/loss event) -- the next entry should
+        # be evaluated as BEGINNING starting the very next tick, no delay.
+        # _close_position's own generic cooldown call is also skipped for
+        # this reason (see its exclusion-list comment).
+        return True
+
+    async def _check_hedge_noon_expiry_close(self, pos: "StraddlePosition", now: datetime) -> bool:
+        """2026-10-24, direct user correction: while ANY hedge is standing
+        (is_hedged_positional -- not just the >300-gap wide-gate tier), the
+        ONLY two ways out are (a) the ₹500/lot cumulative-profit target above,
+        checked first every tick, or (b) force-close at 12:00 noon on the
+        actual expiry day if that target is never reached -- never a T-1 EOD
+        close (that used to discard a hedge a full day early; see
+        _is_past_noon_on_expiry_day's own docstring) and never a rollover
+        (see _single_side_roll's own hedged-position early-return). Runs
+        right after the profit-close check above so a position that clears
+        ₹500/lot exactly at noon is caught by that check first."""
+        if not self._is_past_noon_on_expiry_day(pos, now):
+            return False
+        logger.info(
+            "SellStraddle[%s]: HEDGE NOON-EXPIRY CLOSE — 12:00 on expiry day %s reached, "
+            "cumulative-profit target never crossed -- force-closing all legs.",
+            self._underlying, pos.expiry_date.isoformat() if pos.expiry_date else "?",
+        )
+        self._clog.info("HEDGE NOON-EXPIRY CLOSE -- 12:00 on expiry day, profit target never reached")
+        await self._close_position_and_hedge("hedge_noon_expiry_close")
+        return True
         # 2026-09-17, direct user spec, OVERRIDES the 2026-08-24 original
         # design (which deliberately cooled down before the next entry --
         # see this method's own opening docstring): "when we close complete
@@ -1990,6 +2046,8 @@ class ExitMixin:
         # exits (ratio_exit, ltp_decay, TSL, etc.) is unchanged below.
         if pos.is_hedged_positional:
             if await self._check_hedge_cumulative_profit_close(pos, now):
+                return
+            if await self._check_hedge_noon_expiry_close(pos, now):
                 return
 
         # 1c. HEDGE SAME-STRIKE COLLISION GUARD (2026-08-20, user spec): a standing

@@ -236,17 +236,24 @@ class RollingMixin:
         if not pos or pos.status != "open":
             return False
 
-        # 2026-10-24, direct user spec: once both legs are ITM and the gap
-        # between them has widened past 300pts, rollover is capped off
-        # entirely -- see _check_itm_pair_gate_wide's own docstring for the
-        # full mechanic (immediate hedge, then a cycle-scoped profit-or-T-1
-        # exit). A single check here covers every roll type (ltp_decay,
-        # ratio_exit, exit_rules, vwap_rise all funnel through this one
-        # function), rather than gating each caller separately.
-        if getattr(self, "_itm_pair_gate_wide_active", False):
+        # 2026-10-24 CORRECTION, direct user spec, real incident (22 Oct
+        # 13:16: a vwap_rise_roll fired on a position hedged since 19 Oct
+        # 09:37 via plain day_loss_sl -- the >300-gap wide-gate tier had
+        # NOT yet activated at that moment, so the narrower check this used
+        # to be (_itm_pair_gate_wide_active only) didn't catch it, but per
+        # the user's correction it should have): rollover of ANY kind
+        # (ltp_decay, ratio_exit, exit_rules, vwap_rise -- all funnel through
+        # this one function) is now disabled the instant ANY hedge is
+        # standing (pos.is_hedged_positional), not only once the gap-specific
+        # wide-gate tier has activated. _itm_pair_gate_wide_active is kept in
+        # the check too for the brief window where the wide gate has gone
+        # active but its own hedge build hasn't landed yet (is_hedged_
+        # positional still False at that instant).
+        if pos.is_hedged_positional or getattr(self, "_itm_pair_gate_wide_active", False):
             self._clog.info(
-                "SellStraddle[%s]: ROLLOVER %s — skipped, ITM-pair-gate-wide is active "
-                "(gap>300pts both ITM) -- no rollover while this is active.",
+                "SellStraddle[%s]: ROLLOVER %s — skipped, position is hedged (or ITM-pair-gate-"
+                "wide is active) -- no rollover while any hedge is standing; only the ₹500/lot "
+                "cumulative-profit target or 12:00 noon on expiry day can close it.",
                 self._underlying, reason,
             )
             return False
@@ -842,11 +849,22 @@ class RollingMixin:
         carry check), then watch THIS CYCLE's own cumulative P&L (sold+
         hedge combined, pos.cycle_booked_pnl_pts -- never a different,
         already-closed cycle's booked profit) against the same ₹500/lot
-        threshold the plain gate uses:
-          - crosses it -> close everything, cycle ends.
-          - never crosses it -> force-close everything anyway at
-            T-1-from-expiry, regardless of profit or loss at that point --
-            the position has run out of time to resolve on its own.
+        threshold the plain gate uses. Crossing it closes everything, cycle
+        ends. If it never crosses: once hedged, this position is now just an
+        ordinary hedged position (is_hedged_positional=True) like any other
+        -- the generic every-tick checks in exits.py's _check_exits
+        (_check_hedge_cumulative_profit_close / _check_hedge_noon_expiry_
+        close, both run earlier in the ladder than this method) own the
+        profit-or-noon-on-expiry-day force-close from here on, not this
+        gap-specific method -- so by the time this runs, a past-noon hedge
+        has already been closed and pos.status is no longer "open".
+
+        2026-10-24 CORRECTION: this used to also force-close at T-1-from-
+        expiry itself if the threshold was never crossed -- removed, since
+        the user's broader correction makes T-1 EOD wrong for ANY hedged
+        position (discards a hedge a full day before it needed to; see
+        _is_past_noon_on_expiry_day's own docstring). The generic noon check
+        above is the single source of truth for that deadline now.
 
         Returns True if this fired a close this tick (caller stops
         evaluating any other exit); False otherwise, including while
@@ -909,16 +927,6 @@ class RollingMixin:
                 self._underlying, cumulative_inr, threshold_inr,
             )
             await self._close_position_and_hedge("itm_pair_gate_wide_profit")
-            self._itm_pair_gate_wide_active = False
-            return True
-
-        if self._is_t1_from_expiry(pos, now):
-            self._clog.info(
-                "SellStraddle[%s]: ITM-PAIR GATE WIDE — T-1 from expiry, threshold never crossed "
-                "(this cycle's cumulative ₹%.2f < ₹%.2f) -- force-closing regardless of P&L.",
-                self._underlying, cumulative_inr, threshold_inr,
-            )
-            await self._close_position_and_hedge("itm_pair_gate_wide_t1_close")
             self._itm_pair_gate_wide_active = False
             return True
 
