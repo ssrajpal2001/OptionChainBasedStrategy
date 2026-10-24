@@ -5,6 +5,7 @@ Rollover logic shared by ratio exit, LTP decay, VWAP rise, and scalable TSL.
 """
 from __future__ import annotations
 
+import copy
 import logging
 from datetime import datetime, timedelta
 
@@ -144,6 +145,83 @@ def _format_partner_trace(trace: list) -> str:
 
 class RollingMixin:
     """Rolling / single-side-roll logic for the sell-straddle book."""
+
+    async def _would_pair_trigger_fullclose(
+        self, roll_side: str, candidate_strike: int, candidate_ltp: float,
+        keep_side: str, keep_strike: int, keep_ltp: float, now: datetime,
+    ):
+        """2026-10-24, direct user spec, real incident (2026-10-23): a
+        ratio_exit roll opened a fresh leg that immediately turned out to be
+        ITM, which together with the already-ITM kept leg and an
+        already-high cumulative profit tripped the ITM-pair-gate within the
+        same minute -- paying brokerage to open a leg that was closed again
+        almost instantly for zero benefit.
+
+        Before actually opening `candidate_strike`, build a disposable
+        position clone (the kept leg exactly as it is now; the rolled leg
+        AS IF the candidate were already open -- entry_price=ltp=
+        candidate_ltp, fresh, zero running P&L on it, same shape a
+        just-opened leg genuinely has) and ask every full-close rule "would
+        you fire on THIS pair, right now" using their own real condition
+        math (ITM-pair-gate, hedge-cumulative-profit) or the same pure
+        helper the live inline checks use (day-profit-target, day-loss-SL),
+        or the real function itself on the clone (scalable TSL, which is
+        safe to call directly since it only mutates whatever `pos` it's
+        given). Single-side rolls never touch hedge legs (rollover is
+        sold-legs-only, see _close_position_and_hedge's own docstring), so
+        the clone's hedge legs (if any) are left exactly as they are.
+
+        Returns (True, reason) the FIRST rule that would fire, or
+        (False, "") if none would. Purely a calculation -- never mutates
+        self._position, never dispatches an order, never touches any real
+        armed/guard state."""
+        pos = self._position
+        if not pos:
+            return False, ""
+        clone = copy.deepcopy(pos)
+        clone.status = "open"
+        _leg = clone.ce_leg if roll_side == "CE" else clone.pe_leg
+        _leg.strike = float(candidate_strike)
+        _leg.entry_price = float(candidate_ltp)
+        _leg.ltp = float(candidate_ltp)
+        _kept_leg = clone.pe_leg if roll_side == "CE" else clone.ce_leg
+        _kept_leg.strike = float(keep_strike)
+        _kept_leg.ltp = float(keep_ltp)
+
+        if getattr(self, "_itm_pair_gate_enabled", False):
+            fired, which = await self._check_itm_pair_gate(now, pos_override=clone, dry_run=True)
+            if fired:
+                return True, which
+
+        if clone.is_hedged_positional:
+            fired, which = await self._check_hedge_cumulative_profit_close(clone, now, dry_run=True)
+            if fired:
+                return True, which
+
+        # NOTE: day_loss_sl is deliberately NOT checked here. Unlike the
+        # other four rules, a real day_loss_sl breach never does a plain
+        # close -- it always builds a protective hedge and carries the
+        # position forward (2026-10-06 fix, see the live inline check's own
+        # comment). "Close the current pair directly" is the correct
+        # stand-in for the four rules below, but it would misrepresent
+        # day_loss_sl's real behavior, so it's excluded until/unless a
+        # hedge-equivalent look-ahead is explicitly asked for.
+        if self._initial_net_credit > 0 and not clone.is_hedged_positional:
+            total_day_pct, _, _ = self._total_day_pct(clone, clone.unrealized_pnl)
+            if self._day_profit_target_pct > 0 and total_day_pct >= self._day_profit_target_pct:
+                return True, "day_profit_target"
+
+        if getattr(self, "_tsl_enabled", False):
+            _tsl_pnl = clone.unrealized_pnl
+            if getattr(self, "_tsl_basis", "ltp") == "theta":
+                _etv = float(getattr(clone, "entry_time_value", 0.0) or 0.0)
+                if _etv > 0:
+                    _tsl_pnl = _etv - clone.current_time_value(self._spot)
+            _tsl_pnl = self._combined_pnl_pts(clone, _tsl_pnl)
+            if self._check_scalable_tsl(clone, _tsl_pnl):
+                return True, "scalable_tsl"
+
+        return False, ""
 
     async def _single_side_roll(self, now: datetime, reason: str) -> bool:
         """Check-first rollover: close the GOOD leg (less loss / more profit) and re-sell a new
@@ -348,6 +426,32 @@ class RollingMixin:
                     keep_side, keep_strike, keep_ltp, _skew, self._max_entry_ratio,
                 )
                 return False
+
+        # 4. LOOK-AHEAD: would the resulting pair immediately trigger a
+        # full-close rule anyway? 2026-10-24, direct user spec, real
+        # incident (2026-10-23): a ratio_exit roll opened a fresh ITM leg
+        # that, combined with the already-ITM kept leg and an already-high
+        # cumulative profit, tripped the ITM-pair-gate within the same
+        # minute -- paying brokerage to open a leg that was closed again
+        # almost instantly for zero benefit. Check BEFORE opening the new
+        # leg: if the hypothetical pair would already satisfy any full-close
+        # rule, skip the roll entirely and close the CURRENT pair directly.
+        _would_close, _which_rule = await self._would_pair_trigger_fullclose(
+            roll_side, int(new_strike), float(new_ltp), keep_side, keep_strike, keep_ltp, now,
+        )
+        if _would_close:
+            _remark = (
+                f"Roll skipped: the candidate pair would have immediately triggered "
+                f"{_which_rule} — closed the current pair directly instead to avoid "
+                f"an unnecessary roll."
+            )
+            self._roll_skip_detail = {
+                "which_rule": _which_rule, "candidate_side": roll_side,
+                "candidate_strike": int(new_strike), "kept_side": keep_side, "kept_strike": keep_strike,
+            }
+            self._clog.info("SellStraddle[%s]: ROLLOVER %s — %s", self._underlying, reason, _remark)
+            await self._close_position_and_hedge("roll_skipped_would_immediately_fullclose")
+            return False
 
         # 2026-09-29 REMOVED, direct user decision: a "current-tick sanity check"
         # (candidate pair's live close >= its own combined VWAP -> reject) used to
@@ -570,10 +674,16 @@ class RollingMixin:
             return True
         return False
 
-    def _both_itm(self) -> bool:
-        """Return True if BOTH open legs are ITM relative to current spot."""
-        pos = self._position
-        if not pos or pos.status != "open":
+    def _both_itm(self, pos_override=None) -> bool:
+        """Return True if BOTH open legs are ITM relative to current spot.
+        pos_override (2026-10-24, rollover look-ahead): evaluate against a
+        disposable position clone instead of self._position -- does not
+        require status=="open" on the override (a hypothetical pair has no
+        meaningful status yet)."""
+        pos = pos_override if pos_override is not None else self._position
+        if not pos:
+            return False
+        if pos_override is None and pos.status != "open":
             return False
         spot = self._spot
         if not spot:
@@ -582,7 +692,7 @@ class RollingMixin:
         pe_itm = float(pos.pe_leg.strike) > spot   # PE ITM = strike above spot
         return ce_itm and pe_itm
 
-    def _cumulative_pnl_pts(self) -> float:
+    def _cumulative_pnl_pts(self, pos_override=None) -> float:
         """Today's booked P&L (all closed legs) + current running P&L in option pts.
 
         2026-08-28 fix: when the position is hedged (is_hedged_positional),
@@ -590,13 +700,16 @@ class RollingMixin:
         (via _combined_pnl_pts, exits.py) -- this feeds the ITM-pair-gate's
         own profit threshold, which must treat all 4 legs as one position
         once hedged, same as every other full-close exit check (see
-        _close_position_and_hedge's own docstring for the real incident)."""
-        pos = self._position
+        _close_position_and_hedge's own docstring for the real incident).
+
+        pos_override (2026-10-24, rollover look-ahead): compute against a
+        disposable position clone instead of self._position."""
+        pos = pos_override if pos_override is not None else self._position
         running = pos.unrealized_pnl if pos else 0.0
         running = self._combined_pnl_pts(pos, running) if pos else running
         return self._session_realized_pnl_pts + running
 
-    async def _check_itm_pair_gate(self, now: datetime) -> None:
+    async def _check_itm_pair_gate(self, now: datetime, pos_override=None, dry_run: bool = False):
         """
         Called after every rollover completes and on every exit-check cycle while armed.
         Only activates (arms/watches) when both legs are ITM AND the point-distance between
@@ -608,16 +721,31 @@ class RollingMixin:
         no rollover attempt on this path (that was the old 2026-08 behaviour; direct user
         correction removed it).
         Does nothing if the toggle is OFF, the pair is not both ITM, or the gap is too small.
-        """
+
+        2026-10-24, direct user spec (rollover look-ahead, see
+        rolling.py's _would_pair_trigger_fullclose): pos_override + dry_run
+        let the rollover logic ask "would THIS hypothetical pair already
+        trip this gate" as a pure calculation, on a disposable position
+        clone -- never touches real arm/rolling state or dispatches a real
+        close. Returns (bool, reason) when dry_run; returns None (as
+        before) in the normal live path."""
         if not getattr(self, "_itm_pair_gate_enabled", False):
+            if dry_run:
+                return False, ""
             return
-        if not self._both_itm():
-            self._itm_gate_armed = False
+        if not self._both_itm(pos_override):
+            if not dry_run:
+                self._itm_gate_armed = False
+            if dry_run:
+                return False, ""
             return
 
-        pos = self._position
-        if not pos or pos.status != "open":
-            self._itm_gate_armed = False
+        pos = pos_override if pos_override is not None else self._position
+        if not pos or (pos_override is None and pos.status != "open"):
+            if not dry_run:
+                self._itm_gate_armed = False
+            if dry_run:
+                return False, ""
             return
 
         ce_s = int(pos.ce_leg.strike)
@@ -625,16 +753,22 @@ class RollingMixin:
         min_gap = float(getattr(self, "_itm_pair_gate_min_strike_gap", 100.0))
         strike_gap = abs(ce_s - pe_s)
         if strike_gap <= min_gap:
-            self._itm_gate_armed = False
+            if not dry_run:
+                self._itm_gate_armed = False
+            if dry_run:
+                return False, ""
             return
 
-        cumulative_pts = self._cumulative_pnl_pts()
+        cumulative_pts = self._cumulative_pnl_pts(pos_override)
         cumulative_inr = self._pnl_rs(cumulative_pts)
         # 2026-10-12, direct user correction: ₹500 is a PER-LOT threshold, not a flat
         # total regardless of size -- scale by lot_multiplier so a 20-lot deployment
         # needs ₹10,000 total profit to trigger, same per-lot bar as a 1-lot deployment.
         threshold_inr = (float(getattr(self, "_itm_pair_gate_profit_inr", 500.0))
                           * float(getattr(self, "_lot_multiplier", 1) or 1))
+
+        if dry_run:
+            return (True, "itm_pair_gate_profit") if cumulative_inr >= threshold_inr else (False, "")
 
         if cumulative_inr >= threshold_inr:
             if getattr(self, "_itm_gate_rolling", False):

@@ -223,6 +223,11 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         # hedge legs closed, leaving the position permanently stuck in
         # "closing" with zero further exit management).
         self._hedge_cum_profit_closing: bool = False
+        # 2026-10-24, direct user spec: set right before a
+        # roll_skipped_would_immediately_fullclose close so _close_remark
+        # can name which rule would have fired (see rolling.py's
+        # _would_pair_trigger_fullclose).
+        self._roll_skip_detail: Dict[str, object] = {}
         self._last_roll_attempt: Dict[str, datetime] = {}
         self._last_exit_rules_bucket: str = ""
         self._last_entry_bucket_b: str = ""

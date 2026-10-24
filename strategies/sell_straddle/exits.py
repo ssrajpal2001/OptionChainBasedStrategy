@@ -404,6 +404,15 @@ class ExitMixin:
                 return (f"Post-15:00 R1 exit | {_side} leg (strike={int(_leg.strike)}) breached its own "
                         f"R1, closed independently (armed via {_armed}) → other leg still running solo")
 
+            if reason == "roll_skipped_would_immediately_fullclose":
+                # 2026-10-24, direct user spec: see rolling.py's
+                # _would_pair_trigger_fullclose for the full mechanic.
+                _detail = getattr(self, "_roll_skip_detail", None) or {}
+                _rule = _detail.get("which_rule", "a full-close rule")
+                return (f"Roll skipped: the candidate pair would have immediately triggered "
+                        f"{_rule} — closed the current pair directly instead to avoid "
+                        f"an unnecessary roll.")
+
             if reason == "r1_breach_post_roll":
                 _info = getattr(self, "_r1_last_breach_info", None) or {}
                 return (
@@ -920,6 +929,28 @@ class ExitMixin:
             return sold_pnl_pts + pos.hedge_unrealized_pnl
         return sold_pnl_pts
 
+    def _total_day_pct(self, pos: "StraddlePosition", pnl: float) -> tuple:
+        """Today's cumulative P&L as a % of the day's own basis (LTP credit or
+        theta time-value) -- the exact condition day_profit_target/day_loss_sl
+        compare against. Extracted 2026-10-24 (pure, no side effects) so the
+        rollover look-ahead (_would_pair_trigger_fullclose, rolling.py) can
+        evaluate "would a hypothetical pair already be over this threshold"
+        without duplicating this math. Returns (total_day_pct, basis_label,
+        denominator) -- byte-identical to the inline calc this replaced."""
+        if self._day_exit_basis == "theta" and self._initial_entry_time_value > 0:
+            _etv = float(getattr(pos, "entry_time_value", 0.0) or 0.0)
+            _running_theta = (_etv - pos.current_time_value(self._spot)) if _etv > 0 else pnl
+            total_day_pts = self._session_realized_pnl_pts + self._combined_pnl_pts(pos, _running_theta)
+            _day_denom = self._initial_entry_time_value
+            _basis_lbl = "theta(cumulative)"
+        else:
+            total_day_pts = self._session_realized_pnl_pts + self._combined_pnl_pts(pos, pnl)
+            _day_denom = self._initial_net_credit
+            _basis_lbl = "ltp"
+        if _day_denom <= 0:
+            return 0.0, _basis_lbl, _day_denom
+        return total_day_pts / _day_denom * 100, _basis_lbl, _day_denom
+
     async def _hedge_or_roll_if_eligible(self, pos: "StraddlePosition", now: datetime,
                                           stop_for_day_on_hedge: bool = True) -> bool:
         """Shared hedge/roll eligibility + dispatch, factored out of
@@ -1226,7 +1257,8 @@ class ExitMixin:
                 atm, atm,
             )
 
-    async def _check_hedge_cumulative_profit_close(self, pos: "StraddlePosition", now: datetime) -> bool:
+    async def _check_hedge_cumulative_profit_close(self, pos: "StraddlePosition", now: datetime,
+                                                     dry_run: bool = False):
         """2026-08-24, user spec: while a hedge is standing, check EVERY TICK
         (not just at EOD) whether the combined economics -- both sold legs'
         running P&L, both hedge legs' running P&L, plus whatever's already
@@ -1265,6 +1297,14 @@ class ExitMixin:
         total_pnl_pts = self._cumulative_hedge_pnl(pos, include_hedge=True)
         total_pnl_rs = self._pnl_rs(total_pnl_pts)
         _threshold_rs = _HEDGE_CLOSE_PROFIT_RS * self._lot_multiplier
+        # 2026-10-24, direct user spec (rollover look-ahead, see
+        # rolling.py's _would_pair_trigger_fullclose): dry_run asks "would
+        # THIS hypothetical pair already be over the threshold" purely as a
+        # calculation -- it must never touch pos.status, the real
+        # _hedge_cum_profit_closing guard, or dispatch anything, since the
+        # caller passes a disposable position clone, not the real one.
+        if dry_run:
+            return (True, "hedge_cumulative_profit") if total_pnl_rs >= _threshold_rs else (False, "")
         if total_pnl_rs < _threshold_rs:
             return False
         if pos.status != "open":
@@ -1970,17 +2010,7 @@ class ExitMixin:
         # day_profit_target and day_loss_sl [and day-low reversal / post1500,
         # gated separately below]."
         if self._initial_net_credit > 0 and not pos.is_hedged_positional:
-            if self._day_exit_basis == "theta" and self._initial_entry_time_value > 0:
-                _etv = float(getattr(pos, "entry_time_value", 0.0) or 0.0)
-                _running_theta = (_etv - pos.current_time_value(self._spot)) if _etv > 0 else pnl
-                total_day_pts = self._session_realized_pnl_pts + self._combined_pnl_pts(pos, _running_theta)
-                _day_denom = self._initial_entry_time_value
-                _basis_lbl = "theta(cumulative)"
-            else:
-                total_day_pts = self._session_realized_pnl_pts + self._combined_pnl_pts(pos, pnl)
-                _day_denom = self._initial_net_credit
-                _basis_lbl = "ltp"
-            total_day_pct = total_day_pts / _day_denom * 100
+            total_day_pct, _basis_lbl, _day_denom = self._total_day_pct(pos, pnl)
 
             if self._day_profit_target_pct > 0 and total_day_pct >= self._day_profit_target_pct:
                 # 2026-09-23 fix (log-noise pass, same class as VWAP RISE): this
@@ -2842,7 +2872,15 @@ class ExitMixin:
             # to use BEGINNING entry's own selection logic (select_balanced_pair_at),
             # not the RE-ENTRY pool-scan -- same revert mechanism already used for
             # post_restore_data_stale above, just a different trigger reason.
-            if reason in ("post_restore_data_stale", "itm_pair_gate_profit") and self._trades_today > 0:
+            # 2026-10-24, direct user spec: a roll_skipped_would_immediately_
+            # fullclose close stands in for whichever real rule would have
+            # fired (named in self._roll_skip_detail) -- it must get the SAME
+            # trades_today/cooldown treatment that rule would have gotten,
+            # not one fixed treatment regardless of which rule it was.
+            _skip_which = (self._roll_skip_detail.get("which_rule")
+                           if reason == "roll_skipped_would_immediately_fullclose" else None)
+            if (reason in ("post_restore_data_stale", "itm_pair_gate_profit") or _skip_which == "itm_pair_gate_profit") \
+                    and self._trades_today > 0:
                 self._trades_today -= 1
                 logger.info(
                     "SellStraddle[%s]: %s close -- trades_today reverted to %d so the next "
@@ -2856,7 +2894,8 @@ class ExitMixin:
             # SL/loss events, and the next entry should be evaluated as BEGINNING
             # immediately, no cooldown delay.
             if reason not in ("itm_pair_gate_profit", "hedge_cumulative_profit", "kill_switch",
-                              "deployment_stop", "system_shutdown"):
+                              "deployment_stop", "system_shutdown") \
+                    and _skip_which not in ("itm_pair_gate_profit", "hedge_cumulative_profit"):
                 self._apply_sl_cooldown()
             audit_exit_exec(
                 client_id=_cid,
