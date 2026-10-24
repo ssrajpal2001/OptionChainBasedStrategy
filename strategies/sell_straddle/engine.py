@@ -223,6 +223,12 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
         # hedge legs closed, leaving the position permanently stuck in
         # "closing" with zero further exit management).
         self._hedge_cum_profit_closing: bool = False
+        # 2026-10-24, direct user spec: True while both legs are ITM and the
+        # gap between them exceeds _ITM_PAIR_GATE_WIDE_GAP_PTS (300) -- see
+        # rolling.py's _check_itm_pair_gate_wide for the full mechanic
+        # (rollover disabled, hedged immediately, cycle-scoped profit-or-T1
+        # exit). Checked by _single_side_roll to disable every roll type.
+        self._itm_pair_gate_wide_active: bool = False
         # 2026-10-24, direct user spec: set right before a
         # roll_skipped_would_immediately_fullclose close so _close_remark
         # can name which rule would have fired (see rolling.py's

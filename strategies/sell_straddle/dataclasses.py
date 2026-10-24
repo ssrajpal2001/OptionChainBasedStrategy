@@ -99,6 +99,24 @@ class StraddlePosition:
     # days until it's genuinely closed flat -- that's when the cycle ends.
     cycle_id: str = ""
 
+    # 2026-10-24, direct user spec, real incident fix: P&L booked so far
+    # THIS CYCLE ONLY -- starts at 0.0 the moment a fresh cycle_id is
+    # assigned (a genuine new position from flat), and accumulates every
+    # leg-close booking for as long as cycle_id stays the same, INCLUDING
+    # across an overnight EOD hedge-and-carry day-boundary (the position
+    # object itself already survives that carry unchanged, so this field
+    # rides along for free -- no separate day-vs-cycle bookkeeping needed).
+    # Unlike the strategy's own self._session_realized_pnl_pts (whole
+    # CALENDAR DAY, resets at midnight regardless of cycle continuity, and
+    # correctly stays that way for day_profit_target/day_loss_sl), THIS
+    # field is what ITM-pair-gate and hedge-cumulative-profit now use for
+    # their own "cumulative P&L" threshold checks -- real incident:
+    # 2026-10-23's itm_pair_gate_profit close counted an unrelated, already-
+    # closed EARLIER cycle's booked profit from the same morning, which is
+    # what let it cross the ₹500/lot bar; the cycle in question was, on its
+    # own, still running at a loss.
+    cycle_booked_pnl_pts: float = 0.0
+
     def to_dict(self) -> dict:
         """JSON-serialisable snapshot for PositionStore."""
         def _leg(l: StraddleLeg) -> dict:
@@ -134,6 +152,7 @@ class StraddlePosition:
             "ce_leg_closed": self.ce_leg_closed,
             "pe_leg_closed": self.pe_leg_closed,
             "cycle_id": self.cycle_id,
+            "cycle_booked_pnl_pts": self.cycle_booked_pnl_pts,
         }
 
     @classmethod
@@ -166,6 +185,7 @@ class StraddlePosition:
             ce_leg_closed=bool(d.get("ce_leg_closed", False)),
             pe_leg_closed=bool(d.get("pe_leg_closed", False)),
             cycle_id=d.get("cycle_id", ""),
+            cycle_booked_pnl_pts=d.get("cycle_booked_pnl_pts", 0.0),
         )
 
     @property

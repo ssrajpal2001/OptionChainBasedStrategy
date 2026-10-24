@@ -236,6 +236,21 @@ class RollingMixin:
         if not pos or pos.status != "open":
             return False
 
+        # 2026-10-24, direct user spec: once both legs are ITM and the gap
+        # between them has widened past 300pts, rollover is capped off
+        # entirely -- see _check_itm_pair_gate_wide's own docstring for the
+        # full mechanic (immediate hedge, then a cycle-scoped profit-or-T-1
+        # exit). A single check here covers every roll type (ltp_decay,
+        # ratio_exit, exit_rules, vwap_rise all funnel through this one
+        # function), rather than gating each caller separately.
+        if getattr(self, "_itm_pair_gate_wide_active", False):
+            self._clog.info(
+                "SellStraddle[%s]: ROLLOVER %s — skipped, ITM-pair-gate-wide is active "
+                "(gap>300pts both ITM) -- no rollover while this is active.",
+                self._underlying, reason,
+            )
+            return False
+
         # Throttle: do not re-attempt the same rollover reason more often than
         # _ROLL_RETRY_SECONDS, otherwise every tick would re-run partner search.
         _attempts = getattr(self, "_last_roll_attempt", None) or {}
@@ -693,7 +708,8 @@ class RollingMixin:
         return ce_itm and pe_itm
 
     def _cumulative_pnl_pts(self, pos_override=None) -> float:
-        """Today's booked P&L (all closed legs) + current running P&L in option pts.
+        """THIS CYCLE's booked P&L (all legs closed since cycle_id was last
+        assigned) + current running P&L in option pts.
 
         2026-08-28 fix: when the position is hedged (is_hedged_positional),
         the running P&L now also folds in the hedge legs' own running P&L
@@ -702,12 +718,19 @@ class RollingMixin:
         once hedged, same as every other full-close exit check (see
         _close_position_and_hedge's own docstring for the real incident).
 
+        2026-10-24 CRITICAL FIX, direct user spec, real incident: used to
+        read self._session_realized_pnl_pts (whole CALENDAR DAY, leaking in
+        any earlier, already-closed, unrelated cycle from the same
+        morning). Now reads pos.cycle_booked_pnl_pts -- see
+        _cumulative_hedge_pnl's own docstring (exits.py) for the real
+        2026-10-23 incident this fixes.
+
         pos_override (2026-10-24, rollover look-ahead): compute against a
         disposable position clone instead of self._position."""
         pos = pos_override if pos_override is not None else self._position
         running = pos.unrealized_pnl if pos else 0.0
         running = self._combined_pnl_pts(pos, running) if pos else running
-        return self._session_realized_pnl_pts + running
+        return (pos.cycle_booked_pnl_pts if pos else 0.0) + running
 
     async def _check_itm_pair_gate(self, now: datetime, pos_override=None, dry_run: bool = False):
         """
@@ -807,6 +830,99 @@ class RollingMixin:
                 self._underlying, strike_gap, min_gap, ce_s, pe_s, self._spot,
                 cumulative_pts, cumulative_inr, threshold_inr,
             )
+
+    _ITM_PAIR_GATE_WIDE_GAP_PTS = 300.0
+
+    async def _check_itm_pair_gate_wide(self, now: datetime) -> bool:
+        """2026-10-24, direct user spec: once both legs are ITM and the gap
+        between them widens past _ITM_PAIR_GATE_WIDE_GAP_PTS (300, a harder
+        case than the plain >100 arm/wait gate above), stop attempting any
+        rollover entirely (see _single_side_roll's own early-return), hedge
+        the position immediately (don't wait for the normal EOD hedge-and-
+        carry check), then watch THIS CYCLE's own cumulative P&L (sold+
+        hedge combined, pos.cycle_booked_pnl_pts -- never a different,
+        already-closed cycle's booked profit) against the same ₹500/lot
+        threshold the plain gate uses:
+          - crosses it -> close everything, cycle ends.
+          - never crosses it -> force-close everything anyway at
+            T-1-from-expiry, regardless of profit or loss at that point --
+            the position has run out of time to resolve on its own.
+
+        Returns True if this fired a close this tick (caller stops
+        evaluating any other exit); False otherwise, including while
+        merely active/armed/hedged and still waiting."""
+        if not getattr(self, "_itm_pair_gate_enabled", False):
+            return False
+        pos = self._position
+        if not pos or pos.status != "open":
+            self._itm_pair_gate_wide_active = False
+            return False
+        if not self._both_itm():
+            self._itm_pair_gate_wide_active = False
+            return False
+
+        ce_s = int(pos.ce_leg.strike)
+        pe_s = int(pos.pe_leg.strike)
+        gap = abs(ce_s - pe_s)
+        if gap <= self._ITM_PAIR_GATE_WIDE_GAP_PTS:
+            self._itm_pair_gate_wide_active = False
+            return False
+
+        if not getattr(self, "_itm_pair_gate_wide_active", False):
+            self._itm_pair_gate_wide_active = True
+            self._clog.info(
+                "SellStraddle[%s]: ITM-PAIR GATE WIDE — gap=%d>%.0f (CE%d/PE%d) spot=%.0f -- "
+                "rollover disabled, hedging immediately.",
+                self._underlying, gap, self._ITM_PAIR_GATE_WIDE_GAP_PTS, ce_s, pe_s, self._spot,
+            )
+
+        if not pos.is_hedged_positional:
+            built = await self._try_build_hedge(pos, now)
+            if not built:
+                self._clog.warning(
+                    "SellStraddle[%s]: ITM-PAIR GATE WIDE — hedge build failed; closing complete "
+                    "position instead rather than leaving it unhedged with no rollover available.",
+                    self._underlying,
+                )
+                await self._close_position_and_hedge("itm_pair_gate_wide_hedge_failed")
+                self._itm_pair_gate_wide_active = False
+                return True
+            # Re-fetch: _try_build_hedge may have mutated this same pos object
+            # in place (it does -- sets hedge_ce_leg/hedge_pe_leg/
+            # is_hedged_positional on it directly), so no extra lookup needed,
+            # but self._position itself could theoretically have changed
+            # underneath if something else ran concurrently; be defensive.
+            pos = self._position
+            if not pos or pos.status != "open":
+                self._itm_pair_gate_wide_active = False
+                return True
+
+        cumulative_pts = self._cumulative_pnl_pts()
+        cumulative_inr = self._pnl_rs(cumulative_pts)
+        threshold_inr = (float(getattr(self, "_itm_pair_gate_profit_inr", 500.0))
+                          * float(getattr(self, "_lot_multiplier", 1) or 1))
+
+        if cumulative_inr >= threshold_inr:
+            self._clog.info(
+                "SellStraddle[%s]: ITM-PAIR GATE WIDE — this cycle's cumulative ₹%.2f >= "
+                "threshold ₹%.2f -- closing complete position.",
+                self._underlying, cumulative_inr, threshold_inr,
+            )
+            await self._close_position_and_hedge("itm_pair_gate_wide_profit")
+            self._itm_pair_gate_wide_active = False
+            return True
+
+        if self._is_t1_from_expiry(pos, now):
+            self._clog.info(
+                "SellStraddle[%s]: ITM-PAIR GATE WIDE — T-1 from expiry, threshold never crossed "
+                "(this cycle's cumulative ₹%.2f < ₹%.2f) -- force-closing regardless of P&L.",
+                self._underlying, cumulative_inr, threshold_inr,
+            )
+            await self._close_position_and_hedge("itm_pair_gate_wide_t1_close")
+            self._itm_pair_gate_wide_active = False
+            return True
+
+        return False
 
     async def _check_itm_roll_protection(self, now: datetime) -> None:
         """Tick-level protective stop for the leg(s) just opened by an ITM-pair-gate

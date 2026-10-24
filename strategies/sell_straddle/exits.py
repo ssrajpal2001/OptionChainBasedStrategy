@@ -381,11 +381,32 @@ class ExitMixin:
                         f"→ rolled {_side}")
 
             if reason == "itm_pair_gate_profit":
-                _cum = self._session_realized_pnl_pts + pos.unrealized_pnl
+                # 2026-10-24 fix: was self._session_realized_pnl_pts (whole
+                # day) -- display must match what actually drove the
+                # decision (rolling.py now uses pos.cycle_booked_pnl_pts).
+                _cum = pos.cycle_booked_pnl_pts + pos.unrealized_pnl
                 _inr = self._pnl_rs(_cum)
                 _thr = float(getattr(self, "_itm_pair_gate_profit_inr", 500.0))
-                return (f"Both legs ITM | cumulative P&L {self._ccy_symbol}{_inr:+.0f} ≥ threshold {self._ccy_symbol}{_thr:.0f} "
+                return (f"Both legs ITM | cumulative P&L this cycle {self._ccy_symbol}{_inr:+.0f} "
+                        f"≥ threshold {self._ccy_symbol}{_thr:.0f} "
                         f"| CE{int(pos.ce_leg.strike)} PE{int(pos.pe_leg.strike)} spot={self._spot:.0f}")
+
+            if reason in ("itm_pair_gate_wide_profit", "itm_pair_gate_wide_t1_close",
+                          "itm_pair_gate_wide_hedge_failed"):
+                _cum = pos.cycle_booked_pnl_pts + self._combined_pnl_pts(pos, pos.unrealized_pnl)
+                _inr = self._pnl_rs(_cum)
+                _thr = float(getattr(self, "_itm_pair_gate_profit_inr", 500.0))
+                _gap = abs(int(pos.ce_leg.strike) - int(pos.pe_leg.strike))
+                if reason == "itm_pair_gate_wide_hedge_failed":
+                    return (f"ITM pair gate (wide, gap={_gap}>300) | hedge build failed -- closed "
+                            f"complete position instead of leaving it unhedged with no rollover")
+                if reason == "itm_pair_gate_wide_profit":
+                    return (f"ITM pair gate (wide, gap={_gap}>300) | hedged, no rollover | "
+                            f"cumulative P&L this cycle {self._ccy_symbol}{_inr:+.0f} ≥ threshold "
+                            f"{self._ccy_symbol}{_thr:.0f} → closed complete position")
+                return (f"ITM pair gate (wide, gap={_gap}>300) | hedged, no rollover | T-1 from "
+                        f"expiry, cumulative P&L this cycle {self._ccy_symbol}{_inr:+.0f} never "
+                        f"reached threshold {self._ccy_symbol}{_thr:.0f} → force-closed")
 
             if reason == "day_low_reversal_exit":
                 _cv = pos.current_value
@@ -582,15 +603,28 @@ class ExitMixin:
 
     def _cumulative_hedge_pnl(self, pos: "StraddlePosition", include_hedge: bool = False) -> float:
         """2026-08-24, user spec correction: the hedge decision is driven by
-        the OVERALL cumulative P&L -- today's already-booked P&L plus the
-        running P&L on the sold legs -- NOT by requiring each leg to
-        individually be in loss. CE +50 / PE -80 (net -30) now qualifies,
-        where the old per-leg check would have skipped it since CE alone was
-        "in profit". `include_hedge=True` additionally nets in the hedge
-        legs' own running P&L (0.0 for any not yet built) -- used for the
-        tick-by-tick close-the-hedge check, not the build trigger (no hedge
-        legs exist yet at that point, so it would be a no-op either way)."""
-        total = self._session_realized_pnl_pts + pos.unrealized_pnl
+        the OVERALL cumulative P&L -- booked P&L plus the running P&L on
+        the sold legs -- NOT by requiring each leg to individually be in
+        loss. CE +50 / PE -80 (net -30) now qualifies, where the old
+        per-leg check would have skipped it since CE alone was "in profit".
+        `include_hedge=True` additionally nets in the hedge legs' own
+        running P&L (0.0 for any not yet built) -- used for the tick-by-tick
+        close-the-hedge check, not the build trigger (no hedge legs exist
+        yet at that point, so it would be a no-op either way).
+
+        2026-10-24 CRITICAL FIX, direct user spec, real incident: "booked"
+        used to mean self._session_realized_pnl_pts -- the WHOLE CALENDAR
+        DAY's realized total, including any earlier, already-closed,
+        unrelated cycle from the same morning. Real incident, 2026-10-23:
+        an itm_pair_gate_profit close crossed its ₹500/lot threshold almost
+        entirely on the back of a PRIOR cycle's already-booked profit from
+        earlier that same session -- the actual running cycle was, on its
+        own, still at a loss. Now uses pos.cycle_booked_pnl_pts -- P&L
+        booked since THIS cycle's own cycle_id was assigned, correctly
+        carrying across an overnight hedge-and-carry day-boundary (same
+        cycle, same position object) but never leaking in a different,
+        already-finished cycle's own history."""
+        total = pos.cycle_booked_pnl_pts + pos.unrealized_pnl
         if include_hedge:
             total += pos.hedge_unrealized_pnl
         return total
@@ -2137,7 +2171,19 @@ class ExitMixin:
         # 70%-budget running loss had genuinely crossed the line. Running these two
         # first (still cheap no-ops when the gate is off / nothing is armed) means a
         # hard ₹-loss cap on an already-profit-funded leg always gets first look.
-        await self._check_itm_pair_gate(now)
+        # 2026-10-24, direct user spec: once both legs are ITM AND the gap
+        # between them widens past 300pts (a harder case than the plain
+        # >100 arm/wait gate below), stop attempting any rollover entirely,
+        # hedge immediately, and watch THIS CYCLE's own cumulative P&L
+        # against the same threshold -- crossing it closes everything;
+        # never crossing it force-closes at T-1-from-expiry regardless of
+        # P&L. Must run BEFORE the plain gate below, since a gap>300 pair
+        # always also satisfies gap>100 -- the wide check owns that case
+        # entirely once active (see _single_side_roll's own early-return).
+        if await self._check_itm_pair_gate_wide(now):
+            return
+        if not getattr(self, "_itm_pair_gate_wide_active", False):
+            await self._check_itm_pair_gate(now)
         await self._check_itm_roll_protection(now)
         if not (self._position and self._position.status == "open"):
             # Either check may have closed the position outright (no roll partner
@@ -2534,6 +2580,7 @@ class ExitMixin:
         pos.realized_pnl = pos.unrealized_pnl
         pos.status = "closed"
         self._session_realized_pnl_pts += pos.realized_pnl
+        pos.cycle_booked_pnl_pts += pos.realized_pnl
         self._itm_roll_protection = {}
         _cid = getattr(self, "_client_id", "") or "-"
         _bid = getattr(self, "_binding_id", "") or "-"
@@ -2819,6 +2866,7 @@ class ExitMixin:
                              reason, pos.realized_pnl, eid)
 
             self._session_realized_pnl_pts += pos.realized_pnl
+            pos.cycle_booked_pnl_pts += pos.realized_pnl
             logger.info(
                 "SellStraddle[%s]: Session P&L — trade=%.2fpts cumulative=%.2fpts "
                 "(day=%.1f%% of initial credit=%.2f)",
@@ -3006,6 +3054,7 @@ class ExitMixin:
         # ── Confirmed — finalize this leg's close ─────────────────────────────
         leg.close_time = now
         self._session_realized_pnl_pts += leg_pnl
+        pos.cycle_booked_pnl_pts += leg_pnl
         logger.info("SellStraddle[%s|%s|%s]: CLOSE LEG %s strike=%.0f pnl=%.2fpts [%s] confirmed",
                     self._underlying, _cid, _bid, side, leg.strike, leg_pnl, reason)
         self._clog.info("CLOSE LEG %s strike=%.0f pnl=%.2fpts [%s] confirmed",
