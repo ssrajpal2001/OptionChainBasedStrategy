@@ -1013,16 +1013,18 @@ class ExitMixin:
         return total_day_pts / _day_denom * 100, _basis_lbl, _day_denom
 
     async def _hedge_or_roll_if_eligible(self, pos: "StraddlePosition", now: datetime,
-                                          stop_for_day_on_hedge: bool = True) -> bool:
+                                          stop_for_day_on_hedge: bool = True) -> Optional[str]:
         """Shared hedge/roll eligibility + dispatch, factored out of
         _eod_close_or_hedge (2026-08-25) so the SAME decision can also run
-        earlier via _maybe_prehedge (the pre-squareoff precheck) without
-        duplicating the T-1/roll/hedge branching. Only ever called on a
-        NOT-YET-hedged position (pos.is_hedged_positional is False) -- the
-        already-hedged/T-1-roll branch stays in _eod_close_or_hedge, since
-        that one is specific to a position that's already carrying a hedge
-        from a prior day. Returns True if a hedge or roll was started
-        (caller must not also close).
+        earlier via _maybe_prehedge (the pre-squareoff precheck). Only ever
+        called on a NOT-YET-hedged position (pos.is_hedged_positional is
+        False). Returns "hedged" if a hedge was actually built, or None if
+        it couldn't be (caller should fall through to its own normal
+        close). A plain truthiness check (`if await ...:`) still works for
+        callers that only care whether a hedge was started.
+
+        2026-10-26: no longer ever returns a close-instead outcome -- see
+        the T-1 removal note below.
 
         2026-09-11, direct user spec: day_loss_sl now also reaches this same
         method (see the day-level guardrail below) to activate a hedge
@@ -1034,40 +1036,28 @@ class ExitMixin:
         since a beginning-entry can't fire while this position (now 4 legs)
         is still open. The EOD-time callers keep the default True, unchanged."""
         if not (getattr(self, "_hedge_carry_enabled", False) and self._cumulative_hedge_pnl(pos) < 0):
-            return False
-        if self._is_t1_from_expiry(pos, now):
-            # 2026-10-01 CRITICAL FIX, direct user correction: this used to
-            # roll straight onto next week's expiry SAME DAY
-            # (_start_hedge_roll) instead of hedging a contract that expires
-            # tomorrow -- user clarified the real intended behavior: on T-1
-            # EOD, a still-unhedged position in loss should NOT hedge (same
-            # reasoning as before -- a hedge built against tomorrow's expiry
-            # is pointless) AND should NOT roll/reopen same-day either. It
-            # simply closes both legs, books the loss, and starts genuinely
-            # fresh tomorrow via the normal entry_rules_beginning path (which
-            # already has its own low-anchor-LTP-shift safety net to move to
-            # next week's expiry on its own if the now-expiring-today
-            # contract's premiums are too decayed to clear the entry floor --
-            # no special-casing needed here for that).
-            logger.info(
-                "SellStraddle[%s]: T-1 EOD CLOSE (no hedge) — cumulative loss on the "
-                "expiring week; not hedging/rolling a contract that expires tomorrow -- "
-                "closing and starting fresh tomorrow.", self._underlying,
-            )
-            self._clog.info(
-                "T-1 EOD CLOSE (no hedge) — cumulative loss on the expiring week; "
-                "closing both legs, starting fresh tomorrow (no same-day reopen)."
-            )
-            await self._close_position_and_hedge("t1_no_hedge_eod_close")
-            self._stop_for_day = True
-            return True
+            return None
+        # 2026-10-26 CRITICAL FIX, direct user correction, real incident: this
+        # used to short-circuit on _is_t1_from_expiry() -- "don't hedge a
+        # contract expiring tomorrow, just close and start fresh tomorrow."
+        # That is now WRONG: the user's own spec is "if same week or same day
+        # expiry we will close at 1200 hrs [on expiry day], NOT on T-1 days."
+        # A hedge must always be attempted here regardless of how close the
+        # current contract is to its own expiry -- once genuinely hedged,
+        # _check_hedge_cumulative_profit_close / _check_hedge_noon_expiry_
+        # close (the every-tick checks added 2026-10-24) are what govern its
+        # resolution (₹500/lot profit, or 12:00 noon on the ACTUAL expiry
+        # day), never a same-day T-1 close. Real incident: a position hit
+        # day_loss_sl on 26-Oct (itself T-1 for the 27-Oct expiry) and was
+        # closed outright instead of hedged, purely because of this
+        # now-removed check.
         hedged = await self._try_build_hedge(pos, now)
         if hedged:
             if stop_for_day_on_hedge:
                 self._stop_for_day = True
-            return True
+            return "hedged"
         # Hedge couldn't be built -- caller falls through to a normal close.
-        return False
+        return None
 
     _HEDGE_PRECHECK_LEAD_MIN = 1
 
@@ -1121,7 +1111,7 @@ class ExitMixin:
         if pos.ce_leg_closed or pos.pe_leg_closed:
             return   # single-leg mode is always a surviving-leg-only close -- never hedge-eligible
         started = await self._hedge_or_roll_if_eligible(pos, now)
-        if started:
+        if started == "hedged":
             logger.info(
                 "SellStraddle[%s]: PRE-SQUAREOFF HEDGE — hedge/roll started %dmin ahead of "
                 "the %s deadline; real EOD squareoff will leave it carried.",
@@ -2186,10 +2176,10 @@ class ExitMixin:
                 self._last_day_loss_hedge_attempt = now
                 self._eod_decision_in_progress = True
                 try:
-                    hedged = await self._hedge_or_roll_if_eligible(pos, now, stop_for_day_on_hedge=False)
+                    hedge_outcome = await self._hedge_or_roll_if_eligible(pos, now, stop_for_day_on_hedge=False)
                 finally:
                     self._eod_decision_in_progress = False
-                if hedged:
+                if hedge_outcome == "hedged":
                     logger.info(
                         "SellStraddle[%s]: DAY LOSS SL — hedge activated (position now carried "
                         "positionally; day_loss_sl/day_profit_target now skipped while hedged).",
@@ -2199,7 +2189,7 @@ class ExitMixin:
                     return
                 _why = ("hedge_carry_enabled is OFF for this binding"
                         if not getattr(self, "_hedge_carry_enabled", False)
-                        else "no valid hedge strike found (or already T-1, closed instead -- see log above)")
+                        else "no valid hedge strike found")
                 logger.info(
                     "SellStraddle[%s]: DAY LOSS SL — no hedge activated (%s); retrying in 60s; holding "
                     "position unchanged (no roll, no close).",
