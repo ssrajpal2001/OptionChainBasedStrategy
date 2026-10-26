@@ -8,6 +8,7 @@ from __future__ import annotations
 import copy
 import logging
 from datetime import datetime, timedelta
+from typing import Optional
 
 from config.global_config import IST
 from data_layer.runtime_config import RuntimeConfig
@@ -193,19 +194,10 @@ class RollingMixin:
             if fired:
                 return True, which
 
-        if clone.is_hedged_positional:
-            fired, which = await self._check_hedge_cumulative_profit_close(clone, now, dry_run=True)
-            if fired:
-                return True, which
-
-        # NOTE: day_loss_sl is deliberately NOT checked here. Unlike the
-        # other four rules, a real day_loss_sl breach never does a plain
-        # close -- it always builds a protective hedge and carries the
-        # position forward (2026-10-06 fix, see the live inline check's own
-        # comment). "Close the current pair directly" is the correct
-        # stand-in for the four rules below, but it would misrepresent
-        # day_loss_sl's real behavior, so it's excluded until/unless a
-        # hedge-equivalent look-ahead is explicitly asked for.
+        # NOTE: day_loss_sl no longer exists (removed 2026-10-26) and the
+        # hedge mechanism is no longer profit-driven (it's unconditional
+        # overnight-only protection now) -- neither has a plain-close
+        # equivalent to look ahead for here anymore.
         if self._initial_net_credit > 0 and not clone.is_hedged_positional:
             total_day_pct, _, _ = self._total_day_pct(clone, clone.unrealized_pnl)
             if self._day_profit_target_pct > 0 and total_day_pct >= self._day_profit_target_pct:
@@ -223,10 +215,19 @@ class RollingMixin:
 
         return False, ""
 
-    async def _single_side_roll(self, now: datetime, reason: str) -> bool:
+    async def _single_side_roll(self, now: datetime, reason: str,
+                                 force_roll_side: Optional[str] = None) -> bool:
         """Check-first rollover: close the GOOD leg (less loss / more profit) and re-sell a new
         partner for the RUNNING / bleeding leg ONLY if a candidate passes LTP threshold +
         re-entry rules + ratio. If no candidate passes, the existing trade continues unchanged.
+
+        `force_roll_side` (2026-10-26, direct user spec for the ITM-gap
+        rebalancing roll, "itm_gap_rebalance_roll" reason): when given,
+        skips the "pick the good leg" step below and rolls that side
+        directly -- used specifically to roll the LOSING leg (the inverse
+        of every other reason's selection) while anchoring the profitable
+        leg, to shrink the strike gap. Every other reason passes None and
+        gets the normal "roll the good leg" behavior unchanged.
 
         Returns True if the roll actually executed (new leg opened), False otherwise --
         callers (e.g. the ITM-pair-gate rollover path) use this to decide whether to fall
@@ -238,22 +239,22 @@ class RollingMixin:
 
         # 2026-10-24 CORRECTION, direct user spec, real incident (22 Oct
         # 13:16: a vwap_rise_roll fired on a position hedged since 19 Oct
-        # 09:37 via plain day_loss_sl -- the >300-gap wide-gate tier had
-        # NOT yet activated at that moment, so the narrower check this used
-        # to be (_itm_pair_gate_wide_active only) didn't catch it, but per
-        # the user's correction it should have): rollover of ANY kind
-        # (ltp_decay, ratio_exit, exit_rules, vwap_rise -- all funnel through
-        # this one function) is now disabled the instant ANY hedge is
-        # standing (pos.is_hedged_positional), not only once the gap-specific
-        # wide-gate tier has activated. _itm_pair_gate_wide_active is kept in
-        # the check too for the brief window where the wide gate has gone
-        # active but its own hedge build hasn't landed yet (is_hedged_
-        # positional still False at that instant).
-        if pos.is_hedged_positional or getattr(self, "_itm_pair_gate_wide_active", False):
+        # 09:37 via plain day_loss_sl -- the narrower check this used to be
+        # (_itm_pair_gate_wide_active only) didn't catch it): rollover of
+        # the normal four reasons (ltp_decay, ratio_exit, exit_rules,
+        # vwap_rise) is disabled the instant ANY hedge is standing
+        # (pos.is_hedged_positional).
+        # 2026-10-26, direct user spec: the ITM-gap rebalancing roll itself
+        # (reason="itm_gap_rebalance_roll") is exactly what the wide-gate
+        # state now exists to DO, so it must not be blocked by its own
+        # active flag -- only the other four reasons stay blocked while
+        # wide-gate is active.
+        if pos.is_hedged_positional or (
+            getattr(self, "_itm_pair_gate_wide_active", False) and reason != "itm_gap_rebalance_roll"
+        ):
             self._clog.info(
                 "SellStraddle[%s]: ROLLOVER %s — skipped, position is hedged (or ITM-pair-gate-"
-                "wide is active) -- no rollover while any hedge is standing; only the ₹500/lot "
-                "cumulative-profit target or 12:00 noon on expiry day can close it.",
+                "wide is active) -- no rollover while any hedge is standing.",
                 self._underlying, reason,
             )
             return False
@@ -267,10 +268,12 @@ class RollingMixin:
         _attempts[reason] = now
         self._last_roll_attempt = _attempts
 
-        # 1. Identify the "good" leg to roll: higher short P&L = more profit / less loss.
+        # 1. Identify the leg to roll. Normally the "good" leg (higher short
+        # P&L = more profit / less loss); force_roll_side overrides this to
+        # roll the LOSING leg instead (see this method's own docstring).
         ce_pnl = float(getattr(pos.ce_leg, "entry_price", 0.0) or 0.0) - float(getattr(pos.ce_leg, "ltp", 0.0) or 0.0)
         pe_pnl = float(getattr(pos.pe_leg, "entry_price", 0.0) or 0.0) - float(getattr(pos.pe_leg, "ltp", 0.0) or 0.0)
-        roll_side = "CE" if ce_pnl >= pe_pnl else "PE"
+        roll_side = force_roll_side if force_roll_side else ("CE" if ce_pnl >= pe_pnl else "PE")
         keep_side = "PE" if roll_side == "CE" else "CE"
         keep_leg = pos.pe_leg if keep_side == "PE" else pos.ce_leg
         keep_strike = int(keep_leg.strike)
@@ -841,34 +844,24 @@ class RollingMixin:
     _ITM_PAIR_GATE_WIDE_GAP_PTS = 300.0
 
     async def _check_itm_pair_gate_wide(self, now: datetime) -> bool:
-        """2026-10-24, direct user spec: once both legs are ITM and the gap
-        between them widens past _ITM_PAIR_GATE_WIDE_GAP_PTS (300, a harder
-        case than the plain >100 arm/wait gate above), stop attempting any
-        rollover entirely (see _single_side_roll's own early-return), hedge
-        the position immediately (don't wait for the normal EOD hedge-and-
-        carry check), then watch THIS CYCLE's own cumulative P&L (sold+
-        hedge combined, pos.cycle_booked_pnl_pts -- never a different,
-        already-closed cycle's booked profit) against the same ₹500/lot
-        threshold the plain gate uses. Crossing it closes everything, cycle
-        ends. If it never crosses: once hedged, this position is now just an
-        ordinary hedged position (is_hedged_positional=True) like any other
-        -- the generic every-tick checks in exits.py's _check_exits
-        (_check_hedge_cumulative_profit_close / _check_hedge_noon_expiry_
-        close, both run earlier in the ladder than this method) own the
-        profit-or-noon-on-expiry-day force-close from here on, not this
-        gap-specific method -- so by the time this runs, a past-noon hedge
-        has already been closed and pos.status is no longer "open".
+        """2026-10-26 RE-DESIGN, direct user correction: once both legs are
+        ITM and the gap between them reaches >=_ITM_PAIR_GATE_WIDE_GAP_PTS
+        (300), this NO LONGER builds a hedge. Instead, it repeatedly
+        attempts a rebalancing roll: close the LOSING leg, keep the
+        PROFITABLE leg as anchor, and sell a fresh partner for the losing
+        side -- the inverse of every other roll reason's selection (see
+        _single_side_roll's own force_roll_side param) -- to shrink the gap
+        back down. If a valid partner is found, the roll executes and the
+        gap narrows (or the state simply re-evaluates against the new
+        pair's own gap next tick -- if it's STILL >=300, this same process
+        repeats). If no valid partner exists at this moment, this is a
+        no-op: hold and keep re-checking on a later tick (same fallback
+        behavior _single_side_roll already has for every other reason) --
+        no hedge, no close.
 
-        2026-10-24 CORRECTION: this used to also force-close at T-1-from-
-        expiry itself if the threshold was never crossed -- removed, since
-        the user's broader correction makes T-1 EOD wrong for ANY hedged
-        position (discards a hedge a full day before it needed to; see
-        _is_past_noon_on_expiry_day's own docstring). The generic noon check
-        above is the single source of truth for that deadline now.
-
-        Returns True if this fired a close this tick (caller stops
-        evaluating any other exit); False otherwise, including while
-        merely active/armed/hedged and still waiting."""
+        Returns True if a roll actually executed this tick (caller stops
+        evaluating any other exit, consistent with every other roll
+        reason); False otherwise, including while merely active/holding."""
         if not getattr(self, "_itm_pair_gate_enabled", False):
             return False
         pos = self._position
@@ -882,53 +875,30 @@ class RollingMixin:
         ce_s = int(pos.ce_leg.strike)
         pe_s = int(pos.pe_leg.strike)
         gap = abs(ce_s - pe_s)
-        if gap <= self._ITM_PAIR_GATE_WIDE_GAP_PTS:
+        if gap < self._ITM_PAIR_GATE_WIDE_GAP_PTS:
             self._itm_pair_gate_wide_active = False
             return False
 
         if not getattr(self, "_itm_pair_gate_wide_active", False):
             self._itm_pair_gate_wide_active = True
             self._clog.info(
-                "SellStraddle[%s]: ITM-PAIR GATE WIDE — gap=%d>%.0f (CE%d/PE%d) spot=%.0f -- "
-                "rollover disabled, hedging immediately.",
+                "SellStraddle[%s]: ITM-PAIR GATE WIDE — gap=%d>=%.0f (CE%d/PE%d) spot=%.0f -- "
+                "attempting rebalancing roll (close losing leg, keep profitable leg, "
+                "sell fresh partner for the losing side).",
                 self._underlying, gap, self._ITM_PAIR_GATE_WIDE_GAP_PTS, ce_s, pe_s, self._spot,
             )
 
-        if not pos.is_hedged_positional:
-            built = await self._try_build_hedge(pos, now)
-            if not built:
-                self._clog.warning(
-                    "SellStraddle[%s]: ITM-PAIR GATE WIDE — hedge build failed; closing complete "
-                    "position instead rather than leaving it unhedged with no rollover available.",
-                    self._underlying,
-                )
-                await self._close_position_and_hedge("itm_pair_gate_wide_hedge_failed")
-                self._itm_pair_gate_wide_active = False
-                return True
-            # Re-fetch: _try_build_hedge may have mutated this same pos object
-            # in place (it does -- sets hedge_ce_leg/hedge_pe_leg/
-            # is_hedged_positional on it directly), so no extra lookup needed,
-            # but self._position itself could theoretically have changed
-            # underneath if something else ran concurrently; be defensive.
-            pos = self._position
-            if not pos or pos.status != "open":
-                self._itm_pair_gate_wide_active = False
-                return True
-
-        cumulative_pts = self._cumulative_pnl_pts()
-        cumulative_inr = self._pnl_rs(cumulative_pts)
-        threshold_inr = (float(getattr(self, "_itm_pair_gate_profit_inr", 500.0))
-                          * float(getattr(self, "_lot_multiplier", 1) or 1))
-
-        if cumulative_inr >= threshold_inr:
+        ce_pnl = float(getattr(pos.ce_leg, "entry_price", 0.0) or 0.0) - float(getattr(pos.ce_leg, "ltp", 0.0) or 0.0)
+        pe_pnl = float(getattr(pos.pe_leg, "entry_price", 0.0) or 0.0) - float(getattr(pos.pe_leg, "ltp", 0.0) or 0.0)
+        loss_side = "CE" if ce_pnl < pe_pnl else "PE"
+        rolled = await self._single_side_roll(now, reason="itm_gap_rebalance_roll", force_roll_side=loss_side)
+        if not rolled:
             self._clog.info(
-                "SellStraddle[%s]: ITM-PAIR GATE WIDE — this cycle's cumulative ₹%.2f >= "
-                "threshold ₹%.2f -- closing complete position.",
-                self._underlying, cumulative_inr, threshold_inr,
+                "SellStraddle[%s]: ITM-PAIR GATE WIDE — no valid rollover partner for the losing "
+                "%s leg right now; holding, will keep re-checking.",
+                self._underlying, loss_side,
             )
-            await self._close_position_and_hedge("itm_pair_gate_wide_profit")
-            self._itm_pair_gate_wide_active = False
-            return True
+        return rolled
 
         return False
 
