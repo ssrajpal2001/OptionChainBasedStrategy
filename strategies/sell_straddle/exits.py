@@ -234,13 +234,17 @@ class ExitMixin:
         _crit = []
         _exit_dump = None
         try:
+            # 2026-10-26: day_loss_sl is removed entirely -- this display
+            # used to also flag "✓HIT" for it even though no real exit code
+            # acts on it anymore, same class of misleading-log bug as the
+            # historical 2026-07-21 ITM-pair-gate incident referenced above.
+            # Only day_profit_target is real now.
             _dpt = float(getattr(self, "_day_profit_target_pct", 0.0) or 0.0)
-            _dsl = float(getattr(self, "_day_loss_sl_pct", 0.0) or 0.0)
-            if credit and (_dpt or _dsl):
+            if credit and _dpt:
                 _dpct = self._day_pct(pos)
                 _lbl = "Day%(θ)" if self._day_exit_basis == "theta" else "Day%"
-                _crit.append((_lbl, f"{_dpct:.1f}% vs T{_dpt:.0f}/SL{_dsl:.0f}",
-                              (_dpt > 0 and _dpct >= _dpt) or (_dsl > 0 and _dpct <= -_dsl)))
+                _crit.append((_lbl, f"{_dpct:.1f}% vs T{_dpt:.0f}",
+                              _dpt > 0 and _dpct >= _dpt))
             elif not credit:
                 _crit.append(("Day%", "SKIPPED (initial_credit=0!)", False))
         except Exception as exc:
@@ -361,11 +365,6 @@ class ExitMixin:
                 _pct = self._day_pct(pos)
                 return (f"Day profit target | day={_pct:.1f}% (basis {self._day_exit_basis}) "
                         f"vs T={self._day_profit_target_pct:.1f}%")
-
-            if reason == "day_loss_sl":
-                _pct = self._day_pct(pos)
-                return (f"Day loss stoploss | day={_pct:.1f}% (basis {self._day_exit_basis}) "
-                        f"vs SL={self._day_loss_sl_pct:.1f}%")
 
             if reason == "itm_pair_gate":
                 _cum = self._session_realized_pnl_pts + pos.unrealized_pnl
@@ -1695,10 +1694,13 @@ class ExitMixin:
                 # not just when the stop actually fires -- shows WHICH side(s).
                 f" ITMrollProt({'/'.join(sorted(_prot_map.keys()))})" if _prot_map else "",
             ]) or " (none)"
+            # 2026-10-26: dropped the "SL:%" half of this line -- day_loss_sl
+            # is removed entirely now, so displaying its old config value
+            # here (even though nothing reads it anymore) was misleading.
             logger.info(
-                "SellStraddle[%s]: EXIT-CHECK pnl=%.2f pts | Day%% T:%.0f%%/SL:%.0f%% (credit=%.2f) | "
+                "SellStraddle[%s]: EXIT-CHECK pnl=%.2f pts | Day%% T:%.0f%% (credit=%.2f) | "
                 "EOD@%s | active exits:%s",
-                self._underlying, pnl, self._day_profit_target_pct, self._day_loss_sl_pct,
+                self._underlying, pnl, self._day_profit_target_pct,
                 self._initial_net_credit, self._force_exit.strftime("%H:%M"), _active,
             )
 

@@ -691,19 +691,17 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
                         self._sl_cooldown_until = _cd
                         logger.info("SellStraddle[%s]: restored re-entry cooldown -- no re-entry "
                                     "until %s.", self._underlying, _cd.strftime("%H:%M:%S"))
-                # If session losses already breach day_loss_sl, lock immediately so a
-                # fresh book can't re-enter and trigger an immediate day_loss_sl exit.
-                if (not self._stop_for_day and self._day_loss_sl_pct > 0
-                        and self._initial_net_credit > 0):
-                    _restored_pct = self._session_realized_pnl_pts / self._initial_net_credit * 100
-                    if _restored_pct <= -self._day_loss_sl_pct:
-                        self._stop_for_day = True
-                        logger.info(
-                            "SellStraddle[%s]: STOP FOR DAY set on restore — "
-                            "session P&L=%.1f%% already ≤ -%.1f%% (booked=%.2f credit=%.2f)",
-                            self._underlying, _restored_pct, self._day_loss_sl_pct,
-                            self._session_realized_pnl_pts, self._initial_net_credit,
-                        )
+                # 2026-10-26 CRITICAL FIX, direct user correction: day_loss_sl
+                # is removed entirely from the real exit-check code (see
+                # exits.py), but this restore-time guard was still live --
+                # it would set stop_for_day=True on every restart whenever
+                # the already-booked session P&L happened to be deep enough
+                # in loss, purely off the now-dead day_loss_sl_pct config
+                # value, blocking entries for the rest of the day for a
+                # reason that no longer exists anywhere else in the code.
+                # This is exactly the stuck-stop_for_day bug traced and
+                # manually worked around on 2026-10-26 before this fix --
+                # removed so a restart can no longer reproduce it.
                 logger.info("SellStraddle[%s]: restored session — booked=%.2f pts trades=%d "
                             "credit=%.2f stop_for_day=%s",
                             self._underlying, self._session_realized_pnl_pts, self._trades_today,
@@ -1125,8 +1123,8 @@ class SellStraddleStrategy(AbstractStrategyBook, PositionStoreMixin, PositionUpd
             f"║ HEDGE-AND-CARRY (EOD): {'ON' if getattr(self, '_hedge_carry_enabled', False) else 'OFF'} "
             f"(precheck {getattr(self, '_HEDGE_PRECHECK_LEAD_MIN', 1)}min before squareoff)",
             f"║ SAME-DAY EXPIRY: {'ALLOWED' if getattr(self, '_same_day_expiry_enabled', False) else 'SHIFT TO NEXT'}",
-            f"║ DAY: T:{self._day_profit_target_pct:.0f}% SL:{self._day_loss_sl_pct:.0f}% "
-            f"BASIS:{self._day_exit_basis.upper()}",
+            # 2026-10-26: SL (day_loss_sl) removed entirely -- dropped from this banner.
+            f"║ DAY: T:{self._day_profit_target_pct:.0f}% BASIS:{self._day_exit_basis.upper()}",
             f"║ DYNAMIC EXITS: {exit_rules}",
             f"║ EXIT PRIORITY: EOD→Day%→ITMgate→DayLow→LTPdecay→Ratio→ScalableTSL→exit_rules→VWAPrise",
             f"║ LIMITS: Max Daily Trades:{self._max_trades}",
