@@ -4728,7 +4728,7 @@ function amoTest() {
             <template x-if="indexConfig[adminSelectedIndex] && indexConfig[adminSelectedIndex].sell_straddle">
               <div>
                 <template x-for="(rule,i) in (indexConfig[adminSelectedIndex].sell_straddle.entry_rules_beginning||[])" :key="i">
-                  <div x-data="{}" class="flex flex-wrap xl:flex-nowrap items-center gap-2 mb-2 p-2 rounded" style="background:var(--t-surface);border:1px solid var(--t-border)">
+                  <div x-data="{}" class="flex flex-wrap items-center gap-2 mb-2 p-2 rounded" style="background:var(--t-surface);border:1px solid var(--t-border)">
                     <select x-model="rule.operator" class="t-input w-16 flex-none" title="Logic">
                       <option>AND</option><option>OR</option>
                     </select>
@@ -4799,7 +4799,7 @@ function amoTest() {
             <template x-if="indexConfig[adminSelectedIndex] && indexConfig[adminSelectedIndex].sell_straddle">
               <div>
                 <template x-for="(rule,i) in (indexConfig[adminSelectedIndex].sell_straddle.entry_rules_reentry||[])" :key="i">
-                  <div class="flex flex-wrap xl:flex-nowrap items-center gap-2 mb-2 p-2 rounded" style="background:var(--t-surface);border:1px solid var(--t-border)">
+                  <div class="flex flex-wrap items-center gap-2 mb-2 p-2 rounded" style="background:var(--t-surface);border:1px solid var(--t-border)">
                     <select x-model="rule.operator" class="t-input w-16 flex-none" title="Logic"><option>AND</option><option>OR</option></select>
                     <input type="text" x-model="rule.openBrackets" placeholder="(" class="t-input w-8 flex-none text-center" title="Open bracket">
                     <select x-model="rule.indicator" class="t-input flex-1 min-w-[90px]">
@@ -4866,7 +4866,7 @@ function amoTest() {
             <template x-if="indexConfig[adminSelectedIndex] && indexConfig[adminSelectedIndex].sell_straddle">
               <div>
                 <template x-for="(rule,i) in (indexConfig[adminSelectedIndex].sell_straddle.exit_rules||[])" :key="i">
-                  <div class="flex flex-wrap xl:flex-nowrap items-center gap-2 mb-2 p-2 rounded" style="background:var(--t-surface);border:1px solid var(--t-border)">
+                  <div class="flex flex-wrap items-center gap-2 mb-2 p-2 rounded" style="background:var(--t-surface);border:1px solid var(--t-border)">
                     <select x-model="rule.operator" class="t-input w-16 flex-none" title="Logic"><option>AND</option><option>OR</option></select>
                     <input type="text" x-model="rule.openBrackets" placeholder="(" class="t-input w-8 flex-none text-center" title="Open bracket">
                     <select x-model="rule.indicator" class="t-input flex-1 min-w-[90px]">
