@@ -461,9 +461,33 @@ class RollingMixin:
         # almost instantly for zero benefit. Check BEFORE opening the new
         # leg: if the hypothetical pair would already satisfy any full-close
         # rule, skip the roll entirely and close the CURRENT pair directly.
-        _would_close, _which_rule = await self._would_pair_trigger_fullclose(
-            roll_side, int(new_strike), float(new_ltp), keep_side, keep_strike, keep_ltp, now,
-        )
+        #
+        # 2026-10-27 CRITICAL FIX, direct user correction, real incident
+        # (22-Oct 13:20:15): this look-ahead's clone treats BOTH the kept
+        # leg and the candidate leg as freshly opened at zero running P&L,
+        # so its "cumulative" collapses to just pos.cycle_booked_pnl_pts --
+        # whatever this cycle already booked from EARLIER, unrelated rolls.
+        # Once a cycle has booked enough from ordinary rolls to clear the
+        # Rs500/lot bar on its own (easy after 2-3 profitable rolls), this
+        # check will ALWAYS report "would immediately fullclose" for ANY
+        # later roll attempt, real embedded loss on the kept/rolled leg or
+        # not -- confirmed live: a position with a genuine -211.70pt real
+        # loss on its Put leg got read as "would close profitably" purely
+        # because this cycle's two earlier Call rolls had already banked
+        # +167pts between them. For itm_gap_rebalance_roll specifically,
+        # this is actively wrong: that mechanic exists BECAUSE a real
+        # losing leg needs rolling to shrink an ITM gap, and it already has
+        # its OWN correct post-roll close check (_check_itm_pair_gate_wide,
+        # evaluated on real numbers the very next tick, not a fictional
+        # all-zero clone) -- so skip this look-ahead entirely for that one
+        # reason and let the real roll execute; the wide-gate's own check
+        # is what should decide whether the result closes, not this one.
+        if reason == "itm_gap_rebalance_roll":
+            _would_close, _which_rule = False, ""
+        else:
+            _would_close, _which_rule = await self._would_pair_trigger_fullclose(
+                roll_side, int(new_strike), float(new_ltp), keep_side, keep_strike, keep_ltp, now,
+            )
         if _would_close:
             _remark = (
                 f"Roll skipped: the candidate pair would have immediately triggered "
