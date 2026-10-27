@@ -3699,6 +3699,15 @@ function amoTest() {
                 x-text="m.label"></button>
       </template>
     </div>
+          </div>
+        </template>
+      </div>
+      <div class="flex justify-end">
+        <button class="btn-action" style="width:auto;padding:6px 16px" @click="loadClientPositions()" :disabled="csPosBrokerLoading">
+          <span x-show="!csPosBrokerLoading">↻ Refresh</span><span x-show="csPosBrokerLoading">Loading…</span>
+        </button>
+      </div>
+    </div>
     <div x-show="clientMenu === 'history'" class="space-y-4">
       <div class="t-card rounded">
         <div class="flex flex-wrap items-center justify-between gap-2 px-5 py-3 border-b" style="border-color:var(--t-border)">
@@ -3861,19 +3870,14 @@ function amoTest() {
           <div class="sec-label">Live Activity Feed</div>
           <span class="font-mono text-xs" style="color:var(--t-muted)" x-text="myEvents.length + ' events'"></span>
         </div>
-        <div class="flex-1 overflow-y-auto">
-          <div x-show="myEvents.length===0" class="font-mono text-xs text-center py-6" style="color:var(--t-muted)">No events yet…</div>
-          <template x-for="(evt,i) in myEvents" :key="i">
-            <div class="feed-row">
-              <span class="font-mono text-xs shrink-0" style="color:var(--t-muted)" x-text="evt.ts||''"></span>
-              <span class="font-mono text-xs font-bold shrink-0" :style="`color:${evtColor(evt)}`" x-text="evt.code||evt.side||''"></span>
+</div>
+</main>
               <span class="font-mono text-xs truncate" style="color:var(--t-muted)"
                     x-text="evt.msg||(evt.sym?evt.sym+' '+(evt.qty||'')+'@'+(evt.avg_price||''):'')"></span>
             </div>
           </template>
         </div>
-      </div>
-    </div>
+</div>
 </div>
 </main>
 <footer class="shrink-0 border-t px-5 py-2 flex items-center justify-between" style="border-color:var(--t-border)">
@@ -3945,12 +3949,3 @@ function amoTest() {
            :style="brokerAddOk ? 'color:var(--t-green); background:rgba(var(--t-green-rgb),0.05); border:1px solid rgba(var(--t-green-rgb),0.2)'
                                : 'color:var(--t-red); background:rgba(var(--t-red-rgb),0.05); border:1px solid rgba(var(--t-red-rgb),0.2)'"
            x-text="brokerAddMsg"></div>
-      <button class="btn-add" @click="addBroker()" :disabled="brokerAddLoading">
-        <span x-show="!brokerAddLoading">SAVE &amp; BOOTSTRAP WORKER THREAD</span>
-        <span x-show="brokerAddLoading">CONNECTING TO BROKER…</span>
-      </button>
-    </div>
-  </div>
-</div>
-</body>
-</html>

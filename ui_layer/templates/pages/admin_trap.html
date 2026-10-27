@@ -3631,11 +3631,14 @@ function amoTest() {
   </div>
   </div>
 </main>
-<footer class="shrink-0 border-t px-5 py-2 flex items-center justify-between" style="border-color:var(--t-border)">
-  <span class="font-mono text-xs" style="color:var(--t-muted)">TERMINUS · OptionChain AlgoTrader · NSE Options</span>
-  <span class="font-mono text-xs" style="color:var(--t-muted)" x-text="'IST ' + istTime"></span>
-</footer>
+              <span class="font-mono text-xs truncate" style="color:var(--t-muted)"
+                    x-text="evt.msg||(evt.sym?evt.sym+' '+(evt.qty||'')+'@'+(evt.avg_price||''):'')"></span>
+            </div>
+          </template>
+        </div>
 </div>
 </div>
-</body>
-</html>
+      <div x-show="brokerAddMsg" class="font-mono text-xs px-2 py-1.5 rounded"
+           :style="brokerAddOk ? 'color:var(--t-green); background:rgba(var(--t-green-rgb),0.05); border:1px solid rgba(var(--t-green-rgb),0.2)'
+                               : 'color:var(--t-red); background:rgba(var(--t-red-rgb),0.05); border:1px solid rgba(var(--t-red-rgb),0.2)'"
+           x-text="brokerAddMsg"></div>

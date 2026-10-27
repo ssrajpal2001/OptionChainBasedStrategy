@@ -4223,15 +4223,6 @@ function amoTest() {
                                     x-text="_vp.put_oi_trend||'—'"></span>
                             </span>
                           </div>
-                          <!-- 2026-10-16 fix: this panel had fallen out of sync with
-                               monitor.html's own 2026-10-15 dual high/low-anchor
-                               redesign -- row.thr referenced old single-threshold
-                               field names (future_oi_trend_threshold_pct/
-                               oi_trend_threshold_pct) that no longer exist on the
-                               API response, rendering "NaN% to undefined% threshold"
-                               for every row. Brought in line with monitor.html's own
-                               current block (both HIGH anchor/Fall-check and LOW
-                               anchor/Rise-check, each with its own real threshold). -->
                           <div class="mb-2 space-y-0.5" style="color:var(--t-dim)">
                             <template x-for="row in [
                                        {label:'FUT', now:_vp.future_oi_now, hiAnchor:_vp.future_oi_anchor, pct:_vp.future_oi_pct, fallThr:_vp.future_oi_fall_threshold_pct, loAnchor:_vp.future_oi_low_anchor, pctLo:_vp.future_oi_low_pct, riseThr:_vp.future_oi_rise_threshold_pct},
@@ -5246,7 +5237,7 @@ function amoTest() {
                               :style="ss.exit_basis==='theta'
                                 ? 'color:var(--t-amber);border:1px solid rgba(var(--t-amber-rgb),0.4)'
                                 : 'color:var(--t-cyan);border:1px solid rgba(var(--t-cyan-rgb),0.4)'"
-                              x-text="(ss.exit_basis==='theta'?'THETA-BASED':'LTP-BASED')+' · T'+(ss.day_target_pct||0).toFixed(0)+'% / SL'+(ss.day_sl_pct||0).toFixed(0)+'%'"></span>
+                              x-text="(ss.exit_basis==='theta'?'THETA-BASED':'LTP-BASED')+' · T'+(ss.day_target_pct||0).toFixed(0)+'%'"></span>
                       </div>
                       <template x-if="ss.ltp">
                         <div class="rounded p-1.5 space-y-0.5"
@@ -5292,10 +5283,6 @@ function amoTest() {
                               <span :style="`color:${(ss.theta.remaining_pts||0)<=0?'var(--t-green)':'var(--t-dim)'}`"
                                     x-text="(ss.theta.remaining_pts||0)<=0?'✓ target reached!':(ss.theta.remaining_pts||0).toFixed(1)+' pts · '+ccy+fmt(ss.theta.remaining_rs)"></span>
                             </div>
-                          </div>
-                          <div class="flex justify-between">
-                            <span style="color:var(--t-muted)" x-text="'Loss SL ('+(ss.day_sl_pct||0).toFixed(0)+'%)'"></span>
-                            <span style="color:var(--t-red)" x-text="(ss.theta.sl_amt||0).toFixed(1)+' pts · '+ccy+fmt(ss.theta.sl_rs)"></span>
                           </div>
                           <div class="flex justify-between border-t pt-0.5" style="border-color:var(--t-border)">
                             <span style="color:var(--t-muted)">Current Premium</span>
@@ -5511,18 +5498,17 @@ function amoTest() {
                 </div>
               </template>
             </div>
-          </div>
-        </template>
-      </div>
-      <div class="flex justify-end">
-        <button class="btn-action" style="width:auto;padding:6px 16px" @click="loadClientPositions()" :disabled="csPosBrokerLoading">
-          <span x-show="!csPosBrokerLoading">↻ Refresh</span><span x-show="csPosBrokerLoading">Loading…</span>
-        </button>
-      </div>
-    </div>
 </template>
 </template>
 </div>
+</div>
+</div>
+</main>
+              <span class="font-mono text-xs truncate" style="color:var(--t-muted)"
+                    x-text="evt.msg||(evt.sym?evt.sym+' '+(evt.qty||'')+'@'+(evt.avg_price||''):'')"></span>
+            </div>
+          </template>
+        </div>
 </div>
 </div>
 </main>
@@ -5595,12 +5581,3 @@ function amoTest() {
            :style="brokerAddOk ? 'color:var(--t-green); background:rgba(var(--t-green-rgb),0.05); border:1px solid rgba(var(--t-green-rgb),0.2)'
                                : 'color:var(--t-red); background:rgba(var(--t-red-rgb),0.05); border:1px solid rgba(var(--t-red-rgb),0.2)'"
            x-text="brokerAddMsg"></div>
-      <button class="btn-add" @click="addBroker()" :disabled="brokerAddLoading">
-        <span x-show="!brokerAddLoading">SAVE &amp; BOOTSTRAP WORKER THREAD</span>
-        <span x-show="brokerAddLoading">CONNECTING TO BROKER…</span>
-      </button>
-    </div>
-  </div>
-</div>
-</body>
-</html>

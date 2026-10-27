@@ -4061,7 +4061,7 @@ function amoTest() {
             <template x-if="indexConfig[adminSelectedIndex] && indexConfig[adminSelectedIndex].sell_straddle">
               <div>
                 <template x-for="(rule,i) in (indexConfig[adminSelectedIndex].sell_straddle.entry_rules_beginning||[])" :key="i">
-                  <div x-data="{}" class="flex flex-wrap xl:flex-nowrap items-center gap-2 mb-2 p-2 rounded" style="background:var(--t-surface);border:1px solid var(--t-border)">
+                  <div x-data="{}" class="flex flex-wrap items-center gap-2 mb-2 p-2 rounded" style="background:var(--t-surface);border:1px solid var(--t-border)">
                     <select x-model="rule.operator" class="t-input w-16 flex-none" title="Logic">
                       <option>AND</option><option>OR</option>
                     </select>
@@ -4130,7 +4130,7 @@ function amoTest() {
             <template x-if="indexConfig[adminSelectedIndex] && indexConfig[adminSelectedIndex].sell_straddle">
               <div>
                 <template x-for="(rule,i) in (indexConfig[adminSelectedIndex].sell_straddle.entry_rules_reentry||[])" :key="i">
-                  <div class="flex flex-wrap xl:flex-nowrap items-center gap-2 mb-2 p-2 rounded" style="background:var(--t-surface);border:1px solid var(--t-border)">
+                  <div class="flex flex-wrap items-center gap-2 mb-2 p-2 rounded" style="background:var(--t-surface);border:1px solid var(--t-border)">
                     <select x-model="rule.operator" class="t-input w-16 flex-none" title="Logic"><option>AND</option><option>OR</option></select>
                     <input type="text" x-model="rule.openBrackets" placeholder="(" class="t-input w-8 flex-none text-center" title="Open bracket">
                     <select x-model="rule.indicator" class="t-input flex-1 min-w-[90px]">
@@ -4195,7 +4195,7 @@ function amoTest() {
             <template x-if="indexConfig[adminSelectedIndex] && indexConfig[adminSelectedIndex].sell_straddle">
               <div>
                 <template x-for="(rule,i) in (indexConfig[adminSelectedIndex].sell_straddle.exit_rules||[])" :key="i">
-                  <div class="flex flex-wrap xl:flex-nowrap items-center gap-2 mb-2 p-2 rounded" style="background:var(--t-surface);border:1px solid var(--t-border)">
+                  <div class="flex flex-wrap items-center gap-2 mb-2 p-2 rounded" style="background:var(--t-surface);border:1px solid var(--t-border)">
                     <select x-model="rule.operator" class="t-input w-16 flex-none" title="Logic"><option>AND</option><option>OR</option></select>
                     <input type="text" x-model="rule.openBrackets" placeholder="(" class="t-input w-8 flex-none text-center" title="Open bracket">
                     <select x-model="rule.indicator" class="t-input flex-1 min-w-[90px]">
@@ -4646,11 +4646,14 @@ function amoTest() {
   </div>
   </div>
 </main>
-<footer class="shrink-0 border-t px-5 py-2 flex items-center justify-between" style="border-color:var(--t-border)">
-  <span class="font-mono text-xs" style="color:var(--t-muted)">TERMINUS · OptionChain AlgoTrader · NSE Options</span>
-  <span class="font-mono text-xs" style="color:var(--t-muted)" x-text="'IST ' + istTime"></span>
-</footer>
+              <span class="font-mono text-xs truncate" style="color:var(--t-muted)"
+                    x-text="evt.msg||(evt.sym?evt.sym+' '+(evt.qty||'')+'@'+(evt.avg_price||''):'')"></span>
+            </div>
+          </template>
+        </div>
 </div>
 </div>
-</body>
-</html>
+      <div x-show="brokerAddMsg" class="font-mono text-xs px-2 py-1.5 rounded"
+           :style="brokerAddOk ? 'color:var(--t-green); background:rgba(var(--t-green-rgb),0.05); border:1px solid rgba(var(--t-green-rgb),0.2)'
+                               : 'color:var(--t-red); background:rgba(var(--t-red-rgb),0.05); border:1px solid rgba(var(--t-red-rgb),0.2)'"
+           x-text="brokerAddMsg"></div>
