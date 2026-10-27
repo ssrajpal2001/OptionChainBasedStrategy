@@ -3081,9 +3081,10 @@ class DashboardServer:
                         if strat is not None:
                             _basis = str(getattr(strat, "_day_exit_basis", "ltp")).lower()
                             _dpt = float(getattr(strat, "_day_profit_target_pct", 0.0) or 0.0)
-                            _dsl = float(getattr(strat, "_day_loss_sl_pct", 0.0) or 0.0)
+                            # 2026-10-26: day_loss_sl removed entirely -- stopped surfacing
+                            # day_sl_pct here (the UI no longer reads it either).
                             straddle_info = {"exit_basis": _basis, "day_target_pct": _dpt,
-                                             "day_sl_pct": _dsl, "total_value_sold": 0.0,
+                                             "total_value_sold": 0.0,
                                              "ltp": None, "theta": None, "cooldown": None}
                             # Re-entry cooldown after a full exit: surface the lift time + seconds
                             # left so the client can see entry is paused while data keeps flowing.
