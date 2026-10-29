@@ -298,6 +298,14 @@ class RollingMixin:
         real_step = self._cfg.exchange.strike_steps.get(self._underlying, 50.0) if self._cfg else 50.0
         offset = int(max(int(ss.get("pool_otm_depth", 0) or 0), int(ss.get("pool_itm_depth", 0) or 0)) or ss.get("v_slope_pool_offset") or ss.get("reentry_offset") or 4)
         max_itm = int(ss.get("roll_max_itm_steps", 5))
+        # 2026-10-27, direct user request: optional re-enable of the dual
+        # ltp_target/theta_target floor for rollover partner search (disabled
+        # by default -- see select_rollover_partner_directional's own
+        # docstring for the 2026-08-27 history). Off by default so existing
+        # live behavior is unchanged.
+        _dual_floor_on = bool(ss.get("rollover_enforce_dual_floor", False))
+        _roll_ltp_target = self._ltp_target if _dual_floor_on else 0.0
+        _roll_theta_target = getattr(self, "_theta_target", 0.0) if _dual_floor_on else 0.0
 
         # 2. FIND A VALID PARTNER for the running/bleeding leg.
         #    - premium must be <= kept leg (LOSING/kept leg's own LTP)
@@ -338,6 +346,8 @@ class RollingMixin:
             max_search_steps=max(1, offset * 2),
             trace=_partner_trace,
             itm_cap_step_pts=_ROLLOVER_STRIKE_STEP,
+            ltp_target=_roll_ltp_target,
+            theta_target=_roll_theta_target,
         )
 
         if partner:
@@ -886,7 +896,10 @@ class RollingMixin:
         Returns True if a roll actually executed this tick (caller stops
         evaluating any other exit, consistent with every other roll
         reason); False otherwise, including while merely active/holding."""
-        if not getattr(self, "_itm_pair_gate_enabled", False):
+        # 2026-10-27, direct user spec: this mechanic now has its OWN
+        # independent toggle (itm_pair_gate_wide_enabled), separate from
+        # the plain >100pt gate's itm_pair_gate_enabled -- default OFF.
+        if not getattr(self, "_itm_pair_gate_wide_enabled", False):
             return False
         pos = self._position
         if not pos or pos.status != "open":

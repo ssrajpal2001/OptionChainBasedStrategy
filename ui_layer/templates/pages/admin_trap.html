@@ -1855,6 +1855,7 @@ document.addEventListener('alpine:init', () => {
         tsl_enabled: true, trail_lock_pct: 20.0, trail_floor_pct: 10.0, trail_basis: 'ltp',
         tsl_scalable:  { enabled: false, basis: 'ltp', base_profit: 3000, base_lock: 1500, step_profit: 1000, step_lock: 500 },
         itm_pair_gate_enabled: true,
+        itm_pair_gate_wide_enabled: false,
         itm_roll_protection_enabled: false,
         day_low_exit_enabled: false, day_low_freeze_time: '15:00',
         post1500_exit_enabled: true, shadow_vwap_enabled: true,
@@ -1898,6 +1899,7 @@ document.addEventListener('alpine:init', () => {
       if (!ss.ltp_decay)     ss.ltp_decay     = { enabled: false, ltp_exit_min: 20.0 };
       if (!ss.vwap_rise_sl)  ss.vwap_rise_sl  = { enabled: false, tf: 1, threshold: 1.0 };
       if (ss.itm_pair_gate_enabled === undefined) ss.itm_pair_gate_enabled = true;
+      if (ss.itm_pair_gate_wide_enabled === undefined) ss.itm_pair_gate_wide_enabled = false;
       if (ss.itm_roll_protection_enabled === undefined) ss.itm_roll_protection_enabled = false;
       if (ss.day_low_exit_enabled === undefined) ss.day_low_exit_enabled = false;
       if (ss.day_low_freeze_time === undefined) ss.day_low_freeze_time = '15:00';
@@ -3631,14 +3633,11 @@ function amoTest() {
   </div>
   </div>
 </main>
-              <span class="font-mono text-xs truncate" style="color:var(--t-muted)"
-                    x-text="evt.msg||(evt.sym?evt.sym+' '+(evt.qty||'')+'@'+(evt.avg_price||''):'')"></span>
-            </div>
-          </template>
-        </div>
+<footer class="shrink-0 border-t px-5 py-2 flex items-center justify-between" style="border-color:var(--t-border)">
+  <span class="font-mono text-xs" style="color:var(--t-muted)">TERMINUS · OptionChain AlgoTrader · NSE Options</span>
+  <span class="font-mono text-xs" style="color:var(--t-muted)" x-text="'IST ' + istTime"></span>
+</footer>
 </div>
 </div>
-      <div x-show="brokerAddMsg" class="font-mono text-xs px-2 py-1.5 rounded"
-           :style="brokerAddOk ? 'color:var(--t-green); background:rgba(var(--t-green-rgb),0.05); border:1px solid rgba(var(--t-green-rgb),0.2)'
-                               : 'color:var(--t-red); background:rgba(var(--t-red-rgb),0.05); border:1px solid rgba(var(--t-red-rgb),0.2)'"
-           x-text="brokerAddMsg"></div>
+</body>
+</html>

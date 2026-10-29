@@ -53,26 +53,42 @@ def seg(a, b):
 # for the grep commands used) after the previous hand-tracked-offset scheme
 # broke on an edit landing between ADMIN_SHELL and CLIENT_SHELL instead of
 # before both.
-HEAD_LOGIN_NAV = seg(1, 3573)         # head + shared JS + login + top navbar + mobile drawer
-ADMIN_SHELL    = seg(3574, 3637)      # admin subnav + <main admin> open + banner alerts
-CLIENT_SHELL   = seg(6433, 6720)      # <main client> open + alerts + onboarding/pending + topbar + subnav
-FOOTER_ONLY    = seg(10232, 10236)    # just <footer>...</footer>, no surrounding div-closes
-BROKER_MODAL   = seg(10242, 10325)    # client-only broker-add modal
-FINAL_CLOSE    = seg(10326, 10330)    # blank lines + </body></html>
+HEAD_LOGIN_NAV = seg(1, 3575)         # head + shared JS + login + top navbar + mobile drawer
+ADMIN_SHELL    = seg(3576, 3639)      # admin subnav + <main admin> open + banner alerts
+# 2026-10-27: boundaries re-derived (by exact anchor-text lookup, not
+# arithmetic) against the new ITM PAIR GATE WIDE admin toggle card
+# (guardrails tab) + the 2 Alpine-default-seed lines earlier in the shared
+# header -- both landed ahead of everything below this point.
+CLIENT_SHELL   = seg(6451, 6738)      # <main client> open + alerts + onboarding/pending + topbar + subnav
+FOOTER_ONLY    = seg(10263, 10267)    # just <footer>...</footer>, no surrounding div-closes
+BROKER_MODAL   = seg(10273, 10356)    # client-only broker-add modal
+FINAL_CLOSE    = seg(10357, 10361)    # blank lines + </body></html>
+# 2026-10-29 CRITICAL FIX, real live incident: FOOTER_ONLY/BROKER_MODAL/
+# FINAL_CLOSE had been pointing at the wrong lines for a while -- NOT
+# something tonight's edits caused, confirmed by rebuilding from a 100%
+# pristine git HEAD checkout and finding the exact same wrong output. The
+# old FOOTER_ONLY range actually captured 5 lines from the MIDDLE of the
+# real "Live Activity Feed" x-for template body (the evt.msg span), not the
+# real <footer> (which sits ~13 lines further down) -- every admin AND
+# client page in production has been shipping that orphaned span, with
+# "evt" undefined outside its real x-for scope (Alpine throws "evt is not
+# defined" the instant it tries to render), and the real <footer> was never
+# included anywhere. Re-derived every one of these three by exact anchor
+# text, not arithmetic -- see git history for the before/after line dump.
 
 ADMIN_TABS = {
-    "dashboard":  (3638, 4087, "adminTab='dashboard'"),
-    "strategies": (4088, 5362, "adminTab='strategies'; loadStrategyConfig(); loadStrategyRegistry(); loadIndexConfig(adminSelectedIndex)"),
-    "feeder":     (5363, 5794, "adminTab='feeder'"),
-    "trap":       (5795, 5942, "adminTab='trap'"),
-    "clients":    (5943, 6425, "adminTab='clients'; loadClientProfiles(); loadRiskSummary()"),
+    "dashboard":  (3640, 4089, "adminTab='dashboard'"),
+    "strategies": (4090, 5380, "adminTab='strategies'; loadStrategyConfig(); loadStrategyRegistry(); loadIndexConfig(adminSelectedIndex)"),
+    "feeder":     (5381, 5812, "adminTab='feeder'"),
+    "trap":       (5813, 5960, "adminTab='trap'"),
+    "clients":    (5961, 6443, "adminTab='clients'; loadClientProfiles(); loadRiskSummary()"),
 }
 CLIENT_TABS = {
-    "dashboard":  (6721, 6797, "clientMenu='dashboard'; loadClientPositions()"),
-    "strategies": (6798, 6932, "clientMenu='strategies'"),
-    "brokers":    (6933, 7905, "clientMenu='brokers'"),
-    "positions":  (7906, 10036, "clientMenu='positions'; loadClientPositions()"),
-    "history":    (10037, 10225, "clientMenu='history'; loadClientHistory()"),  # excludes orphaned line
+    "dashboard":  (6739, 6815, "clientMenu='dashboard'; loadClientPositions()"),
+    "strategies": (6816, 6950, "clientMenu='strategies'"),
+    "brokers":    (6951, 7923, "clientMenu='brokers'"),
+    "positions":  (7924, 10054, "clientMenu='positions'; loadClientPositions()"),
+    "history":    (10055, 10243, "clientMenu='history'; loadClientHistory()"),  # excludes orphaned line
 }
 
 # ── Convert tab-click handlers (in the SHARED fragments) to real navigation ──

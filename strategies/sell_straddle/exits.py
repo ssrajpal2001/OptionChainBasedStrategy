@@ -2042,15 +2042,18 @@ class ExitMixin:
         # 70%-budget running loss had genuinely crossed the line. Running these two
         # first (still cheap no-ops when the gate is off / nothing is armed) means a
         # hard ₹-loss cap on an already-profit-funded leg always gets first look.
-        # 2026-10-26, direct user spec: once both legs are ITM AND the gap
-        # between them reaches >=300pts (a harder case than the plain >100
-        # arm/wait gate below), attempt a rebalancing roll instead -- close
-        # the losing leg, keep the profitable leg as anchor, sell a fresh
-        # partner for the losing side (see rolling.py's _check_itm_pair_
-        # gate_wide). No hedge, no close -- if no partner qualifies, this
-        # is a no-op and holds. Must run BEFORE the plain gate below, since
-        # a gap>=300 pair always also satisfies gap>100 -- the wide check
-        # owns that case entirely while active.
+        # 2026-10-27, direct user spec: the 2026-10-26 itm_gap_rebalance_roll
+        # mechanic (roll the LOSING leg, keep the profitable leg as anchor,
+        # once gap>=300) is now gated on its OWN admin toggle
+        # (itm_pair_gate_wide_enabled, default OFF -- real-data backtesting
+        # showed it wasn't promising) instead of being hardcoded on or off.
+        # _check_itm_pair_gate_wide no-ops immediately (returns False,
+        # never sets _itm_pair_gate_wide_active) when that toggle is off, so
+        # the plain >100pt gate below runs unconditionally in that state --
+        # same net effect as the prior hardcoded-disable, but admin-
+        # switchable without a code change. When the toggle IS on, this
+        # reproduces the original 2026-10-26 design exactly: the wide gate
+        # owns a gap>=300 pair entirely while active, plain gate skipped.
         if await self._check_itm_pair_gate_wide(now):
             return
         if not getattr(self, "_itm_pair_gate_wide_active", False):

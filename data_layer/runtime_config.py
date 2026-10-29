@@ -55,6 +55,10 @@ _SS_INDEX_DEFAULT: Dict[str, Any] = {
     "roll_max_itm_steps":    5,
     "itm_pair_gate_enabled": True,
     "itm_pair_gate_profit_inr": 500.0,
+    # 2026-10-27, direct user spec: roll-the-losing-leg rebalancing mechanic
+    # for a >=300pt ITM gap, independent of itm_pair_gate_enabled above.
+    # Default OFF -- real-data backtesting showed it wasn't promising.
+    "itm_pair_gate_wide_enabled": False,
     # Day-low reversal exit: tracks the day's lowest CE+PE combined premium from
     # entry to day_low_freeze_time, then exits full the moment the rate returns
     # to that frozen low. Opt-in, unvalidated -- default OFF.

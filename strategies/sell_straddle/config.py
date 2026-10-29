@@ -77,6 +77,13 @@ class SellStraddleConfig:
     itm_pair_gate_profit_inr: float
     itm_pair_gate_min_strike_gap: float
     itm_roll_protection_enabled: bool
+    # 2026-10-27, direct user spec: the 2026-10-26 "roll the losing leg,
+    # keep the profitable leg, shrink the gap" mechanic (rolling.py's
+    # _check_itm_pair_gate_wide) is now its OWN independent toggle, separate
+    # from itm_pair_gate_enabled above (the plain >100pt full-close gate).
+    # Default OFF -- real-data backtesting on 2026-10-27 showed it wasn't
+    # promising; admin must explicitly turn it back on to re-enable it.
+    itm_pair_gate_wide_enabled: bool
 
     day_low_exit_enabled: bool
     day_low_freeze_time: dtime
@@ -267,6 +274,9 @@ def load_sell_straddle_config(
     itm_pair_gate_enabled = bool(ss.get("itm_pair_gate_enabled", True))
     itm_pair_gate_profit_inr = float(ss.get("itm_pair_gate_profit_inr", 500.0))
     itm_pair_gate_min_strike_gap = float(ss.get("itm_pair_gate_min_strike_gap", 100.0))
+    # 2026-10-27: independent toggle for the >=300pt "roll the losing leg"
+    # rebalancing mechanic, default OFF (see the dataclass field's own note).
+    itm_pair_gate_wide_enabled = bool(ss.get("itm_pair_gate_wide_enabled", False))
     # 2026-09-22, direct user instruction: the 70%-of-booked-profit roll
     # protection stop (armed by _single_side_roll on EVERY single-side roll
     # since the 2026-08-27 broadening, not just the ITM pair gate's own roll)
@@ -395,6 +405,7 @@ def load_sell_straddle_config(
         itm_pair_gate_enabled=itm_pair_gate_enabled,
         itm_pair_gate_profit_inr=itm_pair_gate_profit_inr,
         itm_pair_gate_min_strike_gap=itm_pair_gate_min_strike_gap,
+        itm_pair_gate_wide_enabled=itm_pair_gate_wide_enabled,
         itm_roll_protection_enabled=itm_roll_protection_enabled,
         day_low_exit_enabled=day_low_exit_enabled,
         day_low_freeze_time=day_low_freeze_time,
@@ -488,6 +499,7 @@ class ConfigMixin:
         self._itm_pair_gate_enabled = cfg.itm_pair_gate_enabled
         self._itm_pair_gate_profit_inr = cfg.itm_pair_gate_profit_inr
         self._itm_pair_gate_min_strike_gap = cfg.itm_pair_gate_min_strike_gap
+        self._itm_pair_gate_wide_enabled = cfg.itm_pair_gate_wide_enabled
         self._itm_roll_protection_enabled = cfg.itm_roll_protection_enabled
         if not hasattr(self, "_itm_roll_protection") or not isinstance(self._itm_roll_protection, dict):
             # Keyed by side ("CE"/"PE") -- each side's 70%-of-booked-profit budget is

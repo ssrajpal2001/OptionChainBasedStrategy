@@ -194,13 +194,14 @@ def _evaluate_roll_candidate(strike_prem, roll_side, strike, kept_strike, kept_l
     dict; diag["reject_reason"] is None iff the candidate passed everything
     (diag["score"] then holds its metric score).
 
-    2026-08-27, direct user spec: the dual ltp_target/theta_target floor (still applied
-    at fresh BEGINNING/re-entry via leg_passes_dual_floor elsewhere in this module) is
-    deliberately NOT applied here anymore -- during a rollover the only requirement is
-    the premium gate below; a candidate strike being "too cheap" for a fresh entry's
-    own quality bar is not a reason to reject it as a rollover partner. `ltp_target`/
-    `theta_target` are still accepted as parameters (unused here now) purely so
-    callers/traces don't need touching.
+    2026-08-27, direct user spec: the dual ltp_target/theta_target floor was
+    deliberately NOT applied here for a while -- during a rollover the only
+    requirement was the premium gate below. 2026-10-27, direct user request
+    (backtest comparison): the dual floor is now OPTIONALLY re-enabled for the
+    rollover path too, gated on `ltp_target > 0 or theta_target > 0` so every
+    existing caller that still passes 0.0/0.0 (the ITM-roll-protection pool
+    search via select_partner_for, and the default config) is byte-identical
+    to before this change.
 
     Premium gate — three mutually exclusive modes, selected by the caller:
     - `ltp_le_kept=True` (select_partner_for / the ITM-roll-protection pool search,
@@ -244,6 +245,12 @@ def _evaluate_roll_candidate(strike_prem, roll_side, strike, kept_strike, kept_l
         diag["itm_pass"] = True
     else:
         diag["itm_pass"] = True
+    if (ltp_target and ltp_target > 0) or (theta_target and theta_target > 0):
+        if not leg_passes_dual_floor(roll_side, strike, ltp, spot, ltp_target, theta_target):
+            diag["dual_floor_pass"] = False
+            diag["reject_reason"] = f"dual_floor_fail (ltp={ltp:.2f}, ltp_target={ltp_target:.0f}, theta_target={theta_target:.0f})"
+            return diag
+        diag["dual_floor_pass"] = True
     if min_ltp_exclusive is not None:
         if ltp <= float(min_ltp_exclusive):
             diag["ltp_le_kept_pass"] = False
@@ -487,6 +494,7 @@ def select_rollover_partner_directional(
     spot, real_step, min_gap_pts, rule_pass, max_itm_steps=None,
     max_search_steps: int = 20, trace: Optional[list] = None,
     itm_cap_step_pts: float = 100.0,
+    ltp_target: float = 0.0, theta_target: float = 0.0,
 ):
     """2026-08-27, direct user spec ("one major change in rollover") — replaces the
     2026-08-26 anchor-ring search for the MAIN rollover path (_single_side_roll):
@@ -597,7 +605,7 @@ def select_rollover_partner_directional(
         checked += 1
         diag = _evaluate_roll_candidate(
             strike_prem, roll_side, strike, kept_strike, kept_ltp, spot, itm_cap_step_pts,
-            0.0, 0.0, max_itm_steps, False, rule_pass, "closest_to_kept",
+            ltp_target, theta_target, max_itm_steps, False, rule_pass, "closest_to_kept",
             min_ltp_exclusive=closing_ltp,
         )
         if trace is not None:
@@ -649,7 +657,7 @@ def select_rollover_partner_directional(
         fb_checked += 1
         diag = _evaluate_roll_candidate(
             strike_prem, roll_side, strike, kept_strike, kept_ltp, spot, itm_cap_step_pts,
-            0.0, 0.0, max_itm_steps, False, rule_pass, "closest_to_kept",
+            ltp_target, theta_target, max_itm_steps, False, rule_pass, "closest_to_kept",
             min_ltp_exclusive=closing_ltp,
         )
         diag["search_direction"] = "away_from_spot_fallback"

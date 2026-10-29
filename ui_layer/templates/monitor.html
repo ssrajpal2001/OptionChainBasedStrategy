@@ -1910,6 +1910,7 @@ document.addEventListener('alpine:init', () => {
         tsl_enabled: true, trail_lock_pct: 20.0, trail_floor_pct: 10.0, trail_basis: 'ltp',
         tsl_scalable:  { enabled: false, basis: 'ltp', base_profit: 3000, base_lock: 1500, step_profit: 1000, step_lock: 500 },
         itm_pair_gate_enabled: true,
+        itm_pair_gate_wide_enabled: false,
         itm_roll_protection_enabled: false,
         day_low_exit_enabled: false, day_low_freeze_time: '15:00',
         post1500_exit_enabled: true, shadow_vwap_enabled: true,
@@ -1953,6 +1954,7 @@ document.addEventListener('alpine:init', () => {
       if (!ss.ltp_decay)     ss.ltp_decay     = { enabled: false, ltp_exit_min: 20.0 };
       if (!ss.vwap_rise_sl)  ss.vwap_rise_sl  = { enabled: false, tf: 1, threshold: 1.0 };
       if (ss.itm_pair_gate_enabled === undefined) ss.itm_pair_gate_enabled = true;
+      if (ss.itm_pair_gate_wide_enabled === undefined) ss.itm_pair_gate_wide_enabled = false;
       if (ss.itm_roll_protection_enabled === undefined) ss.itm_roll_protection_enabled = false;
       if (ss.day_low_exit_enabled === undefined) ss.day_low_exit_enabled = false;
       if (ss.day_low_freeze_time === undefined) ss.day_low_freeze_time = '15:00';
@@ -4946,6 +4948,22 @@ function amoTest() {
                   </label>
                 </div>
                 <p class="font-mono text-xs" style="color:var(--t-muted)">After any rollover: if CE &amp; PE are both ITM and cumulative P&amp;L &gt; 0 → close both, re-enter fresh. If cumulative ≤ 0 → watch each eval cycle until profit arrives, then close + re-enter.</p>
+              </div>
+
+              <!-- ITM Pair Gate WIDE (rebalance-roll, 2026-10-27) -->
+              <div class="rounded p-3" style="background:var(--t-surface);border:1px solid var(--t-border)">
+                <div class="flex items-center justify-between mb-1">
+                  <span class="font-display font-bold text-xs" style="color:var(--t-amber)">ITM PAIR GATE — WIDE (REBALANCE ROLL)
+                    <span style="color:var(--t-muted);font-weight:400"> — once gap ≥300pts, roll the LOSING leg instead, keep the profitable leg anchored</span>
+                  </span>
+                  <label class="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" x-model="indexConfig[adminSelectedIndex].sell_straddle.itm_pair_gate_wide_enabled" class="accent-yellow-400">
+                    <span class="font-mono text-xs"
+                          x-text="indexConfig[adminSelectedIndex].sell_straddle.itm_pair_gate_wide_enabled?'ON':'OFF'"
+                          :style="`color:${indexConfig[adminSelectedIndex].sell_straddle.itm_pair_gate_wide_enabled?'var(--t-amber)':'var(--t-muted)'}`"></span>
+                  </label>
+                </div>
+                <p class="font-mono text-xs" style="color:var(--t-muted)">Independent of the plain ITM Pair Gate above. Default OFF (2026-10-27) — real-data backtesting showed this mechanic wasn't promising. While OFF, the plain gate above runs unconditionally; while ON, this gate owns any gap≥300 pair entirely (plain gate skipped) until the gap narrows back under 300 or the position closes.</p>
               </div>
 
               <!-- ITM Roll Protection (70% budget) -->
