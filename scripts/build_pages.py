@@ -88,7 +88,19 @@ CLIENT_TABS = {
     "strategies": (6816, 6950, "clientMenu='strategies'"),
     "brokers":    (6951, 7923, "clientMenu='brokers'"),
     "positions":  (7924, 10054, "clientMenu='positions'; loadClientPositions()"),
-    "history":    (10055, 10243, "clientMenu='history'; loadClientHistory()"),  # excludes orphaned line
+    # 2026-10-29 CRITICAL FIX, real live incident: start was 10055, 13 lines
+    # too early -- it was capturing POSITIONS tab's own leftover unclosed-
+    # template closes + its "Refresh" button (real content, but belongs to
+    # positions, not history) ahead of history's own real opening div
+    # (confirmed by exact anchor: `<div x-show="clientMenu === 'history'">`).
+    # That stray content, sitting as an unbalanced sibling ahead of the real
+    # div, pushed the real content out of the DOM subtree the page's CSS
+    # layout expects -- "History" rendered with zero visible rows even
+    # though the real table markup and data were both present and correct.
+    # End also corrected (was 10243, 13 lines short) to the real end of the
+    # tab's own content (right before the shared "end active" wrapper, which
+    # every tab already gets via the literal patch strings below).
+    "history":    (10068, 10256, "clientMenu='history'; loadClientHistory()"),
 }
 
 # ── Convert tab-click handlers (in the SHARED fragments) to real navigation ──
